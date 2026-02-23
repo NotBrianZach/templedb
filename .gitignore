@@ -1,0 +1,159 @@
+# TempleDB .gitignore
+
+# Database files (users create their own)
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+!schema.sql
+!example-schema.sql
+
+# User database location (never commit!)
+.local/
+local/
+
+# Nix build results
+result
+result-*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.pyz
+*.pyo
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Secrets and keys (CRITICAL - never commit!)
+*.key
+*.pem
+*.age
+keys.txt
+.env
+.env.*
+!.env.example
+secrets/
+.secrets/
+
+# Age/SOPS keys (CRITICAL)
+.config/sops/
+age/
+
+# Nix environment cache
+.direnv/
+nix-envs/*.nix.tmp
+nix-envs/*.generated
+
+# Backups
+backups/*.sqlite
+*.bak
+*.backup
+
+# Cathedral packages (users create their own)
+*.cathedral
+!examples/**/*.cathedral
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Node modules (for build tooling)
+node_modules/
+
+# Personal projects (never commit!)
+personal-projects/
+my-projects/
+
+# System config (never commit!)
+system-config/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Editor backups
+*.bak
+*.gho
+*.ori
+*.orig
+*.tmp
+
+# Compressed files (except examples)
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+!examples/**/*.zip
+
+# Local environment overrides
+.envrc.local
+.env.local
+
+# Test databases
+test*.sqlite
+dev*.sqlite
+
+# Other
+.cache/

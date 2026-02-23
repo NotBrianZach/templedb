@@ -1,0 +1,184 @@
+#compdef templedb
+# Zsh completion for templedb CLI
+# Install: Copy to a directory in your $fpath (e.g., ~/.zsh/completions/)
+
+_templedb() {
+    local -a commands
+    local context state state_descr line
+    typeset -A opt_args
+
+    commands=(
+        'help:Show help message'
+        'status:Show database status'
+        'tui:Launch interactive TUI'
+        'project:Project management'
+        'env:Environment management'
+        'vcs:Version control operations'
+        'search:Search files and content'
+        'llm:LLM context generation'
+        'backup:Backup database'
+        'restore:Restore database from backup'
+    )
+
+    _arguments -C \
+        '1: :->command' \
+        '*:: :->args' \
+        && return 0
+
+    case $state in
+        command)
+            _describe -t commands 'templedb commands' commands
+            ;;
+        args)
+            case ${line[1]} in
+                project)
+                    _templedb_project
+                    ;;
+                env)
+                    _templedb_env
+                    ;;
+                vcs)
+                    _templedb_vcs
+                    ;;
+                search)
+                    _templedb_search
+                    ;;
+                llm)
+                    _templedb_llm
+                    ;;
+                backup)
+                    _files
+                    ;;
+                restore)
+                    _files
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_templedb_project() {
+    local -a subcmds
+    subcmds=(
+        'import:Import git project into database'
+        'list:List all projects'
+        'sync:Re-import project from filesystem'
+    )
+
+    if (( CURRENT == 2 )); then
+        _describe -t subcmds 'project subcommands' subcmds
+    else
+        case ${words[2]} in
+            import)
+                _directories
+                ;;
+            sync)
+                _templedb_projects
+                ;;
+        esac
+    fi
+}
+
+_templedb_env() {
+    local -a subcmds
+    subcmds=(
+        'enter:Enter Nix FHS environment'
+        'list:List environments'
+        'detect:Auto-detect dependencies'
+        'new:Create new environment'
+        'generate:Generate Nix expression'
+    )
+
+    if (( CURRENT == 2 )); then
+        _describe -t subcmds 'env subcommands' subcmds
+    else
+        _templedb_projects
+    fi
+}
+
+_templedb_vcs() {
+    local -a subcmds
+    subcmds=(
+        'commit:Create VCS commit'
+        'status:Show working directory status'
+        'log:Show commit history'
+        'branch:Manage branches'
+    )
+
+    if (( CURRENT == 2 )); then
+        _describe -t subcmds 'vcs subcommands' subcmds
+    else
+        case ${words[2]} in
+            commit)
+                _arguments \
+                    '-m[Commit message]:message:' \
+                    '-p[Project slug]:project:_templedb_projects' \
+                    '-b[Branch name]:branch:' \
+                    '-a[Author name]:author:'
+                ;;
+            status|log|branch)
+                if (( CURRENT == 3 )); then
+                    _templedb_projects
+                else
+                    _arguments \
+                        '-n[Limit number of results]:count:'
+                fi
+                ;;
+        esac
+    fi
+}
+
+_templedb_search() {
+    local -a subcmds
+    subcmds=(
+        'content:Search file contents'
+        'files:Search file names'
+    )
+
+    if (( CURRENT == 2 )); then
+        _describe -t subcmds 'search subcommands' subcmds
+    else
+        case ${words[2]} in
+            content|files)
+                if (( CURRENT == 3 )); then
+                    _message 'search pattern'
+                else
+                    _arguments \
+                        '-p[Project slug]:project:_templedb_projects' \
+                        '-i[Case insensitive search]'
+                fi
+                ;;
+        esac
+    fi
+}
+
+_templedb_llm() {
+    local -a subcmds
+    subcmds=(
+        'context:Generate LLM context'
+        'export:Export project context to JSON'
+        'schema:Show database schema'
+    )
+
+    if (( CURRENT == 2 )); then
+        _describe -t subcmds 'llm subcommands' subcmds
+    else
+        case ${words[2]} in
+            context|export)
+                _arguments \
+                    '-p[Project slug]:project:_templedb_projects' \
+                    '-o[Output file]:file:_files'
+                ;;
+        esac
+    fi
+}
+
+_templedb_projects() {
+    local -a projects
+    if command -v templedb &> /dev/null; then
+        projects=("${(@f)$(templedb project list 2>/dev/null | awk 'NR>3 && NF {print $1":"$2}')}")
+        _describe -t projects 'projects' projects
+    fi
+}
+
+_templedb "$@"
