@@ -1,23 +1,28 @@
-# Projdb Security Best Practices
+# TempleDB Security Best Practices
 
-## Current Security Model
+> **⚠️ NOTE**: This document describes planned secret management features that are not yet implemented in TempleDB.
+> The `templedb secret` commands referenced here are part of the roadmap and will be added in a future release.
+> See [REFACTOR_AGE_DIRECT.md](REFACTOR_AGE_DIRECT.md) for the implementation plan.
 
-Projdb uses SOPS (with age encryption) to store secrets encrypted at rest in a SQLite database. When `templedb direnv` is called, secrets are decrypted and exported as environment variables.
+---
+
+## Planned Security Model (Not Yet Implemented)
+
+TempleDB uses SOPS (with age encryption) to store secrets encrypted at rest in a SQLite database. When `templedb secret export` is called, secrets are decrypted and exported as environment variables.
 
 ## Security Hardening Recommendations
 
-### 1. Validate .envrc Permissions
+### 1. Secure Secret Loading
 
-Add this check to your .envrc:
+Load secrets directly from the database when needed:
 
 ```bash
-# Check .envrc permissions before loading
-if [ "$(stat -c %a .envrc 2>/dev/null || stat -f %A .envrc 2>/dev/null)" != "600" ]; then
-  echo "ERROR: .envrc must have 600 permissions" >&2
-  return 1
-fi
+# Load secrets for current project
+eval "$(templedb secret export my-project --format shell)"
 
-eval "$(templedb direnv)"
+# Or export to a file with restricted permissions
+templedb secret export my-project --format dotenv > .env
+chmod 600 .env
 ```
 
 ### 2. Limit Secret Scope
@@ -26,10 +31,10 @@ Use profiles to separate secrets by sensitivity:
 
 ```bash
 # Only load production secrets when explicitly needed
-if [ "$PROJDB_ENV" = "production" ]; then
-  eval "$(templedb direnv --profile prod)"
+if [ "$TEMPLEDB_ENV" = "production" ]; then
+  eval "$(templedb secret export my-project --profile prod --format shell)"
 else
-  eval "$(templedb direnv --profile dev)"
+  eval "$(templedb secret export my-project --profile dev --format shell)"
 fi
 ```
 
@@ -43,13 +48,16 @@ chmod 400 ~/.config/sops/age/keys.txt
 
 Consider using a hardware security key or TPM for key storage in production.
 
-### 4. Use direnv's `watch_file` for Change Detection
+### 4. Reload Secrets After Updates
+
+After editing secrets, reload them in your current shell:
 
 ```bash
-eval "$(templedb direnv)"
+# Edit secrets
+templedb secret edit my-project
 
-# Reload if database changes
-watch_file ~/.local/share/templedb/templedb.sqlite
+# Reload in current shell
+eval "$(templedb secret export my-project --format shell)"
 ```
 
 ### 5. Audit Secret Access
@@ -77,43 +85,40 @@ templedb secret export my-app --format json | \
 
 ## Alternative Approaches
 
-### Option 1: direnv + SOPS files directly
+### Option 1: SOPS files directly
 
 Instead of SQLite + templedb, use SOPS files directly:
 
 ```bash
-# .envrc
 eval "$(sops -d secrets.yaml | yq -r '.env | to_entries | .[] | "export \(.key)=\(.value)"')"
 ```
 
 **Pros**: Simpler, fewer dependencies
-**Cons**: Less structured, no audit trail
+**Cons**: Less structured, no audit trail, no project/profile management
 
-### Option 2: direnv + pass/gopass
+### Option 2: pass/gopass
 
 Use password-store for secret management:
 
 ```bash
-# .envrc
 export DATABASE_URL="$(pass show project/database_url)"
 export API_KEY="$(pass show project/api_key)"
 ```
 
 **Pros**: Battle-tested, Git-backed versioning
-**Cons**: Secrets loaded individually (slower)
+**Cons**: Secrets loaded individually (slower), less structured
 
 ### Option 3: Hashicorp Vault
 
 For team environments:
 
 ```bash
-# .envrc
 export VAULT_ADDR="https://vault.example.com"
 eval "$(vault kv get -format=json secret/my-app | jq -r '.data.data | to_entries | .[] | "export \(.key)=\(.value)"')"
 ```
 
-**Pros**: Centralized, audited, access control
-**Cons**: Requires infrastructure, complexity
+**Pros**: Centralized, audited, access control, dynamic secrets
+**Cons**: Requires infrastructure, complexity, network dependency
 
 ### Option 4: Nix + sops-nix/agenix
 
@@ -165,8 +170,8 @@ eval "$(op inject -i secrets.env)"
 3. **Monitor audit logs**: Regular review of access patterns
 4. **Rotate secrets**: Implement regular rotation schedule
 5. **Principle of least privilege**: Only load secrets needed for current task
-6. **Review .envrc files**: Audit before `direnv allow`
-7. **Use `direnv deny`**: Immediately revoke if suspicious
+6. **Limit secret lifetime**: Load secrets only when needed, not permanently in shell
+7. **Secure exported files**: If exporting to .env files, ensure 600 permissions
 
 ## Code Improvements for Projdb
 

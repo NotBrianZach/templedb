@@ -1,6 +1,12 @@
-# Projdb Quick Start
+# TempleDB Quick Start
+
+> **New to TempleDB?** Start with [GETTING_STARTED.md](GETTING_STARTED.md) for a beginner-friendly introduction.
+
+This guide covers workflows and advanced usage for users who already have TempleDB installed.
 
 ## Installation
+
+### For NixOS Users
 
 1. **Rebuild NixOS configuration:**
    ```bash
@@ -8,146 +14,236 @@
    sudo nixos-rebuild switch --flake .#hostname
    ```
 
-2. **Reload Emacs config:**
-   - In Emacs: `SPC f e R` (or restart Emacs)
-
-3. **Verify installation:**
+2. **Verify installation:**
    ```bash
    which templedb
    templedb --help
    ```
 
-## First-Time Setup
+### For Non-NixOS Users
 
-1. **Set up Age keys (if not already done):**
-   ```bash
-   # Generate a new age key
-   mkdir -p ~/.config/sops/age
-   age-keygen -o ~/.config/sops/age/keys.txt
+See [GETTING_STARTED.md](GETTING_STARTED.md) for installation instructions.
 
-   # Get your public key
-   age-keygen -y ~/.config/sops/age/keys.txt
-   ```
+## Core Concepts
 
-2. **Set environment variables in your shell config:**
-   ```bash
-   # Add to ~/.bashrc or equivalent
-   export SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt
-   export SOPS_AGE_RECIPIENT=$(age-keygen -y $SOPS_AGE_KEY_FILE)
-   export EDITOR=emacsclient
-   ```
+TempleDB uses a **checkout/commit workflow**:
 
-## Basic Usage
+1. **Database is source of truth** - All files stored in SQLite with full version history
+2. **Checkout to edit** - Extract files to filesystem temporarily
+3. **Commit to save** - Atomic commits back to database
+4. **Query with SQL** - Search and analyze across all projects
 
-### CLI
+This enables:
+- Zero file duplication (content-addressed storage)
+- Multi-agent coordination (ACID transactions)
+- Cross-project queries
+- Version control without git commands
+
+## Basic Workflow
+
+### 1. Import a Project
 
 ```bash
-# Add a project (recommended: auto-detect from directory)
+# Import from existing git repository
 cd ~/projects/my-app
-templedb project add-from-dir .
+templedb project import .
 
-# Or manually specify all details
-templedb project add my-app --name "My Application" --repo "github.com/user/my-app"
+# Or specify path explicitly
+templedb project import /path/to/project
 
-# List projects
-templedb project ls
-
-# Edit nix config
-templedb nix edit my-app
-
-# Initialize secrets
-templedb secret init my-app --age-recipient $SOPS_AGE_RECIPIENT
-
-# Edit secrets
-templedb secret edit my-app
-
-# Export secrets as shell exports
-eval "$(templedb secret export my-app --format shell)"
+# List all projects
+templedb project list
 ```
 
-### Emacs
+### 2. Edit Files (Checkout/Commit)
 
-All commands are under `SPC a d`:
+```bash
+# Checkout project to temporary workspace
+templedb project checkout my-app /tmp/workspace
 
+# Edit files with any tool
+cd /tmp/workspace
+vim src/main.py
+grep -r "TODO" .
+npm test
+
+# Commit changes back to database
+templedb project commit my-app /tmp/workspace -m "Fixed bug in authentication"
+
+# Cleanup (workspace can be deleted)
+rm -rf /tmp/workspace
 ```
-SPC a d l    - List all projects
-SPC a d a    - Add new project
-SPC a d n    - Edit nix config
-SPC a d e    - Edit secrets
-SPC a d x    - Export secrets
-SPC a d v    - Generate direnv output
-SPC a d c    - Create .envrc in current directory
+
+### 3. Version Control
+
+```bash
+# View commit history
+templedb vcs log my-app
+
+# Show working directory status
+templedb vcs status my-app
+
+# Create a commit without checkout/commit workflow
+templedb vcs commit -m "Update docs" -p my-app -a "Your Name"
+
+# Branch management
+templedb vcs branch my-app              # List branches
+templedb vcs branch my-app feature-x    # Create branch
+```
+
+### 4. Query Your Projects
+
+```bash
+# Open database directly
+sqlite3 ~/.local/share/templedb/templedb.sqlite
+
+# Find all Python files across projects
+SELECT project_slug, file_path, lines_of_code
+FROM files_with_types_view
+WHERE type_name = 'python';
+
+# View recent commits
+SELECT * FROM vcs_commit_history_view
+ORDER BY created_at DESC LIMIT 10;
+
+# Get project statistics
+SELECT slug,
+  (SELECT COUNT(*) FROM project_files WHERE project_id = p.id) as files
+FROM projects p;
 ```
 
 ## Common Workflows
 
-### New Project Setup
+### New Project Workflow
 
 ```bash
-# 1. Create project in templedb
-templedb project add my-new-project \
-  --name "My New Project" \
-  --repo "github.com/me/my-new-project" \
-  --branch "main"
+# 1. Navigate to your project
+cd ~/projects/new-app
 
-# 2. Set up nix shell
-templedb nix edit my-new-project
-# (opens editor with empty nix config, add your shell.nix content)
+# 2. Import into TempleDB
+templedb project import .
 
-# 3. Initialize secrets
-templedb secret init my-new-project --age-recipient $SOPS_AGE_RECIPIENT
+# 3. View in database
+templedb project show new-app
 
-# 4. Add secrets
-templedb secret edit my-new-project
-# (opens editor with empty secrets file, add your secrets as YAML)
-
-# 5. Create .envrc for automatic environment loading
-cd ~/projects/my-new-project
-templedb direnv > .envrc
-direnv allow
+# 4. Make changes using checkout/commit
+templedb project checkout new-app /tmp/work
+# ... edit files ...
+templedb project commit new-app /tmp/work -m "Initial setup"
 ```
 
-### Direnv Integration (Recommended)
+### Re-sync Project from Filesystem
+
+If you edit files outside the checkout/commit workflow:
 
 ```bash
-# Navigate to your project directory
-cd ~/projects/my-project
+# Re-import from filesystem to update database
+templedb project sync my-app
 
-# Generate .envrc (project name inferred from directory)
-templedb direnv > .envrc
-
-# Allow direnv
-direnv allow
-
-# Now whenever you cd into this directory:
-# - Nix environment is activated (if configured)
-# - All secrets are loaded as environment variables
+# Or specify path
+templedb project sync my-app /path/to/project
 ```
 
-### Manual Secret Loading (Alternative)
+### Multiple Checkouts
 
 ```bash
-# Shell export format
-eval "$(templedb secret export my-project --format shell)"
+# List active checkouts
+templedb project checkout-list
 
-# Dotenv format
-templedb secret export my-project --format dotenv > .env
+# List checkouts for specific project
+templedb project checkout-list my-app
+
+# Cleanup stale checkouts (if workspace was deleted)
+templedb project checkout-cleanup my-app
 ```
 
-### Multiple Environments
+### Environment Management
 
 ```bash
-# Dev environment
-templedb secret init my-app --profile dev --age-recipient $SOPS_AGE_RECIPIENT
-templedb secret edit my-app --profile dev
+# List available Nix environments
+templedb env list
 
-# Prod environment
-templedb secret init my-app --profile prod --age-recipient $SOPS_AGE_RECIPIENT
-templedb secret edit my-app --profile prod
+# List environments for specific project
+templedb env list my-app
 
-# Use different profiles
-eval "$(templedb secret export my-app --profile dev --format shell)"
-eval "$(templedb secret export my-app --profile prod --format shell)"
+# Enter Nix shell for project
+templedb env enter my-app
+
+# Detect dependencies and generate Nix config
+templedb env detect my-app
+templedb env generate my-app default
+```
+
+### Search and Query
+
+```bash
+# Search file contents
+templedb search content "authentication" -p my-app
+
+# Case-insensitive search
+templedb search content "TODO" -i
+
+# Search file names
+templedb search files "test" -p my-app
+
+# Search across all projects
+templedb search content "api_key"
+```
+
+### Backup and Restore
+
+```bash
+# Backup database
+templedb backup ~/backups/templedb-$(date +%Y%m%d).sqlite
+
+# Restore from backup
+templedb restore ~/backups/templedb-20240101.sqlite
+
+# View database status
+templedb status
+```
+
+## Advanced Features
+
+### Cathedral: Share Projects
+
+Export and import complete projects with all history:
+
+```bash
+# Export project as portable package
+templedb cathedral export my-app -o my-app.cathedral
+
+# Verify package integrity
+templedb cathedral verify my-app.cathedral
+
+# Import on another machine
+templedb cathedral import my-app.cathedral
+```
+
+### Deployment Targets
+
+```bash
+# Add deployment target
+templedb target add production \
+  --type ssh \
+  --host prod.example.com \
+  --user deploy
+
+# Deploy project
+templedb deploy my-app production
+```
+
+### Database Migrations
+
+```bash
+# View migration status
+templedb migration status
+
+# Apply pending migrations
+templedb migration apply
+
+# Rollback last migration
+templedb migration rollback
 ```
 
 ## Troubleshooting
@@ -156,36 +252,54 @@ eval "$(templedb secret export my-app --profile prod --format shell)"
 
 ```bash
 # Verify installation
-nix-store -q --references /run/current-system | grep templedb
+which templedb
 
-# If not found, rebuild:
-sudo nixos-rebuild switch --flake /home/user/projects/my-config#hostname
+# If using local checkout:
+./templedb --help
+
+# Add to PATH
+export PATH="/path/to/templedb:$PATH"
 ```
 
-### SOPS errors
+### Database locked
+
+Another process is using the database. Wait a moment and try again, or check:
 
 ```bash
-# Verify age key exists
-ls -la $SOPS_AGE_KEY_FILE
-
-# Verify age recipient is set
-echo $SOPS_AGE_RECIPIENT
-
-# Test age encryption/decryption
-echo "test" | age -r $SOPS_AGE_RECIPIENT | age -d -i $SOPS_AGE_KEY_FILE
+lsof ~/.local/share/templedb/templedb.sqlite
 ```
 
-### Emacs integration not working
+### Checkout conflicts
 
-```elisp
-;; In Emacs, check if templedb.el is loaded:
-M-: (featurep 'templedb)  ; should return t
+If workspace was modified outside of TempleDB:
 
-;; If nil, check load path:
-M-: (member "/home/user/projects/my-config/emacs.d" load-path)
+```bash
+# List checkouts
+templedb project checkout-list my-app
 
-;; Manually load if needed:
-M-: (load "/home/user/projects/my-config/emacs.d/templedb.el")
+# Cleanup stale checkouts
+templedb project checkout-cleanup my-app
+
+# Start fresh
+rm -rf /tmp/workspace
+templedb project checkout my-app /tmp/workspace
+```
+
+### Import fails
+
+Make sure you're in a git repository:
+
+```bash
+cd /path/to/project
+git status  # Should show repo status
+
+# If not a git repo, initialize:
+git init
+git add .
+git commit -m "Initial commit"
+
+# Then import
+templedb project import .
 ```
 
 ## Database Location
@@ -195,91 +309,18 @@ The SQLite database is stored at:
 ~/.local/share/templedb/templedb.sqlite
 ```
 
-You can query it directly with:
+You can query it directly:
 ```bash
-sqlite3 ~/.local/share/templedb/templedb.sqlite
+sqlite3 ~/.local/share/templedb/templedb.sqlite '.schema'
 ```
 
 Or in Emacs: `SPC p d d`
 
-## Backup Your Database
-
-```bash
-# Backup database
-cp ~/.local/share/templedb/templedb.sqlite ~/backups/templedb-$(date +%Y%m%d).sqlite
-
-# Or use git (secrets are encrypted, but be careful!)
-cd ~/.local/share/templedb
-git init
-git add templedb.sqlite
-git commit -m "Backup templedb"
-```
-
-## File Tracking Extension
-
-Track all project files, dependencies, and deployment configurations:
-
-```bash
-# 1. Apply the file tracking schema extension
-cd /home/user/projects/my-config/templeDB
-./apply_file_tracking_migration.sh
-
-# 2. Install Node dependencies (for population scripts)
-cd /path/to/your/project
-npm install better-sqlite3
-
-# 3. Populate database with project files
-cd /home/user/projects/my-config/templeDB
-node src/populate_templedb_files.cjs
-
-# 4. Extract SQL object metadata
-node src/populate_sql_objects.cjs
-
-# 5. Query your tracked files
-sqlite3 ~/.local/share/templedb/templedb.sqlite \
-  "SELECT type_name, COUNT(*) FROM files_with_types_view GROUP BY type_name"
-```
-
-See `FILE_TRACKING.md` for complete documentation on:
-- File types tracked (JSX, TypeScript, Edge Functions, SQL, etc.)
-- Dependency tracking
-- Deployment configuration
-- Example queries and use cases
-
-## File Versioning Extension
-
-Store actual file contents in the database with full version control:
-
-```bash
-# 1. Apply the versioning schema extension
-cd /home/user/projects/my-config/templeDB
-./apply_versioning_migration.sh
-
-# 2. Store current file contents
-export PROJECT_ROOT=/home/user/projects/my-project
-export PROJECT_SLUG=my-project
-node src/populate_file_contents.cjs
-
-# 3. Query file versions
-sqlite3 ~/.local/share/templedb/templedb.sqlite \
-  "SELECT file_path, version_number, author FROM file_version_history_view LIMIT 10"
-
-# 4. Get content of a specific file
-sqlite3 ~/.local/share/templedb/templedb.sqlite \
-  "SELECT content_text FROM current_file_contents_view WHERE file_path = 'shopUI/src/BookingForm.jsx'"
-```
-
-See `FILE_VERSIONING.md` for complete documentation on:
-- Storing files in database
-- Version control and history
-- Comparing versions
-- Tagging important versions
-- Integration with git
-- Content querying and search
-
 ## Next Steps
 
-- Read `INTEGRATION.md` for detailed documentation
-- Read `FILE_TRACKING.md` for file tracking features
-- Check the CLI help: `templedb --help`
-- Explore the database schema: `sqlite3 ~/.local/share/templedb/templedb.sqlite '.schema'`
+- **[README.md](README.md)** - Complete overview and philosophy
+- **[GUIDE.md](GUIDE.md)** - Detailed usage guide
+- **[DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md)** - Why TempleDB exists
+- **[EXAMPLES.md](EXAMPLES.md)** - SQL query examples
+- **[CATHEDRAL.md](CATHEDRAL.md)** - Sharing projects with teams
+- **[PERFORMANCE.md](PERFORMANCE.md)** - Performance tuning
