@@ -1,14 +1,14 @@
 # TempleDB Security Best Practices
 
-> **⚠️ NOTE**: This document describes planned secret management features that are not yet implemented in TempleDB.
-> The `templedb secret` commands referenced here are part of the roadmap and will be added in a future release.
-> See [REFACTOR_AGE_DIRECT.md](REFACTOR_AGE_DIRECT.md) for the implementation plan.
+## Current Security Model
 
----
+TempleDB uses **age encryption** (https://age-encryption.org) to store secrets encrypted at rest in a SQLite database. When `templedb secret export` is called, secrets are decrypted using your age key and exported as environment variables.
 
-## Planned Security Model (Not Yet Implemented)
-
-TempleDB uses SOPS (with age encryption) to store secrets encrypted at rest in a SQLite database. When `templedb secret export` is called, secrets are decrypted and exported as environment variables.
+**Key features:**
+- Age encryption (modern, simple, secure)
+- Per-project + per-profile secrets
+- Multiple export formats (shell, JSON, YAML, dotenv)
+- Audit logging for all secret operations
 
 ## Security Hardening Recommendations
 

@@ -403,6 +403,12 @@ templedb project commit <proj> <dir> -m <msg> # Commit changes back
 templedb project checkout-list [<proj>]       # List active checkouts
 templedb project checkout-cleanup [<proj>]    # Remove stale checkouts
 
+# Secrets (age encryption)
+templedb secret init <proj> --age-recipient <key>  # Initialize secrets
+templedb secret edit <proj> [--profile <prof>]     # Edit secrets
+templedb secret export <proj> --format <fmt>       # Export (shell/json/yaml/dotenv)
+templedb secret print-raw <proj>                   # Print encrypted blob
+
 # Environments
 templedb env enter <proj> [<env>]  # Enter Nix environment
 templedb env list [<proj>]         # List environments

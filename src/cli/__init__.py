@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cli.core import cli
-from cli.commands import project, vcs, env, search, system, cathedral, deploy, migration, target
+from cli.commands import project, vcs, env, search, system, cathedral, deploy, migration, target, secret
 
 
 def main():
@@ -27,6 +27,7 @@ def main():
     deploy.register(cli)
     migration.register(cli)
     target.register(cli)
+    secret.register(cli)
 
     # TODO: Register llm commands as needed
     # from cli.commands import llm

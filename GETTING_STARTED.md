@@ -5,6 +5,7 @@
 ## What Can TempleDB Do?
 
 - **Project Management**: Track all your projects in one place with metadata, git history, and dependencies
+- **Secret Management**: Store encrypted secrets (API keys, credentials) with age encryption, organized by project and profile
 - **Environment Management**: Manage Nix environments per-project with easy activation
 - **File Versioning**: Track file changes with database-native VCS, query file history, and compare versions
 - **Checkout/Commit Workflow**: Edit files with familiar tools, then commit changes back to the database
@@ -18,15 +19,26 @@ TempleDB needs:
 - Python 3.9+
 - SQLite 3.35+
 - git
+- age (for secret encryption - optional)
 
 **Ubuntu/Debian:**
 ```bash
 sudo apt install python3 sqlite3 git
+# For Ubuntu 22.04+:
+sudo apt install age
 ```
 
 **macOS:**
 ```bash
-brew install python sqlite git
+brew install python sqlite git age
+```
+
+**Install age manually (if not in package manager):**
+```bash
+# Download from https://github.com/FiloSottile/age/releases
+wget https://github.com/FiloSottile/age/releases/download/v1.3.1/age-v1.3.1-linux-amd64.tar.gz
+tar xzf age-v1.3.1-linux-amd64.tar.gz
+sudo mv age/age age/age-keygen /usr/local/bin/
 ```
 
 ### 2. Install TempleDB
@@ -60,7 +72,31 @@ templedb project add-from-dir .
 templedb project ls
 ```
 
-### 4. Explore Your Database
+### 4. Set Up Secrets (Optional)
+
+```bash
+# Generate an age key for encryption
+mkdir -p ~/.config/sops/age
+age-keygen -o ~/.config/sops/age/keys.txt
+
+# Get your public key (the "age1..." part)
+age-keygen -y ~/.config/sops/age/keys.txt
+
+# Add to your shell config (~/.bashrc or ~/.zshrc)
+export TEMPLEDB_AGE_KEY_FILE=~/.config/sops/age/keys.txt
+export TEMPLEDB_AGE_RECIPIENT=$(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
+
+# Initialize secrets for your project
+templedb secret init my-app --age-recipient $TEMPLEDB_AGE_RECIPIENT
+
+# Edit secrets (opens in $EDITOR)
+templedb secret edit my-app
+
+# Load secrets into your shell
+eval "$(templedb secret export my-app --format shell)"
+```
+
+### 5. Explore Your Database
 
 ```bash
 # Open the database directly
@@ -165,6 +201,35 @@ Either:
 2. Add to PATH: `export PATH="/path/to/templedb:$PATH"`
 3. Create symlink: `ln -s /path/to/templedb/templedb ~/bin/templedb`
 
+### "age not found"
+
+Install age:
+- Ubuntu 22.04+: `sudo apt install age`
+- macOS: `brew install age`
+- Manual: Download from https://github.com/FiloSottile/age/releases
+
+### "age key file not found"
+
+Generate an age key:
+```bash
+mkdir -p ~/.config/sops/age
+age-keygen -o ~/.config/sops/age/keys.txt
+export TEMPLEDB_AGE_KEY_FILE=~/.config/sops/age/keys.txt
+```
+
+Add the export to your `~/.bashrc` or `~/.zshrc` to make it permanent.
+
+### "no secrets found"
+
+Initialize secrets first:
+```bash
+# Get your age public key
+age-keygen -y ~/.config/sops/age/keys.txt
+
+# Initialize secrets
+templedb secret init my-app --age-recipient <age-public-key>
+```
+
 ### "Database is locked"
 
 Another process might be using the database. Check:
@@ -187,6 +252,11 @@ Or just wait a moment and try again.
 templedb project import /path/to/project
 templedb project list
 templedb project show my-app
+
+# Secrets
+templedb secret init my-app --age-recipient <age-public-key>
+templedb secret edit my-app
+templedb secret export my-app --format shell
 
 # Checkout/Commit Workflow
 templedb project checkout my-app /tmp/workspace

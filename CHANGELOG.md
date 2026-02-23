@@ -17,6 +17,14 @@ All notable changes to TempleDB are documented in this file.
   - 50% storage savings through deduplication
   - Documentation: `VERSION_CONSOLIDATION_PLAN.md`, `SCHEMA_CHANGES.md`, `CONSOLIDATION_SUMMARY.md`
 
+- **Secret Management** - Age-encrypted secret storage
+  - `templedb secret init/edit/export/print-raw` - Secret management commands
+  - Uses age encryption directly (no SOPS dependency)
+  - Per-project + per-profile secrets organization
+  - Multiple export formats: shell, JSON, YAML, dotenv
+  - Audit logging for all secret operations
+  - Automatic key detection from `TEMPLEDB_AGE_KEY_FILE` or `SOPS_AGE_KEY_FILE`
+
 - **Unified CLI** - Single `templedb` command for all operations
   - `templedb env enter/list/detect/new/generate` - Environment management
   - `templedb project import/list/sync` - Project management

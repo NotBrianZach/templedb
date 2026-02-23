@@ -157,6 +157,30 @@ templedb project checkout-list my-app
 templedb project checkout-cleanup my-app
 ```
 
+### Secret Management
+
+```bash
+# Initialize secrets for a project
+templedb secret init my-app --age-recipient age1...
+
+# Edit secrets in $EDITOR
+templedb secret edit my-app
+
+# Export secrets in different formats
+templedb secret export my-app --format shell   # For eval
+templedb secret export my-app --format yaml    # Human-readable
+templedb secret export my-app --format json    # For scripts
+templedb secret export my-app --format dotenv  # For .env files
+
+# Load secrets into current shell
+eval "$(templedb secret export my-app --format shell)"
+
+# Use profiles for different environments
+templedb secret init my-app --profile prod --age-recipient age1...
+templedb secret edit my-app --profile prod
+eval "$(templedb secret export my-app --profile prod --format shell)"
+```
+
 ### Environment Management
 
 ```bash
