@@ -75,6 +75,37 @@ class DeploymentOrchestrator:
         self.work_dir = work_dir
         self.migration_tracker = MigrationTracker(db_utils)
         self.env_vars = {}
+        self.target_info = None
+
+    def load_target_info(self) -> None:
+        """Load deployment target information including connection strings"""
+        import os
+        import re
+
+        # Get target info from database
+        target_rows = self.db_utils.query_all("""
+            SELECT target_name, target_type, provider, host, connection_string, access_url
+            FROM deployment_targets
+            WHERE project_id = ? AND target_name = ?
+        """, (self.project['id'], self.target_name))
+
+        if target_rows:
+            self.target_info = dict(target_rows[0])
+
+            # Process connection_string if present
+            if self.target_info.get('connection_string'):
+                conn_str = self.target_info['connection_string']
+
+                # Resolve environment variable references like ${VAR_NAME}
+                def resolve_env_var(match):
+                    var_name = match.group(1)
+                    return os.environ.get(var_name, match.group(0))
+
+                conn_str = re.sub(r'\$\{([^}]+)\}', resolve_env_var, conn_str)
+                conn_str = re.sub(r'\$([A-Z_][A-Z0-9_]*)', lambda m: os.environ.get(m.group(1), m.group(0)), conn_str)
+
+                # Make DATABASE_URL available as env var
+                self.env_vars['DATABASE_URL'] = conn_str
 
     def load_environment_variables(self) -> None:
         """Load environment variables for this project/target"""
@@ -470,6 +501,9 @@ class DeploymentOrchestrator:
         print(f"\n🚀 Deploying {self.project['slug']} to {self.target_name}")
         if dry_run:
             print("📋 DRY RUN - No actual changes will be made\n")
+
+        # Load target info (connection strings, etc.)
+        self.load_target_info()
 
         # Load environment variables
         self.load_environment_variables()

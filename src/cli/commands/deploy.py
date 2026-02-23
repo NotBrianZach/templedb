@@ -361,6 +361,124 @@ class DeployCommands(Command):
             print(f"✗ Failed to manage deployment config: {e}", file=sys.stderr)
             return 1
 
+    def target(self, args) -> int:
+        """Manage deployment targets"""
+        try:
+            project_slug = args.slug
+            project = self.get_project_or_exit(project_slug)
+
+            if hasattr(args, 'set_connection') and args.set_connection:
+                # Set connection string for a target
+                target_name = args.target
+                connection_string = args.connection_string
+
+                # Check if target exists
+                existing = self.query_one("""
+                    SELECT id FROM deployment_targets
+                    WHERE project_id = ? AND target_name = ?
+                """, (project['id'], target_name))
+
+                if not existing:
+                    print(f"✗ Target '{target_name}' not found for project {project_slug}", file=sys.stderr)
+                    print(f"\n💡 Available targets:")
+                    targets = self.query_all("""
+                        SELECT target_name FROM deployment_targets
+                        WHERE project_id = ?
+                    """, (project['id'],))
+                    for t in targets:
+                        print(f"   • {t['target_name']}")
+                    return 1
+
+                # Update connection string
+                self.execute("""
+                    UPDATE deployment_targets
+                    SET connection_string = ?, updated_at = datetime('now')
+                    WHERE project_id = ? AND target_name = ?
+                """, (connection_string, project['id'], target_name))
+
+                print(f"✅ Updated connection string for target '{target_name}'")
+
+                # Show if it contains env var references
+                if '${' in connection_string or connection_string.startswith('$'):
+                    print(f"📝 Note: Connection string contains environment variable references")
+                    print(f"   These will be resolved from the environment at deployment time")
+
+                return 0
+
+            elif hasattr(args, 'show') and args.show:
+                # Show target info including connection string
+                target_name = args.target if hasattr(args, 'target') else None
+
+                if target_name:
+                    # Show specific target
+                    target = self.query_one("""
+                        SELECT target_name, target_type, provider, host, connection_string, access_url
+                        FROM deployment_targets
+                        WHERE project_id = ? AND target_name = ?
+                    """, (project['id'], target_name))
+
+                    if not target:
+                        print(f"✗ Target '{target_name}' not found", file=sys.stderr)
+                        return 1
+
+                    print(f"\n🎯 Deployment Target: {target['target_name']}\n")
+                    print(f"   Type: {target['target_type']}")
+                    print(f"   Provider: {target['provider'] or 'unknown'}")
+                    if target['host']:
+                        print(f"   Host: {target['host']}")
+                    if target['access_url']:
+                        print(f"   Access URL: {target['access_url']}")
+                    if target['connection_string']:
+                        # Mask sensitive parts
+                        conn_str = target['connection_string']
+                        if '://' in conn_str and '@' in conn_str:
+                            # Mask password in connection string
+                            parts = conn_str.split('@')
+                            before_at = parts[0]
+                            if ':' in before_at:
+                                protocol_user = before_at.rsplit(':', 1)[0]
+                                conn_str = f"{protocol_user}:****@{parts[1]}"
+                        print(f"   Connection: {conn_str}")
+                    else:
+                        print(f"   Connection: (not set)")
+                    print()
+                else:
+                    # Show all targets
+                    targets = self.query_all("""
+                        SELECT target_name, target_type, provider, host,
+                               CASE WHEN connection_string IS NOT NULL THEN 1 ELSE 0 END as has_connection
+                        FROM deployment_targets
+                        WHERE project_id = ?
+                        ORDER BY target_name
+                    """, (project['id'],))
+
+                    if not targets:
+                        print(f"⚠️  No deployment targets configured for {project_slug}\n")
+                        return 0
+
+                    print(f"\n🎯 Deployment Targets for {project_slug}:\n")
+                    for target in targets:
+                        conn_indicator = "✓" if target['has_connection'] else "✗"
+                        print(f"   {conn_indicator} {target['target_name']} ({target['target_type']})")
+                        print(f"      Provider: {target['provider'] or 'unknown'}")
+                        if target['host']:
+                            print(f"      Host: {target['host']}")
+                    print()
+
+                return 0
+
+            else:
+                print(f"Usage:")
+                print(f"  ./templedb deploy target <project> --show [--target <name>]")
+                print(f"  ./templedb deploy target <project> --set-connection --target <name> <connection_string>")
+                return 1
+
+        except Exception as e:
+            print(f"✗ Failed to manage deployment target: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            return 1
+
 
 def register(cli):
     """Register deployment commands with CLI"""
@@ -395,3 +513,12 @@ def register(cli):
     config_parser.add_argument('--show', action='store_true', help='Show configuration')
     config_parser.add_argument('--validate', action='store_true', help='Validate configuration')
     cli.commands['deploy.config'] = deploy_handler.config_command
+
+    # deploy target command
+    target_parser = subparsers.add_parser('target', help='Manage deployment targets')
+    target_parser.add_argument('slug', help='Project slug')
+    target_parser.add_argument('--show', action='store_true', help='Show target(s)')
+    target_parser.add_argument('--target', help='Target name')
+    target_parser.add_argument('--set-connection', action='store_true', help='Set connection string for target')
+    target_parser.add_argument('connection_string', nargs='?', help='Connection string (supports ${ENV_VAR} syntax)')
+    cli.commands['deploy.target'] = deploy_handler.target

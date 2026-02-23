@@ -43,20 +43,31 @@ sudo mv age/age age/age-keygen /usr/local/bin/
 
 ### 2. Install TempleDB
 
-**Option A: Clone and run directly**
+**Automated Installation (Recommended):**
+```bash
+git clone https://github.com/yourusername/templedb.git
+cd templedb
+./install.sh
+```
+
+The installer will:
+- Install `templedb` to your PATH
+- Initialize the database
+- Check dependencies
+- Optionally import an example project
+
+**Manual Installation:**
 ```bash
 git clone https://github.com/yourusername/templedb.git
 cd templedb
 chmod +x templedb
-./templedb --help
-```
 
-**Option B: Add to PATH**
-```bash
-# After cloning:
+# Run directly
+./templedb --help
+
+# Or add to PATH manually
 echo 'export PATH="$HOME/templedb:$PATH"' >> ~/.bashrc
 source ~/.bashrc
-templedb --help
 ```
 
 ### 3. Initialize Your First Project

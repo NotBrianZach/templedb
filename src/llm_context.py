@@ -255,8 +255,8 @@ class TempleDBContext:
                 "SELECT branch_name, total_commits FROM vcs_branch_summary_view WHERE project_slug = 'woofs_projects'",
             ],
             'file_contents': [
-                "SELECT content_text FROM file_contents fc JOIN project_files pf ON fc.file_id = pf.id WHERE pf.file_path = 'path/to/file'",
-                "SELECT file_path, line_count FROM current_file_contents_view ORDER BY line_count DESC LIMIT 10",
+                "SELECT content_text FROM file_contents fc JOIN project_files pf ON fc.file_id = pf.id WHERE pf.project_id = (SELECT id FROM projects WHERE slug = 'project-slug') AND pf.file_path = 'path/to/file'",
+                "SELECT file_path, line_count FROM current_file_contents_view WHERE project_slug = 'project-slug' ORDER BY line_count DESC LIMIT 10",
             ],
         }
 

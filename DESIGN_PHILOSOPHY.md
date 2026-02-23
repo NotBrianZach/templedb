@@ -102,11 +102,14 @@ Which is truth?
 ### Single Source of Truth
 
 ```sql
--- File exists once in database
-SELECT * FROM project_files WHERE file_path = 'src/config.js';
+-- File exists once per project in database
+SELECT * FROM project_files WHERE project_id = 1 AND file_path = 'src/config.js';
 
 -- id | project_id | file_path      | file_type_id | ...
 -- 42 | 1          | src/config.js  | 12           | ...
+
+-- NOTE: File paths are only unique within a project, not globally!
+-- Multiple projects can have 'src/config.js' - always filter by project_id
 
 -- All references point to this record
 SELECT * FROM file_versions WHERE file_id = 42;

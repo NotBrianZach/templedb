@@ -17,13 +17,13 @@ TempleDB is a database-native project management system that treats your codebas
 
 Like TempleOS showed us the power of simplicity and first principles, TempleDB embraces:
 
-- **Database normalization**: Single source of truth, zero duplication
+- **Database normalization**: Single source of truth, no redundant copies
 - **ACID transactions**: Multi-agent coordination without conflicts
 - **Temporary denormalization**: Nix FHS environments for efficient editing
 - **Re-normalization workflow**: Familiar tools, normalized storage
 - **Transparent**: Query anything with SQL
 
-**Key insight**: Database normalization eliminates state duplication, preventing tracking errors that scale with codebase size. While traditional tools create O(n²) friction through file copies, branches, and duplicates, TempleDB maintains O(log n) complexity through normalized state.
+**Key insight**: Normalization eliminates redundancy, preventing tracking errors that scale with codebase size. Traditional tools create O(n²) friction through file copies and branches. TempleDB maintains O(log n) complexity through normalized state.
 
 **Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) for the complete rationale.**
 
@@ -47,11 +47,10 @@ TempleDB uses a **checkout/commit workflow** - your files live in the database, 
 ```
 
 **Why this works:**
-- Database stores **one copy** of each file (deduplicated, versioned)
+- Database stores **one copy** of each file (content-addressed, versioned)
 - You edit with **familiar tools** (anything that works with files)
-- Commits are **atomic** (ACID transactions)
-- Conflicts are **detected** (optimistic locking with version numbers)
-- Multiple agents can work **safely** (checkout snapshots track versions)
+- Commits are **atomic** with conflict detection
+- Multiple agents can work **safely** (optimistic locking with version tracking)
 
 **Example workflow:**
 ```bash
@@ -157,6 +156,33 @@ python3 src/llm_context.py prompt -t "Explain the auth flow"
 
 ---
 
+## Installation
+
+### Quick Install
+
+```bash
+git clone https://github.com/yourusername/templedb.git
+cd templedb
+./install.sh
+```
+
+The installer will:
+- ✓ Check dependencies (Python, SQLite, git, age)
+- ✓ Install `templedb` to your PATH
+- ✓ Initialize the database at `~/.local/share/templedb/templedb.sqlite`
+- ✓ Optionally import an example project
+
+### Requirements
+
+- Python 3.9+
+- SQLite 3.35+
+- git
+- age (optional, for secret management)
+
+See **[GETTING_STARTED.md](GETTING_STARTED.md)** for detailed installation instructions.
+
+---
+
 ## Quick Start
 
 ### 1. Import a Project
@@ -243,24 +269,23 @@ FROM projects p"
 - **14 migrations** - Schema evolution with backward compatibility
 - **Views** - Pre-computed queries for common operations
 - **Complete schema** - Every relationship mapped
-- **Content-addressed storage** - Deduplicated file content
+- **Content-addressed storage** - Files stored by hash, referenced by version
 
 ### File Tracking
 
 - **25+ file types** - JavaScript, Python, SQL, JSX, Edge Functions, etc.
 - **Metadata** - LOC, complexity, git info, dependencies
 - **Components** - Extract function/component names
-- **Content deduplication** - 50% storage reduction via content-addressable storage (`content_blobs`)
+- **Storage efficiency** - 50% reduction via content-addressable blobs
 
 ### Version Control System
 
-- **Branches** - Database-native branching (`vcs_branches`)
-- **Commits** - Atomic changesets with SHA-256 hashing (`vcs_commits`)
-- **Version history** - All file versions tracked via `vcs_file_states`
-- **Content-addressed storage** - Deduplicated content via `content_blobs`
+- **Branches** - Database-native branching
+- **Commits** - Atomic changesets with SHA-256 hashing
+- **Version history** - All file versions tracked
 - **Working state** - Track modified/staged files
 - **Conflict detection** - Optimistic locking prevents data loss
-- **Multi-agent safe** - ACID transactions coordinate concurrent edits
+- **Multi-agent safe** - Coordinated concurrent edits
 
 ### Checkout/Commit Workflow
 
@@ -268,7 +293,7 @@ FROM projects p"
 - **Edit with any tool** - vim, vscode, grep, find, etc.
 - **Re-normalize** - Commit changes back to database
 - **Conflict detection** - Version-based optimistic locking
-- **Atomic operations** - All changes in ACID transactions
+- **Atomic operations** - All changes in transactions
 
 ### LLM Context Provider
 
@@ -364,6 +389,7 @@ ORDER BY version_number DESC;
 - **[GUIDE.md](GUIDE.md)** - Complete usage guide (checkout/commit workflow, SQL queries, CLI commands)
 - **[FILES.md](FILES.md)** - How file tracking and versioning works
 - **[EXAMPLES.md](EXAMPLES.md)** - SQL query examples and common patterns
+- **[QUERY_BEST_PRACTICES.md](QUERY_BEST_PRACTICES.md)** - ⚠️ **Critical**: Query constraints and best practices (read this!)
 
 ### Advanced Topics
 - **[ADVANCED.md](ADVANCED.md)** - Performance tuning, Nix environments, deployment
@@ -442,33 +468,33 @@ templedb help                      # Show help
 
 ---
 
-## Philosophy: Normalization > Duplication
+## Philosophy: Normalization vs. Redundancy
 
 TempleDB inverts the traditional model:
 
 **Traditional:**
 - Filesystem is source of truth
-- Files duplicated across branches, projects, builds
+- Files copied across branches, projects, builds
 - Git creates full copies per branch
 - State fragmented across filesystem, .git, node_modules
-- **O(n²) friction**: Duplication scales with codebase size
+- **O(n²) friction**: Redundancy scales with codebase size
 
 **TempleDB:**
 - **Database is single source of truth**
 - Files normalized (stored once, referenced many times)
-- Versions reference files (not duplicate)
-- Branches reference versions (not copy)
+- Versions reference content by hash
+- Branches reference versions
 - **O(log n) friction**: Normalization scales logarithmically
 
 This enables:
-- **Zero duplication**: Each file/package stored once
+- **Storage efficiency**: Each file stored once via content addressing
 - **No tracking errors**: Database enforces consistency
-- **ACID guarantees**: Multi-agent coordination
+- **Multi-agent safety**: Coordinated concurrent work
 - **Instant queries**: SQL across entire codebase
-- **Temporary denormalization**: Nix FHS for efficient editing
-- **Scales indefinitely**: Friction stays constant
+- **Temporary workspaces**: Extract files when needed
+- **Scales indefinitely**: Constant overhead
 
-**Example**: Refactoring a 1,242-line NixOS config with 40+ duplicate packages and 377 commented lines → 586 lines, zero duplicates, tracked atomically in TempleDB.
+**Example**: Refactoring a 1,242-line NixOS config with 40+ redundant packages → 586 lines with efficient storage, tracked atomically in TempleDB.
 
 **Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) for the complete philosophy.**
 
