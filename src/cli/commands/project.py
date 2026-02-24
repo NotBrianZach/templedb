@@ -9,10 +9,10 @@ from typing import Optional
 
 # Import will be resolved at runtime
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from db_utils import query_one, query_all, execute, get_connection
 from cli.core import Command
 from cli.commands.checkout import CheckoutCommand
 from cli.commands.commit import CommitCommand
+from repositories import ProjectRepository, FileRepository
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -20,6 +20,12 @@ logger = get_logger(__name__)
 
 class ProjectCommands(Command):
     """Project management command handlers"""
+
+    def __init__(self):
+        super().__init__()
+        """Initialize with repositories"""
+        self.project_repo = ProjectRepository()
+        self.file_repo = FileRepository()
 
     def import_project(self, args) -> int:
         """Import a project from filesystem into database"""
@@ -37,15 +43,17 @@ class ProjectCommands(Command):
         slug = args.slug if args.slug else project_path.name
 
         # Check if project exists, create if not
-        project = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
+        project = self.project_repo.get_by_slug(slug)
 
         if not project:
             # Create project
             logger.info(f"Creating new project: {slug}")
-            execute("""
-                INSERT INTO projects (slug, name, repo_url, git_branch, status)
-                VALUES (?, ?, ?, 'main', 'active')
-            """, (slug, slug, str(project_path)))
+            self.project_repo.create(
+                slug=slug,
+                name=slug,
+                repo_url=str(project_path),
+                git_branch='main'
+            )
             logger.info(f"Created project '{slug}'")
         else:
             logger.info(f"Updating existing project: {slug}")
@@ -72,17 +80,7 @@ class ProjectCommands(Command):
 
     def list_projects(self, args) -> int:
         """List all projects"""
-        projects = query_all("""
-            SELECT
-                p.slug,
-                p.name,
-                COUNT(pf.id) as file_count,
-                SUM(pf.lines_of_code) as total_lines
-            FROM projects p
-            LEFT JOIN project_files pf ON p.id = pf.project_id
-            GROUP BY p.id
-            ORDER BY p.slug
-        """)
+        projects = self.project_repo.get_all()
 
         if not projects:
             print("No projects found")
@@ -98,7 +96,10 @@ class ProjectCommands(Command):
 
     def show_project(self, args) -> int:
         """Show detailed project information"""
-        project = self.get_project_or_exit(args.slug)
+        project = self.project_repo.get_by_slug(args.slug)
+        if not project:
+            logger.error(f"Project '{args.slug}' not found")
+            return 1
 
         print(f"\nProject: {project['slug']}")
         print(f"Name: {project['name']}")
@@ -106,14 +107,7 @@ class ProjectCommands(Command):
         print(f"Branch: {project.get('git_branch', 'N/A')}")
 
         # Get file statistics
-        stats = query_one("""
-            SELECT
-                COUNT(*) as file_count,
-                SUM(lines_of_code) as total_lines,
-                COUNT(DISTINCT file_type_id) as file_types
-            FROM project_files
-            WHERE project_id = ?
-        """, (project['id'],))
+        stats = self.project_repo.get_statistics(project['id'])
 
         if stats:
             print(f"\nFiles: {stats['file_count']}")
@@ -121,14 +115,7 @@ class ProjectCommands(Command):
             print(f"File types: {stats['file_types']}")
 
         # Get VCS info
-        vcs_info = query_one("""
-            SELECT
-                COUNT(DISTINCT vb.id) as branch_count,
-                COUNT(DISTINCT vc.id) as commit_count
-            FROM vcs_branches vb
-            LEFT JOIN vcs_commits vc ON vb.id = vc.branch_id
-            WHERE vb.project_id = ?
-        """, (project['id'],))
+        vcs_info = self.project_repo.get_vcs_info(project['id'])
 
         if vcs_info and vcs_info['branch_count'] > 0:
             print(f"\nVCS Branches: {vcs_info['branch_count']}")
@@ -139,7 +126,10 @@ class ProjectCommands(Command):
 
     def sync_project(self, args) -> int:
         """Re-import project from filesystem"""
-        project = self.get_project_or_exit(args.slug)
+        project = self.project_repo.get_by_slug(args.slug)
+        if not project:
+            logger.error(f"Project '{args.slug}' not found")
+            return 1
 
         repo_path = project.get('repo_url')
         if not repo_path or not Path(repo_path).exists():
@@ -169,7 +159,10 @@ class ProjectCommands(Command):
 
     def remove_project(self, args) -> int:
         """Remove a project from database"""
-        project = self.get_project_or_exit(args.slug)
+        project = self.project_repo.get_by_slug(args.slug)
+        if not project:
+            logger.error(f"Project '{args.slug}' not found")
+            return 1
 
         if not args.force:
             response = input(f"Remove project '{args.slug}' and all its data? (yes/no): ")
@@ -178,7 +171,7 @@ class ProjectCommands(Command):
                 return 0
 
         # Delete project (cascade will handle related records)
-        execute("DELETE FROM projects WHERE id = ?", (project['id'],))
+        self.project_repo.delete(project['id'])
         logger.info(f"Removed project: {args.slug}")
         return 0
 

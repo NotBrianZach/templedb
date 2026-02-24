@@ -39,6 +39,7 @@
             python311
             python311Packages.textual
             python311Packages.rich
+            python311Packages.pyyaml  # For secret management
 
             # Runtime tools your CLI shells out to
             sops

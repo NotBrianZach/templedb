@@ -11,6 +11,7 @@ let
   pythonEnv = python.withPackages (ps: with ps; [
     textual
     rich
+    pyyaml  # For secret management YAML export
   ]);
 in
 

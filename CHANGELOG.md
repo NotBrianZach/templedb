@@ -6,6 +6,56 @@ All notable changes to TempleDB are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **TUI VCS Enhancements** - Comprehensive VCS features in Terminal UI
+  - Interactive staging screen - Stage/unstage files visually with `[s]Stage [u]Unstage [a]All [r]Reset`
+  - Commit creation dialog - Create commits from TUI with message input
+  - Commit detail screen - View full commit information with file lists
+  - Commit diff viewer - View diffs for any commit with `[d]` key
+  - Staged diff viewer - View diff of staged changes before committing
+  - Enhanced VCS menu with staging and commit options
+  - Enhanced commits screen with diff viewing capability
+  - Split-view staging area showing staged/unstaged changes
+  - Emoji indicators for change types (📝 modified, ✨ added, 🗑️ deleted)
+  - Direct database integration for fast staging operations
+  - CLI integration for diff and commit operations
+  - 7 new screen classes added to TUI
+  - Documentation: `TUI_VCS_ENHANCEMENTS.md`
+
+- **Staging Area Operations** - Complete CLI staging functionality
+  - `templedb vcs add -p project [--all] [files...]` - Stage files for commit
+  - `templedb vcs reset -p project [--all] [files...]` - Unstage files
+  - `templedb vcs diff project --staged` - Show diff of staged changes
+  - `templedb vcs show project commit` - Show commit details
+  - Pattern matching support for staging (e.g., `*.py`, `src/*`)
+  - Enhanced `vcs status` showing staged and unstaged changes
+  - Commit workflow similar to Git's staging area
+  - Documentation: `STAGING_OPERATIONS.md`
+
+- **VCS Diff Viewer** - Visual diff between file versions
+  - `templedb vcs diff <project> <file> [commit1] [commit2]` - Show diffs
+  - Compare current version to previous version (default)
+  - Compare specific commits
+  - Compare commit to current version
+  - Unified and side-by-side diff formats
+  - Color-coded output (additions in green, deletions in red)
+  - Context snippets with line numbers
+  - Supports commit hash prefix matching
+  - Documentation: diff command in CLI help
+
+- **Full-Text Search (FTS5)** - 10-100x faster content search
+  - Migration 016: Adds SQLite FTS5 virtual table for file contents
+  - Indexed 1,500+ files for instant search
+  - Boolean operators: AND, OR, NOT
+  - Phrase search with quotes: "exact phrase"
+  - Prefix matching with *: auth*
+  - Relevance ranking with ORDER BY rank
+  - Context snippets with highlighted matches
+  - Fallback to LIKE search with --no-fts flag
+  - `file_search_view` for queries with full project context
+  - 60-second initial indexing, instant searches thereafter
+  - Automatic index maintenance (future: triggers)
+
 ### Removed
 - **Redundant SQL Extraction Infrastructure** - Cleaned up duplicate systems
   - Archived `src/populate_sql_objects.cjs` (standalone script superseded by integrated Python analyzer)

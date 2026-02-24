@@ -1,0 +1,10 @@
+{
+  "provider": "gdrive",
+  "config": {
+    "credentials_path": "~/.config/templedb/gdrive_credentials.json",
+    "token_path": "~/.config/templedb/gdrive_token.json",
+    "folder_name": "TempleDB Backups",
+    "retention_days": 30,
+    "max_backups": 10
+  }
+}

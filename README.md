@@ -446,7 +446,12 @@ templedb secret export <proj> --format <fmt>       # Export (shell/json/yaml/dot
 templedb secret print-raw <proj>                   # Print encrypted blob
 
 # Interactive TUI
-templedb tui                   # Launch terminal UI (9 screens: projects, files, VCS, secrets)
+templedb tui                   # Launch terminal UI with VCS features:
+                               # - Interactive staging (stage/unstage files visually)
+                               # - Commit creation dialog
+                               # - Commit history with diff viewing
+                               # - Staged changes diff viewer
+                               # See TUI_VCS_ENHANCEMENTS.md for details
 
 # Environments
 templedb env enter <proj> [<env>]  # Enter Nix environment
@@ -455,11 +460,15 @@ templedb env detect <proj>         # Auto-detect packages
 templedb env new <proj> <env>      # Create new environment
 templedb env generate <proj> <env> # Generate Nix expression
 
-# Version Control
-templedb vcs commit -m <msg> -p <proj> [-b <branch>] [-a <author>]
-templedb vcs status <proj>         # Show working directory status
-templedb vcs log <proj> [-n <num>] # Show commit history
-templedb vcs branch <proj> [<name>] # List or create branches
+# Version Control (with staging area)
+templedb vcs add -p <proj> [--all] [files...]       # Stage files for commit
+templedb vcs reset -p <proj> [--all] [files...]     # Unstage files
+templedb vcs diff <proj> [--staged]                 # Show diffs (staged or working)
+templedb vcs show <proj> <commit>                   # Show commit details with diff
+templedb vcs commit -m <msg> -p <proj> [-a <author>] # Commit staged changes
+templedb vcs status <proj>                          # Show staged and unstaged changes
+templedb vcs log <proj> [-n <num>]                  # Show commit history
+templedb vcs branch <proj> [<name>]                 # List or create branches
 
 # Search
 templedb search content <pattern> [-p <proj>] [-i]  # Search file contents

@@ -11,12 +11,21 @@ from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from db_utils import DB_PATH, query_one, query_all
+from db_utils import DB_PATH
+from repositories import BaseRepository
 from cli.core import Command
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class SystemCommands(Command):
     """System command handlers"""
+
+    def __init__(self):
+        super().__init__()
+        """Initialize with repositories"""
+        self.system_repo = BaseRepository()  # Generic repository for system queries
 
     def backup(self, args) -> int:
         """Backup database"""
@@ -103,12 +112,12 @@ class SystemCommands(Command):
         print()
 
         stats = [
-            ("Projects", query_one("SELECT COUNT(*) as count FROM projects")['count']),
-            ("Files", query_one("SELECT COUNT(*) as count FROM project_files")['count']),
-            ("Lines of Code", query_one("SELECT SUM(lines_of_code) as total FROM project_files")['total'] or 0),
-            ("File Contents Stored", query_one("SELECT COUNT(*) as count FROM file_contents")['count']),
-            ("VCS Commits", query_one("SELECT COUNT(*) as count FROM vcs_commits")['count']),
-            ("VCS Branches", query_one("SELECT COUNT(*) as count FROM vcs_branches")['count']),
+            ("Projects", self.system_repo.query_one("SELECT COUNT(*) as count FROM projects")['count']),
+            ("Files", self.system_repo.query_one("SELECT COUNT(*) as count FROM project_files")['count']),
+            ("Lines of Code", self.system_repo.query_one("SELECT SUM(lines_of_code) as total FROM project_files")['total'] or 0),
+            ("File Contents Stored", self.system_repo.query_one("SELECT COUNT(*) as count FROM file_contents")['count']),
+            ("VCS Commits", self.system_repo.query_one("SELECT COUNT(*) as count FROM vcs_commits")['count']),
+            ("VCS Branches", self.system_repo.query_one("SELECT COUNT(*) as count FROM vcs_branches")['count']),
             ("Database Size", f"{size_mb:.2f} MB")
         ]
 
@@ -121,7 +130,7 @@ class SystemCommands(Command):
         print("═════ Projects ═════")
         print()
 
-        projects = query_all("""
+        projects = self.system_repo.query_all("""
             SELECT
                 p.slug,
                 p.repo_url,
@@ -142,7 +151,7 @@ class SystemCommands(Command):
         print("═════ File Types Distribution ═════")
         print()
 
-        file_types = query_all("""
+        file_types = self.system_repo.query_all("""
             SELECT
                 type_name,
                 COUNT(*) as count,
@@ -165,7 +174,7 @@ class SystemCommands(Command):
         print("═════ Top 10 Largest Files ═════")
         print()
 
-        largest_files = query_all("""
+        largest_files = self.system_repo.query_all("""
             SELECT
                 SUBSTR(file_path, 1, 45) as file,
                 project_slug,
@@ -186,7 +195,7 @@ class SystemCommands(Command):
         print()
 
         try:
-            recent_commits = query_all("""
+            recent_commits = self.system_repo.query_all("""
                 SELECT
                     SUBSTR(c.commit_message, 1, 40) as message,
                     p.slug as project_slug,

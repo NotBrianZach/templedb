@@ -1,0 +1,13 @@
+{
+  "provider": "s3",
+  "config": {
+    "bucket_name": "my-templedb-backups",
+    "aws_access_key_id": "YOUR_ACCESS_KEY",
+    "aws_secret_access_key": "YOUR_SECRET_KEY",
+    "region": "us-east-1",
+    "prefix": "backups/",
+    "retention_days": 30,
+    "max_backups": 10
+  },
+  "note": "For S3 backups, you need to install: pip install boto3"
+}

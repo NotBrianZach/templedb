@@ -6,55 +6,120 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from db_utils import query_all
+from repositories import FileRepository
 from cli.core import Command
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class SearchCommands(Command):
     """Search command handlers"""
 
+    def __init__(self):
+        super().__init__()
+        """Initialize with repositories"""
+        self.file_repo = FileRepository()
+
     def search_content(self, args) -> int:
-        """Search file contents"""
+        """Search file contents using FTS5"""
         pattern = args.pattern
         project_slug = args.project if hasattr(args, 'project') and args.project else None
-        case_insensitive = args.ignore_case if hasattr(args, 'ignore_case') else False
+        use_fts = not (hasattr(args, 'no_fts') and args.no_fts)
 
-        # Build query
-        if case_insensitive:
-            where_clause = "content_text LIKE ? COLLATE NOCASE"
-            pattern_param = f"%{pattern}%"
+        if use_fts:
+            # Use FTS5 for fast full-text search
+            # FTS5 query syntax: can use boolean operators, phrases, etc.
+            if project_slug:
+                sql = """
+                    SELECT
+                        fsv.project_slug,
+                        fsv.file_path,
+                        fsv.file_name,
+                        fsv.file_type,
+                        fsv.line_count,
+                        snippet(file_contents_fts, 1, '<b>', '</b>', '...', 32) AS snippet,
+                        rank
+                    FROM file_contents_fts
+                    JOIN file_search_view fsv ON fsv.file_path = file_contents_fts.file_path
+                    WHERE file_contents_fts MATCH ? AND fsv.project_slug = ?
+                    ORDER BY rank
+                    LIMIT 100
+                """
+                params = (pattern, project_slug)
+            else:
+                sql = """
+                    SELECT
+                        fsv.project_slug,
+                        fsv.file_path,
+                        fsv.file_name,
+                        fsv.file_type,
+                        fsv.line_count,
+                        snippet(file_contents_fts, 1, '<b>', '</b>', '...', 32) AS snippet,
+                        rank
+                    FROM file_contents_fts
+                    JOIN file_search_view fsv ON fsv.file_path = file_contents_fts.file_path
+                    WHERE file_contents_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT 100
+                """
+                params = (pattern,)
+
+            results = self.file_repo.query_all(sql, params)
+
+            if not results:
+                print(f"No files found containing '{pattern}'")
+                print("\nTip: FTS5 uses full-text search syntax.")
+                print("  - Use quotes for phrases: \"exact phrase\"")
+                print("  - Use AND/OR/NOT: term1 AND term2")
+                print("  - Use * for prefix: auth*")
+                return 0
+
+            print(self.format_table(
+                results,
+                ['project_slug', 'file_path', 'snippet'],
+                title=f"Files containing '{pattern}' ({len(results)} results, ranked by relevance)"
+            ))
         else:
-            where_clause = "content_text LIKE ?"
-            pattern_param = f"%{pattern}%"
+            # Fallback to LIKE search (slower but works without FTS5)
+            case_insensitive = args.ignore_case if hasattr(args, 'ignore_case') else False
 
-        if project_slug:
-            sql = f"""
-                SELECT file_path, project_slug, line_count
-                FROM current_file_contents_view
-                WHERE project_slug = ? AND {where_clause}
-                LIMIT 100
-            """
-            params = (project_slug, pattern_param)
-        else:
-            sql = f"""
-                SELECT file_path, project_slug, line_count
-                FROM current_file_contents_view
-                WHERE {where_clause}
-                LIMIT 100
-            """
-            params = (pattern_param,)
+            if case_insensitive:
+                where_clause = "content_text LIKE ? COLLATE NOCASE"
+                pattern_param = f"%{pattern}%"
+            else:
+                where_clause = "content_text LIKE ?"
+                pattern_param = f"%{pattern}%"
 
-        results = query_all(sql, params)
+            if project_slug:
+                sql = f"""
+                    SELECT file_path, project_slug, line_count
+                    FROM current_file_contents_view
+                    WHERE project_slug = ? AND {where_clause}
+                    LIMIT 100
+                """
+                params = (project_slug, pattern_param)
+            else:
+                sql = f"""
+                    SELECT file_path, project_slug, line_count
+                    FROM current_file_contents_view
+                    WHERE {where_clause}
+                    LIMIT 100
+                """
+                params = (pattern_param,)
 
-        if not results:
-            print(f"No files found containing '{pattern}'")
-            return 0
+            results = self.file_repo.query_all(sql, params)
 
-        print(self.format_table(
-            results,
-            ['project_slug', 'file_path', 'line_count'],
-            title=f"Files containing '{pattern}' ({len(results)} results)"
-        ))
+            if not results:
+                print(f"No files found containing '{pattern}'")
+                return 0
+
+            print(self.format_table(
+                results,
+                ['project_slug', 'file_path', 'line_count'],
+                title=f"Files containing '{pattern}' ({len(results)} results)"
+            ))
+
         return 0
 
     def search_files(self, args) -> int:
@@ -63,14 +128,14 @@ class SearchCommands(Command):
         project_slug = args.project if hasattr(args, 'project') and args.project else None
 
         if project_slug:
-            results = query_all("""
+            results = self.file_repo.query_all("""
                 SELECT file_path, type_name, lines_of_code
                 FROM files_with_types_view
                 WHERE project_slug = ? AND file_path LIKE ?
                 LIMIT 100
             """, (project_slug, f"%{pattern}%"))
         else:
-            results = query_all("""
+            results = self.file_repo.query_all("""
                 SELECT file_path, project_slug, type_name, lines_of_code
                 FROM files_with_types_view
                 WHERE file_path LIKE ?
@@ -103,9 +168,10 @@ def register(cli):
 
     # search content
     content_parser = subparsers.add_parser('content', help='Search file contents')
-    content_parser.add_argument('pattern', help='Search pattern')
+    content_parser.add_argument('pattern', help='Search pattern (supports FTS5 syntax)')
     content_parser.add_argument('-p', '--project', help='Project slug to limit search')
-    content_parser.add_argument('-i', '--ignore-case', action='store_true', help='Case insensitive')
+    content_parser.add_argument('-i', '--ignore-case', action='store_true', help='Case insensitive (only with --no-fts)')
+    content_parser.add_argument('--no-fts', action='store_true', help='Use LIKE instead of FTS5 (slower)')
     cli.commands['search.content'] = cmd.search_content
 
     # search files

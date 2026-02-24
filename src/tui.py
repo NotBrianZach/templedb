@@ -380,6 +380,8 @@ class VCSMenuScreen(Screen):
         Binding("escape", "app.pop_screen", "Back"),
         Binding("c", "commits", "Commits"),
         Binding("b", "branches", "Branches"),
+        Binding("s", "staging", "Staging"),
+        Binding("n", "new_commit", "New Commit"),
         Binding("l", "log", "Log"),
     ]
 
@@ -394,6 +396,8 @@ class VCSMenuScreen(Screen):
             Static(title, classes="screen-title"),
             Button("Commits [c]", id="btn-commits", variant="primary"),
             Button("Branches [b]", id="btn-branches"),
+            Button("Staging [s]", id="btn-staging"),
+            Button("New Commit [n]", id="btn-new-commit"),
             Button("Log [l]", id="btn-log"),
             Static("", id="status-line"),
             id="vcs-menu"
@@ -406,6 +410,10 @@ class VCSMenuScreen(Screen):
             self.action_commits()
         elif event.button.id == "btn-branches":
             self.action_branches()
+        elif event.button.id == "btn-staging":
+            self.action_staging()
+        elif event.button.id == "btn-new-commit":
+            self.action_new_commit()
         elif event.button.id == "btn-log":
             self.action_log()
 
@@ -416,6 +424,20 @@ class VCSMenuScreen(Screen):
     def action_branches(self) -> None:
         """Show branches"""
         self.app.push_screen(VCSBranchesScreen(self.project_slug))
+
+    def action_staging(self) -> None:
+        """Show staging area"""
+        if self.project_slug:
+            self.app.push_screen(VCSStagingScreen(self.project_slug))
+        else:
+            self.notify("Select a project first", severity="warning")
+
+    def action_new_commit(self) -> None:
+        """Create new commit"""
+        if self.project_slug:
+            self.app.push_screen(VCSCommitDialog(self.project_slug))
+        else:
+            self.notify("Select a project first", severity="warning")
 
     def action_log(self) -> None:
         """Show log"""
@@ -433,6 +455,7 @@ class VCSCommitsScreen(Screen):
         Binding("q", "quit", "Quit"),
         Binding("escape", "app.pop_screen", "Back"),
         Binding("enter", "show_commit_detail", "Details"),
+        Binding("d", "show_diff", "Diff"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -461,6 +484,7 @@ class VCSCommitsScreen(Screen):
         if self.project_slug:
             commits = query_all("""
                 SELECT
+                    commit_hash,
                     SUBSTR(commit_hash, 1, 8) as short_hash,
                     branch_name,
                     author,
@@ -474,6 +498,7 @@ class VCSCommitsScreen(Screen):
         else:
             commits = query_all("""
                 SELECT
+                    commit_hash,
                     SUBSTR(commit_hash, 1, 8) as short_hash,
                     branch_name,
                     author,
@@ -484,6 +509,7 @@ class VCSCommitsScreen(Screen):
                 LIMIT 100
             """)
 
+        self.commits_data = commits  # Store for later reference
         for commit in commits:
             table.add_row(
                 commit['short_hash'],
@@ -494,7 +520,7 @@ class VCSCommitsScreen(Screen):
             )
 
         status = self.query_one("#status-line", Static)
-        status.update(f"Commits: {len(commits)} | [enter]Details [esc]Back [q]Quit")
+        status.update(f"Commits: {len(commits)} | [enter]Details [d]Diff [esc]Back [q]Quit")
 
     def action_show_commit_detail(self) -> None:
         """Show commit details"""
@@ -502,9 +528,17 @@ class VCSCommitsScreen(Screen):
         if table.row_count > 0:
             row_key = table.cursor_row
             if row_key is not None:
-                row = table.get_row_at(row_key)
-                commit_hash_short = row[0]
-                self.notify(f"Commit details for {commit_hash_short} (view coming soon)")
+                commit_hash = self.commits_data[row_key]['commit_hash']
+                self.app.push_screen(VCSCommitDetailScreen(self.project_slug, commit_hash))
+
+    def action_show_diff(self) -> None:
+        """Show diff for selected commit"""
+        table = self.query_one("#commits-table", DataTable)
+        if table.row_count > 0:
+            row_key = table.cursor_row
+            if row_key is not None:
+                commit_hash = self.commits_data[row_key]['commit_hash']
+                self.app.push_screen(VCSCommitDiffScreen(self.project_slug, commit_hash))
 
 
 class VCSBranchesScreen(Screen):
@@ -586,6 +620,451 @@ class VCSBranchesScreen(Screen):
                 row = table.get_row_at(row_key)
                 branch_name = row[0]
                 self.notify(f"Branch switching for {branch_name} (coming soon)")
+
+
+class VCSCommitDetailScreen(Screen):
+    """Show detailed commit information"""
+
+    def __init__(self, project_slug: str, commit_hash: str):
+        super().__init__()
+        self.project_slug = project_slug
+        self.commit_hash = commit_hash
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("escape", "app.pop_screen", "Back"),
+        Binding("d", "show_diff", "Show Diff"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Container(
+            Static(f"Commit: {self.commit_hash[:8]}", classes="screen-title"),
+            Static("", id="commit-detail"),
+            id="commit-detail-container"
+        )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Load commit details"""
+        # Get commit info
+        commit = query_one("""
+            SELECT c.commit_hash, c.author, c.commit_message, c.commit_timestamp,
+                   b.branch_name, p.slug as project_slug
+            FROM vcs_commits c
+            JOIN vcs_branches b ON c.branch_id = b.id
+            JOIN projects p ON c.project_id = p.id
+            WHERE c.commit_hash LIKE ? AND p.slug = ?
+        """, (f"{self.commit_hash}%", self.project_slug))
+
+        # Get changed files
+        files = query_all("""
+            SELECT fs.file_id, pf.file_path, fs.state
+            FROM vcs_file_states fs
+            JOIN project_files pf ON fs.file_id = pf.id
+            WHERE fs.commit_id = (
+                SELECT id FROM vcs_commits WHERE commit_hash LIKE ? LIMIT 1
+            )
+        """, (f"{self.commit_hash}%",))
+
+        if commit:
+            files_text = "\n".join([
+                f"  {'✨' if f['state'] == 'added' else '📝' if f['state'] == 'modified' else '🗑️'} {f['state']:<10} {f['file_path']}"
+                for f in files
+            ])
+
+            detail_text = f"""
+Commit: {commit['commit_hash'][:16]}...
+Branch: {commit['branch_name']}
+Author: {commit['author']}
+Date: {commit['commit_timestamp']}
+
+Message:
+{commit['commit_message']}
+
+Changed files ({len(files)}):
+{files_text}
+
+[d] Show Diff  [esc] Back  [q] Quit
+"""
+        else:
+            detail_text = "Commit not found"
+
+        detail_widget = self.query_one("#commit-detail", Static)
+        detail_widget.update(detail_text)
+
+    def action_show_diff(self) -> None:
+        """Show diff for this commit"""
+        self.app.push_screen(VCSCommitDiffScreen(self.project_slug, self.commit_hash))
+
+
+class VCSCommitDiffScreen(Screen):
+    """Show diff for a commit"""
+
+    def __init__(self, project_slug: str, commit_hash: str):
+        super().__init__()
+        self.project_slug = project_slug
+        self.commit_hash = commit_hash
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("escape", "app.pop_screen", "Back"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Container(
+            Static(f"Diff: {self.commit_hash[:8]}", classes="screen-title"),
+            Static("", id="diff-content", classes="content-viewer"),
+            id="diff-container"
+        )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Load and display diff"""
+        try:
+            # Use CLI to get diff
+            result = subprocess.run(
+                ["templedb", "vcs", "show", self.project_slug, self.commit_hash],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            if result.returncode == 0:
+                diff_text = result.stdout
+            else:
+                diff_text = f"Error loading diff:\n{result.stderr}"
+
+        except Exception as e:
+            diff_text = f"Error: {str(e)}"
+
+        diff_widget = self.query_one("#diff-content", Static)
+        diff_widget.update(diff_text)
+
+
+class VCSStagingScreen(Screen):
+    """Interactive staging area management"""
+
+    def __init__(self, project_slug: str):
+        super().__init__()
+        self.project_slug = project_slug
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("escape", "app.pop_screen", "Back"),
+        Binding("s", "stage_file", "Stage"),
+        Binding("u", "unstage_file", "Unstage"),
+        Binding("a", "stage_all", "Stage All"),
+        Binding("r", "unstage_all", "Unstage All"),
+        Binding("d", "show_staged_diff", "Diff Staged"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Container(
+            Static(f"Staging: {self.project_slug}", classes="screen-title"),
+            Static("Staged Changes:", classes="section-header"),
+            DataTable(id="staged-table"),
+            Static("Unstaged Changes:", classes="section-header"),
+            DataTable(id="unstaged-table"),
+            Static("", id="status-line"),
+            id="staging-container"
+        )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Load staging status"""
+        staged_table = self.query_one("#staged-table", DataTable)
+        staged_table.add_columns("State", "File")
+        staged_table.cursor_type = "row"
+
+        unstaged_table = self.query_one("#unstaged-table", DataTable)
+        unstaged_table.add_columns("State", "File")
+        unstaged_table.cursor_type = "row"
+
+        self.load_status()
+
+    def load_status(self) -> None:
+        """Load staging status"""
+        # Get project and branch
+        project = query_one("SELECT id FROM projects WHERE slug = ?", (self.project_slug,))
+        if not project:
+            return
+
+        branches = query_all("""
+            SELECT id, branch_name, is_default
+            FROM vcs_branches WHERE project_id = ?
+        """, (project['id'],))
+        branch = next((b for b in branches if b.get('is_default')), None)
+        if not branch:
+            return
+
+        # Refresh working state
+        execute("DELETE FROM vcs_working_state WHERE project_id = ? AND branch_id = ?",
+                (project['id'], branch['id']))
+
+        # Get all files
+        files = query_all("""
+            SELECT pf.id, pf.file_path, fc.content_hash
+            FROM project_files pf
+            LEFT JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
+            WHERE pf.project_id = ?
+        """, (project['id'],))
+
+        # Get last commit state
+        last_commit = query_one("""
+            SELECT id, commit_hash FROM vcs_commits
+            WHERE project_id = ? AND branch_id = ?
+            ORDER BY commit_timestamp DESC LIMIT 1
+        """, (project['id'], branch['id']))
+
+        # Populate working state
+        for file in files:
+            if last_commit:
+                committed = query_one("""
+                    SELECT content_hash FROM vcs_file_states
+                    WHERE commit_id = ? AND file_id = ?
+                """, (last_commit['id'], file['id']))
+
+                if committed:
+                    if file['content_hash'] != committed['content_hash']:
+                        state = 'modified'
+                    else:
+                        state = 'unmodified'
+                else:
+                    state = 'added'
+            else:
+                state = 'added'
+
+            execute("""
+                INSERT INTO vcs_working_state
+                (project_id, branch_id, file_id, state, staged, content_hash)
+                VALUES (?, ?, ?, ?, 0, ?)
+            """, (project['id'], branch['id'], file['id'], state, file['content_hash']))
+
+        # Load staged files
+        staged_table = self.query_one("#staged-table", DataTable)
+        staged_table.clear()
+
+        staged = query_all("""
+            SELECT ws.state, pf.file_path, ws.file_id
+            FROM vcs_working_state ws
+            JOIN project_files pf ON ws.file_id = pf.id
+            WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged = 1
+            ORDER BY pf.file_path
+        """, (project['id'], branch['id']))
+
+        self.staged_data = staged
+        for s in staged:
+            icon = {'modified': '📝', 'added': '✨', 'deleted': '🗑️'}.get(s['state'], '?')
+            staged_table.add_row(f"{icon} {s['state']}", s['file_path'])
+
+        # Load unstaged files
+        unstaged_table = self.query_one("#unstaged-table", DataTable)
+        unstaged_table.clear()
+
+        unstaged = query_all("""
+            SELECT ws.state, pf.file_path, ws.file_id
+            FROM vcs_working_state ws
+            JOIN project_files pf ON ws.file_id = pf.id
+            WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged = 0 AND ws.state != 'unmodified'
+            ORDER BY pf.file_path
+        """, (project['id'], branch['id']))
+
+        self.unstaged_data = unstaged
+        for u in unstaged:
+            icon = {'modified': '📝', 'added': '✨', 'deleted': '🗑️'}.get(u['state'], '?')
+            unstaged_table.add_row(f"{icon} {u['state']}", u['file_path'])
+
+        status = self.query_one("#status-line", Static)
+        status.update(f"Staged: {len(staged)} | Unstaged: {len(unstaged)} | [s]Stage [u]Unstage [a]All [r]Reset [d]Diff [esc]Back")
+
+    def action_stage_file(self) -> None:
+        """Stage selected file"""
+        unstaged_table = self.query_one("#unstaged-table", DataTable)
+        if unstaged_table.row_count > 0:
+            row_key = unstaged_table.cursor_row
+            if row_key is not None:
+                file_id = self.unstaged_data[row_key]['file_id']
+                project = query_one("SELECT id FROM projects WHERE slug = ?", (self.project_slug,))
+                branch = query_one("""
+                    SELECT id FROM vcs_branches
+                    WHERE project_id = ? AND is_default = 1
+                """, (project['id'],))
+
+                execute("""
+                    UPDATE vcs_working_state
+                    SET staged = 1
+                    WHERE file_id = ? AND project_id = ? AND branch_id = ?
+                """, (file_id, project['id'], branch['id']))
+
+                self.load_status()
+
+    def action_unstage_file(self) -> None:
+        """Unstage selected file"""
+        staged_table = self.query_one("#staged-table", DataTable)
+        if staged_table.row_count > 0:
+            row_key = staged_table.cursor_row
+            if row_key is not None:
+                file_id = self.staged_data[row_key]['file_id']
+                project = query_one("SELECT id FROM projects WHERE slug = ?", (self.project_slug,))
+                branch = query_one("""
+                    SELECT id FROM vcs_branches
+                    WHERE project_id = ? AND is_default = 1
+                """, (project['id'],))
+
+                execute("""
+                    UPDATE vcs_working_state
+                    SET staged = 0
+                    WHERE file_id = ? AND project_id = ? AND branch_id = ?
+                """, (file_id, project['id'], branch['id']))
+
+                self.load_status()
+
+    def action_stage_all(self) -> None:
+        """Stage all files"""
+        try:
+            subprocess.run(["templedb", "vcs", "add", "-p", self.project_slug, "--all"], check=True)
+            self.notify("Staged all changes")
+            self.load_status()
+        except Exception as e:
+            self.notify(f"Error: {str(e)}", severity="error")
+
+    def action_unstage_all(self) -> None:
+        """Unstage all files"""
+        try:
+            subprocess.run(["templedb", "vcs", "reset", "-p", self.project_slug, "--all"], check=True)
+            self.notify("Unstaged all changes")
+            self.load_status()
+        except Exception as e:
+            self.notify(f"Error: {str(e)}", severity="error")
+
+    def action_show_staged_diff(self) -> None:
+        """Show diff of staged changes"""
+        try:
+            result = subprocess.run(
+                ["templedb", "vcs", "diff", self.project_slug, "--staged"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.stdout:
+                self.app.push_screen(VCSStagedDiffScreen(self.project_slug, result.stdout))
+            else:
+                self.notify("No staged changes to show")
+        except Exception as e:
+            self.notify(f"Error: {str(e)}", severity="error")
+
+
+class VCSStagedDiffScreen(Screen):
+    """Show diff of staged changes"""
+
+    def __init__(self, project_slug: str, diff_content: str):
+        super().__init__()
+        self.project_slug = project_slug
+        self.diff_content = diff_content
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("escape", "app.pop_screen", "Back"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Container(
+            Static(f"Staged Changes: {self.project_slug}", classes="screen-title"),
+            Static("", id="diff-content", classes="content-viewer"),
+            id="diff-container"
+        )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Display diff"""
+        diff_widget = self.query_one("#diff-content", Static)
+        diff_widget.update(self.diff_content)
+
+
+class VCSCommitDialog(Screen):
+    """Dialog for creating a new commit"""
+
+    def __init__(self, project_slug: str):
+        super().__init__()
+        self.project_slug = project_slug
+
+    BINDINGS = [
+        Binding("escape", "app.pop_screen", "Cancel"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Container(
+            Static(f"Create Commit: {self.project_slug}", classes="screen-title"),
+            Label("Commit message:"),
+            Input(placeholder="Enter commit message", id="commit-message"),
+            Label("Author (optional):"),
+            Input(placeholder="Auto-detect from git config", id="commit-author"),
+            Horizontal(
+                Button("Stage All & Commit", variant="primary", id="stage-commit-btn"),
+                Button("Commit Staged", variant="success", id="commit-btn"),
+                Button("Cancel", id="cancel-btn"),
+                id="button-row"
+            ),
+            Static("", id="commit-status"),
+            id="commit-container"
+        )
+        yield Footer()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses"""
+        if event.button.id == "cancel-btn":
+            self.app.pop_screen()
+        elif event.button.id == "commit-btn":
+            self.do_commit(stage_all=False)
+        elif event.button.id == "stage-commit-btn":
+            self.do_commit(stage_all=True)
+
+    def do_commit(self, stage_all: bool = False) -> None:
+        """Execute commit"""
+        message_input = self.query_one("#commit-message", Input)
+        author_input = self.query_one("#commit-author", Input)
+        status = self.query_one("#commit-status", Static)
+
+        message = message_input.value.strip()
+        author = author_input.value.strip()
+
+        if not message:
+            status.update("[red]Error: Commit message required[/red]")
+            return
+
+        status.update("Creating commit...")
+
+        try:
+            # Stage all if requested
+            if stage_all:
+                subprocess.run(["templedb", "vcs", "add", "-p", self.project_slug, "--all"], check=True)
+
+            # Create commit
+            cmd = ["templedb", "vcs", "commit", "-p", self.project_slug, "-m", message]
+            if author:
+                cmd.extend(["-a", author])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+            if result.returncode == 0:
+                status.update("[green]✓ Commit created successfully![/green]")
+                # Close dialog after a moment
+                import asyncio
+                async def close_after_delay():
+                    await asyncio.sleep(1)
+                    self.app.pop_screen()
+                self.app.call_later(close_after_delay)
+            else:
+                error_msg = result.stderr or result.stdout
+                status.update(f"[red]Error: {error_msg}[/red]")
+
+        except Exception as e:
+            status.update(f"[red]Error: {str(e)}[/red]")
 
 
 class SecretsScreen(Screen):
@@ -990,6 +1469,48 @@ class TempleDBTUI(App):
         height: 1fr;
         overflow: auto;
         padding: 1;
+    }
+
+    .section-header {
+        text-style: bold;
+        background: $primary-darken-1;
+        padding: 0 1;
+        margin-top: 1;
+    }
+
+    #staging-container {
+        height: 100%;
+    }
+
+    #staged-table, #unstaged-table {
+        height: 35%;
+        margin: 0 1;
+    }
+
+    #diff-container, #commit-detail-container {
+        height: 100%;
+    }
+
+    #diff-content, #commit-detail {
+        height: 1fr;
+        overflow: auto;
+        padding: 1;
+        background: $surface-darken-1;
+        border: solid $primary;
+    }
+
+    #commit-container {
+        align: center middle;
+        width: 70;
+    }
+
+    #commit-message, #commit-author {
+        margin: 1 0;
+    }
+
+    #commit-status {
+        margin: 1;
+        height: 3;
     }
     """
 

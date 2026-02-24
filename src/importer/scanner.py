@@ -26,6 +26,10 @@ FILE_TYPE_PATTERNS = [
     (r'\.mjs$', 'javascript', None),
     (r'\.js$', 'javascript', None),
 
+    # Emacs Lisp
+    (r'\.spacemacs$', 'emacs_config', None),
+    (r'\.el$', 'emacs_lisp', None),
+
     # Styles
     (r'\.css$', 'css', None),
     (r'\.scss$', 'scss', None),

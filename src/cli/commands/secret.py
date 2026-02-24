@@ -10,13 +10,29 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from db_utils import query_one, execute, query_all
+from repositories import BaseRepository, ProjectRepository
 from cli.core import Command
-import yaml
+from logger import get_logger
+
+logger = get_logger(__name__)
+
+# Import yaml only when needed
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+    logger.warning("PyYAML not installed - secret commands will not work")
 
 
 class SecretCommands(Command):
     """Secret management command handlers"""
+
+    def __init__(self):
+        super().__init__()
+        """Initialize with repositories"""
+        self.project_repo = ProjectRepository()
+        self.secret_repo = BaseRepository()  # Generic repository for secret-specific queries
 
     def _age_encrypt(self, plaintext: bytes, age_recipient: str) -> bytes:
         """Encrypt data using age with the given recipient public key."""
@@ -73,15 +89,15 @@ class SecretCommands(Command):
 
     def _get_project_id(self, slug: str) -> int:
         """Get project ID from slug"""
-        row = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
-        if not row:
-            print(f"error: project not found: {slug}", file=sys.stderr)
+        project = self.project_repo.get_by_slug(slug)
+        if not project:
+            logger.error(f"Project not found: {slug}")
             sys.exit(1)
-        return row['id']
+        return project['id']
 
     def _audit_log(self, action: str, slug: str, profile: str, metadata: dict = None):
         """Log audit event"""
-        execute("""
+        self.secret_repo.execute("""
             INSERT INTO audit_log (ts, actor, action, project_slug, profile, details)
             VALUES (datetime('now'), ?, ?, ?, ?, ?)
         """, (
@@ -94,6 +110,10 @@ class SecretCommands(Command):
 
     def secret_init(self, args) -> int:
         """Initialize secrets for a project"""
+        if not YAML_AVAILABLE:
+            logger.error("PyYAML not installed. Install with: pip install pyyaml")
+            return 1
+
         slug = args.slug
         profile = args.profile
         age_recipient = args.age_recipient
@@ -108,7 +128,7 @@ class SecretCommands(Command):
         encrypted = self._age_encrypt(plaintext_yaml, age_recipient)
 
         # Store in database
-        execute("""
+        self.secret_repo.execute("""
             INSERT INTO secret_blobs (project_id, profile, secret_name, secret_blob, content_type)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(project_id, profile) DO UPDATE SET
@@ -122,13 +142,17 @@ class SecretCommands(Command):
 
     def secret_edit(self, args) -> int:
         """Edit secrets for a project"""
+        if not YAML_AVAILABLE:
+            logger.error("PyYAML not installed. Install with: pip install pyyaml")
+            return 1
+
         slug = args.slug
         profile = args.profile
 
         project_id = self._get_project_id(slug)
 
         # Get existing secret blob
-        row = query_one("""
+        row = self.secret_repo.query_one("""
             SELECT secret_blob FROM secret_blobs
             WHERE project_id = ? AND profile = ?
         """, (project_id, profile))
@@ -191,7 +215,7 @@ class SecretCommands(Command):
             encrypted = self._age_encrypt(edited_text.encode('utf-8'), age_recipient)
 
             # Update database
-            execute("""
+            self.secret_repo.execute("""
                 UPDATE secret_blobs
                 SET secret_blob = ?, updated_at = datetime('now')
                 WHERE project_id = ? AND profile = ?
@@ -207,6 +231,10 @@ class SecretCommands(Command):
 
     def secret_export(self, args) -> int:
         """Export secrets in various formats"""
+        if not YAML_AVAILABLE:
+            logger.error("PyYAML not installed. Install with: pip install pyyaml")
+            return 1
+
         slug = args.slug
         profile = args.profile
         fmt = args.format
@@ -214,7 +242,7 @@ class SecretCommands(Command):
         project_id = self._get_project_id(slug)
 
         # Get secret blob
-        row = query_one("""
+        row = self.secret_repo.query_one("""
             SELECT secret_blob FROM secret_blobs
             WHERE project_id = ? AND profile = ?
         """, (project_id, profile))
@@ -256,7 +284,7 @@ class SecretCommands(Command):
 
         project_id = self._get_project_id(slug)
 
-        row = query_one("""
+        row = self.secret_repo.query_one("""
             SELECT secret_blob FROM secret_blobs
             WHERE project_id = ? AND profile = ?
         """, (project_id, profile))

@@ -1,0 +1,25 @@
+# TempleDB Cloud Backup Requirements
+#
+# Optional dependencies for cloud backup providers
+#
+# Install all:
+#   pip install -r requirements-backup.txt
+#
+# Or install specific providers:
+#   pip install -r requirements-backup.txt --only-binary :all: google-auth google-auth-oauthlib google-api-python-client
+
+# Google Drive provider
+google-auth>=2.16.0
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.1.0
+google-api-python-client>=2.70.0
+
+# AWS S3 provider (coming soon)
+# boto3>=1.26.0
+# botocore>=1.29.0
+
+# Dropbox provider (coming soon)
+# dropbox>=11.36.0
+
+# Optional: YAML config support
+# pyyaml>=6.0

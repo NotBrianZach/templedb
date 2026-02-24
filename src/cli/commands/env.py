@@ -8,8 +8,12 @@ import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from db_utils import query_one, query_all, execute, get_connection, DB_PATH
+from repositories import BaseRepository, ProjectRepository
+from db_utils import DB_PATH
 from cli.core import Command
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class EnvCommands(Command):
@@ -17,6 +21,8 @@ class EnvCommands(Command):
 
     def __init__(self):
         super().__init__()
+        self.project_repo = ProjectRepository()
+        self.env_repo = BaseRepository()  # Generic repository for env-specific queries
         self.script_dir = Path(__file__).parent.parent.parent.parent.resolve()
         self.nix_env_dir = Path(DB_PATH).parent / "nix-envs"
         self.nix_env_dir.mkdir(exist_ok=True)
@@ -27,13 +33,13 @@ class EnvCommands(Command):
         env_name = args.env_name if hasattr(args, 'env_name') and args.env_name else 'dev'
 
         # Check if environment exists
-        env = query_one("""
+        env = self.env_repo.query_one("""
             SELECT * FROM nix_environments
             WHERE project_id = ? AND env_name = ?
         """, (project['id'], env_name))
 
         if not env:
-            print(f"Error: Environment '{env_name}' not found for project '{args.project}'", file=sys.stderr)
+            logger.error(f"Environment '{env_name}' not found for project '{args.project}'")
             print(f"\nTip: List available environments with: templedb env list {args.project}", file=sys.stderr)
             return 1
 
@@ -55,7 +61,7 @@ class EnvCommands(Command):
                 return 1
 
         # Start session tracking
-        session_id = execute("""
+        session_id = self.env_repo.execute("""
             INSERT INTO nix_env_sessions (environment_id, started_at)
             VALUES (?, datetime('now'))
         """, (env['id'],))
@@ -70,7 +76,7 @@ class EnvCommands(Command):
         exit_code = result.returncode
 
         # End session tracking
-        execute("""
+        self.env_repo.execute("""
             UPDATE nix_env_sessions
             SET ended_at = datetime('now'), exit_code = ?
             WHERE id = ?
@@ -84,7 +90,7 @@ class EnvCommands(Command):
         project_slug = args.project if hasattr(args, 'project') and args.project else None
 
         if project_slug:
-            rows = query_all("""
+            rows = self.env_repo.query_all("""
                 SELECT
                     env_name,
                     description,
@@ -95,7 +101,7 @@ class EnvCommands(Command):
                 ORDER BY env_name
             """, (project_slug,))
         else:
-            rows = query_all("""
+            rows = self.env_repo.query_all("""
                 SELECT
                     p.slug as project_slug,
                     ne.env_name,
@@ -197,7 +203,7 @@ class EnvCommands(Command):
             var_name_with_target = f"{target}:{args.var_name}"
 
             # Insert or update environment variable
-            self.execute("""
+            self.env_repo.execute("""
                 INSERT INTO environment_variables (scope_type, scope_id, var_name, var_value)
                 VALUES ('project', ?, ?, ?)
                 ON CONFLICT(scope_type, scope_id, var_name)
@@ -220,7 +226,7 @@ class EnvCommands(Command):
             target = args.target if hasattr(args, 'target') and args.target else 'default'
             var_name_with_target = f"{target}:{args.var_name}"
 
-            result = self.query_one("""
+            result = self.env_repo.query_one("""
                 SELECT var_value, created_at
                 FROM environment_variables
                 WHERE scope_type = 'project' AND scope_id = ? AND var_name = ?
@@ -243,7 +249,7 @@ class EnvCommands(Command):
         try:
             project = self.get_project_or_exit(args.project)
 
-            rows = self.query_all("""
+            rows = self.env_repo.query_all("""
                 SELECT var_name, var_value, created_at
                 FROM environment_variables
                 WHERE scope_type = 'project' AND scope_id = ?
@@ -299,7 +305,7 @@ class EnvCommands(Command):
             target = args.target if hasattr(args, 'target') and args.target else 'default'
             var_name_with_target = f"{target}:{args.var_name}"
 
-            self.execute("""
+            self.env_repo.execute("""
                 DELETE FROM environment_variables
                 WHERE scope_type = 'project' AND scope_id = ? AND var_name = ?
             """, (project['id'], var_name_with_target))

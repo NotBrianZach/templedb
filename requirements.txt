@@ -1,0 +1,11 @@
+# TempleDB Python Dependencies
+
+# Core dependencies (minimal)
+# None - TempleDB core only needs Python standard library + SQLite
+
+# TUI dependencies (optional - for `templedb tui`)
+textual>=0.47.0
+rich>=13.0.0
+
+# Secret management dependencies
+PyYAML>=6.0.0  # For YAML export format in secret management
