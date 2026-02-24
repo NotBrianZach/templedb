@@ -38,8 +38,20 @@ const PATTERNS = {
     view: /CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+([\w.]+)\s+AS/gi,
     materializedView: /CREATE\s+MATERIALIZED\s+VIEW\s+([\w.]+)/gi,
     function: /CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([\w.]+)\s*\(([\s\S]*?)\)\s+RETURNS\s+([\w\s\[\]]+)/gi,
+    procedure: /CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+([\w.]+)\s*\(/gi,
     trigger: /CREATE\s+TRIGGER\s+([\w.]+)/gi,
-    type: /CREATE\s+TYPE\s+([\w.]+)\s+AS\s+ENUM/gi,
+    type: /CREATE\s+TYPE\s+([\w.]+)\s+AS\s+(?:ENUM|RANGE|\()/gi,
+    domain: /CREATE\s+DOMAIN\s+([\w.]+)\s+AS/gi,
+    sequence: /CREATE\s+SEQUENCE(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)/gi,
+    index: /CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)/gi,
+    schema: /CREATE\s+SCHEMA(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)/gi,
+    extension: /CREATE\s+EXTENSION(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)/gi,
+    policy: /CREATE\s+POLICY\s+([\w.]+)\s+ON\s+([\w.]+)/gi,
+    aggregate: /CREATE\s+(?:OR\s+REPLACE\s+)?AGGREGATE\s+([\w.]+)\s*\(/gi,
+    operator: /CREATE\s+OPERATOR\s+([^\s(]+)\s*\(/gi,
+    cast: /CREATE\s+CAST\s*\(\s*([\w.]+)\s+AS\s+([\w.]+)\s*\)/gi,
+    foreignTable: /CREATE\s+FOREIGN\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)/gi,
+    server: /CREATE\s+SERVER\s+([\w.]+)/gi,
 };
 
 function parseSchemaAndName(fullName) {
@@ -215,6 +227,173 @@ function extractSqlObjects(sqlContent) {
         });
     }
 
+    // Extract procedures
+    const procedurePattern = new RegExp(PATTERNS.procedure.source, PATTERNS.procedure.flags);
+    while ((match = procedurePattern.exec(sqlContent)) !== null) {
+        const fullName = match[1];
+        const { schema, name } = parseSchemaAndName(fullName);
+
+        objects.push({
+            objectType: 'procedure',
+            schemaName: schema,
+            objectName: name,
+            fullName,
+        });
+    }
+
+    // Extract sequences
+    const sequencePattern = new RegExp(PATTERNS.sequence.source, PATTERNS.sequence.flags);
+    while ((match = sequencePattern.exec(sqlContent)) !== null) {
+        const fullName = match[1];
+        const { schema, name } = parseSchemaAndName(fullName);
+
+        objects.push({
+            objectType: 'sequence',
+            schemaName: schema,
+            objectName: name,
+            fullName,
+        });
+    }
+
+    // Extract indexes
+    const indexPattern = new RegExp(PATTERNS.index.source, PATTERNS.index.flags);
+    while ((match = indexPattern.exec(sqlContent)) !== null) {
+        const fullName = match[1];
+        const { schema, name } = parseSchemaAndName(fullName);
+
+        objects.push({
+            objectType: 'index',
+            schemaName: schema,
+            objectName: name,
+            fullName,
+        });
+    }
+
+    // Extract schemas
+    const schemaPattern = new RegExp(PATTERNS.schema.source, PATTERNS.schema.flags);
+    while ((match = schemaPattern.exec(sqlContent)) !== null) {
+        const fullName = match[1];
+        const { schema, name } = parseSchemaAndName(fullName);
+
+        objects.push({
+            objectType: 'schema',
+            schemaName: schema,
+            objectName: name,
+            fullName,
+        });
+    }
+
+    // Extract extensions
+    const extensionPattern = new RegExp(PATTERNS.extension.source, PATTERNS.extension.flags);
+    while ((match = extensionPattern.exec(sqlContent)) !== null) {
+        const extensionName = match[1];
+
+        objects.push({
+            objectType: 'extension',
+            schemaName: 'public',
+            objectName: extensionName,
+            fullName: extensionName,
+        });
+    }
+
+    // Extract policies
+    const policyPattern = new RegExp(PATTERNS.policy.source, PATTERNS.policy.flags);
+    while ((match = policyPattern.exec(sqlContent)) !== null) {
+        const policyName = match[1];
+        const tableName = match[2];
+        const { schema, name } = parseSchemaAndName(tableName);
+
+        objects.push({
+            objectType: 'policy',
+            schemaName: schema,
+            objectName: policyName,
+            fullName: `${policyName} ON ${tableName}`,
+            targetTable: tableName,
+        });
+    }
+
+    // Extract domains
+    const domainPattern = new RegExp(PATTERNS.domain.source, PATTERNS.domain.flags);
+    while ((match = domainPattern.exec(sqlContent)) !== null) {
+        const fullName = match[1];
+        const { schema, name } = parseSchemaAndName(fullName);
+
+        objects.push({
+            objectType: 'domain',
+            schemaName: schema,
+            objectName: name,
+            fullName,
+        });
+    }
+
+    // Extract aggregates
+    const aggregatePattern = new RegExp(PATTERNS.aggregate.source, PATTERNS.aggregate.flags);
+    while ((match = aggregatePattern.exec(sqlContent)) !== null) {
+        const fullName = match[1];
+        const { schema, name } = parseSchemaAndName(fullName);
+
+        objects.push({
+            objectType: 'aggregate',
+            schemaName: schema,
+            objectName: name,
+            fullName,
+        });
+    }
+
+    // Extract operators
+    const operatorPattern = new RegExp(PATTERNS.operator.source, PATTERNS.operator.flags);
+    while ((match = operatorPattern.exec(sqlContent)) !== null) {
+        const operatorName = match[1];
+
+        objects.push({
+            objectType: 'operator',
+            schemaName: 'public',
+            objectName: operatorName,
+            fullName: operatorName,
+        });
+    }
+
+    // Extract casts
+    const castPattern = new RegExp(PATTERNS.cast.source, PATTERNS.cast.flags);
+    while ((match = castPattern.exec(sqlContent)) !== null) {
+        const sourceType = match[1];
+        const targetType = match[2];
+
+        objects.push({
+            objectType: 'cast',
+            schemaName: 'public',
+            objectName: `${sourceType}_to_${targetType}`,
+            fullName: `${sourceType} AS ${targetType}`,
+        });
+    }
+
+    // Extract foreign tables
+    const foreignTablePattern = new RegExp(PATTERNS.foreignTable.source, PATTERNS.foreignTable.flags);
+    while ((match = foreignTablePattern.exec(sqlContent)) !== null) {
+        const fullName = match[1];
+        const { schema, name } = parseSchemaAndName(fullName);
+
+        objects.push({
+            objectType: 'foreign_table',
+            schemaName: schema,
+            objectName: name,
+            fullName,
+        });
+    }
+
+    // Extract servers
+    const serverPattern = new RegExp(PATTERNS.server.source, PATTERNS.server.flags);
+    while ((match = serverPattern.exec(sqlContent)) !== null) {
+        const serverName = match[1];
+
+        objects.push({
+            objectType: 'server',
+            schemaName: 'public',
+            objectName: serverName,
+            fullName: serverName,
+        });
+    }
+
     return objects;
 }
 
@@ -274,7 +453,7 @@ async function main() {
 
     // Connect to database
     if (!fs.existsSync(TEMPLEDB_PATH)) {
-        console.error(`ERROR: projdb database not found at ${TEMPLEDB_PATH}`);
+        console.error(`ERROR: templedb database not found at ${TEMPLEDB_PATH}`);
         process.exit(1);
     }
 

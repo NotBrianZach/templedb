@@ -30,15 +30,27 @@ class SqlAnalyzer:
 
     # Regex patterns for SQL objects
     PATTERNS = {
-        'table': re.compile(r'CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)\s*\(', re.IGNORECASE),
+        'table': re.compile(r'CREATE\s+(?:UNLOGGED\s+)?(?:TEMPORARY\s+|TEMP\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)\s*\(', re.IGNORECASE),
         'view': re.compile(r'CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+([\w.]+)\s+AS', re.IGNORECASE),
-        'materialized_view': re.compile(r'CREATE\s+MATERIALIZED\s+VIEW\s+([\w.]+)', re.IGNORECASE),
+        'materialized_view': re.compile(r'CREATE\s+MATERIALIZED\s+VIEW(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)', re.IGNORECASE),
         'function': re.compile(
             r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([\w.]+)\s*\(([\s\S]*?)\)\s+RETURNS\s+([\w\s\[\]]+)',
             re.IGNORECASE
         ),
-        'trigger': re.compile(r'CREATE\s+TRIGGER\s+([\w.]+)', re.IGNORECASE),
-        'type': re.compile(r'CREATE\s+TYPE\s+([\w.]+)\s+AS\s+ENUM', re.IGNORECASE),
+        'procedure': re.compile(r'CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+([\w.]+)\s*\(', re.IGNORECASE),
+        'trigger': re.compile(r'CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+([\w.]+)', re.IGNORECASE),
+        'index': re.compile(r'CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)', re.IGNORECASE),
+        'type': re.compile(r'CREATE\s+TYPE\s+([\w.]+)\s+AS\s+(?:ENUM|RANGE|\()', re.IGNORECASE),
+        'sequence': re.compile(r'CREATE\s+SEQUENCE(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)', re.IGNORECASE),
+        'schema': re.compile(r'CREATE\s+SCHEMA(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)', re.IGNORECASE),
+        'extension': re.compile(r'CREATE\s+EXTENSION(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)', re.IGNORECASE),
+        'policy': re.compile(r'CREATE\s+POLICY\s+([\w.]+)\s+ON\s+([\w.]+)', re.IGNORECASE),
+        'domain': re.compile(r'CREATE\s+DOMAIN\s+([\w.]+)\s+AS', re.IGNORECASE),
+        'aggregate': re.compile(r'CREATE\s+(?:OR\s+REPLACE\s+)?AGGREGATE\s+([\w.]+)\s*\(', re.IGNORECASE),
+        'operator': re.compile(r'CREATE\s+OPERATOR\s+([^\s(]+)\s*\(', re.IGNORECASE),
+        'cast': re.compile(r'CREATE\s+CAST\s*\(\s*([\w.]+)\s+AS\s+([\w.]+)\s*\)', re.IGNORECASE),
+        'foreign_table': re.compile(r'CREATE\s+FOREIGN\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+([\w.]+)', re.IGNORECASE),
+        'server': re.compile(r'CREATE\s+SERVER\s+([\w.]+)', re.IGNORECASE),
     }
 
     @staticmethod
@@ -200,6 +212,147 @@ class SqlAnalyzer:
                 object_type='type',
                 schema_name=schema,
                 object_name=name,
+                full_name=full_name
+            ))
+
+        # Extract procedures
+        for match in cls.PATTERNS['procedure'].finditer(sql_content):
+            full_name = match.group(1)
+            schema, name = cls.parse_schema_and_name(full_name)
+
+            objects.append(SqlObject(
+                object_type='procedure',
+                schema_name=schema,
+                object_name=name,
+                full_name=full_name
+            ))
+
+        # Extract indexes
+        for match in cls.PATTERNS['index'].finditer(sql_content):
+            full_name = match.group(1)
+            schema, name = cls.parse_schema_and_name(full_name)
+
+            objects.append(SqlObject(
+                object_type='index',
+                schema_name=schema,
+                object_name=name,
+                full_name=full_name
+            ))
+
+        # Extract sequences
+        for match in cls.PATTERNS['sequence'].finditer(sql_content):
+            full_name = match.group(1)
+            schema, name = cls.parse_schema_and_name(full_name)
+
+            objects.append(SqlObject(
+                object_type='sequence',
+                schema_name=schema,
+                object_name=name,
+                full_name=full_name
+            ))
+
+        # Extract schemas
+        for match in cls.PATTERNS['schema'].finditer(sql_content):
+            full_name = match.group(1)
+
+            objects.append(SqlObject(
+                object_type='schema',
+                schema_name=full_name,
+                object_name=full_name,
+                full_name=full_name
+            ))
+
+        # Extract extensions
+        for match in cls.PATTERNS['extension'].finditer(sql_content):
+            full_name = match.group(1)
+
+            objects.append(SqlObject(
+                object_type='extension',
+                schema_name='public',
+                object_name=full_name,
+                full_name=full_name
+            ))
+
+        # Extract policies
+        for match in cls.PATTERNS['policy'].finditer(sql_content):
+            policy_name = match.group(1)
+            table_name = match.group(2)
+
+            objects.append(SqlObject(
+                object_type='policy',
+                schema_name='public',
+                object_name=policy_name,
+                full_name=f"{policy_name} ON {table_name}"
+            ))
+
+        # Extract domains
+        for match in cls.PATTERNS['domain'].finditer(sql_content):
+            full_name = match.group(1)
+            schema, name = cls.parse_schema_and_name(full_name)
+
+            objects.append(SqlObject(
+                object_type='domain',
+                schema_name=schema,
+                object_name=name,
+                full_name=full_name
+            ))
+
+        # Extract aggregates
+        for match in cls.PATTERNS['aggregate'].finditer(sql_content):
+            full_name = match.group(1)
+            schema, name = cls.parse_schema_and_name(full_name)
+
+            objects.append(SqlObject(
+                object_type='aggregate',
+                schema_name=schema,
+                object_name=name,
+                full_name=full_name
+            ))
+
+        # Extract operators
+        for match in cls.PATTERNS['operator'].finditer(sql_content):
+            operator_name = match.group(1)
+
+            objects.append(SqlObject(
+                object_type='operator',
+                schema_name='public',
+                object_name=operator_name,
+                full_name=operator_name
+            ))
+
+        # Extract casts
+        for match in cls.PATTERNS['cast'].finditer(sql_content):
+            from_type = match.group(1)
+            to_type = match.group(2)
+            cast_name = f"{from_type} AS {to_type}"
+
+            objects.append(SqlObject(
+                object_type='cast',
+                schema_name='public',
+                object_name=cast_name,
+                full_name=cast_name
+            ))
+
+        # Extract foreign tables
+        for match in cls.PATTERNS['foreign_table'].finditer(sql_content):
+            full_name = match.group(1)
+            schema, name = cls.parse_schema_and_name(full_name)
+
+            objects.append(SqlObject(
+                object_type='foreign_table',
+                schema_name=schema,
+                object_name=name,
+                full_name=full_name
+            ))
+
+        # Extract servers
+        for match in cls.PATTERNS['server'].finditer(sql_content):
+            full_name = match.group(1)
+
+            objects.append(SqlObject(
+                object_type='server',
+                schema_name='public',
+                object_name=full_name,
                 full_name=full_name
             ))
 

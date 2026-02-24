@@ -150,13 +150,13 @@ eval "$(op inject -i secrets.env)"
 
 ## Threat Model Considerations
 
-### What Projdb Protects Against:
+### What TempleDB Protects Against:
 - ✅ Secrets committed to Git
 - ✅ Secrets in plain text on disk
 - ✅ Unauthorized access (with proper key management)
 - ✅ Accidental exposure via text editor
 
-### What Projdb Does NOT Protect Against:
+### What TempleDB Does NOT Protect Against:
 - ❌ Compromised SOPS_AGE_KEY_FILE
 - ❌ Process memory dumps
 - ❌ Malicious child processes reading environment
@@ -173,7 +173,7 @@ eval "$(op inject -i secrets.env)"
 6. **Limit secret lifetime**: Load secrets only when needed, not permanently in shell
 7. **Secure exported files**: If exporting to .env files, ensure 600 permissions
 
-## Code Improvements for Projdb
+## Code Improvements for TempleDB
 
 Consider these enhancements to the templedb codebase:
 

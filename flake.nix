@@ -1,5 +1,5 @@
 {
-  description = "projdb - SQLite-backed project config + sops secrets manager";
+  description = "templedb - SQLite-backed project config + sops secrets manager";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -17,8 +17,14 @@
         # rust = pkgs.rustup;
       in
       {
+        # TUI package
+        packages.templedb-tui = pkgs.callPackage ./default.nix {};
+
+        # Default package
+        packages.default = self.packages.${system}.templedb-tui;
+
         devShells.default = pkgs.mkShell {
-          name = "projdb-dev";
+          name = "templedb-dev";
 
           packages = with pkgs; [
             # rust
@@ -28,6 +34,11 @@
             # Native deps
             sqlite
             pkg-config
+
+            # Python for TUI
+            python311
+            python311Packages.textual
+            python311Packages.rich
 
             # Runtime tools your CLI shells out to
             sops
@@ -41,7 +52,8 @@
           # Environment variables useful for dev
           shellHook = ''
             export RUST_BACKTRACE=1
-            echo "projdb dev shell loaded"
+            echo "templedb dev shell loaded"
+            echo "TUI available: python3 src/tui.py"
           '';
         };
       });

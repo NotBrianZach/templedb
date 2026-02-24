@@ -1,12 +1,22 @@
-# TempleDB - Your Code's Sacred Repository
+<div align="center">
+
+![TempleDB Banner](assets/banner.svg)
+
+</div>
 
 > *"God's temple is everything."* - Terry A. Davis
 
+<div align="center">
+
 **In honor of Terry Davis and the spirit of TempleOS**
+
+</div>
 
 ---
 
 ## What is TempleDB?
+
+<img src="assets/logo.svg" align="right" width="150" alt="TempleDB Logo"/>
 
 TempleDB is a database-native project management system that treats your codebase as a temple - a sacred, organized space where every file, every line, every change is tracked, versioned, and queryable.
 
@@ -23,7 +33,7 @@ Like TempleOS showed us the power of simplicity and first principles, TempleDB e
 - **Re-normalization workflow**: Familiar tools, normalized storage
 - **Transparent**: Query anything with SQL
 
-**Key insight**: Normalization eliminates redundancy, preventing tracking errors that scale with codebase size. Traditional tools create O(n²) friction through file copies and branches. TempleDB maintains O(log n) complexity through normalized state.
+**Key insight**: With k checkouts of n files, traditional workflows require O(k²) pairwise comparisons to verify consistency—quadratic coordination cost. TempleDB maintains a single source of truth, reducing verification to O(k) comparisons. This asymptotic improvement (O(k) factor) becomes significant as teams and branches scale. Storage savings (10-50×) are a bonus.
 
 **Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) for the complete rationale.**
 
@@ -383,34 +393,34 @@ ORDER BY version_number DESC;
 ### Essential Reading
 - **[README.md](README.md)** - You are here! Overview and quick start
 - **[DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md)** - Why TempleDB exists (read this first!)
-- **[QUICKSTART.md](QUICKSTART.md)** - Get up and running in 5 minutes
+- **[GETTING_STARTED.md](GETTING_STARTED.md)** - Installation and beginner's guide
 
 ### User Guides
 - **[GUIDE.md](GUIDE.md)** - Complete usage guide (checkout/commit workflow, SQL queries, CLI commands)
+- **[QUICKSTART.md](QUICKSTART.md)** - Advanced workflows for existing users
 - **[FILES.md](FILES.md)** - How file tracking and versioning works
+- **[TUI.md](TUI.md)** - Terminal UI guide
 - **[EXAMPLES.md](EXAMPLES.md)** - SQL query examples and common patterns
+
+### Critical Reference
 - **[QUERY_BEST_PRACTICES.md](QUERY_BEST_PRACTICES.md)** - ⚠️ **Critical**: Query constraints and best practices (read this!)
+- **[DATABASE_CONSTRAINTS.md](DATABASE_CONSTRAINTS.md)** - ⚠️ **Critical**: All uniqueness constraints and foreign keys
 
 ### Advanced Topics
-- **[ADVANCED.md](ADVANCED.md)** - Performance tuning, Nix environments, deployment
-- **[CATHEDRAL.md](CATHEDRAL.md)** - Multi-user setup for teams
-- **[BUILD.md](BUILD.md)** - Build from source
-- **[SECURITY.md](SECURITY.md)** - Security considerations
-
-### Schema & Migrations
-- **[MIGRATIONS.md](MIGRATIONS.md)** - Complete migration history and schema evolution
-- **[SCHEMA_CHANGES.md](SCHEMA_CHANGES.md)** - Schema documentation for version consolidation
-- **[VERSION_CONSOLIDATION_PLAN.md](VERSION_CONSOLIDATION_PLAN.md)** - Version system unification details
-- **[CONSOLIDATION_SUMMARY.md](CONSOLIDATION_SUMMARY.md)** - User-friendly consolidation guide
+- **[Performance & Optimization](docs/advanced/ADVANCED.md)** - Tuning, Nix environments, deployment
+- **[Multi-User Setup](docs/advanced/CATHEDRAL.md)** - Teams and collaboration
+- **[Building from Source](docs/advanced/BUILD.md)** - Development setup
+- **[Security](docs/advanced/SECURITY.md)** - Security considerations
 
 ### Project Info
 - **[ROADMAP.md](ROADMAP.md)** - Future features and development plans
 - **[CHANGELOG.md](CHANGELOG.md)** - Version history
-- **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Release notes for version 0.6.0
+- **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Latest release notes
+- **[MIGRATIONS.md](MIGRATIONS.md)** - Schema evolution history
 - **[TRIBUTE.md](TRIBUTE.md)** - Dedication to Terry Davis
 
-### Archive
-- **[archive/](archive/)** - Historical implementation documents
+### Implementation Details
+- **[Implementation Docs](docs/implementation/)** - Historical analyses, refactors, and completed work
 
 ---
 
@@ -434,6 +444,9 @@ templedb secret init <proj> --age-recipient <key>  # Initialize secrets
 templedb secret edit <proj> [--profile <prof>]     # Edit secrets
 templedb secret export <proj> --format <fmt>       # Export (shell/json/yaml/dotenv)
 templedb secret print-raw <proj>                   # Print encrypted blob
+
+# Interactive TUI
+templedb tui                   # Launch terminal UI (9 screens: projects, files, VCS, secrets)
 
 # Environments
 templedb env enter <proj> [<env>]  # Enter Nix environment
@@ -475,16 +488,17 @@ TempleDB inverts the traditional model:
 **Traditional:**
 - Filesystem is source of truth
 - Files copied across branches, projects, builds
-- Git creates full copies per branch
+- k checkouts require **O(k²) pairwise comparisons** to verify consistency
+- Merge conflicts require **O(n×m²)** worst-case comparison
 - State fragmented across filesystem, .git, node_modules
-- **O(n²) friction**: Redundancy scales with codebase size
+- **Coordination cost scales quadratically** with number of checkouts
 
 **TempleDB:**
 - **Database is single source of truth**
 - Files normalized (stored once, referenced many times)
-- Versions reference content by hash
-- Branches reference versions
-- **O(log n) friction**: Normalization scales logarithmically
+- Verification is **O(k) comparisons** against single source
+- Conflicts detected by version numbers, not content scanning
+- **Coordination cost scales linearly** (O(k) factor improvement)
 
 This enables:
 - **Storage efficiency**: Each file stored once via content addressing
@@ -501,6 +515,12 @@ This enables:
 ---
 
 ## Tribute
+
+<div align="center">
+
+<img src="assets/templeos-tribute.svg" width="500" alt="TempleOS Tribute"/>
+
+</div>
 
 This project is dedicated to **Terry A. Davis** (1969-2018), creator of TempleOS. Terry showed us that simplicity, transparency, and building from first principles can create something beautiful and profound.
 

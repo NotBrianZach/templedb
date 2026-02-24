@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- TempleDB Logo: A temple with database elements -->
+
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="#1a1a2e" stroke="#16213e" stroke-width="3"/>
+
+  <!-- Temple pediment (top triangle) -->
+  <path d="M 40 70 L 100 40 L 160 70 Z" fill="#0f3460" stroke="#e94560" stroke-width="2"/>
+
+  <!-- Temple columns (representing database tables/structure) -->
+  <rect x="50" y="70" width="15" height="60" fill="#e94560" rx="2"/>
+  <rect x="75" y="70" width="15" height="60" fill="#e94560" rx="2"/>
+  <rect x="110" y="70" width="15" height="60" fill="#e94560" rx="2"/>
+  <rect x="135" y="70" width="15" height="60" fill="#e94560" rx="2"/>
+
+  <!-- Column capitals (decorative tops) -->
+  <rect x="47" y="68" width="21" height="6" fill="#ff6b9d" rx="1"/>
+  <rect x="72" y="68" width="21" height="6" fill="#ff6b9d" rx="1"/>
+  <rect x="107" y="68" width="21" height="6" fill="#ff6b9d" rx="1"/>
+  <rect x="132" y="68" width="21" height="6" fill="#ff6b9d" rx="1"/>
+
+  <!-- Base platform -->
+  <rect x="35" y="130" width="130" height="8" fill="#0f3460" rx="2"/>
+
+  <!-- Database cylinder layers (at the base) -->
+  <ellipse cx="100" cy="145" rx="40" ry="8" fill="#16213e" stroke="#e94560" stroke-width="2"/>
+  <ellipse cx="100" cy="152" rx="40" ry="8" fill="#16213e" stroke="#e94560" stroke-width="2"/>
+  <ellipse cx="100" cy="159" rx="40" ry="8" fill="#1a1a2e" stroke="#e94560" stroke-width="2"/>
+
+  <!-- Data flow lines (connecting temple to database) -->
+  <line x1="57" y1="130" x2="70" y2="145" stroke="#00d4ff" stroke-width="2" opacity="0.6"/>
+  <line x1="82" y1="130" x2="85" y2="145" stroke="#00d4ff" stroke-width="2" opacity="0.6"/>
+  <line x1="118" y1="130" x2="115" y2="145" stroke="#00d4ff" stroke-width="2" opacity="0.6"/>
+  <line x1="143" y1="130" x2="130" y2="145" stroke="#00d4ff" stroke-width="2" opacity="0.6"/>
+
+  <!-- Small data nodes -->
+  <circle cx="70" cy="145" r="2" fill="#00d4ff"/>
+  <circle cx="85" cy="145" r="2" fill="#00d4ff"/>
+  <circle cx="115" cy="145" r="2" fill="#00d4ff"/>
+  <circle cx="130" cy="145" r="2" fill="#00d4ff"/>
+
+  <!-- Center emblem: stylized 'T' and 'DB' -->
+  <text x="100" y="58" font-family="monospace" font-size="14" font-weight="bold" text-anchor="middle" fill="#00d4ff">T</text>
+</svg>

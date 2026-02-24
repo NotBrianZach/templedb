@@ -43,12 +43,12 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 # Errors / helpers
 # -------------------------
 
-class ProjdbError(RuntimeError):
+class TempledbError(RuntimeError):
     pass
 
 
 def bail(msg: str) -> None:
-    raise ProjdbError(msg)
+    raise TempledbError(msg)
 
 
 def default_db_path() -> Path:
@@ -933,7 +933,7 @@ def cmd_direnv(conn: sqlite3.Connection, slug: Optional[str], profile: str, load
         try:
             resolved = resolve_template(conn, slug, profile, compound_row["value_template"])
             print(f"export {compound_row['key']}={shell_escape(resolved)}")
-        except ProjdbError as e:
+        except TempledbError as e:
             # If a compound value fails to resolve, print a warning but continue
             print(f"# Warning: Failed to resolve compound value '{compound_row['key']}': {e}", file=sys.stderr)
 
@@ -1485,7 +1485,7 @@ def main() -> int:
 
         return 0
 
-    except ProjdbError as e:
+    except TempledbError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     except sqlite3.IntegrityError as e:

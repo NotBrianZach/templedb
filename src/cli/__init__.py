@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cli.core import cli
-from cli.commands import project, vcs, env, search, system, cathedral, deploy, migration, target, secret
+from cli.commands import project, vcs, env, search, system, cathedral, deploy, migration, target, secret, tui_launcher
 
 
 def main():
@@ -28,6 +28,7 @@ def main():
     migration.register(cli)
     target.register(cli)
     secret.register(cli)
+    tui_launcher.register(cli)
 
     # TODO: Register llm commands as needed
     # from cli.commands import llm

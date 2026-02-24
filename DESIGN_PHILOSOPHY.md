@@ -40,7 +40,7 @@ Traditional code management tools (git, filesystems) treat code as text files:
 - **Files are duplicated** across branches, forks, local copies
 - **State is replicated** in .git metadata, node_modules, build artifacts
 - **Truth is fragmented** across filesystem, git, package managers
-- **Tracking errors scale** with codebase size
+- **Tracking overhead** grows with number of copies and coordination points
 
 **TempleDB inverts this**: The database is the source of truth.
 
@@ -93,7 +93,7 @@ Which is truth?
 4. **Deployment Risk**: Did you deploy the right version?
 5. **Onboarding Friction**: New developers lost in duplicates
 
-**This friction scales super-linearly with codebase size.**
+**This friction grows with the number of duplicate copies and coordination points.**
 
 ---
 
@@ -426,11 +426,11 @@ Ergonomics:
 - Re-normalize on commit
 ```
 
-**Friction stays constant:**
-- Database normalization: O(1) duplication
-- FHS environments: O(1) per workspace
-- ACID transactions: O(log n) conflicts
-- **Total: O(log n) complexity**
+**Benefits:**
+- Database normalization: Single copy per file (no duplication)
+- FHS environments: Fast checkout to temporary workspace
+- ACID transactions: Safe concurrent operations
+- **Storage: Constant factor improvement** (k× fewer copies)
 
 ---
 
@@ -460,23 +460,42 @@ Ergonomics:
 - Multi-agent safe (ACID transactions)
 - Exportable (cathedral format)
 
-### The Scaling Law
+### Honest Performance Comparison
 
-```
-Traditional Duplication Friction:
-F(n) = k × n²
-Where n = codebase size, k = duplication factor
+See [SYNCHRONIZATION_COST_ANALYSIS.md](SYNCHRONIZATION_COST_ANALYSIS.md) for detailed analysis.
 
-TempleDB Normalization Friction:
-F(n) = k × log(n)
-Where n = codebase size, k = database overhead
+**Storage:**
+- Traditional: k checkouts × n files = **O(k × n) storage**
+- TempleDB: 1 copy per unique file = **O(n) storage**
+- **Improvement: 10-50× storage savings** (O(k) factor)
 
-At 1M LOC:
-Traditional: ~1,000,000× base friction
-TempleDB:    ~20× base friction
+**Coordination Costs (The Real Win):**
+- **Verify consistency:**
+  - Traditional: O(k²) pairwise comparisons → O(k² × n) total
+  - TempleDB: O(k) comparisons vs source → O(k × n) total
+  - **Improvement: O(k) factor** (e.g., 10 checkouts: 45 comparisons → 10)
 
-50,000× improvement
-```
+- **Detect merge conflicts:**
+  - Traditional: O(n × m²) worst-case for three-way merge
+  - TempleDB: O(n) with version-based detection
+  - **Improvement: O(m²) factor per file**
+
+- **Dependency queries:**
+  - Traditional: O(n × m) sequential scan
+  - TempleDB: O(log n + k) indexed lookup
+  - **Improvement: O(n) factor when k << n**
+
+**When This Matters:**
+- As teams grow → more checkouts (k increases)
+- As codebase grows → more files (n increases)
+- If k scales with n (e.g., one branch per feature) → **O(n²) vs O(n)**
+
+**Real Benefits:**
+1. **Coordination efficiency:** O(k) factor in verification (quadratic → linear)
+2. **Storage efficiency:** 10-50× fewer file copies
+3. **ACID transactions:** Safe concurrent operations
+4. **SQL queries:** O(log n) indexed lookups vs O(n) scans
+5. **Single source of truth:** Simplified mental model
 
 ---
 
@@ -490,9 +509,9 @@ Every piece of state stored once in SQLite. References, not copies.
 
 Multiple versions of truth → conflicts, inconsistency, mental overhead.
 
-### 3. Friction Scales with Codebase Size
+### 3. Storage Overhead Scales with Checkouts
 
-O(n²) with duplication vs O(log n) with normalization.
+Multiple checkouts multiply storage: O(k × n) where k = number of active checkouts. TempleDB stores each file once: O(n). This is a constant-factor improvement (k×), not asymptotic.
 
 ### 4. ACID Enables Multi-Agent Orchestration
 
@@ -552,9 +571,9 @@ This approach:
 - Preserves developer ergonomics
 - Provides database superpowers
 
-The friction of duplication scales with codebase size. The power of normalization scales with query complexity.
+Duplication creates k× storage overhead and coordination complexity. Normalization eliminates redundancy and enables powerful queries.
 
-**Choose normalization. Scale indefinitely.**
+**Choose normalization. Eliminate waste.**
 
 ---
 

@@ -1,7 +1,7 @@
 -- ============================================================================
--- PROJDB FILE TRACKING SCHEMA EXTENSION
+-- TEMPLEDB FILE TRACKING SCHEMA EXTENSION
 -- ============================================================================
--- This schema extends the existing projdb SQLite database to track all
+-- This schema extends the existing templedb SQLite database to track all
 -- project files, their dependencies, deployment information, and metadata.
 -- ============================================================================
 

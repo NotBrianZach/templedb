@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
  * ============================================================================
- * Populate projdb with woofs_projects file information
+ * Populate templedb with woofs_projects file information
  * ============================================================================
  *
- * This script scans the woofs_projects directory and populates the projdb
+ * This script scans the woofs_projects directory and populates the templedb
  * database with information about all project files, their types, and metadata.
  *
- * Usage: node populate_projdb_files.js [--dry-run]
+ * Usage: node populate_templedb_files.js [--dry-run]
  */
 
 const fs = require('fs');
@@ -22,7 +22,7 @@ const TEMPLEDB_PATH = process.env.TEMPLEDB_PATH || path.join(process.env.HOME, '
 const DRY_RUN = process.argv.includes('--dry-run');
 
 console.log('============================================================================');
-console.log('Populating projdb with file information');
+console.log('Populating templedb with file information');
 console.log('============================================================================');
 console.log(`Project: ${PROJECT_SLUG}`);
 console.log(`Project Root: ${PROJECT_ROOT}`);
@@ -178,7 +178,7 @@ function analyzeFile(filePath) {
 async function main() {
     // Connect to database
     if (!fs.existsSync(TEMPLEDB_PATH)) {
-        console.error(`ERROR: projdb database not found at ${TEMPLEDB_PATH}`);
+        console.error(`ERROR: templedb database not found at ${TEMPLEDB_PATH}`);
         process.exit(1);
     }
 

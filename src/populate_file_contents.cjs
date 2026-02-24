@@ -129,7 +129,7 @@ function readFileContent(filePath) {
 
 async function main() {
     if (!fs.existsSync(TEMPLEDB_PATH)) {
-        console.error(`ERROR: projdb database not found at ${TEMPLEDB_PATH}`);
+        console.error(`ERROR: templedb database not found at ${TEMPLEDB_PATH}`);
         process.exit(1);
     }
 

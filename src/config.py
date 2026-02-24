@@ -37,6 +37,16 @@ VCS_ENABLED = True
 # TUI
 TUI_THEME = "dark"  # or "light"
 
-# Logging
+# Logging Configuration
 LOG_LEVEL = os.environ.get('TEMPLEDB_LOG_LEVEL', 'INFO')
 LOG_FILE = os.path.join(DB_DIR, "templedb.log")
+LOG_TO_FILE = os.environ.get('TEMPLEDB_LOG_TO_FILE', 'false').lower() in ('true', '1', 'yes')
+
+# Initialize logging system on import
+# This ensures all modules get the configured logger
+from . import logger as _logger
+_logger.setup_logging(
+    level=LOG_LEVEL,
+    log_file=Path(LOG_FILE) if LOG_TO_FILE else None,
+    verbose=False
+)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Generic script to populate any project into projdb
+ * Generic script to populate any project into templedb
  * Usage: node populate_project.cjs <project_root> <project_slug>
  */
 
@@ -22,7 +22,7 @@ const TEMPLEDB_PATH = process.env.TEMPLEDB_PATH || path.join(process.env.HOME, '
 const DRY_RUN = process.argv.includes('--dry-run');
 
 console.log('============================================================================');
-console.log('Populating projdb with file information');
+console.log('Populating templedb with file information');
 console.log('============================================================================');
 console.log(`Project: ${PROJECT_SLUG}`);
 console.log(`Project Root: ${PROJECT_ROOT}`);

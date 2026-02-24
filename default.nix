@@ -35,7 +35,7 @@ pkgs.stdenv.mkDerivation {
 
     # Create wrapper script that uses the Python environment
     makeWrapper ${pythonEnv}/bin/python3 $out/bin/templedb-tui \
-      --add-flags "$out/lib/templedb/src/templedb_tui.py" \
+      --add-flags "$out/lib/templedb/src/tui.py" \
       --set PYTHONPATH "$out/lib/templedb/src"
   '';
 

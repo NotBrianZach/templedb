@@ -84,53 +84,139 @@ class SystemCommands(Command):
         """Show database status"""
         # Database info
         db_path = Path(DB_PATH)
-        if db_path.exists():
-            size_mb = db_path.stat().st_size / (1024 * 1024)
-            print(f"\n📊 TempleDB Status\n")
-            print(f"Database: {DB_PATH}")
-            print(f"Size: {size_mb:.2f} MB")
-        else:
+        if not db_path.exists():
             print(f"Database not found: {DB_PATH}")
             return 1
 
-        # Project count
-        project_count = query_one("SELECT COUNT(*) as count FROM projects")
-        print(f"\nProjects: {project_count['count']}")
+        size_mb = db_path.stat().st_size / (1024 * 1024)
 
-        # File statistics
-        file_stats = query_one("""
-            SELECT
-                COUNT(*) as file_count,
-                SUM(lines_of_code) as total_lines,
-                COUNT(DISTINCT file_type_id) as file_types
-            FROM project_files
-        """)
-        if file_stats:
-            print(f"Files: {file_stats['file_count']}")
-            print(f"Lines of code: {file_stats['total_lines']:,}")
-            print(f"File types: {file_stats['file_types']}")
-
-        # VCS statistics
-        vcs_stats = query_one("""
-            SELECT
-                COUNT(DISTINCT id) as branch_count
-            FROM vcs_branches
-        """)
-        commit_stats = query_one("""
-            SELECT COUNT(*) as commit_count FROM vcs_commits
-        """)
-        if vcs_stats and commit_stats:
-            print(f"\nVCS Branches: {vcs_stats['branch_count']}")
-            print(f"VCS Commits: {commit_stats['commit_count']}")
-
-        # Performance settings
-        pragmas = query_one("PRAGMA journal_mode")
-        cache_size = query_one("PRAGMA cache_size")
-        print(f"\nPerformance:")
-        print(f"Journal mode: {pragmas['journal_mode'] if pragmas else 'unknown'}")
-        print(f"Cache size: {abs(cache_size['cache_size']) // 1024 if cache_size and cache_size['cache_size'] < 0 else 'default'} MB")
-
+        # Header
         print()
+        print("╔════════════════════════════════════════════════════════════════╗")
+        print("║                     TempleDB Status                            ║")
+        print("║            In Honor of Terry Davis (1969-2018)                 ║")
+        print("╚════════════════════════════════════════════════════════════════╝")
+        print()
+
+        # Overall Statistics
+        print("═════ Overall Statistics ═════")
+        print()
+
+        stats = [
+            ("Projects", query_one("SELECT COUNT(*) as count FROM projects")['count']),
+            ("Files", query_one("SELECT COUNT(*) as count FROM project_files")['count']),
+            ("Lines of Code", query_one("SELECT SUM(lines_of_code) as total FROM project_files")['total'] or 0),
+            ("File Contents Stored", query_one("SELECT COUNT(*) as count FROM file_contents")['count']),
+            ("VCS Commits", query_one("SELECT COUNT(*) as count FROM vcs_commits")['count']),
+            ("VCS Branches", query_one("SELECT COUNT(*) as count FROM vcs_branches")['count']),
+            ("Database Size", f"{size_mb:.2f} MB")
+        ]
+
+        max_label = max(len(label) for label, _ in stats)
+        for label, value in stats:
+            print(f"{label:<{max_label}} {value}")
+
+        # Projects
+        print()
+        print("═════ Projects ═════")
+        print()
+
+        projects = query_all("""
+            SELECT
+                p.slug,
+                p.repo_url,
+                (SELECT COUNT(*) FROM project_files WHERE project_id = p.id) as files,
+                (SELECT SUM(lines_of_code) FROM project_files WHERE project_id = p.id) as lines,
+                (SELECT branch_name FROM vcs_branches WHERE project_id = p.id AND is_default = 1) as branch
+            FROM projects p
+            ORDER BY p.slug
+        """)
+
+        if projects:
+            print(self.format_table(projects, ['slug', 'repo_url', 'files', 'lines', 'branch']))
+        else:
+            print("No projects found")
+            print()
+
+        # File Types Distribution
+        print("═════ File Types Distribution ═════")
+        print()
+
+        file_types = query_all("""
+            SELECT
+                type_name,
+                COUNT(*) as count,
+                SUM(lines_of_code) as lines,
+                PRINTF('%.1f%%', 100.0 * COUNT(*) / (SELECT COUNT(*) FROM project_files)) as pct
+            FROM files_with_types_view
+            GROUP BY type_name
+            HAVING COUNT(*) > 0
+            ORDER BY COUNT(*) DESC
+            LIMIT 15
+        """)
+
+        if file_types:
+            print(self.format_table(file_types, ['type_name', 'count', 'lines', 'pct']))
+        else:
+            print("No file types found")
+            print()
+
+        # Top Largest Files
+        print("═════ Top 10 Largest Files ═════")
+        print()
+
+        largest_files = query_all("""
+            SELECT
+                SUBSTR(file_path, 1, 45) as file,
+                project_slug,
+                lines_of_code as lines
+            FROM files_with_types_view
+            ORDER BY lines_of_code DESC
+            LIMIT 10
+        """)
+
+        if largest_files:
+            print(self.format_table(largest_files, ['file', 'project_slug', 'lines']))
+        else:
+            print("No files found")
+            print()
+
+        # Recent Activity
+        print("═════ Recent Activity ═════")
+        print()
+
+        try:
+            recent_commits = query_all("""
+                SELECT
+                    SUBSTR(c.commit_message, 1, 40) as message,
+                    p.slug as project_slug,
+                    SUBSTR(c.commit_timestamp, 1, 16) as time
+                FROM vcs_commits c
+                JOIN projects p ON c.project_id = p.id
+                ORDER BY c.commit_timestamp DESC
+                LIMIT 10
+            """)
+
+            if recent_commits:
+                print(self.format_table(recent_commits, ['message', 'project_slug', 'time']))
+            else:
+                print("No commits found")
+                print()
+        except Exception as e:
+            print(f"No recent activity available")
+            print()
+
+        # Footer
+        print("═════════════════════════════════════════════════════════════════")
+        print(f"Database: {DB_PATH}")
+        print()
+        print("Quick commands:")
+        print("  ./templedb project list              # List all projects")
+        print("  ./templedb vcs status <project>      # View VCS status")
+        print("  ./templedb status                    # Show this status")
+        print("═════════════════════════════════════════════════════════════════")
+        print()
+
         return 0
 
 

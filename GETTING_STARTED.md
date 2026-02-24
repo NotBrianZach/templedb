@@ -107,7 +107,39 @@ templedb secret edit my-app
 eval "$(templedb secret export my-app --format shell)"
 ```
 
-### 5. Explore Your Database
+### 5. Try the Interactive TUI (Optional)
+
+```bash
+# Install TUI dependency
+pip install textual
+
+# Launch interactive interface
+templedb tui
+```
+
+The TUI provides a keyboard-driven interface for:
+- Browsing projects and files
+- Viewing file contents
+- Managing VCS (commits, branches)
+- Managing encrypted secrets
+- Viewing database status
+- Searching across projects
+- Discovering commands interactively
+
+**Keyboard shortcuts:**
+- `p` - Projects
+- `v` - VCS (version control)
+- `x` - Secrets
+- `s` - Status
+- `?` - Help
+- `q` - Quit
+
+**In file lists:**
+- `v` - View file content
+- `/` - Search files
+- `Enter` - File details
+
+### 6. Explore Your Database
 
 ```bash
 # Open the database directly

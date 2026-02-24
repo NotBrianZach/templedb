@@ -1,4 +1,4 @@
--- Database views for projdb
+-- Database views for templedb
 -- These views join foreign key relationships to show names instead of just IDs
 
 -- View for nix_configs with project details

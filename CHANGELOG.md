@@ -6,7 +6,26 @@ All notable changes to TempleDB are documented in this file.
 
 ## [Unreleased]
 
+### Removed
+- **Redundant SQL Extraction Infrastructure** - Cleaned up duplicate systems
+  - Archived `src/populate_sql_objects.cjs` (standalone script superseded by integrated Python analyzer)
+  - Dropped `sql_objects` table (empty, superseded by `file_metadata` table)
+  - Dropped `sql_objects_view`, 3 indexes, 1 trigger (unused infrastructure)
+  - Migration 015: Removes unused sql_objects infrastructure
+  - SQL objects now extracted by `src/importer/sql_analyzer.py` during project import
+  - Data stored in `file_metadata` table with `metadata_type = 'sql_object'`
+  - Documentation: `REDUNDANCY_ANALYSIS.md`
+  - Saves 555 lines of unused code, eliminates duplicate pattern maintenance
+
 ### Added
+- **SQL Object Type Coverage** - Expanded PostgreSQL object detection
+  - Added 12 new SQL object types: procedure, sequence, schema, extension, policy, domain, aggregate, operator, cast, foreign_table, server
+  - Updated Python SQL analyzer with 18 total patterns (up from 6)
+  - Fixed operator pattern to capture symbolic operators (|+|, <->, @@)
+  - Coverage increased from ~40% to ~95% of common PostgreSQL objects
+  - Real-world test: 456 → 710 SQL objects detected in woofs_projects (+56%)
+  - Documentation: `DATABASE_TYPES_GAP_ANALYSIS.md`, `SQL_EXTRACTION_FIXES.md`
+
 - **Version System Consolidation** - Unified duplicate version control systems
   - Consolidated `file_versions` and VCS system into single version history
   - All content now deduplicated via `content_blobs` (content-addressable storage)
@@ -16,6 +35,22 @@ All notable changes to TempleDB are documented in this file.
   - Updates all views for backward compatibility
   - 50% storage savings through deduplication
   - Documentation: `VERSION_CONSOLIDATION_PLAN.md`, `SCHEMA_CHANGES.md`, `CONSOLIDATION_SUMMARY.md`
+
+- **Interactive Terminal UI (TUI)** - Keyboard-driven interface
+  - `templedb tui` - Launch interactive terminal interface
+  - **Projects browser** - View all projects with file counts and statistics
+  - **File browser** - Browse project files with real-time search
+  - **File content viewer** - View text files directly in TUI (500 line limit)
+  - **VCS screens** - Browse commits, branches, and project history
+  - **Secrets management** - List, view, and edit encrypted secrets
+  - **Database status** - Quick overview of database stats
+  - **Project import dialog** - Interactive project import
+  - Vim-inspired navigation (hjkl + arrow keys)
+  - Real-time incremental search
+  - Keyboard-only operation (Space-based commands)
+  - Built with Textual framework
+  - 9 fully functional screens
+  - Documentation: `TUI.md`
 
 - **Secret Management** - Age-encrypted secret storage
   - `templedb secret init/edit/export/print-raw` - Secret management commands
@@ -203,8 +238,8 @@ All notable changes to TempleDB are documented in this file.
 
 **Directory Changes**:
 - `/home/user/projectdb/` → `/home/user/templeDB/`
-- `~/.local/share/projdb/` → `~/.local/share/templedb/`
-- `projdb.sqlite` → `templedb.sqlite`
+- `~/.local/share/templedb/` → `~/.local/share/templedb/`
+- `templedb.sqlite` → `templedb.sqlite`
 
 **Files Updated**: 27 files (shell scripts, Python, JavaScript, Markdown)
 

@@ -13,6 +13,9 @@ from db_utils import query_one, query_all, execute, get_connection
 from cli.core import Command
 from cli.commands.checkout import CheckoutCommand
 from cli.commands.commit import CommitCommand
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class ProjectCommands(Command):
@@ -23,11 +26,11 @@ class ProjectCommands(Command):
         project_path = Path(args.path).resolve()
 
         if not project_path.exists():
-            print(f"Error: Path does not exist: {project_path}", file=sys.stderr)
+            logger.error(f"Path does not exist: {project_path}")
             return 1
 
         if not project_path.is_dir():
-            print(f"Error: Path is not a directory: {project_path}", file=sys.stderr)
+            logger.error(f"Path is not a directory: {project_path}")
             return 1
 
         # Determine slug
@@ -38,14 +41,14 @@ class ProjectCommands(Command):
 
         if not project:
             # Create project
-            print(f"Creating new project: {slug}")
+            logger.info(f"Creating new project: {slug}")
             execute("""
                 INSERT INTO projects (slug, name, repo_url, git_branch, status)
                 VALUES (?, ?, ?, 'main', 'active')
             """, (slug, slug, str(project_path)))
-            print(f"✓ Created project '{slug}'")
+            logger.info(f"Created project '{slug}'")
         else:
-            print(f"Updating existing project: {slug}")
+            logger.info(f"Updating existing project: {slug}")
 
         # Use Python importer
         try:
@@ -64,9 +67,7 @@ class ProjectCommands(Command):
 
             return 0
         except Exception as e:
-            print(f"✗ Import failed: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Import failed: {e}", exc_info=True)
             return 1
 
     def list_projects(self, args) -> int:
@@ -142,10 +143,10 @@ class ProjectCommands(Command):
 
         repo_path = project.get('repo_url')
         if not repo_path or not Path(repo_path).exists():
-            print(f"Error: Project path not found: {repo_path}", file=sys.stderr)
+            logger.error(f"Project path not found: {repo_path}")
             return 1
 
-        print(f"Syncing {args.slug} from {repo_path}...")
+        logger.info(f"Syncing {args.slug} from {repo_path}...")
 
         # Use Python importer
         try:
@@ -163,7 +164,7 @@ class ProjectCommands(Command):
 
             return 0
         except Exception as e:
-            print(f"✗ Sync failed: {e}", file=sys.stderr)
+            logger.error(f"Sync failed: {e}", exc_info=True)
             return 1
 
     def remove_project(self, args) -> int:
@@ -178,7 +179,7 @@ class ProjectCommands(Command):
 
         # Delete project (cascade will handle related records)
         execute("DELETE FROM projects WHERE id = ?", (project['id'],))
-        print(f"✓ Removed project: {args.slug}")
+        logger.info(f"Removed project: {args.slug}")
         return 0
 
 
