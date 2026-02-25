@@ -25,7 +25,7 @@ Like TempleOS showed us the power of simplicity and first principles, TempleDB e
 - **Re-normalization workflow**: Familiar tools, normalized storage
 - **Transparent**: Query anything with SQL
 
-**Key insight**: With k checkouts of n files, traditional workflows require O(k²) pairwise comparisons to verify consistency—quadratic coordination cost. TempleDB maintains a single source of truth, reducing verification to O(k) comparisons. This asymptotic improvement (O(k) factor) becomes significant as teams and branches scale. Storage savings (10-50×) are a bonus.
+**Key insight**: With k checkouts of n files, traditional agent swarm workflows require O(k²) pairwise comparisons to verify consistency—quadratic coordination cost. TempleDB maintains a single source of truth, reducing verification to O(k) comparisons. This asymptotic improvement (O(k) factor) becomes significant as teams and branches scale. Storage savings (10-50×) are a bonus.
 
 **Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) for the complete rationale.**
 
