@@ -455,6 +455,7 @@ CREATE INDEX IF NOT EXISTS idx_project_files_project_id ON project_files(project
 CREATE INDEX IF NOT EXISTS idx_project_files_file_type_id ON project_files(file_type_id);
 CREATE INDEX IF NOT EXISTS idx_project_files_component_name ON project_files(component_name);
 CREATE INDEX IF NOT EXISTS idx_project_files_status ON project_files(status);
+CREATE INDEX IF NOT EXISTS idx_project_files_project_path ON project_files(project_id, file_path);
 
 CREATE INDEX IF NOT EXISTS idx_file_dependencies_parent ON file_dependencies(parent_file_id);
 CREATE INDEX IF NOT EXISTS idx_file_dependencies_dependency ON file_dependencies(dependency_file_id);

@@ -35,10 +35,23 @@ class SecretCommands(Command):
         self.secret_repo = BaseRepository()  # Generic repository for secret-specific queries
 
     def _age_encrypt(self, plaintext: bytes, age_recipient: str) -> bytes:
-        """Encrypt data using age with the given recipient public key."""
+        """Encrypt data using age with the given recipient public key(s).
+
+        Args:
+            age_recipient: Single recipient or comma-separated list of recipients
+        """
+        # Support multiple recipients (comma-separated)
+        recipients = [r.strip() for r in age_recipient.split(',')]
+
+        # Build age command with multiple -r flags
+        age_cmd = ["age"]
+        for recipient in recipients:
+            age_cmd.extend(["-r", recipient])
+        age_cmd.append("-a")  # ASCII armor
+
         try:
             proc = subprocess.run(
-                ["age", "-r", age_recipient, "-a"],  # -a for ASCII armor
+                age_cmd,
                 input=plaintext,
                 capture_output=True,
                 check=True,
@@ -309,7 +322,8 @@ def register(cli):
     init_parser = subparsers.add_parser('init', help='Initialize secrets for a project')
     init_parser.add_argument('slug', help='Project slug')
     init_parser.add_argument('--profile', default='default', help='Secret profile')
-    init_parser.add_argument('--age-recipient', required=True, help='Age public key (age1...)')
+    init_parser.add_argument('--age-recipient', required=True,
+                            help='Age public key (age1...) or comma-separated list for multiple recipients')
     cli.commands['secret.init'] = cmd.secret_init
 
     # secret edit

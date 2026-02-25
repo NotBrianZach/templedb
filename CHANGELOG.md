@@ -7,6 +7,38 @@ All notable changes to TempleDB are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Extended File Type Support** - Track 100+ file types and dotfiles
+  - Migration 017: Adds 95+ new file types to database
+  - **Programming languages**: Rust, Go, Ruby, Java, Kotlin, Swift, C, C++, C#, PHP, Scala, Clojure, Elixir, Erlang, Haskell, Lua, Perl, R
+  - **Shell configs**: .bashrc, .zshrc, .bash_profile, .profile, .fish, .aliases
+  - **Git configs**: .gitignore, .gitattributes, .gitmodules, .gitconfig
+  - **Editor configs**: .editorconfig, .prettierrc, .eslintrc, .vimrc, .rubocop.yml, .flake8, .babelrc, .browserslistrc
+  - **Version managers**: .nvmrc, .ruby-version, .python-version, .node-version
+  - **CI/CD**: .travis.yml, .gitlab-ci.yml, GitHub workflows, CircleCI, Jenkins, Dependabot
+  - **Package managers**: requirements.txt, Pipfile, pyproject.toml, Cargo.toml, Gemfile, go.mod, composer.json, .npmrc, .yarnrc
+  - **Build tools**: Makefile, Rakefile, build.gradle, pom.xml, CMakeLists.txt, jest.config.js, webpack.config.js, vite.config.js
+  - **Infrastructure**: Terraform (.tf), Ansible (playbooks), Kubernetes, Helm charts
+  - **Database**: schema.sql, schema.prisma
+  - **Testing**: *.test.js, *.spec.js, pytest.ini
+  - **Platform configs**: Procfile, vercel.json, netlify.toml, railway.json
+  - **Documentation**: CHANGELOG.md, LICENSE, CONTRIBUTING.md, SECURITY.md
+  - Enhanced scanner with component name extraction for Rust, Go, Ruby
+  - Test script to verify 100% detection rate
+  - Complete documentation: `FILE_TYPE_SUPPORT.md`
+
+- **Cloud Backup System** - Pluggable cloud storage backups
+  - Pluggable provider architecture with abstract base class
+  - **Google Drive provider** with OAuth2 authentication
+  - **Local filesystem provider** (always available)
+  - CLI commands: backup, list, restore, cleanup, test, setup
+  - Automated backup scheduling with cron (interactive script)
+  - Retention policies: max backups + days to keep
+  - Safe restore with automatic safety backups
+  - Online backups using SQLite backup API (no downtime)
+  - Configuration file support (JSON/YAML)
+  - Easy to add new providers (S3, Dropbox, etc.)
+  - Complete documentation: `docs/advanced/CLOUD_BACKUP.md`
+
 - **TUI VCS Enhancements** - Comprehensive VCS features in Terminal UI
   - Interactive staging screen - Stage/unstage files visually with `[s]Stage [u]Unstage [a]All [r]Reset`
   - Commit creation dialog - Create commits from TUI with message input

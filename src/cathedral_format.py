@@ -14,6 +14,7 @@ A .cathedral package is a directory structure containing:
   metadata/              - Additional metadata (stats, tags, readme)
 """
 
+import os
 import json
 import hashlib
 from dataclasses import dataclass, asdict
@@ -196,7 +197,7 @@ class CathedralPackage:
         hasher = hashlib.sha256()
 
         # Hash all files in deterministic order
-        for root, dirs, files in sorted(self.package_path.walk()):
+        for root, dirs, files in os.walk(str(self.package_path)):
             dirs.sort()
             for file in sorted(files):
                 if file == "manifest.json":  # Skip manifest (it contains the checksum)

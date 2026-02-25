@@ -83,8 +83,9 @@ class ConfigCommands(Command):
         # Create or update checkout record
         if existing_checkout:
             checkout_id = existing_checkout['id']
-            # Delete old links
-            self.config_repo.delete_links_for_checkout(checkout_id)
+            # Delete old links unless appending
+            if not args.append:
+                self.config_repo.delete_links_for_checkout(checkout_id)
         else:
             checkout_id = self.config_repo.create_checkout(project['id'], str(checkout_dir))
 
@@ -303,6 +304,7 @@ def register(cli):
     link_parser.add_argument('--checkout-dir', help='Checkout directory (default: ~/.config/templedb/checkouts/<slug>)')
     link_parser.add_argument('--files', help='File pattern to link (default: all dotfiles and directories)')
     link_parser.add_argument('--force', '-f', action='store_true', help='Replace existing files')
+    link_parser.add_argument('--append', '-a', action='store_true', help='Append links without removing existing ones')
     cli.commands['config.link'] = cmd.link_config
 
     # config unlink
