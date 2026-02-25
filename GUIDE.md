@@ -1,7 +1,5 @@
 # How to View/Review/Fiddle with TempleDB Projects
 
-**TL;DR**: Use checkout/commit workflow + standard Unix tools. The TUI was removed because it was unnecessary complexity.
-
 ---
 
 ## Philosophy

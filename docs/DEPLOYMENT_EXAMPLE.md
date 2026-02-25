@@ -1,16 +1,16 @@
-# Deploying Woofs Projects with TempleDB
+# Deploying Complex Applications with TempleDB
 
-Complete step-by-step guide to deploying the woofs_projects application using TempleDB's deployment system.
+Complete step-by-step guide to deploying multi-tier applications with database migrations, build steps, and multiple environments using TempleDB's deployment system.
 
 ---
 
 ## Overview
 
-**woofs_projects** is tracked in TempleDB with:
-- 455 files (355,407 lines of code)
-- 8 database migrations
-- 13 edge functions
-- TypeScript build system
+This guide demonstrates deploying a complex application tracked in TempleDB with:
+- Multiple files (hundreds or thousands of lines of code)
+- Database migrations (schema changes)
+- Build system (TypeScript, webpack, or other compilation)
+- Edge functions or serverless components
 - Multiple deployment targets (local, staging, production)
 
 This guide walks through the entire deployment process from secrets setup to production deployment.
@@ -45,18 +45,18 @@ age --version
 age-plugin-yubikey --version
 
 # Check project is synced
-./templedb project show woofs_projects
+./templedb project show myproject
 ```
 
 ### Deployment Targets
 
-Your woofs_projects has 3 deployment targets:
+A typical multi-environment setup has 3 deployment targets:
 
 | Target | Host | Provider | Purpose |
 |--------|------|----------|---------|
 | **local** | localhost:5432 | PostgreSQL | Local development |
-| **staging** | staging.woofs.com | Supabase | Pre-production testing |
-| **production** | db.woofs.com | Supabase | Live production |
+| **staging** | staging.example.com | Supabase/AWS/etc | Pre-production testing |
+| **production** | db.example.com | Supabase/AWS/etc | Live production |
 
 View targets:
 ```bash
@@ -81,10 +81,10 @@ AGE_KEY=$(age-keygen -y ~/.config/age/keys.txt)
 echo "Your age key: $AGE_KEY"
 
 # 3. Initialize secrets
-./templedb secret init woofs_projects --age-recipient "$AGE_KEY"
+./templedb secret init myproject --age-recipient "$AGE_KEY"
 
 # 4. Edit secrets and add required variables
-./templedb secret edit woofs_projects
+./templedb secret edit myproject
 ```
 
 ### Option 2: Yubikey (Recommended for Production)
@@ -102,13 +102,13 @@ BACKUP=$(age-plugin-yubikey --identity | grep age1yubikey)
 
 # 4. Initialize with recipient(s)
 # Single Yubikey:
-./templedb secret init woofs_projects --age-recipient "$YUBIKEY"
+./templedb secret init myproject --age-recipient "$YUBIKEY"
 
 # With backup:
-./templedb secret init woofs_projects --age-recipient "$YUBIKEY,$BACKUP"
+./templedb secret init myproject --age-recipient "$YUBIKEY,$BACKUP"
 
 # 5. Edit secrets
-./templedb secret edit woofs_projects
+./templedb secret edit myproject
 # (Will prompt for PIN)
 ```
 
@@ -121,15 +121,21 @@ env:
   # Database connection (required for all deployments)
   DATABASE_URL: "postgresql://user:pass@host:5432/dbname"
 
-  # Supabase specific (for staging/production)
+  # Cloud provider specific (for staging/production)
   SUPABASE_URL: "https://xxxxx.supabase.co"
   SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
   SUPABASE_SERVICE_ROLE_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 
-  # Optional: Additional secrets
+  # Or AWS credentials
+  AWS_ACCESS_KEY_ID: "AKIA..."
+  AWS_SECRET_ACCESS_KEY: "..."
+  AWS_REGION: "us-east-1"
+
+  # Optional: Third-party API keys
   TWILIO_ACCOUNT_SID: "ACxxxxx..."
   TWILIO_AUTH_TOKEN: "xxxxx..."
   STRIPE_SECRET_KEY: "sk_test_xxxxx..."
+  SENDGRID_API_KEY: "SG.xxxxx..."
 ```
 
 Save and exit your editor (`:wq` in vim, `Ctrl+X` in nano).
@@ -138,7 +144,7 @@ Save and exit your editor (`:wq` in vim, `Ctrl+X` in nano).
 
 ```bash
 # Export secrets to verify (doesn't show on screen by default)
-./templedb secret export woofs_projects --format shell
+./templedb secret export myproject --format shell
 
 # Should show:
 # export DATABASE_URL='postgresql://...'
@@ -167,12 +173,12 @@ Your deployment targets are already configured. To view or modify:
 ```bash
 # Update staging target
 ./templedb target update staging \
-  --host staging.woofs.com \
+  --host staging.example.com \
   --provider supabase
 
 # Update production target
 ./templedb target update production \
-  --host db.woofs.com \
+  --host db.example.com \
   --provider supabase
 ```
 
@@ -185,36 +191,36 @@ Your deployment targets are already configured. To view or modify:
 ### Dry Run to Staging
 
 ```bash
-./templedb deploy run woofs_projects --target staging --dry-run
+./templedb deploy run myproject --target staging --dry-run
 ```
 
 **Expected Output:**
 ```
-🚀 Deploying woofs_projects to staging...
+🚀 Deploying myproject to staging...
 📋 DRY RUN - No actual deployment will occur
 
 📦 Exporting project from TempleDB...
-✓ Exported to /tmp/templedb_deploy_woofs_projects/woofs_projects.cathedral
+✓ Exported to /tmp/templedb_deploy_myproject/myproject.cathedral
 
 🔧 Reconstructing project from cathedral package...
    Reconstructed 1357 files
-✓ Project reconstructed to /tmp/templedb_deploy_woofs_projects/working
+✓ Project reconstructed to /tmp/templedb_deploy_myproject/working
 
 📋 Found deployment configuration - using orchestrator
 
-🚀 Deploying woofs_projects to staging
+🚀 Deploying myproject to staging
 📋 DRY RUN - No actual changes will be made
 
 🔧 [1] Deploying: migrations
    Found 8 pending migrations
-      [DRY RUN] Would apply: migrations/001_add_phone_lookup_table.sql
-      [DRY RUN] Would apply: migrations/002_create_client_context_view.sql
-      [DRY RUN] Would apply: migrations/003_create_sync_state_table.sql
-      [DRY RUN] Would apply: supabase/migrations/20240415000000_storage_rate_limit.sql
-      [DRY RUN] Would apply: woofsDB/migrations/20251027_add_payment_tables.sql
-      [DRY RUN] Would apply: woofsDB/migrations/20260223_add_sync_state_table.sql
-      [DRY RUN] Would apply: woofsDB/migrations/20260224_add_online_booking_system.sql
-      [DRY RUN] Would apply: woofsDB/verify_cell_phone_migration.sql
+      [DRY RUN] Would apply: migrations/001_create_users_table.sql
+      [DRY RUN] Would apply: migrations/002_create_orders_table.sql
+      [DRY RUN] Would apply: migrations/003_add_payment_methods.sql
+      [DRY RUN] Would apply: migrations/004_create_indexes.sql
+      [DRY RUN] Would apply: migrations/005_add_audit_log.sql
+      [DRY RUN] Would apply: migrations/006_add_webhooks_table.sql
+      [DRY RUN] Would apply: migrations/007_add_rate_limiting.sql
+      [DRY RUN] Would apply: migrations/008_create_materialized_views.sql
    ✅ Completed in 0ms
 
 🔧 [2] Deploying: typescript_build
@@ -227,21 +233,21 @@ Your deployment targets are already configured. To view or modify:
 ### Understanding the Output
 
 **Group 1: migrations**
-- 8 SQL migrations will be applied to database
-- Creates tables, views, and schema changes
+- SQL migrations will be applied to database
+- Creates tables, views, indexes, and schema changes
 - **Critical:** These are applied in order and cannot be rolled back automatically
 
 **Group 2: typescript_build**
-- Compiles TypeScript to JavaScript
-- Runs `npm run build`
-- Required before edge functions can run
+- Compiles TypeScript to JavaScript (or other build processes)
+- Runs `npm run build` or equivalent
+- Required before application can run
 
 ### Skip Validation (for testing)
 
 If you're not ready to configure secrets:
 
 ```bash
-./templedb deploy run woofs_projects --target staging --dry-run --skip-validation
+./templedb deploy run myproject --target staging --dry-run --skip-validation
 ```
 
 ---
@@ -254,7 +260,7 @@ Once dry-run looks good, deploy for real!
 
 ```bash
 # Test that secrets can be decrypted
-./templedb secret export woofs_projects --format shell > /dev/null
+./templedb secret export myproject --format shell > /dev/null
 echo "✓ Secrets OK"
 ```
 
@@ -263,7 +269,7 @@ echo "✓ Secrets OK"
 ### Step 2: Deploy
 
 ```bash
-./templedb deploy run woofs_projects --target staging
+./templedb deploy run myproject --target staging
 ```
 
 **You will be prompted:**
@@ -274,36 +280,36 @@ echo "✓ Secrets OK"
 
 **Expected Output:**
 ```
-🚀 Deploying woofs_projects to staging...
+🚀 Deploying myproject to staging...
 
 📦 Exporting project from TempleDB...
-✓ Exported to /tmp/templedb_deploy_woofs_projects/woofs_projects.cathedral
+✓ Exported to /tmp/templedb_deploy_myproject/myproject.cathedral
 
 🔧 Reconstructing project from cathedral package...
    Reconstructed 1357 files
-✓ Project reconstructed to /tmp/templedb_deploy_woofs_projects/working
+✓ Project reconstructed to /tmp/templedb_deploy_myproject/working
 
-🚀 Deploying woofs_projects to staging
+🚀 Deploying myproject to staging
 
 🔧 [1] Deploying: migrations
    Running pre-deploy hooks...
       ✓ Verified psql is available
    Applying 8 pending migrations...
-      ✓ Applied: migrations/001_add_phone_lookup_table.sql (127ms)
-      ✓ Applied: migrations/002_create_client_context_view.sql (43ms)
-      ✓ Applied: migrations/003_create_sync_state_table.sql (89ms)
-      ✓ Applied: supabase/migrations/20240415000000_storage_rate_limit.sql (156ms)
-      ✓ Applied: woofsDB/migrations/20251027_add_payment_tables.sql (234ms)
-      ✓ Applied: woofsDB/migrations/20260223_add_sync_state_table.sql (91ms)
-      ✓ Applied: woofsDB/migrations/20260224_add_online_booking_system.sql (312ms)
-      ✓ Applied: woofsDB/verify_cell_phone_migration.sql (67ms)
+      ✓ Applied: migrations/001_create_users_table.sql (127ms)
+      ✓ Applied: migrations/002_create_orders_table.sql (43ms)
+      ✓ Applied: migrations/003_add_payment_methods.sql (89ms)
+      ✓ Applied: migrations/004_create_indexes.sql (156ms)
+      ✓ Applied: migrations/005_add_audit_log.sql (234ms)
+      ✓ Applied: migrations/006_add_webhooks_table.sql (91ms)
+      ✓ Applied: migrations/007_add_rate_limiting.sql (312ms)
+      ✓ Applied: migrations/008_create_materialized_views.sql (67ms)
    Running post-deploy hooks...
       ✓ Verified all migrations applied
    ✅ Completed in 1.2s
 
 🔧 [2] Deploying: typescript_build
    Running build: npm run build
-      > woofs@1.0.0 build
+      > myproject@1.0.0 build
       > tsc && vite build
 
       vite v4.0.0 building for production...
@@ -315,17 +321,17 @@ echo "✓ Secrets OK"
 
 ✅ Deployment complete! (6.7s total)
 
-🎯 Deployed to: https://staging.woofs.com
+🎯 Deployed to: https://staging.example.com
 ```
 
 ### Step 4: Verify Deployment
 
 ```bash
 # Check deployment status
-./templedb deploy status woofs_projects
+./templedb deploy status myproject
 
 # Test the staging site
-curl https://staging.woofs.com/health
+curl https://staging.example.com/health
 # Should return: {"status": "ok"}
 
 # Check database migrations
@@ -343,45 +349,50 @@ psql $DATABASE_URL -c "SELECT * FROM schema_migrations ORDER BY version DESC LIM
 - [ ] Staging deployment successful
 - [ ] All features tested on staging
 - [ ] Database migrations verified
-- [ ] Edge functions working
 - [ ] Performance acceptable
 - [ ] No errors in logs
 - [ ] Team approved for production
+- [ ] Rollback plan documented
 
 ### Production Deployment
 
 ```bash
 # 1. Final dry-run to production
-./templedb deploy run woofs_projects --target production --dry-run
+./templedb deploy run myproject --target production --dry-run
 
 # 2. Review what will be deployed
 # Make sure migration list matches what you tested on staging
 
 # 3. Deploy to production
-./templedb deploy run woofs_projects --target production
+./templedb deploy run myproject --target production
 
 # 4. Monitor closely
-watch -n 5 'curl -s https://db.woofs.com/health'
+watch -n 5 'curl -s https://db.example.com/health'
 ```
 
 ### Post-Deployment Verification
 
 ```bash
 # Check deployment status
-./templedb deploy status woofs_projects
+./templedb deploy status myproject
 
 # Verify migrations applied
 psql $PRODUCTION_DATABASE_URL -c "SELECT version, description, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 10;"
 
 # Check application health
-curl https://db.woofs.com/health
-curl https://db.woofs.com/api/status
+curl https://db.example.com/health
+curl https://db.example.com/api/status
 
 # Monitor logs (if available)
 # For Supabase:
 # - Check Supabase dashboard logs
 # - Monitor edge function logs
 # - Check database performance
+
+# For AWS:
+# - Check CloudWatch logs
+# - Monitor Lambda function metrics
+# - Check RDS performance
 ```
 
 ---
@@ -402,8 +413,8 @@ psql $DATABASE_URL
 SELECT * FROM schema_migrations ORDER BY version DESC LIMIT 10;
 
 # 3. Run rollback migrations (if you have them)
-\i migrations/rollback/008_rollback_online_booking.sql
-\i migrations/rollback/007_rollback_sync_state.sql
+\i migrations/rollback/008_rollback_materialized_views.sql
+\i migrations/rollback/007_rollback_rate_limiting.sql
 # etc.
 
 # 4. Or restore from backup
@@ -420,8 +431,8 @@ git log --oneline | grep "deploy"
 git checkout <previous-commit>
 
 # 3. Deploy previous version
-./templedb project sync woofs_projects
-./templedb deploy run woofs_projects --target production
+./templedb project sync myproject
+./templedb deploy run myproject --target production
 ```
 
 ### Rollback Strategy
@@ -449,7 +460,7 @@ For automated deployments from CI/CD:
 age-keygen -o ~/.config/age/ci-key.txt
 CI_KEY=$(age-keygen -y ~/.config/age/ci-key.txt)
 
-./templedb secret init woofs_projects --profile ci --age-recipient "$CI_KEY"
+./templedb secret init myproject --profile ci --age-recipient "$CI_KEY"
 
 # 2. Store CI key in GitHub Secrets / GitLab CI Variables
 # Variable name: TEMPLEDB_AGE_KEY_FILE
@@ -459,7 +470,7 @@ CI_KEY=$(age-keygen -y ~/.config/age/ci-key.txt)
 export TEMPLEDB_AGE_KEY_FILE=/tmp/ci-key.txt
 echo "$TEMPLEDB_AGE_KEY" > /tmp/ci-key.txt
 
-./templedb deploy run woofs_projects --profile ci --target staging --yes
+./templedb deploy run myproject --profile ci --target staging --yes
 ```
 
 ### Staged Rollout
@@ -468,14 +479,14 @@ Deploy incrementally:
 
 ```bash
 # 1. Deploy to staging
-./templedb deploy run woofs_projects --target staging
+./templedb deploy run myproject --target staging
 
 # 2. Test for 24-48 hours
 # Monitor metrics, errors, user feedback
 
 # 3. Deploy to production during low-traffic window
 # Early morning or weekend
-./templedb deploy run woofs_projects --target production
+./templedb deploy run myproject --target production
 ```
 
 ### Blue-Green Deployment
@@ -484,14 +495,14 @@ For zero-downtime deployments:
 
 ```bash
 # 1. Setup blue and green targets
-./templedb target add blue --host blue.woofs.com --provider supabase
-./templedb target add green --host green.woofs.com --provider supabase
+./templedb target add blue --host blue.example.com --provider supabase
+./templedb target add green --host green.example.com --provider supabase
 
 # 2. Deploy to inactive target (green)
-./templedb deploy run woofs_projects --target green
+./templedb deploy run myproject --target green
 
 # 3. Test green
-curl https://green.woofs.com/health
+curl https://green.example.com/health
 
 # 4. Switch DNS/load balancer to green
 # (Manual step or via DNS provider API)
@@ -507,13 +518,13 @@ curl https://green.woofs.com/health
 
 ```bash
 # Watch deployment progress
-./templedb deploy run woofs_projects --target staging | tee deploy.log
+./templedb deploy run myproject --target staging | tee deploy.log
 
 # Monitor logs in another terminal
 tail -f ~/.local/share/templedb/logs/backup.log
 
 # Watch application health
-watch -n 2 'curl -s https://staging.woofs.com/health | jq'
+watch -n 2 'curl -s https://staging.example.com/health | jq'
 ```
 
 ### Post-Deployment Health Checks
@@ -526,12 +537,12 @@ psql $DATABASE_URL -c "SELECT NOW();"
 psql $DATABASE_URL -c "SELECT COUNT(*) FROM schema_migrations;"
 
 # Test API endpoints
-curl https://staging.woofs.com/api/health
-curl https://staging.woofs.com/api/bookings
-curl https://staging.woofs.com/api/clients
+curl https://staging.example.com/api/health
+curl https://staging.example.com/api/users
+curl https://staging.example.com/api/orders
 
-# Check edge functions (if using Supabase)
-curl https://staging.woofs.com/functions/v1/receiveDialpadSMSWebhook
+# Check serverless functions (if using)
+curl https://staging.example.com/functions/v1/webhook-handler
 ```
 
 ---
@@ -542,18 +553,18 @@ curl https://staging.woofs.com/functions/v1/receiveDialpadSMSWebhook
 
 ```bash
 # Check if secrets exist
-./templedb secret export woofs_projects --format yaml
+./templedb secret export myproject --format yaml
 
 # If not found, initialize
-./templedb secret init woofs_projects --age-recipient <your-key>
-./templedb secret edit woofs_projects
+./templedb secret init myproject --age-recipient <your-key>
+./templedb secret edit myproject
 ```
 
 ### Error: "Missing required environment variables: DATABASE_URL"
 
 ```bash
 # Edit secrets and add DATABASE_URL
-./templedb secret edit woofs_projects
+./templedb secret edit myproject
 
 # Add:
 env:
@@ -599,17 +610,17 @@ psql $DATABASE_URL -c "SELECT * FROM schema_migrations ORDER BY version;"
 psql $DATABASE_URL < migrations/XXX_failed_migration.sql
 
 # Continue deployment
-./templedb deploy run woofs_projects --target staging
+./templedb deploy run myproject --target staging
 ```
 
 ### Error: "npm run build failed"
 
 ```bash
 # Check Node.js version
-node --version  # Should be 18+
+node --version  # Should match project requirements
 
 # Install dependencies
-cd /tmp/templedb_deploy_woofs_projects/working
+cd /tmp/templedb_deploy_myproject/working
 npm install
 
 # Try build manually
@@ -633,7 +644,7 @@ rm -rf /tmp/templedb_deploy_*
 
 # Retry with verbose logging
 export TEMPLEDB_LOG_LEVEL=DEBUG
-./templedb deploy run woofs_projects --target staging
+./templedb deploy run myproject --target staging
 ```
 
 ---
@@ -645,11 +656,11 @@ export TEMPLEDB_LOG_LEVEL=DEBUG
 If you only want to deploy certain parts:
 
 ```bash
-# Skip TypeScript build (if already built)
-./templedb deploy run woofs_projects --target staging --skip-group typescript_build
+# Skip build step (if already built)
+./templedb deploy run myproject --target staging --skip-group typescript_build
 
 # Deploy only migrations
-./templedb deploy run woofs_projects --target staging --skip-group typescript_build
+./templedb deploy run myproject --target staging --skip-group typescript_build
 ```
 
 ### Custom Deployment Scripts
@@ -670,15 +681,17 @@ groups:
       - npm ci
       - npm run build
 
-  - name: edge_functions
+  - name: serverless_functions
     order: 3
     commands:
       - supabase functions deploy --all
+      # Or for AWS Lambda:
+      # - aws lambda update-function-code --function-name myfunction
 
   - name: post_deploy
     order: 4
     commands:
-      - curl -X POST https://api.woofs.com/deploy-webhook
+      - curl -X POST https://api.example.com/deploy-webhook
 ```
 
 ---
@@ -719,7 +732,7 @@ Before every deployment:
 
 ## Summary
 
-**Deploying woofs_projects:**
+**Deploying complex applications with TempleDB:**
 
 1. **Setup Secrets** → `./templedb secret init` + `edit`
 2. **Dry Run** → `--dry-run --target staging`
@@ -731,16 +744,16 @@ Before every deployment:
 **Key Commands:**
 ```bash
 # Dry run
-./templedb deploy run woofs_projects --target staging --dry-run
+./templedb deploy run myproject --target staging --dry-run
 
 # Deploy staging
-./templedb deploy run woofs_projects --target staging
+./templedb deploy run myproject --target staging
 
 # Deploy production
-./templedb deploy run woofs_projects --target production
+./templedb deploy run myproject --target production
 
 # Check status
-./templedb deploy status woofs_projects
+./templedb deploy status myproject
 ```
 
 ---
