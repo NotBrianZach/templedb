@@ -13,11 +13,11 @@
 
 <img src="assets/logo.svg" align="right" width="150" alt="TempleDB Logo"/>
 
-TempleDB is a database-native project management system that treats your codebase as a temple - a sacred, organized space where every file, every line, every change is tracked, versioned, and queryable.
+TempleDB is a database-native ai swarm centric project management system that treats your codebase as a temple - a sacred, organized space where every file, every line, every change is tracked, versioned, and queryable.
 
 ### Philosophy
 
-Like TempleOS showed us the power of simplicity and first principles, TempleDB embraces:
+As TempleOS showed us the power of simplicity and first principles, so TempleDB embraces:
 
 - **Database normalization**: Single source of truth, no redundant copies
 - **ACID transactions**: Multi-agent coordination without conflicts
