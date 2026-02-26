@@ -66,7 +66,7 @@ age-plugin-yubikey --generate
 BACKUP=$(age-plugin-yubikey --identity | grep age1yubikey)
 
 # 4. Initialize secrets with BOTH recipients
-./templedb secret init woofs_projects \
+./templedb secret init myproject \
   --age-recipient "$PRIMARY,$BACKUP"
 ```
 
@@ -89,7 +89,7 @@ age-keygen -o ~/.config/age/backup-key.txt
 BACKUP=$(age-keygen -y ~/.config/age/backup-key.txt)
 
 # 3. Initialize with both
-./templedb secret init woofs_projects \
+./templedb secret init myproject \
   --age-recipient "$YUBIKEY,$BACKUP"
 
 # 4. Store backup key in safe place
@@ -171,11 +171,11 @@ echo "Backup: $BACKUP"
 
 ```bash
 # Initialize with comma-separated recipients
-./templedb secret init woofs_projects \
+./templedb secret init myproject \
   --age-recipient "$PRIMARY,$BACKUP"
 
 # Output:
-# Initialized secrets for woofs_projects (profile: default)
+# Initialized secrets for myproject (profile: default)
 ```
 
 ### Step 4: Test Both Keys
@@ -183,13 +183,13 @@ echo "Backup: $BACKUP"
 ```bash
 # Test with primary
 # (Insert primary Yubikey)
-./templedb secret edit woofs_projects
+./templedb secret edit myproject
 # Enter PIN for primary
 # Edit, save, exit
 
 # Test with backup
 # (Remove primary, insert backup)
-./templedb secret edit woofs_projects
+./templedb secret edit myproject
 # Enter PIN for backup
 # Should work!
 ```
@@ -216,7 +216,7 @@ echo "Backup: $BACKUP"
 
 ```bash
 # Decrypt secret and check header (shows which keys can decrypt)
-./templedb secret export woofs_projects --format yaml | head -3
+./templedb secret export myproject --format yaml | head -3
 ```
 
 Unfortunately, age doesn't store recipient info in the ciphertext. You'll need to track this separately.
@@ -225,7 +225,7 @@ Unfortunately, age doesn't store recipient info in the ciphertext. You'll need t
 
 ```yaml
 # secrets-config.yml
-project: woofs_projects
+project: myproject
 recipients:
   - name: "Primary Yubikey"
     recipient: "age1yubikey1qw7ry8g2..."
@@ -249,7 +249,7 @@ To add a new Yubikey/recipient to existing secrets:
 
 ```bash
 # 1. Export current secrets
-./templedb secret export woofs_projects --format yaml > /tmp/secrets.yml
+./templedb secret export myproject --format yaml > /tmp/secrets.yml
 
 # 2. Get new recipient
 # (Insert new Yubikey)
@@ -258,11 +258,11 @@ NEW_RECIPIENT=$(age-plugin-yubikey --identity | grep age1yubikey)
 
 # 3. Re-initialize with OLD + NEW recipients
 OLD_RECIPIENTS="age1yubikey1abc...,age1yubikey1def..."
-./templedb secret init woofs_projects \
+./templedb secret init myproject \
   --age-recipient "$OLD_RECIPIENTS,$NEW_RECIPIENT"
 
 # 4. Re-import secrets
-./templedb secret edit woofs_projects
+./templedb secret edit myproject
 # Paste contents of /tmp/secrets.yml
 # Save and exit
 
@@ -276,15 +276,15 @@ To revoke a recipient's access:
 
 ```bash
 # 1. Export secrets with PRIMARY Yubikey
-./templedb secret export woofs_projects --format yaml > /tmp/secrets.yml
+./templedb secret export myproject --format yaml > /tmp/secrets.yml
 
 # 2. Re-initialize with only remaining recipients
 REMAINING="age1yubikey1abc...,age1yubikey1xyz..."
-./templedb secret init woofs_projects \
+./templedb secret init myproject \
   --age-recipient "$REMAINING"
 
 # 3. Re-import secrets
-./templedb secret edit woofs_projects
+./templedb secret edit myproject
 # Paste from /tmp/secrets.yml
 
 # 4. Clean up
@@ -340,13 +340,13 @@ Test your backup keys regularly:
 
 ```bash
 # Monthly: Quick test
-./templedb secret export woofs_projects --format shell > /dev/null
+./templedb secret export myproject --format shell > /dev/null
 
 # Quarterly: Full backup test
 # 1. Remove primary
 # 2. Use backup to edit secrets
 # 3. Verify deployment works
-./templedb deploy run woofs_projects --target staging --dry-run
+./templedb deploy run myproject --target staging --dry-run
 ```
 
 ---
@@ -366,7 +366,7 @@ Test your backup keys regularly:
 
 ```bash
 # With backup Yubikey inserted
-./templedb secret export woofs_projects --format yaml > /tmp/secrets.yml
+./templedb secret export myproject --format yaml > /tmp/secrets.yml
 
 # Generate on new Yubikey
 age-plugin-yubikey --generate
@@ -376,11 +376,11 @@ NEW_PRIMARY=$(age-plugin-yubikey --identity | grep age1yubikey)
 BACKUP="age1yubikey1abc..."
 
 # Re-initialize
-./templedb secret init woofs_projects \
+./templedb secret init myproject \
   --age-recipient "$NEW_PRIMARY,$BACKUP"
 
 # Restore secrets
-./templedb secret edit woofs_projects
+./templedb secret edit myproject
 # Import from /tmp/secrets.yml
 ```
 
@@ -441,26 +441,26 @@ age-keygen -o ~/.config/age/ci-key.txt
 CI_KEY=$(age-keygen -y ~/.config/age/ci-key.txt)
 
 # Initialize separate profile
-./templedb secret init woofs_projects \
+./templedb secret init myproject \
   --profile ci \
   --age-recipient "$CI_KEY"
 
 # In CI pipeline
 export TEMPLEDB_AGE_KEY_FILE=/path/to/ci-key.txt
-./templedb deploy run woofs_projects --profile ci --target staging
+./templedb deploy run myproject --profile ci --target staging
 ```
 
 **Team Members use Yubikeys:**
 ```bash
 # Each developer uses their Yubikey
-./templedb secret edit woofs_projects --profile default
+./templedb secret edit myproject --profile default
 # Requires their Yubikey + PIN
 ```
 
 **CI uses file key:**
 ```bash
 # CI uses file-based key
-./templedb deploy run woofs_projects --profile ci
+./templedb deploy run myproject --profile ci
 # No Yubikey required
 ```
 
