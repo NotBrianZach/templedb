@@ -38,15 +38,19 @@ else
 fi
 ```
 
-### 3. Protect SOPS_AGE_KEY_FILE
+### 3. Protect Age Keys
 
 Ensure your age key has minimal permissions:
 
 ```bash
 chmod 400 ~/.config/sops/age/keys.txt
+# Or ~/.config/age/keys.txt
 ```
 
-Consider using a hardware security key or TPM for key storage in production.
+**For production:** Use hardware security keys (Yubikey) for enhanced security. See:
+- [YUBIKEY_SECRETS.md](YUBIKEY_SECRETS.md) - Hardware-backed encryption setup
+- [BACKUP_YUBIKEY.md](BACKUP_YUBIKEY.md) - Backup Yubikey strategies
+- [DEPLOYMENT_EXAMPLE.md](../DEPLOYMENT_EXAMPLE.md) - Production deployment workflows
 
 ### 4. Reload Secrets After Updates
 
@@ -173,13 +177,16 @@ eval "$(op inject -i secrets.env)"
 6. **Limit secret lifetime**: Load secrets only when needed, not permanently in shell
 7. **Secure exported files**: If exporting to .env files, ensure 600 permissions
 
-## Code Improvements for TempleDB
+## Security Enhancements
 
-Consider these enhancements to the templedb codebase:
+TempleDB includes:
+- ✅ **Hardware security key support** - Yubikey integration (see [YUBIKEY_SECRETS.md](YUBIKEY_SECRETS.md))
+- ✅ **Multi-recipient encryption** - Backup Yubikey support (see [BACKUP_YUBIKEY.md](BACKUP_YUBIKEY.md))
+- ✅ **Audit logging** - All secret operations are logged
 
+Potential future enhancements:
 1. **Validate .envrc permissions** before generating output
 2. **Add secret age warnings** (warn if >90 days old)
-3. **Support hardware security keys** (YubiKey, etc.)
-4. **Add `--dry-run` mode** to preview what will be loaded
-5. **Implement secret checksums** to detect tampering
-6. **Add rate limiting** on secret access to detect abuse
+3. **Add `--dry-run` mode** to preview what will be loaded
+4. **Implement secret checksums** to detect tampering
+5. **Add rate limiting** on secret access to detect abuse

@@ -141,10 +141,12 @@ YUBIKEY_RECIPIENT=$(age-plugin-yubikey --identity | grep age1yubikey)
 
 ```bash
 # Deployment will decrypt secrets using Yubikey
-./templedb deploy run woofs_projects --target staging
+./templedb deploy run myproject --target staging
 
 # Yubikey must be present and you must enter PIN
 ```
+
+**For complete deployment workflows**, see [DEPLOYMENT_EXAMPLE.md](../DEPLOYMENT_EXAMPLE.md).
 
 ---
 

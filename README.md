@@ -399,7 +399,9 @@ ORDER BY version_number DESC;
 - **[DATABASE_CONSTRAINTS.md](DATABASE_CONSTRAINTS.md)** - ⚠️ **Critical**: All uniqueness constraints and foreign keys
 
 ### Advanced Topics
-- **[Performance & Optimization](docs/advanced/ADVANCED.md)** - Tuning, Nix environments, deployment
+- **[Deployment Guide](docs/DEPLOYMENT_EXAMPLE.md)** ⭐ - Complete deployment workflow for production
+- **[Performance & Optimization](docs/advanced/ADVANCED.md)** - Tuning, Nix environments
+- **[Yubikey Secrets](docs/advanced/YUBIKEY_SECRETS.md)** - Hardware-backed encryption
 - **[Multi-User Setup](docs/advanced/CATHEDRAL.md)** - Teams and collaboration
 - **[Building from Source](docs/advanced/BUILD.md)** - Development setup
 - **[Security](docs/advanced/SECURITY.md)** - Security considerations

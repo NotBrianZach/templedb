@@ -356,4 +356,6 @@ After installation:
 1. **[GETTING_STARTED.md](../GETTING_STARTED.md)** - Beginner-friendly introduction
 2. **[QUICKSTART.md](../QUICKSTART.md)** - Common workflows
 3. **[README.md](../README.md)** - Complete overview
-4. **[SECURITY.md](../SECURITY.md)** - Secret management setup
+4. **[DEPLOYMENT_EXAMPLE.md](DEPLOYMENT_EXAMPLE.md)** - Production deployment guide
+5. **[advanced/YUBIKEY_SECRETS.md](advanced/YUBIKEY_SECRETS.md)** - Hardware-backed secrets
+6. **[advanced/SECURITY.md](advanced/SECURITY.md)** - Security best practices

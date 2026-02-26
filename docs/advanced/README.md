@@ -6,15 +6,24 @@ Specialized documentation for power users, system administrators, and contributo
 
 ## Performance & Deployment
 
+### [DEPLOYMENT_EXAMPLE.md](../DEPLOYMENT_EXAMPLE.md) ⭐
+**Complete deployment guide for complex applications**
+- Database migrations and build systems
+- Multiple environments (local, staging, production)
+- Secrets management (age encryption and Yubikey)
+- CI/CD integration and rollback procedures
+- Troubleshooting and best practices
+
+**For:** Deploying multi-tier applications with TempleDB. **Start here for production deployments.**
+
 ### [ADVANCED.md](ADVANCED.md)
 **Topics:**
 - Performance tuning (connection pooling, WAL mode, batch operations)
 - Nix environment management and FHS environments
-- Deployment orchestration and multi-component projects
 - Database optimization (indexes, query patterns, caching)
 - Profiling and benchmarking
 
-**For:** Users optimizing performance, deploying to production, or using Nix environments.
+**For:** Users optimizing performance or using Nix environments.
 
 ---
 
@@ -48,15 +57,33 @@ Specialized documentation for power users, system administrators, and contributo
 
 ## Security
 
+### [YUBIKEY_SECRETS.md](YUBIKEY_SECRETS.md) ⭐
+**Hardware-backed secret encryption with Yubikey**
+- Yubikey setup and authentication
+- PIN protection and touch policies
+- Integration with TempleDB secrets
+- Deployment usage (see [DEPLOYMENT_EXAMPLE.md](../DEPLOYMENT_EXAMPLE.md))
+- CI/CD considerations
+
+**For:** Production deployments requiring hardware security.
+
+### [BACKUP_YUBIKEY.md](BACKUP_YUBIKEY.md)
+**Yubikey backup and redundancy strategies**
+- Multi-recipient encryption (primary + backup Yubikeys)
+- Team access patterns
+- Disaster recovery procedures
+- Recipient management
+
+**For:** Setting up backup Yubikeys for redundancy.
+
 ### [SECURITY.md](SECURITY.md)
 **Topics:**
 - Secret management with age encryption
 - Database access control
-- Secure deployment practices
 - Key management best practices
 - Threat model and security considerations
 
-**For:** Security-conscious users, system administrators, enterprise deployments.
+**For:** Security-conscious users, system administrators.
 
 ---
 
@@ -124,11 +151,11 @@ Specialized documentation for power users, system administrators, and contributo
 
 ### If You Want To...
 
-**Improve Performance:**
-→ Start with [ADVANCED.md](ADVANCED.md) → Performance Tuning section
+**Deploy to Production:** ⭐
+→ Start with [DEPLOYMENT_EXAMPLE.md](../DEPLOYMENT_EXAMPLE.md) - Complete deployment workflow
 
-**Deploy to Production:**
-→ Read [ADVANCED.md](ADVANCED.md) → Deployment + [SECURITY.md](SECURITY.md)
+**Improve Performance:**
+→ Read [ADVANCED.md](ADVANCED.md) → Performance Tuning section
 
 **Set Up Team Collaboration:**
 → Read [CATHEDRAL.md](CATHEDRAL.md) → Multi-User Setup
