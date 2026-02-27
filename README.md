@@ -330,11 +330,22 @@ FROM projects p"
 - **Session analytics** - Duration, commits, metrics per session
 - **Multi-agent support** - Track multiple concurrent agent sessions
 
+**Multi-Agent Coordination** ⭐ NEW - Inspired by [Gas Town](https://github.com/steveyegge/gastown):
+- **Work Items (Beads)** - Structured task management with unique IDs (`tdb-xxxxx`)
+- **Agent Coordinator** - Orchestrate multiple agents working in parallel
+- **Auto-Dispatch** - Automatically assign work to least-busy agents
+- **Mailbox System** - Asynchronous task assignment via database
+- **Convoys** - Bundle related work items for coordinated execution
+- **O(k) Coordination** - Linear scaling (vs. O(k²) git-based coordination)
+- **ACID Transactions** - Conflict-free multi-agent coordination
+
 **LLM Context Provider:**
 - **Schema overview** - Describe database structure
 - **Project context** - Complete project information
 - **File context** - File metadata and versions
 - **Prompt generation** - Ready-to-use AI prompts
+
+**See [MULTI_AGENT_COORDINATION.md](MULTI_AGENT_COORDINATION.md) for complete guide.**
 
 ---
 
@@ -506,6 +517,18 @@ templedb agent status <session-id> [--verbose]           # Show session details
 templedb agent history <session-id> [--limit <n>]        # View interaction history
 templedb agent context <session-id> [--output <file>]    # Export session context
 
+# Multi-Agent Coordination (Work Items)
+templedb work create -p <proj> -t <title> [--type <type>] [--priority <pri>]  # Create work item
+templedb work list [-p <proj>] [-s <status>] [--priority <pri>]               # List work items
+templedb work show <item-id>                                                   # Show item details
+templedb work assign <item-id> <session-id>                                    # Assign to agent
+templedb work status <item-id> <status>                                        # Update status
+templedb work stats [-p <proj>]                                                # Show statistics
+templedb work mailbox <session-id> [-s <status>]                              # Show agent mailbox
+templedb work dispatch [-p <proj>] [--priority <pri>]                          # Auto-dispatch work
+templedb work agents [-p <proj>]                                               # List available agents
+templedb work metrics [-p <proj>]                                              # Show coordination metrics
+
 # Search
 templedb search content <pattern> [-p <proj>] [-i]  # Search file contents
 templedb search files <pattern> [-p <proj>]         # Search file names
@@ -552,10 +575,6 @@ This enables:
 - **Instant queries**: SQL across entire codebase
 - **Temporary workspaces**: Extract files when needed
 - **Scales indefinitely**: Constant overhead
-
-**Example**: Refactoring a 1,242-line NixOS config with 40+ redundant packages → 586 lines with efficient storage, tracked atomically in TempleDB.
-
-**Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) for the complete philosophy.**
 
 ---
 
