@@ -13,9 +13,11 @@ from dataclasses import dataclass
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from repositories import ProjectRepository, FileRepository, CheckoutRepository, VCSRepository
+from repositories.agent_repository import AgentRepository
 from importer.content import ContentStore, FileContent
 from importer.scanner import FileScanner
 from logger import get_logger
+from config import DB_PATH
 
 logger = get_logger(__name__)
 
@@ -41,6 +43,115 @@ class CommitCommand:
         self.file_repo = FileRepository()
         self.checkout_repo = CheckoutRepository()
         self.vcs_repo = VCSRepository()
+        self.agent_repo = AgentRepository(DB_PATH)
+
+    def _collect_commit_metadata(self, args, changes: Dict) -> Dict:
+        """
+        Collect commit metadata from args or interactively.
+
+        Args:
+            args: Command line arguments
+            changes: Dictionary with added/modified/deleted file lists
+
+        Returns:
+            Dictionary of metadata fields
+        """
+        metadata = {}
+
+        # Interactive mode
+        if hasattr(args, 'interactive') and args.interactive:
+            print("\n📝 Commit Metadata (press Enter to skip):")
+
+            # Intent
+            intent = input("  Intent/Purpose: ").strip()
+            if intent:
+                metadata['intent'] = intent
+
+            # Change type
+            print("  Change type: feature, bugfix, refactor, docs, test, chore, perf, style")
+            change_type = input("  Type: ").strip().lower()
+            if change_type in ['feature', 'bugfix', 'refactor', 'docs', 'test', 'chore', 'perf', 'style']:
+                metadata['change_type'] = change_type
+
+            # Scope
+            scope = input("  Scope (e.g., auth, api, ui): ").strip()
+            if scope:
+                metadata['scope'] = scope
+
+            # Breaking change
+            breaking = input("  Breaking change? (y/N): ").strip().lower()
+            if breaking == 'y':
+                metadata['is_breaking'] = True
+                breaking_desc = input("    Description: ").strip()
+                if breaking_desc:
+                    metadata['breaking_change_description'] = breaking_desc
+                migration = input("    Migration notes: ").strip()
+                if migration:
+                    metadata['migration_notes'] = migration
+
+            # Impact level
+            print("  Impact level: low, medium, high, critical")
+            impact = input("  Impact: ").strip().lower()
+            if impact in ['low', 'medium', 'high', 'critical']:
+                metadata['impact_level'] = impact
+
+            # AI assistance
+            ai = input("  AI-assisted? (y/N): ").strip().lower()
+            if ai == 'y':
+                metadata['ai_assisted'] = True
+                ai_tool = input("    AI tool (Claude/GPT-4/Copilot): ").strip()
+                if ai_tool:
+                    metadata['ai_tool'] = ai_tool
+                confidence = input("    Confidence (low/medium/high): ").strip().lower()
+                if confidence in ['low', 'medium', 'high']:
+                    metadata['confidence_level'] = confidence
+
+            # Tags
+            tags = input("  Tags (comma-separated): ").strip()
+            if tags:
+                import json
+                metadata['tags'] = json.dumps([t.strip() for t in tags.split(',') if t.strip()])
+
+        # Command-line args
+        else:
+            if hasattr(args, 'intent') and args.intent:
+                metadata['intent'] = args.intent
+
+            if hasattr(args, 'type') and args.type:
+                metadata['change_type'] = args.type
+
+            if hasattr(args, 'scope') and args.scope:
+                metadata['scope'] = args.scope
+
+            if hasattr(args, 'breaking') and args.breaking:
+                metadata['is_breaking'] = True
+
+            if hasattr(args, 'impact') and args.impact:
+                metadata['impact_level'] = args.impact
+
+            if hasattr(args, 'ai_assisted') and args.ai_assisted:
+                metadata['ai_assisted'] = True
+                if hasattr(args, 'ai_tool') and args.ai_tool:
+                    metadata['ai_tool'] = args.ai_tool
+
+            if hasattr(args, 'confidence') and args.confidence:
+                metadata['confidence_level'] = args.confidence
+
+            if hasattr(args, 'tags') and args.tags:
+                import json
+                metadata['tags'] = json.dumps([t.strip() for t in args.tags.split(',') if t.strip()])
+
+        # Auto-detect some metadata from changes
+        if not metadata.get('impact_level'):
+            total_changes = len(changes['added']) + len(changes['modified']) + len(changes['deleted'])
+            if total_changes > 50:
+                metadata['impact_level'] = 'high'
+            elif total_changes > 20:
+                metadata['impact_level'] = 'medium'
+            else:
+                metadata['impact_level'] = 'low'
+
+        return metadata
 
     def commit(self, args) -> int:
         """Commit workspace changes back to database
@@ -165,6 +276,12 @@ class CommitCommand:
                     message=message
                 )
 
+                # Collect and store commit metadata
+                metadata = self._collect_commit_metadata(args, changes)
+                if metadata:
+                    self.vcs_repo.create_commit_metadata(commit_id, **metadata)
+                    logger.info(f"✓ Stored commit metadata")
+
                 # Process changes
                 files_processed = 0
 
@@ -223,6 +340,30 @@ class CommitCommand:
                             (checkout['id'], change.file_id),
                             commit=False
                         )
+
+            # Link commit to active agent session if exists
+            session_id = os.getenv('TEMPLEDB_SESSION_ID')
+            if session_id:
+                try:
+                    session_id_int = int(session_id)
+                    session = self.agent_repo.get_session(session_id=session_id_int)
+                    if session and session['status'] == 'active':
+                        self.agent_repo.link_commit_to_session(session_id_int, commit_id)
+                        self.agent_repo.add_interaction(
+                            session_id=session_id_int,
+                            interaction_type='commit',
+                            content=message,
+                            metadata={
+                                'commit_id': commit_id,
+                                'files_changed': files_processed,
+                                'added': len(changes['added']),
+                                'modified': len(changes['modified']),
+                                'deleted': len(changes['deleted'])
+                            }
+                        )
+                        logger.info(f"✓ Linked commit to agent session {session_id}")
+                except (ValueError, Exception) as e:
+                    logger.warning(f"Could not link commit to session: {e}")
 
             # Success
             logger.info("Commit complete!")
