@@ -426,6 +426,60 @@ class AgentCommands(Command):
         watcher = AgentWatcher(session_id, poll_interval=poll_interval)
         return watcher.watch()
 
+    def chat_with_session(self, args) -> int:
+        """Start interactive chat with agent session"""
+        session_id = args.session_id
+
+        # Import AgentChat
+        from agent_chat import AgentChat
+
+        # Create chat and start chatting
+        chat = AgentChat(session_id)
+        return chat.chat()
+
+    def send_message(self, args) -> int:
+        """Send a message to an active agent session"""
+        session_id = args.session_id
+        message = args.message
+
+        # Check session exists and is active
+        session = self.agent_repo.get_session(session_id=session_id)
+        if not session:
+            logger.error(f"Session {session_id} not found")
+            return 1
+
+        if session['status'] != 'active':
+            logger.warning(f"Session {session_id} is not active (status: {session['status']})")
+            response = input("Send message anyway? [y/N]: ").strip().lower()
+            if response != 'y':
+                return 1
+
+        # Send the message
+        self.agent_repo.add_interaction(
+            session_id=session_id,
+            interaction_type='user_message',
+            content=message,
+            metadata={'source': 'cli', 'timestamp': datetime.now().isoformat()}
+        )
+
+        # Update session state
+        try:
+            self.agent_repo.execute("""
+                UPDATE agent_session_state
+                SET
+                    current_activity = 'Processing user message',
+                    activity_type = 'thinking',
+                    last_heartbeat = datetime('now')
+                WHERE session_id = ?
+            """, (session_id,))
+        except Exception as e:
+            logger.debug(f"Could not update session state: {e}")
+
+        print(f"✓ Message sent to session {session_id}")
+        print(f"  Use 'templedb agent watch {session_id}' to see agent's response")
+
+        return 0
+
 
 def register(cli):
     """Register agent commands with CLI"""
@@ -490,3 +544,14 @@ def register(cli):
     watch_parser.add_argument('session_id', type=int, help='Session ID to watch')
     watch_parser.add_argument('--interval', '-i', type=float, default=2.0, help='Poll interval in seconds (default: 2.0)')
     cli.commands['agent.watch'] = cmd.watch_session
+
+    # agent chat
+    chat_parser = subparsers.add_parser('chat', help='Interactive chat with agent session')
+    chat_parser.add_argument('session_id', type=int, help='Session ID to chat with')
+    cli.commands['agent.chat'] = cmd.chat_with_session
+
+    # agent send
+    send_parser = subparsers.add_parser('send', help='Send a message to agent session')
+    send_parser.add_argument('session_id', type=int, help='Session ID')
+    send_parser.add_argument('message', help='Message to send')
+    cli.commands['agent.send'] = cmd.send_message
