@@ -414,6 +414,18 @@ class AgentCommands(Command):
 
         return 0
 
+    def watch_session(self, args) -> int:
+        """Watch an active agent session in real-time"""
+        session_id = args.session_id
+        poll_interval = getattr(args, 'interval', 2.0)
+
+        # Import AgentWatcher
+        from agent_watcher import AgentWatcher
+
+        # Create watcher and start watching
+        watcher = AgentWatcher(session_id, poll_interval=poll_interval)
+        return watcher.watch()
+
 
 def register(cli):
     """Register agent commands with CLI"""
@@ -472,3 +484,9 @@ def register(cli):
     context_parser.add_argument('session_id', type=int, help='Session ID')
     context_parser.add_argument('--output', '-o', help='Output file for context JSON')
     cli.commands['agent.context'] = cmd.show_context
+
+    # agent watch
+    watch_parser = subparsers.add_parser('watch', help='Watch agent session in real-time')
+    watch_parser.add_argument('session_id', type=int, help='Session ID to watch')
+    watch_parser.add_argument('--interval', '-i', type=float, default=2.0, help='Poll interval in seconds (default: 2.0)')
+    cli.commands['agent.watch'] = cmd.watch_session
