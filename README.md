@@ -143,20 +143,41 @@ grep -r "TODO" .
 # Multi-agent conflict detection included!
 ```
 
-### 5. **LLM Integration**
+### 5. **AI Agent Session Management**
 
-Generate context for AI agents:
+Track AI agent sessions with automatic commit linking:
 
 ```bash
-# Get project overview
-python3 src/llm_context.py project -p my-project
+# Start an agent session
+./templedb agent start --project myproject --goal "Implement authentication"
+# → Session ID: 1
 
-# Export to JSON
-python3 src/llm_context.py export -p myproject -o context.json
+# Export session ID to link commits
+export TEMPLEDB_SESSION_ID=1
 
-# Generate custom prompt
-python3 src/llm_context.py prompt -t "Explain the auth flow"
+# Checkout and work
+./templedb project checkout myproject /tmp/work
+cd /tmp/work && vim src/auth.py
+
+# Commit - automatically linked to session
+./templedb project commit myproject /tmp/work -m "Add auth" --ai-assisted
+
+# View session status
+./templedb agent status 1
+# → Shows commits, interactions, duration
+
+# End session
+./templedb agent end 1
 ```
+
+**Features:**
+- Session lifecycle tracking (start/active/completed)
+- Automatic commit-to-session linking via `TEMPLEDB_SESSION_ID`
+- Interaction history logging
+- Context snapshot generation
+- Session analytics (duration, commits, metrics)
+
+**See [AGENT_SESSIONS.md](AGENT_SESSIONS.md) for complete guide.**
 
 ---
 
@@ -299,8 +320,17 @@ FROM projects p"
 - **Conflict detection** - Version-based optimistic locking
 - **Atomic operations** - All changes in transactions
 
-### LLM Context Provider
+### AI Agent Integration
 
+**Agent Session Management:**
+- **Session tracking** - Create, manage, and monitor AI sessions
+- **Automatic commit linking** - Link commits via `TEMPLEDB_SESSION_ID` env var
+- **Interaction logging** - Record all agent interactions
+- **Context snapshots** - Generate and store project context for agents
+- **Session analytics** - Duration, commits, metrics per session
+- **Multi-agent support** - Track multiple concurrent agent sessions
+
+**LLM Context Provider:**
 - **Schema overview** - Describe database structure
 - **Project context** - Complete project information
 - **File context** - File metadata and versions
@@ -395,6 +425,8 @@ ORDER BY version_number DESC;
 - **[FILES.md](FILES.md)** - How file tracking and versioning works
 - **[TUI.md](TUI.md)** - Terminal UI guide
 - **[EXAMPLES.md](EXAMPLES.md)** - SQL query examples and common patterns
+- **[AGENT_SESSIONS.md](AGENT_SESSIONS.md)** - AI agent session management guide
+- **[VCS_METADATA_GUIDE.md](VCS_METADATA_GUIDE.md)** - Commit metadata and AI attribution
 
 ### Critical Reference
 - **[QUERY_BEST_PRACTICES.md](QUERY_BEST_PRACTICES.md)** - ⚠️ **Critical**: Query constraints and best practices (read this!)
@@ -465,6 +497,14 @@ templedb vcs commit -m <msg> -p <proj> [-a <author>] # Commit staged changes
 templedb vcs status <proj>                          # Show staged and unstaged changes
 templedb vcs log <proj> [-n <num>]                  # Show commit history
 templedb vcs branch <proj> [<name>]                 # List or create branches
+
+# Agent Sessions (AI tracking)
+templedb agent start --project <proj> [--goal <text>]    # Start AI agent session
+templedb agent end <session-id> [--status <status>]      # End session
+templedb agent list [--project <proj>] [--status <stat>] # List sessions
+templedb agent status <session-id> [--verbose]           # Show session details
+templedb agent history <session-id> [--limit <n>]        # View interaction history
+templedb agent context <session-id> [--output <file>]    # Export session context
 
 # Search
 templedb search content <pattern> [-p <proj>] [-i]  # Search file contents
