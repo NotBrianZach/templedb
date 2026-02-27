@@ -480,6 +480,18 @@ class AgentCommands(Command):
 
         return 0
 
+    def launch_tui(self, args) -> int:
+        """Launch interactive TUI for agent sessions"""
+        session_id = getattr(args, 'session_id', None)
+
+        # Import AgentTUI
+        from agent_tui import AgentTUI
+
+        # Launch TUI
+        app = AgentTUI(session_id=session_id)
+        app.run()
+        return 0
+
 
 def register(cli):
     """Register agent commands with CLI"""
@@ -555,3 +567,8 @@ def register(cli):
     send_parser.add_argument('session_id', type=int, help='Session ID')
     send_parser.add_argument('message', help='Message to send')
     cli.commands['agent.send'] = cmd.send_message
+
+    # agent tui
+    tui_parser = subparsers.add_parser('tui', help='Launch interactive TUI')
+    tui_parser.add_argument('session_id', nargs='?', type=int, help='Session ID to view (optional)')
+    cli.commands['agent.tui'] = cmd.launch_tui

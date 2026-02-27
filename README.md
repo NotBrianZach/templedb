@@ -437,6 +437,7 @@ ORDER BY version_number DESC;
 - **[TUI.md](TUI.md)** - Terminal UI guide
 - **[EXAMPLES.md](EXAMPLES.md)** - SQL query examples and common patterns
 - **[AGENT_SESSIONS.md](AGENT_SESSIONS.md)** - AI agent session management guide
+- **[MULTI_AGENT_COORDINATION.md](MULTI_AGENT_COORDINATION.md)** ⭐ - Multi-agent coordination and work items
 - **[VCS_METADATA_GUIDE.md](VCS_METADATA_GUIDE.md)** - Commit metadata and AI attribution
 
 ### Critical Reference

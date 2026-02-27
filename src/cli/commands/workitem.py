@@ -39,6 +39,28 @@ class WorkItemCommands(Command):
         self.agent_repo = AgentRepository(DB_PATH)
         self.coordinator = AgentCoordinator()
 
+    def _get_project_id(self, project: str) -> Optional[int]:
+        """
+        Get project ID from slug or ID string.
+
+        Args:
+            project: Project slug or ID string
+
+        Returns:
+            Project ID or None if not found
+        """
+        try:
+            project_id = int(project)
+            project_obj = self.project_repo.get_by_id(project_id)
+        except ValueError:
+            project_obj = self.project_repo.get_by_slug(project)
+
+        if not project_obj:
+            logger.error(f"Project '{project}' not found")
+            return None
+
+        return project_obj['id']
+
     def _format_table(self, data, headers):
         """Simple table formatting"""
         if not data:
@@ -71,17 +93,9 @@ class WorkItemCommands(Command):
         parent_id = getattr(args, 'parent', None)
 
         # Get project
-        try:
-            project_id = int(project)
-            project_obj = self.project_repo.get_by_id(project_id)
-        except ValueError:
-            project_obj = self.project_repo.get_by_slug(project)
-
-        if not project_obj:
-            logger.error(f"Project '{project}' not found")
+        project_id = self._get_project_id(project)
+        if not project_id:
             return 1
-
-        project_id = project_obj['id']
 
         # Check for TEMPLEDB_SESSION_ID to link to creating session
         session_id = os.environ.get('TEMPLEDB_SESSION_ID')
@@ -155,14 +169,9 @@ class WorkItemCommands(Command):
 
         if project:
             # Get project ID
-            try:
-                project_id = int(project)
-            except ValueError:
-                project_obj = self.project_repo.get_by_slug(project)
-                if not project_obj:
-                    logger.error(f"Project '{project}' not found")
-                    return 1
-                project_id = project_obj['id']
+            project_id = self._get_project_id(project)
+            if not project_id:
+                return 1
 
             where_clauses.append("wi.project_id = ?")
             params.append(project_id)
@@ -397,14 +406,9 @@ class WorkItemCommands(Command):
         params = []
         if project:
             # Get project ID
-            try:
-                project_id = int(project)
-            except ValueError:
-                project_obj = self.project_repo.get_by_slug(project)
-                if not project_obj:
-                    logger.error(f"Project '{project}' not found")
-                    return 1
-                project_id = project_obj['id']
+            project_id = self._get_project_id(project)
+            if not project_id:
+                return 1
 
             where_sql = "WHERE project_id = ?"
             params.append(project_id)
@@ -540,14 +544,9 @@ class WorkItemCommands(Command):
 
         project_id = None
         if project:
-            try:
-                project_id = int(project)
-            except ValueError:
-                project_obj = self.project_repo.get_by_slug(project)
-                if not project_obj:
-                    logger.error(f"Project '{project}' not found")
-                    return 1
-                project_id = project_obj['id']
+            project_id = self._get_project_id(project)
+            if not project_id:
+                return 1
 
         dispatched = self.coordinator.dispatch_pending_work(
             project_id=project_id,
@@ -563,14 +562,9 @@ class WorkItemCommands(Command):
 
         project_id = None
         if project:
-            try:
-                project_id = int(project)
-            except ValueError:
-                project_obj = self.project_repo.get_by_slug(project)
-                if not project_obj:
-                    logger.error(f"Project '{project}' not found")
-                    return 1
-                project_id = project_obj['id']
+            project_id = self._get_project_id(project)
+            if not project_id:
+                return 1
 
         agents = self.coordinator.get_available_agents(project_id=project_id)
 
@@ -601,14 +595,9 @@ class WorkItemCommands(Command):
 
         project_id = None
         if project:
-            try:
-                project_id = int(project)
-            except ValueError:
-                project_obj = self.project_repo.get_by_slug(project)
-                if not project_obj:
-                    logger.error(f"Project '{project}' not found")
-                    return 1
-                project_id = project_obj['id']
+            project_id = self._get_project_id(project)
+            if not project_id:
+                return 1
 
         metrics = self.coordinator.get_coordination_metrics(project_id=project_id)
 
