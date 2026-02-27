@@ -44,6 +44,7 @@
             # Runtime tools your CLI shells out to
             sops
             age
+            age-plugin-yubikey
 
             # Nice-to-haves
             git
