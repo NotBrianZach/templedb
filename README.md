@@ -15,6 +15,8 @@
 
 TempleDB is a database-native ai swarm centric project management system that treats your codebase as a temple - a sacred, organized space where every file, every line, every change is tracked, versioned, and queryable.
 
+We throw out of the temple those that would lend us technical debt in the form of state duplication, namely filesystem centric tools like git, sops, and potentially including ci/cd and deployment tools like docker.
+
 ### Philosophy
 
 As TempleOS showed us the power of simplicity and first principles, so TempleDB embraces:

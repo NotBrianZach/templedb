@@ -243,4 +243,17 @@ def register(cli):
     commit_parser.add_argument('-m', '--message', required=True, help='Commit message')
     commit_parser.add_argument('--force', '-f', action='store_true', help='Force commit, overwrite conflicts')
     commit_parser.add_argument('--strategy', choices=['abort', 'force', 'rebase'], help='Conflict resolution strategy')
+
+    # Metadata options
+    commit_parser.add_argument('--interactive', '-i', action='store_true', help='Interactive mode for rich metadata')
+    commit_parser.add_argument('--intent', help='High-level intent/purpose of the commit')
+    commit_parser.add_argument('--type', choices=['feature', 'bugfix', 'refactor', 'docs', 'test', 'chore', 'perf', 'style'], help='Type of change')
+    commit_parser.add_argument('--scope', help='Scope/area of codebase affected')
+    commit_parser.add_argument('--breaking', action='store_true', help='Mark as breaking change')
+    commit_parser.add_argument('--impact', choices=['low', 'medium', 'high', 'critical'], help='Impact level')
+    commit_parser.add_argument('--ai-assisted', action='store_true', help='Mark as AI-assisted')
+    commit_parser.add_argument('--ai-tool', help='AI tool used (e.g., Claude, GPT-4)')
+    commit_parser.add_argument('--confidence', choices=['low', 'medium', 'high'], help='Confidence level')
+    commit_parser.add_argument('--tags', help='Comma-separated tags')
+
     cli.commands['project.commit'] = commit_cmd.commit
