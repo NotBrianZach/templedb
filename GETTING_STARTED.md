@@ -70,6 +70,31 @@ echo 'export PATH="$HOME/templedb:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
+**AI Assistant Setup (Optional):**
+
+For Claude Code users, enable comprehensive TempleDB context:
+
+```bash
+# Launch Claude Code with full project context
+claude --append-system-prompt-file .claude/project-context.md
+
+# Or create a convenient alias
+echo "alias claude-templedb='claude --append-system-prompt-file .claude/project-context.md'" >> ~/.bashrc
+source ~/.bashrc
+
+# Then use:
+claude-templedb
+```
+
+The `.claude/project-context.md` file provides AI assistants with:
+- Complete architecture and philosophy
+- All CLI commands and workflows
+- Common SQL query patterns
+- Development guidelines
+- MCP integration details
+
+This ensures AI assistants understand TempleDB's unique database-first approach from the start.
+
 ### 3. Initialize Your First Project
 
 ```bash

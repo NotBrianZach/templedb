@@ -206,6 +206,28 @@ The installer will:
 
 See **[GETTING_STARTED.md](GETTING_STARTED.md)** for detailed installation instructions.
 
+### AI Assistant Integration
+
+**For Claude Code users**: TempleDB includes a comprehensive project context file for AI assistants:
+
+```bash
+# Launch Claude Code with full TempleDB context
+claude --append-system-prompt-file .claude/project-context.md
+
+# Or create an alias for convenience
+alias claude-templedb='claude --append-system-prompt-file .claude/project-context.md'
+```
+
+The project context file (`.claude/project-context.md`) provides:
+- Complete architecture overview
+- CLI command reference
+- Common SQL query patterns
+- Development guidelines
+- MCP integration details
+- Multi-agent coordination guide
+
+This ensures AI assistants have comprehensive understanding of TempleDB's philosophy, commands, and workflows from the start.
+
 ---
 
 ## Quick Start
@@ -336,7 +358,6 @@ FROM projects p"
 - **Auto-Dispatch** - Automatically assign work to least-busy agents
 - **Mailbox System** - Asynchronous task assignment via database
 - **Convoys** - Bundle related work items for coordinated execution
-- **O(k) Coordination** - Linear scaling (vs. O(k²) git-based coordination)
 - **ACID Transactions** - Conflict-free multi-agent coordination
 
 **LLM Context Provider:**
@@ -346,25 +367,6 @@ FROM projects p"
 - **Prompt generation** - Ready-to-use AI prompts
 
 **See [MULTI_AGENT_COORDINATION.md](MULTI_AGENT_COORDINATION.md) for complete guide.**
-
----
-
-## Current State
-
-### Tracked Projects
-
-- **8 projects** imported
-- **494 files** tracked
-- **369,500+ lines** of code
-- **52MB database** with full contents
-
-### Top File Types
-
-1. config_json (127 files, 119,694 lines)
-2. javascript (109 files, 23,899 lines)
-3. markdown (33 files, 168,286 lines)
-4. jsx_component (27 files, 13,026 lines)
-5. sql_file (18 files, 28,885 lines)
 
 ---
 
@@ -549,52 +551,9 @@ templedb help                      # Show help
 
 ---
 
-## Philosophy: Normalization vs. Redundancy
-
-TempleDB inverts the traditional model:
-
-**Traditional:**
-- Filesystem is source of truth
-- Files copied across branches, projects, builds
-- k checkouts require **O(k²) pairwise comparisons** to verify consistency
-- Merge conflicts require **O(n×m²)** worst-case comparison
-- State fragmented across filesystem, .git, node_modules
-- **Coordination cost scales quadratically** with number of checkouts
-
-**TempleDB:**
-- **Database is single source of truth**
-- Files normalized (stored once, referenced many times)
-- Verification is **O(k) comparisons** against single source
-- Conflicts detected by version numbers, not content scanning
-- **Coordination cost scales linearly** (O(k) factor improvement)
-
-This enables:
-- **Storage efficiency**: Each file stored once via content addressing
-- **No tracking errors**: Database enforces consistency
-- **Multi-agent safety**: Coordinated concurrent work
-- **Instant queries**: SQL across entire codebase
-- **Temporary workspaces**: Extract files when needed
-- **Scales indefinitely**: Constant overhead
-
----
-
-## Tribute
-
-<div align="center">
-
-<img src="assets/templeos-tribute.svg" width="500" alt="TempleOS Tribute"/>
-
-</div>
-
-This project is dedicated to **Terry A. Davis** (1969-2018), creator of TempleOS. Terry showed us that simplicity, transparency, and building from first principles can create something beautiful and profound.
-
-Read more: [TRIBUTE.md](TRIBUTE.md)
-
----
-
 ## Contributing
 
-TempleDB is a personal project but contributions are welcome. The code is its own documentation - query the database to understand it!
+Contributions or other maintainers are welcome.
 
 ---
 

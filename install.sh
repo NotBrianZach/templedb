@@ -334,6 +334,15 @@ show_completion_message() {
     echo "  • Quick Start:     QUICKSTART.md"
     echo "  • README:          README.md"
     echo ""
+    echo "AI Assistant Integration:"
+    echo "  • For Claude Code users:"
+    echo "    claude --append-system-prompt-file .claude/project-context.md"
+    echo ""
+    echo "  • Or create an alias:"
+    echo "    alias claude-templedb='claude --append-system-prompt-file .claude/project-context.md'"
+    echo ""
+    echo "  This provides comprehensive TempleDB context to AI assistants."
+    echo ""
 
     if ! command -v age &> /dev/null; then
         echo "Optional: Install age for secret management"
