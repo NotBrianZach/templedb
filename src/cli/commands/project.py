@@ -175,6 +175,37 @@ class ProjectCommands(Command):
         logger.info(f"Removed project: {args.slug}")
         return 0
 
+    def generate_envrc(self, args) -> int:
+        """Generate .envrc file for a project"""
+        project = self.project_repo.get_by_slug(args.slug)
+        if not project:
+            logger.error(f"Project '{args.slug}' not found")
+            return 1
+
+        repo_url = project.get('repo_url')
+        if not repo_url:
+            logger.error(f"Project '{args.slug}' has no repo_url set")
+            return 1
+
+        project_path = Path(repo_url)
+        if not project_path.exists():
+            logger.error(f"Project path does not exist: {project_path}")
+            return 1
+
+        envrc_path = project_path / ".envrc"
+
+        if envrc_path.exists() and not args.force:
+            logger.info(f"✓ .envrc already exists at {envrc_path}")
+            logger.info("  Use --force to overwrite")
+            return 0
+
+        # Standard .envrc content that calls tdb direnv
+        envrc_content = 'eval "$(tdb direnv)"\n'
+
+        envrc_path.write_text(envrc_content)
+        logger.info(f"✅ Generated .envrc at {envrc_path}")
+        return 0
+
 
 def register(cli):
     """Register project commands with CLI"""
@@ -215,6 +246,12 @@ def register(cli):
     rm_parser.add_argument('slug', help='Project slug')
     rm_parser.add_argument('--force', '-f', action='store_true', help='Skip confirmation')
     cli.commands['project.rm'] = cmd.remove_project
+
+    # project generate-envrc
+    envrc_parser = subparsers.add_parser('generate-envrc', help='Generate .envrc file for project')
+    envrc_parser.add_argument('slug', help='Project slug')
+    envrc_parser.add_argument('--force', '-f', action='store_true', help='Overwrite existing .envrc')
+    cli.commands['project.generate-envrc'] = cmd.generate_envrc
 
     # project checkout
     checkout_cmd = CheckoutCommand()

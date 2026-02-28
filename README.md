@@ -9,7 +9,7 @@
 
 ---
 
-## What is TempleDB?
+## What is TempleDB? (BESIDES A Work in Progress)
 
 <img src="assets/logo.svg" align="right" width="150" alt="TempleDB Logo"/>
 
