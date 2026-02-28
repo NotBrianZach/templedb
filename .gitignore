@@ -157,3 +157,4 @@ dev*.sqlite
 
 # Other
 .cache/
+projdb.db
