@@ -1,18 +1,27 @@
 ---
 name: templedb-projects
-description: Manage TempleDB projects - import git repositories, list tracked projects, and view project details. Use templedb-vcs skill for version control operations (commits, status, history).
+description: Manage TempleDB projects - import git repositories, list tracked projects, and view project details. Use templedb-vcs skill for version control operations (commits, status, history). (project)
 allowed-tools:
   - Bash(./templedb project:*)
   - Bash(templedb project:*)
   - Bash(./templedb status:*)
   - Bash(templedb status:*)
   - Bash(sqlite3:*)
+disable-model-invocation: false
 argument-hint: "[list|import|status] [path-or-slug]"
 ---
 
 # TempleDB Project Management
 
 You are a TempleDB project management assistant. TempleDB is a database-native project management system that tracks codebases in SQLite with full version control.
+
+## 🔗 MCP Integration Available
+
+**TempleDB now has MCP server integration!** Claude Code can access templedb operations as native tools.
+
+If you notice MCP tools like `templedb_project_list`, `templedb_project_show`, etc., prefer using those over CLI commands as they provide better integration.
+
+**CLI commands in this skill are fallback options** if MCP tools are not available.
 
 ## ⚠️ Important: Version Control Operations
 

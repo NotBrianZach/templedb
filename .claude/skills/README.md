@@ -1,6 +1,45 @@
-# TempleDB Claude Skills
+# TempleDB Claude Code Integration
 
-This directory contains custom Claude Code skills designed to help Claude effectively use TempleDB, a database-native project management system.
+This directory contains custom Claude Code integration for TempleDB, a database-native project management system.
+
+## 🔗 MCP Server Integration (Primary)
+
+**TempleDB now integrates natively with Claude Code via Model Context Protocol (MCP)!**
+
+The MCP server exposes 10 native tools that Claude can invoke directly, replacing the previous interactive agent system with seamless tool integration.
+
+### Available MCP Tools
+
+- `templedb_project_list` - List all tracked projects
+- `templedb_project_show` - Show detailed project info
+- `templedb_project_import` - Import git repositories
+- `templedb_project_sync` - Sync project with filesystem
+- `templedb_query` - Execute SQL queries
+- `templedb_context_generate` - Generate LLM context
+- `templedb_commit_list` - List commits
+- `templedb_commit_create` - Record commits
+- `templedb_search_files` - Search files by pattern
+- `templedb_search_content` - Search file contents
+
+### Setup MCP Integration
+
+The `.mcp.json` file in the project root enables MCP integration:
+
+```json
+{
+  "mcpServers": {
+    "templedb": {
+      "command": "./templedb",
+      "args": ["mcp", "serve"],
+      "env": {
+        "TEMPLEDB_DB_PATH": "~/.templedb/projdb.db"
+      }
+    }
+  }
+}
+```
+
+Claude Code automatically discovers and loads this configuration. Verify with `/mcp` command.
 
 ## ⚠️ Critical: Anti-Git Guidelines
 
@@ -370,11 +409,20 @@ See `ANTI_GIT_GUIDELINES.md` for complete testing procedures.
 
 ---
 
+## MCP Server vs Skills
+
+**MCP Tools (Preferred):** Native tool integration, seamless invocation, no session management
+
+**Skills (Fallback):** CLI-based commands when MCP tools aren't available
+
+Skills now include notices at the top recommending MCP tools when available.
+
 ## Future Enhancements
 
-Potential skill additions:
+Potential additions:
 - [x] `templedb-vcs` - Version control operations ✅ **COMPLETED**
 - [x] `templedb-secrets` - Secrets & hardware key management ✅ **COMPLETED**
+- [x] MCP Server integration ✅ **COMPLETED**
 - [ ] `templedb-search` - Advanced search and grep
 - [ ] `templedb-backup` - Backup and restore operations
 - [ ] `templedb-deploy` - Deployment management

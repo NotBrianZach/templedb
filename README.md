@@ -457,7 +457,6 @@ ORDER BY version_number DESC;
 - **[CHANGELOG.md](CHANGELOG.md)** - Version history
 - **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Latest release notes
 - **[MIGRATIONS.md](MIGRATIONS.md)** - Schema evolution history
-- **[TRIBUTE.md](TRIBUTE.md)** - Dedication to Terry Davis
 
 ### Implementation Details
 - **[Implementation Docs](docs/implementation/)** - Historical analyses, refactors, and completed work

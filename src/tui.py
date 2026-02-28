@@ -44,6 +44,7 @@ class ProjectsScreen(Screen):
         table = self.query_one("#projects-table", DataTable)
         table.add_columns("Slug", "Name", "Files", "Lines")
         table.cursor_type = "row"
+        table.focus()
 
         self.load_projects()
 
@@ -133,6 +134,7 @@ class FilesScreen(Screen):
         table = self.query_one("#files-table", DataTable)
         table.add_columns("Path", "Type", "LOC", "Size")
         table.cursor_type = "row"
+        table.focus()
 
         self.load_files()
 
@@ -474,6 +476,7 @@ class VCSCommitsScreen(Screen):
         table = self.query_one("#commits-table", DataTable)
         table.add_columns("Hash", "Branch", "Author", "Message", "Date")
         table.cursor_type = "row"
+        table.focus()
         self.load_commits()
 
     def load_commits(self) -> None:
@@ -570,6 +573,7 @@ class VCSBranchesScreen(Screen):
         table = self.query_one("#branches-table", DataTable)
         table.add_columns("Branch", "Default", "Commits", "Created")
         table.cursor_type = "row"
+        table.focus()
         self.load_branches()
 
     def load_branches(self) -> None:
@@ -782,6 +786,7 @@ class VCSStagingScreen(Screen):
         unstaged_table = self.query_one("#unstaged-table", DataTable)
         unstaged_table.add_columns("State", "File")
         unstaged_table.cursor_type = "row"
+        unstaged_table.focus()
 
         self.load_status()
 
@@ -1093,6 +1098,7 @@ class SecretsScreen(Screen):
         table = self.query_one("#secrets-table", DataTable)
         table.add_columns("Project", "Profile", "Created", "Updated")
         table.cursor_type = "row"
+        table.focus()
         self.load_secrets()
 
     def load_secrets(self) -> None:
@@ -1287,6 +1293,15 @@ class MainMenuScreen(Screen):
         Binding("x", "secrets", "Secrets"),
         Binding("?", "help", "Help"),
     ]
+
+    def on_mount(self) -> None:
+        """Set focus when screen mounts"""
+        # Focus the first button so keyboard navigation works
+        try:
+            first_button = self.query_one("#btn-projects", Button)
+            first_button.focus()
+        except Exception:
+            pass
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1520,6 +1535,11 @@ class TempleDBTUI(App):
     def on_mount(self) -> None:
         """Show main menu on start"""
         self.push_screen(MainMenuScreen())
+
+    def on_key(self, event) -> None:
+        """Handle global keyboard events"""
+        # This helps debug keyboard input issues
+        pass
 
 
 def main():

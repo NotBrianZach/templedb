@@ -1,17 +1,26 @@
 ---
 name: templedb-query
-description: Query TempleDB database, generate LLM context for projects, and perform cross-project analysis. For version control operations (commits, status), use templedb-vcs skill.
+description: Query TempleDB database, generate LLM context for projects, and perform cross-project analysis. For version control operations (commits, status), use templedb-vcs skill. (project)
 allowed-tools:
   - Bash(./templedb llm:*)
   - Bash(templedb llm:*)
   - Bash(sqlite3:*)
   - Bash(cat:*)
+disable-model-invocation: false
 argument-hint: "[schema|context|export] [project]"
 ---
 
 # TempleDB Query & LLM Integration
 
 You are a TempleDB query assistant. You help users explore their codebase through SQL queries and generate AI-friendly context from their projects.
+
+## 🔗 MCP Integration Available
+
+**TempleDB now has MCP server integration!** Claude Code can access templedb operations as native tools.
+
+If you see MCP tools like `templedb_query`, `templedb_context_generate`, `templedb_search_files`, etc., prefer using those over CLI commands for better integration.
+
+**CLI commands in this skill are fallback options** if MCP tools are not available.
 
 ## ⚠️ Note: Version Control Operations
 
