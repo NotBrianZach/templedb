@@ -14,11 +14,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from cli.core import Command
 from repositories import ProjectRepository
-from repositories.agent_repository import AgentRepository
 from logger import get_logger
 from config import DB_PATH
 import db_utils
-from agent_coordinator import AgentCoordinator
 
 logger = get_logger(__name__)
 
@@ -36,8 +34,6 @@ class WorkItemCommands(Command):
     def __init__(self):
         super().__init__()
         self.project_repo = ProjectRepository()
-        self.agent_repo = AgentRepository(DB_PATH)
-        self.coordinator = AgentCoordinator()
 
     def _get_project_id(self, project: str) -> Optional[int]:
         """
@@ -97,20 +93,8 @@ class WorkItemCommands(Command):
         if not project_id:
             return 1
 
-        # Check for TEMPLEDB_SESSION_ID to link to creating session
-        session_id = os.environ.get('TEMPLEDB_SESSION_ID')
-        if session_id:
-            try:
-                session_id = int(session_id)
-                session = self.agent_repo.get_session(session_id)
-                if not session:
-                    logger.warning(f"Session ID {session_id} from TEMPLEDB_SESSION_ID not found, ignoring")
-                    session_id = None
-            except ValueError:
-                logger.warning(f"Invalid TEMPLEDB_SESSION_ID value: {session_id}, ignoring")
-                session_id = None
-        else:
-            session_id = None
+        # Get creator identifier (could be set via env var or default to 'cli')
+        created_by = os.environ.get('TEMPLEDB_USER', 'cli')
 
         # Generate work item ID
         work_item_id = generate_work_item_id()
@@ -130,7 +114,7 @@ class WorkItemCommands(Command):
         db_utils.execute("""
             INSERT INTO work_items (
                 id, project_id, title, description, status, priority, item_type,
-                created_by_session_id, parent_item_id
+                created_by, parent_item_id
             ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
         """, (
             work_item_id,
@@ -139,7 +123,7 @@ class WorkItemCommands(Command):
             description,
             priority,
             item_type,
-            session_id,
+            created_by,
             parent_id
         ))
 
@@ -150,8 +134,7 @@ class WorkItemCommands(Command):
         print(f"  Status: pending")
         if parent_id:
             print(f"  Parent: {parent_id}")
-        if session_id:
-            print(f"  Created by session: {session_id}")
+        print(f"  Created by: {created_by}")
 
         return 0
 
@@ -160,7 +143,7 @@ class WorkItemCommands(Command):
         project = getattr(args, 'project', None)
         status = getattr(args, 'status', None)
         priority = getattr(args, 'priority', None)
-        assigned_session = getattr(args, 'assigned_session', None)
+        assigned_to = getattr(args, 'assigned_to', None)
         show_all = getattr(args, 'all', False)
 
         # Build query
@@ -187,9 +170,9 @@ class WorkItemCommands(Command):
             where_clauses.append("wi.priority = ?")
             params.append(priority)
 
-        if assigned_session:
-            where_clauses.append("wi.assigned_session_id = ?")
-            params.append(int(assigned_session))
+        if assigned_to:
+            where_clauses.append("wi.assigned_to = ?")
+            params.append(assigned_to)
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
@@ -202,12 +185,11 @@ class WorkItemCommands(Command):
                 wi.priority,
                 wi.item_type,
                 p.slug as project_slug,
-                s.session_uuid as assigned_session,
+                wi.assigned_to,
                 wi.created_at,
                 (SELECT COUNT(*) FROM work_items sub WHERE sub.parent_item_id = wi.id) as subtask_count
             FROM work_items wi
             JOIN projects p ON wi.project_id = p.id
-            LEFT JOIN agent_sessions s ON wi.assigned_session_id = s.id
             WHERE {where_sql}
             ORDER BY
                 CASE wi.priority
@@ -234,7 +216,7 @@ class WorkItemCommands(Command):
                 item['item_type'],
                 item['status'],
                 item['priority'],
-                item['assigned_session'][:8] if item['assigned_session'] else '-',
+                item['assigned_to'][:12] if item['assigned_to'] else '-',
                 str(item['subtask_count']) if item['subtask_count'] > 0 else '-'
             ])
 
@@ -333,9 +315,9 @@ class WorkItemCommands(Command):
         return 0
 
     def assign_item(self, args) -> int:
-        """Assign a work item to an agent session."""
+        """Assign a work item to a user/agent."""
         item_id = args.item_id
-        session_id = args.session_id
+        assignee = args.assignee
 
         # Verify item exists
         item = db_utils.query_one("SELECT id, status FROM work_items WHERE id = ?", (item_id,))
@@ -343,31 +325,21 @@ class WorkItemCommands(Command):
             logger.error(f"Work item '{item_id}' not found")
             return 1
 
-        # Verify session exists and is active
-        session = self.agent_repo.get_session(session_id)
-        if not session:
-            logger.error(f"Session {session_id} not found")
-            return 1
-
-        if session['status'] != 'active':
-            logger.error(f"Session {session_id} is not active (status: {session['status']})")
-            return 1
-
         # Assign item
         db_utils.execute("""
             UPDATE work_items
-            SET assigned_session_id = ?,
+            SET assigned_to = ?,
                 status = CASE
                     WHEN status = 'pending' THEN 'assigned'
                     ELSE status
                 END
             WHERE id = ?
-        """, (session_id, item_id))
+        """, (assignee, item_id))
 
-        print(f"Assigned work item {item_id} to session {session_id} ({session['session_uuid'][:16]}...)")
+        print(f"Assigned work item {item_id} to {assignee}")
 
-        # Show mailbox message was created
-        print(f"✓ Work assignment notification sent to agent mailbox")
+        # Show notification was created
+        print(f"✓ Work assignment notification sent")
 
         return 0
 
@@ -460,19 +432,13 @@ class WorkItemCommands(Command):
         return 0
 
     def mailbox(self, args) -> int:
-        """Show agent mailbox messages."""
-        session_id = args.session_id
+        """Show work item notifications for a recipient."""
+        recipient = args.recipient
         status_filter = getattr(args, 'status', None)
 
-        # Verify session exists
-        session = self.agent_repo.get_session(session_id)
-        if not session:
-            logger.error(f"Session {session_id} not found")
-            return 1
-
         # Build query
-        where_sql = "WHERE session_id = ?"
-        params = [session_id]
+        where_sql = "WHERE recipient = ?"
+        params = [recipient]
 
         if status_filter:
             where_sql += " AND status = ?"
@@ -489,17 +455,17 @@ class WorkItemCommands(Command):
                 delivered_at,
                 read_at,
                 message_content
-            FROM agent_mailbox
+            FROM work_item_notifications
             {where_sql}
             ORDER BY delivered_at DESC
             LIMIT 50
         """, tuple(params))
 
         if not messages:
-            print(f"No messages in mailbox for session {session_id}")
+            print(f"No notifications for {recipient}")
             return 0
 
-        print(f"Mailbox for Session {session_id} ({session['session_uuid'][:16]}...)")
+        print(f"Notifications for {recipient}")
         print("=" * 80)
 
         for msg in messages:
@@ -538,59 +504,19 @@ class WorkItemCommands(Command):
         return 0
 
     def dispatch(self, args) -> int:
-        """Auto-dispatch pending work items to available agents."""
-        project = getattr(args, 'project', None)
-        priority = getattr(args, 'priority', None)
-
-        project_id = None
-        if project:
-            project_id = self._get_project_id(project)
-            if not project_id:
-                return 1
-
-        dispatched = self.coordinator.dispatch_pending_work(
-            project_id=project_id,
-            priority_filter=priority
-        )
-
-        print(f"Dispatched {dispatched} work items to available agents")
-        return 0
+        """Auto-dispatch pending work items (deprecated - agent sessions removed)."""
+        logger.warning("dispatch command is deprecated - agent session coordination has been removed")
+        logger.info("Use 'work assign' to manually assign work items")
+        return 1
 
     def agents(self, args) -> int:
-        """List available agents with workload info."""
-        project = getattr(args, 'project', None)
-
-        project_id = None
-        if project:
-            project_id = self._get_project_id(project)
-            if not project_id:
-                return 1
-
-        agents = self.coordinator.get_available_agents(project_id=project_id)
-
-        if not agents:
-            print("No active agents available")
-            return 0
-
-        headers = ["Session ID", "UUID", "Type", "Project", "Active Work", "Unread Msgs"]
-        rows = []
-        for agent in agents:
-            rows.append([
-                str(agent['id']),
-                agent['session_uuid'][:16] + '...' if agent['session_uuid'] else '-',
-                agent['agent_type'],
-                agent['project_slug'] or '-',
-                str(agent['active_work_count']),
-                str(agent['unread_messages'])
-            ])
-
-        print(self._format_table(rows, headers))
-        print(f"\nTotal: {len(agents)} active agents")
-
-        return 0
+        """List available agents (deprecated - agent sessions removed)."""
+        logger.warning("agents command is deprecated - agent session coordination has been removed")
+        logger.info("Work items can now be assigned to any user/agent identifier using 'work assign'")
+        return 1
 
     def metrics(self, args) -> int:
-        """Show coordination metrics."""
+        """Show work item metrics (simplified without agent coordination)."""
         project = getattr(args, 'project', None)
 
         project_id = None
@@ -599,24 +525,34 @@ class WorkItemCommands(Command):
             if not project_id:
                 return 1
 
-        metrics = self.coordinator.get_coordination_metrics(project_id=project_id)
+        # Query work item stats
+        where_clause = "WHERE project_id = ?" if project_id else ""
+        params = (project_id,) if project_id else ()
 
-        print("Multi-Agent Coordination Metrics")
+        stats = db_utils.query_one(f"""
+            SELECT
+                COUNT(*) as total_items,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END) as assigned,
+                SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked
+            FROM work_items
+            {where_clause}
+        """, params)
+
+        print("Work Item Metrics")
         print("=" * 50)
         print()
 
         print("Work Items:")
-        work = metrics['work_items']
-        print(f"  Total:        {work.get('total_items', 0)}")
-        print(f"  Pending:      {work.get('pending', 0)}")
-        print(f"  Assigned:     {work.get('assigned', 0)}")
-        print(f"  In Progress:  {work.get('in_progress', 0)}")
-        print(f"  Completed:    {work.get('completed', 0)}")
-        print(f"  Blocked:      {work.get('blocked', 0)}")
+        print(f"  Total:        {stats['total_items'] or 0}")
+        print(f"  Pending:      {stats['pending'] or 0}")
+        print(f"  Assigned:     {stats['assigned'] or 0}")
+        print(f"  In Progress:  {stats['in_progress'] or 0}")
+        print(f"  Completed:    {stats['completed'] or 0}")
+        print(f"  Blocked:      {stats['blocked'] or 0}")
         print()
-
-        print("Agents:")
-        agents = metrics['agents']
         print(f"  Active:       {agents.get('active_agents', 0)}")
         print(f"  Busy:         {agents.get('busy_agents', 0)}")
         print()
@@ -664,7 +600,7 @@ def register(cli):
     list_parser.add_argument('--priority',
                             choices=['low', 'medium', 'high', 'critical'],
                             help='Filter by priority')
-    list_parser.add_argument('--assigned-session', type=int, help='Filter by assigned session ID')
+    list_parser.add_argument('--assigned-to', help='Filter by assignee')
     list_parser.add_argument('-a', '--all', action='store_true', help='Show all items including completed/cancelled')
     cli.commands['work.list'] = cmd.list_items
 
@@ -674,9 +610,9 @@ def register(cli):
     cli.commands['work.show'] = cmd.show_item
 
     # Assign item
-    assign_parser = subparsers.add_parser('assign', help='Assign work item to agent session')
+    assign_parser = subparsers.add_parser('assign', help='Assign work item to user/agent')
     assign_parser.add_argument('item_id', help='Work item ID')
-    assign_parser.add_argument('session_id', type=int, help='Agent session ID')
+    assign_parser.add_argument('assignee', help='User or agent identifier')
     cli.commands['work.assign'] = cmd.assign_item
 
     # Update status
@@ -693,8 +629,8 @@ def register(cli):
     cli.commands['work.stats'] = cmd.stats
 
     # Mailbox
-    mailbox_parser = subparsers.add_parser('mailbox', help='Show agent mailbox messages')
-    mailbox_parser.add_argument('session_id', type=int, help='Agent session ID')
+    mailbox_parser = subparsers.add_parser('mailbox', help='Show work item notifications')
+    mailbox_parser.add_argument('recipient', help='User or agent identifier')
     mailbox_parser.add_argument('-s', '--status',
                                 choices=['unread', 'read', 'acknowledged', 'completed'],
                                 help='Filter by message status')

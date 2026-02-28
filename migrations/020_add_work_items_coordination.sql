@@ -13,8 +13,8 @@ CREATE TABLE IF NOT EXISTS work_items (
     item_type TEXT DEFAULT 'task',          -- task, bug, feature, refactor, research
 
     -- Assignment and coordination
-    assigned_session_id INTEGER,            -- Current agent session working on this
-    created_by_session_id INTEGER,          -- Agent session that created this item
+    assigned_to TEXT,                       -- User/agent identifier working on this
+    created_by TEXT,                        -- User/agent that created this item
     parent_item_id TEXT,                    -- For sub-tasks/dependencies
 
     -- Metadata
@@ -30,8 +30,6 @@ CREATE TABLE IF NOT EXISTS work_items (
     completed_at TEXT,
 
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-    FOREIGN KEY (assigned_session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL,
-    FOREIGN KEY (created_by_session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL,
     FOREIGN KEY (parent_item_id) REFERENCES work_items(id) ON DELETE SET NULL,
 
     CHECK (status IN ('pending', 'assigned', 'in_progress', 'completed', 'blocked', 'cancelled')),
@@ -42,8 +40,8 @@ CREATE TABLE IF NOT EXISTS work_items (
 -- Indexes for work item queries
 CREATE INDEX IF NOT EXISTS idx_work_items_project_status
     ON work_items(project_id, status);
-CREATE INDEX IF NOT EXISTS idx_work_items_assigned_session
-    ON work_items(assigned_session_id, status);
+CREATE INDEX IF NOT EXISTS idx_work_items_assigned
+    ON work_items(assigned_to, status);
 CREATE INDEX IF NOT EXISTS idx_work_items_status_priority
     ON work_items(status, priority, created_at);
 CREATE INDEX IF NOT EXISTS idx_work_items_parent
@@ -58,7 +56,7 @@ CREATE TABLE IF NOT EXISTS work_convoys (
     status TEXT NOT NULL DEFAULT 'pending',     -- pending, active, completed, cancelled
 
     -- Coordination
-    coordinator_session_id INTEGER,             -- Mayor/coordinator agent
+    coordinator TEXT,                           -- Mayor/coordinator agent identifier
 
     -- Timestamps
     created_at TEXT DEFAULT (datetime('now')),
@@ -66,7 +64,6 @@ CREATE TABLE IF NOT EXISTS work_convoys (
     completed_at TEXT,
 
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-    FOREIGN KEY (coordinator_session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL,
 
     CHECK (status IN ('pending', 'active', 'completed', 'cancelled'))
 );
@@ -117,21 +114,20 @@ CREATE TABLE IF NOT EXISTS work_item_transitions (
     work_item_id TEXT NOT NULL,
     from_status TEXT NOT NULL,
     to_status TEXT NOT NULL,
-    session_id INTEGER,                         -- Agent that made the transition
+    changed_by TEXT,                            -- User/agent that made the transition
     reason TEXT,
     transitioned_at TEXT DEFAULT (datetime('now')),
 
-    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_transitions_work_item
     ON work_item_transitions(work_item_id, transitioned_at);
 
--- Agent mailbox table (asynchronous task assignment)
-CREATE TABLE IF NOT EXISTS agent_mailbox (
+-- Work item notifications table (asynchronous task assignment)
+CREATE TABLE IF NOT EXISTS work_item_notifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL,
+    recipient TEXT NOT NULL,                    -- User/agent identifier
     message_type TEXT NOT NULL,                 -- work_assignment, notification, coordination_request
     work_item_id TEXT,                          -- Related work item if applicable
     convoy_id INTEGER,                          -- Related convoy if applicable
@@ -144,7 +140,6 @@ CREATE TABLE IF NOT EXISTS agent_mailbox (
     read_at TEXT,
     acknowledged_at TEXT,
 
-    FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
     FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
     FOREIGN KEY (convoy_id) REFERENCES work_convoys(id) ON DELETE CASCADE,
 
@@ -153,10 +148,10 @@ CREATE TABLE IF NOT EXISTS agent_mailbox (
     CHECK (status IN ('unread', 'read', 'acknowledged', 'completed'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_mailbox_session_status
-    ON agent_mailbox(session_id, status, priority);
-CREATE INDEX IF NOT EXISTS idx_mailbox_work_item
-    ON agent_mailbox(work_item_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_recipient_status
+    ON work_item_notifications(recipient, status, priority);
+CREATE INDEX IF NOT EXISTS idx_notifications_work_item
+    ON work_item_notifications(work_item_id);
 
 -- Views for work item queries
 
@@ -170,15 +165,13 @@ SELECT
     wi.item_type,
     p.slug as project_slug,
     p.name as project_name,
-    s.session_uuid as assigned_session,
-    s.agent_type,
+    wi.assigned_to,
     wi.created_at,
     wi.assigned_at,
     wi.started_at,
     (SELECT COUNT(*) FROM work_items sub WHERE sub.parent_item_id = wi.id) as subtask_count
 FROM work_items wi
 JOIN projects p ON wi.project_id = p.id
-LEFT JOIN agent_sessions s ON wi.assigned_session_id = s.id
 WHERE wi.status IN ('pending', 'assigned', 'in_progress', 'blocked');
 
 -- Work item statistics by project
@@ -197,24 +190,19 @@ FROM projects p
 LEFT JOIN work_items wi ON p.id = wi.project_id
 GROUP BY p.id;
 
--- Agent workload view
-CREATE VIEW IF NOT EXISTS agent_workload_view AS
+-- Assignee workload view
+CREATE VIEW IF NOT EXISTS assignee_workload_view AS
 SELECT
-    s.id as session_id,
-    s.session_uuid,
-    s.agent_type,
-    s.status as session_status,
+    wi.assigned_to,
     p.slug as project_slug,
     COUNT(wi.id) as assigned_items,
     SUM(CASE WHEN wi.status = 'in_progress' THEN 1 ELSE 0 END) as active_items,
     SUM(CASE WHEN wi.priority IN ('high', 'critical') THEN 1 ELSE 0 END) as high_priority_items,
-    (SELECT COUNT(*) FROM agent_mailbox WHERE session_id = s.id AND status = 'unread') as unread_messages
-FROM agent_sessions s
-LEFT JOIN agent_sessions_projects sp ON s.id = sp.session_id
-LEFT JOIN projects p ON sp.project_id = p.id
-LEFT JOIN work_items wi ON s.id = wi.assigned_session_id
-WHERE s.status = 'active'
-GROUP BY s.id;
+    (SELECT COUNT(*) FROM work_item_notifications WHERE recipient = wi.assigned_to AND status = 'unread') as unread_messages
+FROM work_items wi
+JOIN projects p ON wi.project_id = p.id
+WHERE wi.assigned_to IS NOT NULL
+GROUP BY wi.assigned_to, p.slug;
 
 -- Convoy progress view
 CREATE VIEW IF NOT EXISTS convoy_progress_view AS
@@ -259,13 +247,13 @@ BEGIN
         work_item_id,
         from_status,
         to_status,
-        session_id,
+        changed_by,
         transitioned_at
     ) VALUES (
         NEW.id,
         OLD.status,
         NEW.status,
-        NEW.assigned_session_id,
+        NEW.assigned_to,
         datetime('now')
     );
 
@@ -278,20 +266,20 @@ BEGIN
     WHERE id = NEW.id;
 END;
 
--- Automatically send mailbox message on work assignment
-CREATE TRIGGER IF NOT EXISTS notify_agent_on_assignment
-AFTER UPDATE OF assigned_session_id ON work_items
-WHEN NEW.assigned_session_id IS NOT NULL
-    AND (OLD.assigned_session_id IS NULL OR OLD.assigned_session_id != NEW.assigned_session_id)
+-- Automatically send notification on work assignment
+CREATE TRIGGER IF NOT EXISTS notify_on_assignment
+AFTER UPDATE OF assigned_to ON work_items
+WHEN NEW.assigned_to IS NOT NULL
+    AND (OLD.assigned_to IS NULL OR OLD.assigned_to != NEW.assigned_to)
 BEGIN
-    INSERT INTO agent_mailbox (
-        session_id,
+    INSERT INTO work_item_notifications (
+        recipient,
         message_type,
         work_item_id,
         message_content,
         priority
     ) VALUES (
-        NEW.assigned_session_id,
+        NEW.assigned_to,
         'work_assignment',
         NEW.id,
         json_object(

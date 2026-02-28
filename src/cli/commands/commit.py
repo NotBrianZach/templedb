@@ -13,7 +13,6 @@ from dataclasses import dataclass
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from repositories import ProjectRepository, FileRepository, CheckoutRepository, VCSRepository
-from repositories.agent_repository import AgentRepository
 from importer.content import ContentStore, FileContent
 from importer.scanner import FileScanner
 from logger import get_logger
@@ -43,7 +42,6 @@ class CommitCommand:
         self.file_repo = FileRepository()
         self.checkout_repo = CheckoutRepository()
         self.vcs_repo = VCSRepository()
-        self.agent_repo = AgentRepository(DB_PATH)
 
     def _collect_commit_metadata(self, args, changes: Dict) -> Dict:
         """
@@ -341,29 +339,6 @@ class CommitCommand:
                             commit=False
                         )
 
-            # Link commit to active agent session if exists
-            session_id = os.getenv('TEMPLEDB_SESSION_ID')
-            if session_id:
-                try:
-                    session_id_int = int(session_id)
-                    session = self.agent_repo.get_session(session_id=session_id_int)
-                    if session and session['status'] == 'active':
-                        self.agent_repo.link_commit_to_session(session_id_int, commit_id)
-                        self.agent_repo.add_interaction(
-                            session_id=session_id_int,
-                            interaction_type='commit',
-                            content=message,
-                            metadata={
-                                'commit_id': commit_id,
-                                'files_changed': files_processed,
-                                'added': len(changes['added']),
-                                'modified': len(changes['modified']),
-                                'deleted': len(changes['deleted'])
-                            }
-                        )
-                        logger.info(f"✓ Linked commit to agent session {session_id}")
-                except (ValueError, Exception) as e:
-                    logger.warning(f"Could not link commit to session: {e}")
 
             # Success
             logger.info("Commit complete!")

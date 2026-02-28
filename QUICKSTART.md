@@ -1,350 +1,157 @@
 # TempleDB Quick Start
 
-> **New to TempleDB?** Start with [GETTING_STARTED.md](GETTING_STARTED.md) for a beginner-friendly introduction.
+## Simple Workflow (What You Asked For!)
 
-This guide covers workflows and advanced usage for users who already have TempleDB installed.
-
-## Installation
-
-### For NixOS Users
-
-1. **Rebuild NixOS configuration:**
-   ```bash
-   cd /home/user/projects/my-config
-   sudo nixos-rebuild switch --flake .#hostname
-   ```
-
-2. **Verify installation:**
-   ```bash
-   which templedb
-   templedb --help
-   ```
-
-### For Non-NixOS Users
-
-See [GETTING_STARTED.md](GETTING_STARTED.md) for installation instructions.
-
-## Core Concepts
-
-TempleDB uses a **checkout/commit workflow**:
-
-1. **Database is source of truth** - All files stored in SQLite with full version history
-2. **Checkout to edit** - Extract files to filesystem temporarily
-3. **Commit to save** - Atomic commits back to database
-4. **Query with SQL** - Search and analyze across all projects
-
-This enables:
-- Zero file duplication (content-addressed storage)
-- Multi-agent coordination (ACID transactions)
-- Cross-project queries
-- Version control without git commands
-
-## Basic Workflow
-
-### 1. Import a Project
+### Launch Claude with Project Context
 
 ```bash
-# Import from existing git repository
-cd ~/projects/my-app
-templedb project import .
+# One command - that's it!
+./tdb claude woofs_project
+```
 
-# Or specify path explicitly
-templedb project import /path/to/project
+This will:
+- ✅ Verify the project exists in TempleDB
+- ✅ Set your agent identifier (TEMPLEDB_USER)
+- ✅ Launch Claude Code with instructions to load project context
+- ✅ All TempleDB MCP tools are auto-approved (no permission prompts!)
 
+### First Time Setup
+
+```bash
+# 1. Import your project into TempleDB
+./tdb import https://github.com/user/woofs_project woofs_project
+
+# 2. Launch Claude
+./tdb claude woofs_project
+```
+
+That's it! No more:
+- ❌ Manual context generation commands
+- ❌ Permission approval dialogs
+- ❌ Setting environment variables
+- ❌ Complex workflows
+
+## What Just Got Better
+
+### Before (Annoying):
+```bash
+# Import project
+./templedb project import https://github.com/user/woofs_project --name woofs_project
+
+# Open Claude Code
+claude
+
+# Wait for Claude to start...
+# Type: "Generate context for woofs_project"
+# Click "Approve" for templedb_context_generate
+# Click "Approve" for templedb_search_files
+# Click "Approve" for templedb_query
+# ...click approve 10 more times...
+```
+
+### After (Easy):
+```bash
+./tdb claude woofs_project
+```
+
+Done! 🎉
+
+## Available TempleDB Tools (All Auto-Approved)
+
+When you use `./tdb claude`, all these MCP tools work without permission prompts:
+
+### Project & Context
+- `templedb_project_list` - List all projects
+- `templedb_project_show` - Get project details
+- `templedb_project_import` - Import a git repo
+- `templedb_project_sync` - Sync with filesystem
+- `templedb_context_generate` - Generate full project context
+
+### Search & Query
+- `templedb_search_files` - Find files by pattern
+- `templedb_search_content` - Search code content
+- `templedb_query` - Run SQL queries
+
+### Version Control
+- `templedb_commit_list` - List commits
+- `templedb_commit_create` - Record commits
+
+## Other Useful Commands
+
+```bash
 # List all projects
-templedb project list
-```
+./tdb list
 
-### 2. Edit Files (Checkout/Commit)
+# Sync project with filesystem (after making changes)
+./tdb sync woofs_project
 
-```bash
-# Checkout project to temporary workspace
-templedb project checkout my-app /tmp/workspace
+# Import another project
+./tdb import https://github.com/user/another-repo another_project
 
-# Edit files with any tool
-cd /tmp/workspace
-vim src/main.py
-grep -r "TODO" .
-npm test
-
-# Commit changes back to database
-templedb project commit my-app /tmp/workspace -m "Fixed bug in authentication"
-
-# Cleanup (workspace can be deleted)
-rm -rf /tmp/workspace
-```
-
-### 3. Version Control
-
-```bash
-# View commit history
-templedb vcs log my-app
-
-# Show working directory status
-templedb vcs status my-app
-
-# Create a commit without checkout/commit workflow
-templedb vcs commit -m "Update docs" -p my-app -a "Your Name"
-
-# Branch management
-templedb vcs branch my-app              # List branches
-templedb vcs branch my-app feature-x    # Create branch
-```
-
-### 4. Query Your Projects
-
-```bash
-# Open database directly
-sqlite3 ~/.local/share/templedb/templedb.sqlite
-
-# Find all Python files across projects
-SELECT project_slug, file_path, lines_of_code
-FROM files_with_types_view
-WHERE type_name = 'python';
-
-# View recent commits
-SELECT * FROM vcs_commit_history_view
-ORDER BY created_at DESC LIMIT 10;
-
-# Get project statistics
-SELECT slug,
-  (SELECT COUNT(*) FROM project_files WHERE project_id = p.id) as files
-FROM projects p;
-```
-
-## Common Workflows
-
-### New Project Workflow
-
-```bash
-# 1. Navigate to your project
-cd ~/projects/new-app
-
-# 2. Import into TempleDB
-templedb project import .
-
-# 3. View in database
-templedb project show new-app
-
-# 4. Make changes using checkout/commit
-templedb project checkout new-app /tmp/work
-# ... edit files ...
-templedb project commit new-app /tmp/work -m "Initial setup"
-```
-
-### Re-sync Project from Filesystem
-
-If you edit files outside the checkout/commit workflow:
-
-```bash
-# Re-import from filesystem to update database
-templedb project sync my-app
-
-# Or specify path
-templedb project sync my-app /path/to/project
-```
-
-### Multiple Checkouts
-
-```bash
-# List active checkouts
-templedb project checkout-list
-
-# List checkouts for specific project
-templedb project checkout-list my-app
-
-# Cleanup stale checkouts (if workspace was deleted)
-templedb project checkout-cleanup my-app
-```
-
-### Secret Management
-
-```bash
-# Initialize secrets for a project
-templedb secret init my-app --age-recipient age1...
-
-# Edit secrets in $EDITOR
-templedb secret edit my-app
-
-# Export secrets in different formats
-templedb secret export my-app --format shell   # For eval
-templedb secret export my-app --format yaml    # Human-readable
-templedb secret export my-app --format json    # For scripts
-templedb secret export my-app --format dotenv  # For .env files
-
-# Load secrets into current shell
-eval "$(templedb secret export my-app --format shell)"
-
-# Use profiles for different environments
-templedb secret init my-app --profile prod --age-recipient age1...
-templedb secret edit my-app --profile prod
-eval "$(templedb secret export my-app --profile prod --format shell)"
-```
-
-### Environment Management
-
-```bash
-# List available Nix environments
-templedb env list
-
-# List environments for specific project
-templedb env list my-app
-
-# Enter Nix shell for project
-templedb env enter my-app
-
-# Detect dependencies and generate Nix config
-templedb env detect my-app
-templedb env generate my-app default
-```
-
-### Search and Query
-
-```bash
-# Search file contents
-templedb search content "authentication" -p my-app
-
-# Case-insensitive search
-templedb search content "TODO" -i
-
-# Search file names
-templedb search files "test" -p my-app
-
-# Search across all projects
-templedb search content "api_key"
-```
-
-### Backup and Restore
-
-```bash
-# Backup database
-templedb backup ~/backups/templedb-$(date +%Y%m%d).sqlite
-
-# Restore from backup
-templedb restore ~/backups/templedb-20240101.sqlite
-
-# View database status
-templedb status
-```
-
-## Advanced Features
-
-### Cathedral: Share Projects
-
-Export and import complete projects with all history:
-
-```bash
-# Export project as portable package
-templedb cathedral export my-app -o my-app.cathedral
-
-# Verify package integrity
-templedb cathedral verify my-app.cathedral
-
-# Import on another machine
-templedb cathedral import my-app.cathedral
-```
-
-### Deployment Targets
-
-```bash
-# Add deployment target
-templedb target add production \
-  --type ssh \
-  --host prod.example.com \
-  --user deploy
-
-# Deploy project
-templedb deploy my-app production
-```
-
-### Database Migrations
-
-```bash
-# View migration status
-templedb migration status
-
-# Apply pending migrations
-templedb migration apply
-
-# Rollback last migration
-templedb migration rollback
-```
-
-## Troubleshooting
-
-### Command not found
-
-```bash
-# Verify installation
-which templedb
-
-# If using local checkout:
+# Use the full CLI for advanced features
 ./templedb --help
-
-# Add to PATH
-export PATH="/path/to/templedb:$PATH"
+./templedb work --help      # Work items / task management
+./templedb vcs --help       # Version control
+./templedb search --help    # Advanced search
 ```
 
-### Database locked
+## Work Items / AI Swarms
 
-Another process is using the database. Wait a moment and try again, or check:
+Work items still work great - now with simpler agent identifiers:
 
 ```bash
-lsof ~/.local/share/templedb/templedb.sqlite
+# Set your agent identity
+export TEMPLEDB_USER=agent-1
+
+# Create work items
+./templedb work create --project woofs_project --title "Deploy to staging"
+
+# Assign to agents (any identifier)
+./templedb work assign tdb-abc12 agent-1
+./templedb work assign tdb-def34 agent-2
+
+# Query your work
+./templedb work list --assigned-to agent-1
+
+# Check notifications
+./templedb work mailbox agent-1
 ```
 
-### Checkout conflicts
-
-If workspace was modified outside of TempleDB:
+### Multiple Agents Working in Parallel
 
 ```bash
-# List checkouts
-templedb project checkout-list my-app
+# Terminal 1 - Agent 1
+export TEMPLEDB_USER=agent-1
+./tdb claude woofs_project
 
-# Cleanup stale checkouts
-templedb project checkout-cleanup my-app
+# Terminal 2 - Agent 2
+export TEMPLEDB_USER=agent-2
+./tdb claude woofs_project
 
-# Start fresh
-rm -rf /tmp/workspace
-templedb project checkout my-app /tmp/workspace
+# Terminal 3 - Coordinator
+./templedb work create --project woofs_project --title "Update API"
+./templedb work assign tdb-abc12 agent-1
+./templedb work assign tdb-def34 agent-2
 ```
 
-### Import fails
+Each agent can query their work items and coordinate via the database!
 
-Make sure you're in a git repository:
+## Tips
 
-```bash
-cd /path/to/project
-git status  # Should show repo status
+1. **Set a permanent agent ID** (optional):
+   ```bash
+   # Add to ~/.bashrc or ~/.zshrc
+   export TEMPLEDB_USER=claude-myname
+   ```
 
-# If not a git repo, initialize:
-git init
-git add .
-git commit -m "Initial commit"
+2. **Project location**: The `tdb` command automatically changes to your project directory if it exists
 
-# Then import
-templedb project import .
-```
+3. **Already in Claude?** If you run `./tdb claude project` while already in a Claude session, it just shows you what MCP tools are available
 
-## Database Location
+4. **Full power**: Use `./templedb` for the full CLI when you need advanced features
 
-The SQLite database is stored at:
-```
-~/.local/share/templedb/templedb.sqlite
-```
+## Configuration
 
-You can query it directly:
-```bash
-sqlite3 ~/.local/share/templedb/templedb.sqlite '.schema'
-```
+Auto-approvals are configured in `.claude/settings.local.json` - you can edit this file to add/remove permissions.
 
-Or in Emacs: `SPC p d d`
-
-## Next Steps
-
-- **[README.md](README.md)** - Complete overview and philosophy
-- **[GUIDE.md](GUIDE.md)** - Detailed usage guide
-- **[DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md)** - Why TempleDB exists
-- **[EXAMPLES.md](EXAMPLES.md)** - SQL query examples
-- **[CATHEDRAL.md](CATHEDRAL.md)** - Sharing projects with teams
-- **[PERFORMANCE.md](PERFORMANCE.md)** - Performance tuning
+The MCP server is configured in `.mcp.json` at the project root - Claude Code discovers this automatically.

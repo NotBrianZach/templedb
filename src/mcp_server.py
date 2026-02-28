@@ -16,7 +16,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from repositories import ProjectRepository
-from repositories.agent_repository import AgentRepository
 from llm_context import TempleDBContext
 from config import DB_PATH
 from logger import get_logger
@@ -36,7 +35,6 @@ class MCPServer:
     def __init__(self):
         """Initialize MCP server with templedb repositories"""
         self.project_repo = ProjectRepository()
-        self.agent_repo = AgentRepository(DB_PATH)
         self.context_gen = TempleDBContext(DB_PATH)
 
         # MCP protocol version
