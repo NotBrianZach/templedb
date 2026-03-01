@@ -35,11 +35,12 @@
             sqlite
             pkg-config
 
-            # Python for TUI
+            # Python for TUI and CLI
             python311
             python311Packages.textual
             python311Packages.rich
             python311Packages.pyyaml  # For secret management
+            python311Packages.cryptography  # For RSA encryption
 
             # Runtime tools your CLI shells out to
             sops
