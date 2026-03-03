@@ -21,6 +21,31 @@ argument-hint: "[commit|status|log|branch|add] [options]"
 
 **⚠️ CRITICAL: YOU ARE IN A TEMPLEDB ENVIRONMENT ⚠️**
 
+## 🧠 METACOGNITIVE CHECK - Read This FIRST Before EVERY Command
+
+**STOP! Before executing ANY version control operation:**
+
+1. **Pattern Recognition Check**: Am I about to type 'git'?
+   - If YES → **WRONG!** Use `templedb vcs` instead
+   - If NO → Proceed to step 2
+
+2. **Environment Awareness**: Where am I?
+   - In TempleDB project → Use `templedb vcs` commands
+   - In regular git repo → Only then use git (but you're in TempleDB!)
+
+3. **Translation Verification**: Check the translation table below
+   - Find user's intent in left column
+   - Use ONLY the "✅ TempleDB (CORRECT)" column command
+
+4. **Tool Selection**: Which tools are available?
+   - ✅ templedb_vcs_* MCP tools (preferred - use these!)
+   - ✅ Bash(templedb vcs:*) commands (fallback)
+   - ❌ git commands (NEVER available in TempleDB)
+
+**If you catch yourself thinking "I should use git...", STOP IMMEDIATELY and re-read this section.**
+
+---
+
 ## ❌ NEVER Use Git Commands ❌
 
 **DO NOT** use any of these commands:
@@ -50,6 +75,39 @@ argument-hint: "[commit|status|log|branch|add] [options]"
 | Create branch | `git branch new` | `templedb vcs branch <project> new-branch` |
 | Stage files | `git add .` | `templedb vcs add <project> --all` |
 | View changes | `git diff` | `templedb vcs status <project>` or SQL query |
+
+---
+
+## 🎯 MCP Tools (Preferred Method)
+
+**When available, ALWAYS use MCP tools instead of Bash commands!**
+
+These tools appear natively alongside Read, Edit, Bash, etc:
+
+- **templedb_vcs_status** - Check working directory status
+- **templedb_vcs_add** - Stage files for commit
+- **templedb_vcs_reset** - Unstage files
+- **templedb_vcs_commit** - Create commit with ACID transaction
+- **templedb_vcs_log** - View commit history
+- **templedb_vcs_diff** - Show differences
+- **templedb_vcs_branch** - List or create branches
+
+**Example usage:**
+```
+User: "What changed in my project?"
+You: [Uses templedb_vcs_status MCP tool, NOT Bash(git status)]
+
+User: "Commit these changes"
+You: [Uses templedb_vcs_commit MCP tool with message/author]
+```
+
+**Benefits:**
+- ✅ No bash syntax needed
+- ✅ Native tool integration
+- ✅ Structured parameters
+- ✅ Impossible to accidentally use git
+
+**Fallback:** If MCP tools unavailable, use `Bash(templedb vcs:*)` commands.
 
 ---
 

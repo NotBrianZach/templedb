@@ -52,6 +52,19 @@ class MCPServer:
             "templedb_commit_create": self.tool_commit_create,
             "templedb_search_files": self.tool_search_files,
             "templedb_search_content": self.tool_search_content,
+            # VCS operations
+            "templedb_vcs_status": self.tool_vcs_status,
+            "templedb_vcs_add": self.tool_vcs_add,
+            "templedb_vcs_reset": self.tool_vcs_reset,
+            "templedb_vcs_commit": self.tool_vcs_commit,
+            "templedb_vcs_log": self.tool_vcs_log,
+            "templedb_vcs_diff": self.tool_vcs_diff,
+            "templedb_vcs_branch": self.tool_vcs_branch,
+            # Deployment operations
+            "templedb_deploy": self.tool_deploy,
+            "templedb_env_get": self.tool_env_get,
+            "templedb_env_set": self.tool_env_set,
+            "templedb_env_list": self.tool_env_list,
         }
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
@@ -59,7 +72,7 @@ class MCPServer:
         return [
             {
                 "name": "templedb_project_list",
-                "description": "List all projects tracked in TempleDB. Returns project names, IDs, slugs, and git info.",
+                "description": "List all projects tracked in TempleDB. Returns project names, IDs, slugs, and repository metadata.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -82,13 +95,13 @@ class MCPServer:
             },
             {
                 "name": "templedb_project_import",
-                "description": "Import a git repository into TempleDB. Clones repo and indexes all files.",
+                "description": "Import a repository into TempleDB. Clones the repository and indexes all files for database-native tracking.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "repo_url": {
                             "type": "string",
-                            "description": "Git repository URL (http/https/ssh)"
+                            "description": "Repository URL (http/https/ssh format)"
                         },
                         "name": {
                             "type": "string",
@@ -169,7 +182,7 @@ class MCPServer:
             },
             {
                 "name": "templedb_commit_create",
-                "description": "Record a commit in TempleDB. Use after making git commits to track in database.",
+                "description": "Record a commit in TempleDB with ACID transaction. This tracks commits in the database for version control. Provide the commit hash from the underlying VCS, commit message, and project. TempleDB uses database-native version control.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -179,7 +192,7 @@ class MCPServer:
                         },
                         "commit_hash": {
                             "type": "string",
-                            "description": "Git commit SHA"
+                            "description": "VCS commit hash (SHA)"
                         },
                         "message": {
                             "type": "string",
@@ -239,6 +252,222 @@ class MCPServer:
                         }
                     },
                     "required": ["query"]
+                }
+            },
+            {
+                "name": "templedb_vcs_status",
+                "description": "Show working directory status for a project. This is the database-native equivalent of checking uncommitted changes. Shows staged, modified, and untracked files.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_vcs_add",
+                "description": "Stage files for commit in TempleDB. Use this to add files to the staging area before committing. This is database-native staging, not git.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "files": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of file paths to stage (use '.' for all)"
+                        }
+                    },
+                    "required": ["project", "files"]
+                }
+            },
+            {
+                "name": "templedb_vcs_reset",
+                "description": "Unstage files from the staging area. Removes files from staging without discarding changes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "files": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of file paths to unstage (use '.' for all)"
+                        }
+                    },
+                    "required": ["project", "files"]
+                }
+            },
+            {
+                "name": "templedb_vcs_commit",
+                "description": "Create a commit in TempleDB with ACID transaction. This commits staged changes with a message and author. Database-native commit with full transaction safety.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "Commit message"
+                        },
+                        "author": {
+                            "type": "string",
+                            "description": "Author name and email (e.g. 'Name <email@example.com>')"
+                        },
+                        "all": {
+                            "type": "boolean",
+                            "description": "Stage all modified files before committing (default: false)"
+                        }
+                    },
+                    "required": ["project", "message", "author"]
+                }
+            },
+            {
+                "name": "templedb_vcs_log",
+                "description": "Show commit history for a project. View the version control log with commits, messages, and timestamps.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of commits to show (default: 20)"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_vcs_diff",
+                "description": "Show differences between file versions. Compare working directory with staged/committed versions.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "file": {
+                            "type": "string",
+                            "description": "Optional specific file path to diff"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_vcs_branch",
+                "description": "List or create branches in TempleDB. Manage version control branches with database transactions.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Optional branch name to create"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_deploy",
+                "description": "Deploy a project from TempleDB to a deployment target. Executes deployment orchestration including migrations, builds, and environment setup.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "Deployment target name (e.g., 'production', 'staging')"
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "If true, show what would be deployed without executing (default: false)"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_env_get",
+                "description": "Get an environment variable value for a project. Retrieves configuration from TempleDB database.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "key": {
+                            "type": "string",
+                            "description": "Environment variable name"
+                        }
+                    },
+                    "required": ["project", "key"]
+                }
+            },
+            {
+                "name": "templedb_env_set",
+                "description": "Set an environment variable for a project. Stores configuration in TempleDB database with optional encryption.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "key": {
+                            "type": "string",
+                            "description": "Environment variable name"
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "Environment variable value"
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "Optional deployment target (e.g., 'production', 'development')"
+                        }
+                    },
+                    "required": ["project", "key", "value"]
+                }
+            },
+            {
+                "name": "templedb_env_list",
+                "description": "List all environment variables for a project. Shows configuration stored in TempleDB.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "Optional filter by deployment target"
+                        }
+                    },
+                    "required": ["project"]
                 }
             }
         ]
@@ -300,7 +529,7 @@ class MCPServer:
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def tool_project_import(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Import a git repository"""
+        """Import a repository into TempleDB"""
         try:
             repo_url = args["repo_url"]
             name = args.get("name")
@@ -562,6 +791,287 @@ class MCPServer:
             }
         except Exception as e:
             logger.error(f"Error searching content: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show VCS status for project"""
+        try:
+            project_name = args["project"]
+
+            import subprocess
+            result = subprocess.run(
+                ["./templedb", "vcs", "status", project_name],
+                capture_output=True, text=True, cwd="/home/zach/templeDB"
+            )
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Status check failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout}]
+            }
+        except Exception as e:
+            logger.error(f"Error checking status: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_add(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Stage files for commit"""
+        try:
+            project_name = args["project"]
+            files = args["files"]
+
+            import subprocess
+            cmd = ["./templedb", "vcs", "add", "-p", project_name] + files
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Stage failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or f"Staged {len(files)} file(s)"}]
+            }
+        except Exception as e:
+            logger.error(f"Error staging files: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_reset(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Unstage files"""
+        try:
+            project_name = args["project"]
+            files = args["files"]
+
+            import subprocess
+            cmd = ["./templedb", "vcs", "reset", "-p", project_name] + files
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Unstage failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or f"Unstaged {len(files)} file(s)"}]
+            }
+        except Exception as e:
+            logger.error(f"Error unstaging files: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_commit(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a commit"""
+        try:
+            project_name = args["project"]
+            message = args["message"]
+            author = args["author"]
+            commit_all = args.get("all", False)
+
+            import subprocess
+            cmd = ["./templedb", "vcs", "commit", "-p", project_name, "-m", message, "-a", author]
+            if commit_all:
+                cmd.append("--all")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Commit failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or "Commit created successfully"}]
+            }
+        except Exception as e:
+            logger.error(f"Error creating commit: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_log(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show commit log"""
+        try:
+            project_name = args["project"]
+            limit = args.get("limit", 20)
+
+            import subprocess
+            cmd = ["./templedb", "vcs", "log", project_name, "--limit", str(limit)]
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Log retrieval failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout}]
+            }
+        except Exception as e:
+            logger.error(f"Error retrieving log: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_diff(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show diff"""
+        try:
+            project_name = args["project"]
+            file_path = args.get("file")
+
+            import subprocess
+            cmd = ["./templedb", "vcs", "diff", "-p", project_name]
+            if file_path:
+                cmd.append(file_path)
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Diff failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or "No differences found"}]
+            }
+        except Exception as e:
+            logger.error(f"Error showing diff: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_branch(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List or create branches"""
+        try:
+            project_name = args["project"]
+            branch_name = args.get("name")
+
+            import subprocess
+            cmd = ["./templedb", "vcs", "branch", project_name]
+            if branch_name:
+                cmd.append(branch_name)
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Branch operation failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout}]
+            }
+        except Exception as e:
+            logger.error(f"Error with branch operation: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy project"""
+        try:
+            project_name = args["project"]
+            target = args.get("target", "default")
+            dry_run = args.get("dry_run", False)
+
+            import subprocess
+            cmd = ["./templedb", "deploy", "run", project_name]
+            if target:
+                cmd.extend(["--target", target])
+            if dry_run:
+                cmd.append("--dry-run")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Deployment failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or "Deployment completed successfully"}]
+            }
+        except Exception as e:
+            logger.error(f"Error deploying project: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_env_get(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get environment variable"""
+        try:
+            project_name = args["project"]
+            key = args["key"]
+
+            import subprocess
+            result = subprocess.run(
+                ["./templedb", "env", "get", "-p", project_name, "-k", key],
+                capture_output=True, text=True, cwd="/home/zach/templeDB"
+            )
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Failed to get variable: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout.strip()}]
+            }
+        except Exception as e:
+            logger.error(f"Error getting env variable: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_env_set(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Set environment variable"""
+        try:
+            project_name = args["project"]
+            key = args["key"]
+            value = args["value"]
+            target = args.get("target")
+
+            import subprocess
+            cmd = ["./templedb", "env", "set", "-p", project_name, "-k", key, "-v", value]
+            if target:
+                cmd.extend(["--target", target])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Failed to set variable: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or f"Set {key}={value}"}]
+            }
+        except Exception as e:
+            logger.error(f"Error setting env variable: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_env_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List environment variables"""
+        try:
+            project_name = args["project"]
+            target = args.get("target")
+
+            import subprocess
+            cmd = ["./templedb", "env", "vars", "-p", project_name]
+            if target:
+                cmd.extend(["--target", target])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Failed to list variables: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout}]
+            }
+        except Exception as e:
+            logger.error(f"Error listing env variables: {e}")
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def handle_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:

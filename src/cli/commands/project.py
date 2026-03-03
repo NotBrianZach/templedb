@@ -275,6 +275,25 @@ def register(cli):
     checkout_cleanup_parser.add_argument('--force', '-f', action='store_true', help='Skip confirmation')
     cli.commands['project.checkout-cleanup'] = checkout_cmd.cleanup_checkouts
 
+    # project checkout-status
+    checkout_status_parser = subparsers.add_parser('checkout-status', help='Show checkout status')
+    checkout_status_parser.add_argument('project_slug', help='Project slug')
+    checkout_status_parser.add_argument('checkout_path', help='Checkout directory path')
+    cli.commands['project.checkout-status'] = checkout_cmd.status
+
+    # project checkout-pull
+    checkout_pull_parser = subparsers.add_parser('checkout-pull', help='Pull latest changes to checkout')
+    checkout_pull_parser.add_argument('project_slug', help='Project slug')
+    checkout_pull_parser.add_argument('checkout_path', help='Checkout directory path')
+    cli.commands['project.checkout-pull'] = checkout_cmd.pull
+
+    # project checkout-diff
+    checkout_diff_parser = subparsers.add_parser('checkout-diff', help='Show diff between checkout and database')
+    checkout_diff_parser.add_argument('project_slug', help='Project slug')
+    checkout_diff_parser.add_argument('checkout_path', help='Checkout directory path')
+    checkout_diff_parser.add_argument('file', nargs='?', help='File pattern to diff (optional)')
+    cli.commands['project.checkout-diff'] = checkout_cmd.diff
+
     # project commit
     commit_cmd = CommitCommand()
     commit_parser = subparsers.add_parser('commit', help='Commit workspace changes to database')

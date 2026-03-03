@@ -718,6 +718,119 @@ class VCSCommands(Command):
 
         return 0
 
+    def import_history(self, args) -> int:
+        """Import full git history from repository"""
+        project = self.get_project_or_exit(args.project)
+
+        repo_url = project.get('repo_url')
+        if not repo_url:
+            logger.error(f"Project has no repo_url set")
+            return 1
+
+        repo_path = Path(repo_url)
+        if not repo_path.exists():
+            logger.error(f"Repository path does not exist: {repo_path}")
+            return 1
+
+        if not (repo_path / '.git').exists():
+            logger.error(f"Not a git repository: {repo_path}")
+            return 1
+
+        print(f"📦 Importing git history for {args.project}")
+        print(f"   Repository: {repo_path}")
+
+        if args.branch:
+            print(f"   Branch: {args.branch}")
+        else:
+            print(f"   Branches: all")
+
+        print()
+
+        try:
+            from importer.git_history import GitHistoryImporter
+
+            importer = GitHistoryImporter(args.project, str(repo_path))
+            stats = importer.import_full_history(branch=args.branch)
+
+            print(f"\n✅ Git history import complete!")
+            print(f"   Commits imported: {stats['commits_imported']}")
+            print(f"   Branches imported: {stats['branches_imported']}")
+            print(f"   Tags imported: {stats['tags_imported']}")
+
+            if stats['errors'] > 0:
+                print(f"   ⚠️  Errors: {stats['errors']}")
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Git history import failed: {e}", exc_info=True)
+            print(f"\n✗ Import failed: {e}", file=sys.stderr)
+            return 1
+
+    def export_to_git(self, args) -> int:
+        """Export database commits to git repository"""
+        project = self.get_project_or_exit(args.project)
+
+        repo_url = project.get('repo_url')
+        if not repo_url:
+            logger.error(f"Project has no repo_url set")
+            return 1
+
+        repo_path = Path(repo_url)
+        if not repo_path.exists():
+            logger.error(f"Repository path does not exist: {repo_path}")
+            return 1
+
+        if not (repo_path / '.git').exists():
+            logger.error(f"Not a git repository: {repo_path}")
+            return 1
+
+        print(f"📤 Exporting commits from {args.project} to git")
+        print(f"   Repository: {repo_path}")
+        print(f"   Branch: {args.branch}")
+
+        if args.since:
+            print(f"   Since commit: {args.since}")
+
+        print()
+
+        try:
+            from exporter.git_export import GitExporter
+
+            exporter = GitExporter(args.project, str(repo_path))
+            stats = exporter.export_commits(
+                branch_name=args.branch,
+                since_commit=args.since
+            )
+
+            print(f"\n✅ Git export complete!")
+            print(f"   Commits exported: {stats.commits_exported}")
+            print(f"   Files written: {stats.files_written}")
+            print(f"   Branches updated: {stats.branches_updated}")
+
+            if stats.errors > 0:
+                print(f"   ⚠️  Errors: {stats.errors}")
+
+            # Push if requested
+            if args.push and stats.commits_exported > 0:
+                print(f"\n📡 Pushing to {args.remote}/{args.branch}...")
+
+                if exporter.push_to_remote(
+                    remote=args.remote,
+                    branch=args.branch,
+                    force=args.force
+                ):
+                    print(f"   ✅ Pushed successfully")
+                else:
+                    print(f"   ✗ Push failed", file=sys.stderr)
+                    return 1
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Git export failed: {e}", exc_info=True)
+            print(f"\n✗ Export failed: {e}", file=sys.stderr)
+            return 1
 
 
 def register(cli):
@@ -783,3 +896,19 @@ def register(cli):
     show_parser.add_argument('project', help='Project slug')
     show_parser.add_argument('commit', help='Commit hash or prefix')
     cli.commands['vcs.show'] = cmd.show
+
+    # vcs import-history
+    import_history_parser = subparsers.add_parser('import-history', help='Import full git history')
+    import_history_parser.add_argument('project', help='Project slug')
+    import_history_parser.add_argument('--branch', help='Specific branch to import (default: all branches)')
+    cli.commands['vcs.import-history'] = cmd.import_history
+
+    # vcs export
+    export_parser = subparsers.add_parser('export', help='Export database commits to git')
+    export_parser.add_argument('project', help='Project slug')
+    export_parser.add_argument('--branch', default='main', help='Branch to export (default: main)')
+    export_parser.add_argument('--since', help='Only export commits after this git commit hash')
+    export_parser.add_argument('--push', action='store_true', help='Push to remote after export')
+    export_parser.add_argument('--remote', default='origin', help='Remote to push to (default: origin)')
+    export_parser.add_argument('--force', action='store_true', help='Force push (use with caution)')
+    cli.commands['vcs.export'] = cmd.export_to_git

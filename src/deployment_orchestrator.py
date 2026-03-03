@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from deployment_config import DeploymentConfig, DeploymentGroup
 from migration_tracker import MigrationTracker, Migration
+from deployment_instructions import DeploymentInstructionsGenerator
 
 
 @dataclass
@@ -435,6 +436,21 @@ class DeploymentOrchestrator:
                 error_message=str(e)
             )
 
+    def _generate_deploy_instructions(self) -> None:
+        """Generate DEPLOY_INSTRUCTIONS.md after successful deployment"""
+        try:
+            generator = DeploymentInstructionsGenerator(
+                work_dir=self.work_dir,
+                project=self.project,
+                target_name=self.target_name
+            )
+
+            output_path = generator.write_to_file()
+            print(f"📝 Generated deployment instructions: {output_path}")
+        except Exception as e:
+            # Don't fail deployment if instruction generation fails
+            print(f"⚠️  Could not generate deployment instructions: {e}")
+
     def deploy_group(
         self,
         group: DeploymentGroup,
@@ -553,6 +569,10 @@ class DeploymentOrchestrator:
 
         if all_success:
             print(f"\n✅ Deployment complete! ({duration_ms / 1000:.1f}s total)")
+
+            # Generate deployment instructions after successful deployment
+            if not dry_run:
+                self._generate_deploy_instructions()
         else:
             print(f"\n⚠️  Deployment completed with errors ({duration_ms / 1000:.1f}s total)")
 
