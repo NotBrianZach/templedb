@@ -56,11 +56,24 @@ TempleDB uses a **checkout/commit workflow** - your files live in the database, 
 - Commits are **atomic** with conflict detection
 - Multiple agents can work **safely** (optimistic locking with version tracking)
 
-**Example workflow:**
-```bash
-./templedb project checkout myproject /tmp/work   # Extract to filesystem
-cd /tmp/work && vim src/main.py                   # Edit with any tool
-./templedb project commit myproject /tmp/work -m "Fix" # Commit back
+**Example workflow (AI Agent via MCP):**
+```python
+# Claude Code/Agent using TempleDB MCP tools
+# 1. List projects to find what to work on
+projects = mcp_templedb_project_list()
+
+# 2. Check current status
+status = mcp_templedb_vcs_status(project="myproject")
+
+# 3. Make changes using standard file tools (Read, Edit, Write)
+Read(file_path="/path/to/project/src/main.py")
+Edit(file_path="/path/to/project/src/main.py", old_string="...", new_string="...")
+
+# 4. Stage and commit changes via MCP
+mcp_templedb_vcs_add(project="myproject", files=["src/main.py"])
+mcp_templedb_vcs_commit(project="myproject", message="Fix bug", author="Claude <noreply@anthropic.com>")
+
+# Database stays normalized - no temporary checkouts needed!
 ```
 
 **See [HOWTO_EXPLORE.md](HOWTO_EXPLORE.md) for complete examples.**
@@ -228,6 +241,41 @@ The project context file (`.claude/project-context.md`) provides:
 
 This ensures AI assistants have comprehensive understanding of TempleDB's philosophy, commands, and workflows from the start.
 
+### MCP Server for AI Agents
+
+TempleDB includes a Model Context Protocol (MCP) server that exposes the database directly to AI agents:
+
+```bash
+# Start the MCP server
+./templedb mcp serve
+
+# Or configure in Claude Desktop's config:
+{
+  "mcpServers": {
+    "templedb": {
+      "command": "/path/to/templedb",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+**Available MCP Tools:**
+- `templedb_project_list/show/import/sync` - Project management
+- `templedb_vcs_status/add/commit/log/diff` - Version control operations
+- `templedb_search_files/content` - Code search
+- `templedb_query` - Direct SQL queries
+- `templedb_context_generate` - Generate LLM context
+
+**Agent Workflow Benefits:**
+- ✅ No filesystem checkouts needed - direct database access
+- ✅ Atomic operations with ACID guarantees
+- ✅ Multi-agent coordination via database transactions
+- ✅ Query across all projects with SQL
+- ✅ Automatic conflict detection
+
+See the MCP example workflow above for how agents use these tools.
+
 ---
 
 ## Quick Start
@@ -255,7 +303,38 @@ This ensures AI assistants have comprehensive understanding of TempleDB's philos
 ./templedb project show myproject
 ```
 
-### 3. Edit Files (Checkout/Commit Workflow)
+### 3. Work with Files
+
+**Option A: AI Agent/Claude CLI (via MCP - recommended for agents)**
+
+```python
+# TempleDB MCP server provides direct database access for AI agents
+# No filesystem checkouts needed - agents work directly with the database!
+
+# Check project status
+mcp_templedb_vcs_status(project="myproject")
+
+# Search for files to modify
+mcp_templedb_search_files(pattern="%.py", project="myproject")
+
+# Read file content directly from database
+mcp_templedb_query(query="""
+  SELECT cb.content_text
+  FROM project_files pf
+  JOIN file_contents fc ON fc.file_id = pf.id
+  JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+  WHERE pf.file_path = 'src/main.py' AND pf.project_id = (
+    SELECT id FROM projects WHERE slug = 'myproject'
+  )
+""")
+
+# Make changes using standard file operations (Read/Edit/Write)
+# Then stage and commit
+mcp_templedb_vcs_add(project="myproject", files=["src/main.py"])
+mcp_templedb_vcs_commit(project="myproject", message="Fix auth", author="Agent")
+```
+
+**Option B: Human Developer (Checkout/Commit Workflow)**
 
 ```bash
 # 1. Checkout project to filesystem
@@ -273,8 +352,6 @@ tree                         # Explore structure
 # 4. Cleanup (optional)
 rm -rf /tmp/workspace
 ```
-
-**The checkout/commit workflow is the primary way to work with TempleDB projects.**
 
 ### 4. Browse and Query
 

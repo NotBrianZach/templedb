@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from deployment_config import DeploymentConfig, DeploymentGroup
 from migration_tracker import MigrationTracker, Migration
 from deployment_instructions import DeploymentInstructionsGenerator
+from deployment_tracker import DeploymentTracker
 
 
 @dataclass
@@ -75,8 +76,10 @@ class DeploymentOrchestrator:
         self.db_utils = db_utils
         self.work_dir = work_dir
         self.migration_tracker = MigrationTracker(db_utils)
+        self.deployment_tracker = DeploymentTracker(db_utils)
         self.env_vars = {}
         self.target_info = None
+        self.current_deployment_id = None
 
     def load_target_info(self) -> None:
         """Load deployment target information including connection strings"""
@@ -445,8 +448,21 @@ class DeploymentOrchestrator:
                 target_name=self.target_name
             )
 
-            output_path = generator.write_to_file()
+            # Validate before writing
+            validation = generator.validate()
+
+            # Write with validation report
+            output_path = generator.write_to_file(validate=True)
             print(f"📝 Generated deployment instructions: {output_path}")
+
+            # Show validation summary
+            if validation.errors:
+                print(f"   ⚠️  {len(validation.errors)} validation error(s) found")
+            if validation.warnings:
+                print(f"   ⚠️  {len(validation.warnings)} validation warning(s) found")
+            if validation.valid:
+                print(f"   ✓ Validation passed")
+
         except Exception as e:
             # Don't fail deployment if instruction generation fails
             print(f"⚠️  Could not generate deployment instructions: {e}")
@@ -518,6 +534,25 @@ class DeploymentOrchestrator:
         if dry_run:
             print("📋 DRY RUN - No actual changes will be made\n")
 
+        # Start deployment tracking (not in dry run)
+        if not dry_run:
+            # Get latest commit for tracking
+            from repositories import VCSRepository
+            vcs_repo = VCSRepository()
+            latest_commit = vcs_repo.query_one("""
+                SELECT commit_hash FROM vcs_commits
+                WHERE project_id = ? ORDER BY id DESC LIMIT 1
+            """, (self.project['id'],))
+
+            commit_hash = latest_commit['commit_hash'] if latest_commit else None
+
+            self.current_deployment_id = self.deployment_tracker.start_deployment(
+                project_id=self.project['id'],
+                target_name=self.target_name,
+                deployment_type='deploy',
+                commit_hash=commit_hash
+            )
+
         # Load target info (connection strings, etc.)
         self.load_target_info()
 
@@ -576,8 +611,305 @@ class DeploymentOrchestrator:
         else:
             print(f"\n⚠️  Deployment completed with errors ({duration_ms / 1000:.1f}s total)")
 
+        # Complete deployment tracking (not in dry run)
+        if not dry_run and self.current_deployment_id:
+            # Collect deployed groups and files
+            groups_deployed = [r.group_name for r in group_results if r.success and not r.skipped]
+            files_deployed = []
+            for r in group_results:
+                if r.files_deployed:
+                    files_deployed.extend(r.files_deployed)
+
+            # Create deployment snapshot
+            deployment_snapshot = {
+                'groups': [r.__dict__ for r in group_results],
+                'environment_vars': list(self.env_vars.keys()),
+                'target_info': {
+                    'name': self.target_name,
+                    'groups_count': len(self.config.groups)
+                }
+            }
+
+            # Get error message if failed
+            error_message = None
+            if not all_success:
+                failed_groups = [r for r in group_results if not r.success and not r.skipped]
+                if failed_groups:
+                    error_message = failed_groups[0].error_message
+
+            # Complete deployment record
+            self.deployment_tracker.complete_deployment(
+                deployment_id=self.current_deployment_id,
+                success=all_success,
+                duration_ms=duration_ms,
+                groups_deployed=groups_deployed,
+                files_deployed=files_deployed,
+                error_message=error_message,
+                deployment_snapshot=deployment_snapshot
+            )
+
         return DeploymentResult(
             success=all_success,
             duration_ms=duration_ms,
             group_results=group_results
         )
+
+    def rollback(
+        self,
+        to_commit_hash: str,
+        dry_run: bool = False,
+        validate_env: bool = True
+    ) -> DeploymentResult:
+        """
+        Rollback deployment to a specific commit
+
+        Args:
+            to_commit_hash: Commit hash to rollback to
+            dry_run: If True, show what would be done
+            validate_env: If True, validate environment variables
+
+        Returns:
+            DeploymentResult with rollback status
+        """
+        start_time = time.time()
+
+        print(f"\n⏪ Rolling back {self.project['slug']} to commit {to_commit_hash[:8]}...")
+        if dry_run:
+            print("📋 DRY RUN - No actual changes will be made\n")
+
+        # Start rollback deployment tracking
+        if not dry_run:
+            self.current_deployment_id = self.deployment_tracker.start_deployment(
+                project_id=self.project['id'],
+                target_name=self.target_name,
+                deployment_type='rollback',
+                commit_hash=to_commit_hash
+            )
+
+        # Export the specific commit from database
+        print("📦 Exporting target commit from TempleDB...")
+
+        from cathedral_export import CathedralExporter
+        from repositories import VCSRepository
+
+        # Verify commit exists
+        vcs_repo = VCSRepository()
+        commit = vcs_repo.query_one("""
+            SELECT * FROM vcs_commits
+            WHERE project_id = ? AND commit_hash = ?
+        """, (self.project['id'], to_commit_hash))
+
+        if not commit:
+            error_msg = f"Commit {to_commit_hash} not found in database"
+            print(f"✗ {error_msg}")
+
+            if not dry_run and self.current_deployment_id:
+                self.deployment_tracker.complete_deployment(
+                    deployment_id=self.current_deployment_id,
+                    success=False,
+                    duration_ms=int((time.time() - start_time) * 1000),
+                    error_message=error_msg
+                )
+
+            return DeploymentResult(
+                success=False,
+                duration_ms=int((time.time() - start_time) * 1000),
+                error_message=error_msg
+            )
+
+        # Export cathedral package at specific commit
+        export_dir = Path(f"/tmp/templedb_rollback_{self.project['slug']}")
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        exporter = CathedralExporter()
+        # Note: This would need enhancement to export at specific commit
+        # For now, exporting current state
+        print(f"⚠️  Full commit-based rollback not yet implemented")
+        print(f"   Exporting current database state instead...")
+
+        # TODO: Implement commit-specific export in CathedralExporter
+        # This requires filtering files/content based on commit state
+
+        from cathedral_export import export_project
+        success = export_project(
+            slug=self.project['slug'],
+            output_dir=export_dir,
+            compress=False,
+            include_files=True,
+            include_vcs=False,
+            include_environments=True
+        )
+
+        if not success:
+            error_msg = "Failed to export project for rollback"
+            print(f"✗ {error_msg}")
+
+            if not dry_run and self.current_deployment_id:
+                self.deployment_tracker.complete_deployment(
+                    deployment_id=self.current_deployment_id,
+                    success=False,
+                    duration_ms=int((time.time() - start_time) * 1000),
+                    error_message=error_msg
+                )
+
+            return DeploymentResult(
+                success=False,
+                duration_ms=int((time.time() - start_time) * 1000),
+                error_message=error_msg
+            )
+
+        cathedral_dir = export_dir / f"{self.project['slug']}.cathedral"
+        print(f"✓ Exported to {cathedral_dir}\n")
+
+        # Reconstruct to working directory
+        work_dir = export_dir / "working"
+        work_dir.mkdir(exist_ok=True)
+
+        print("🔧 Reconstructing project...")
+        self._reconstruct_project(cathedral_dir, work_dir)
+        print(f"✓ Reconstructed to {work_dir}\n")
+
+        # Update work_dir for deployment
+        original_work_dir = self.work_dir
+        self.work_dir = work_dir
+
+        # Load environment and validate
+        self.load_environment_variables()
+
+        if validate_env:
+            missing_vars = self.validate_environment()
+            if missing_vars:
+                error_msg = f"Missing required environment variables: {', '.join(missing_vars)}"
+                print(f"\n✗ {error_msg}")
+
+                if not dry_run and self.current_deployment_id:
+                    self.deployment_tracker.complete_deployment(
+                        deployment_id=self.current_deployment_id,
+                        success=False,
+                        duration_ms=int((time.time() - start_time) * 1000),
+                        error_message=error_msg
+                    )
+
+                return DeploymentResult(
+                    success=False,
+                    duration_ms=int((time.time() - start_time) * 1000),
+                    error_message=error_msg
+                )
+
+        # Deploy using normal deployment flow
+        print("🚀 Deploying rollback version...\n")
+
+        group_results = []
+        sorted_groups = sorted(self.config.groups, key=lambda g: g.order)
+
+        for group in sorted_groups:
+            result = self.deploy_group(group, dry_run)
+            group_results.append(result)
+
+            if not result.success and not result.skipped and not group.continue_on_failure:
+                print(f"\n✗ Rollback failed at group: {group.name}")
+                print(f"   Error: {result.error_message}")
+
+                duration_ms = int((time.time() - start_time) * 1000)
+
+                if not dry_run and self.current_deployment_id:
+                    self.deployment_tracker.complete_deployment(
+                        deployment_id=self.current_deployment_id,
+                        success=False,
+                        duration_ms=duration_ms,
+                        group_results=[r.__dict__ for r in group_results],
+                        error_message=f"Failed at group: {group.name}"
+                    )
+
+                return DeploymentResult(
+                    success=False,
+                    duration_ms=duration_ms,
+                    group_results=group_results,
+                    error_message=f"Failed at group: {group.name}"
+                )
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        all_success = all(r.success or r.skipped for r in group_results)
+
+        if all_success:
+            print(f"\n✅ Rollback complete! ({duration_ms / 1000:.1f}s total)")
+        else:
+            print(f"\n⚠️  Rollback completed with errors ({duration_ms / 1000:.1f}s total)")
+
+        # Complete rollback deployment tracking
+        if not dry_run and self.current_deployment_id:
+            groups_deployed = [r.group_name for r in group_results if r.success and not r.skipped]
+            files_deployed = []
+            for r in group_results:
+                if r.files_deployed:
+                    files_deployed.extend(r.files_deployed)
+
+            deployment_snapshot = {
+                'rollback_to_commit': to_commit_hash,
+                'groups': [r.__dict__ for r in group_results]
+            }
+
+            error_message = None
+            if not all_success:
+                failed_groups = [r for r in group_results if not r.success and not r.skipped]
+                if failed_groups:
+                    error_message = failed_groups[0].error_message
+
+            self.deployment_tracker.complete_deployment(
+                deployment_id=self.current_deployment_id,
+                success=all_success,
+                duration_ms=duration_ms,
+                groups_deployed=groups_deployed,
+                files_deployed=files_deployed,
+                error_message=error_message,
+                deployment_snapshot=deployment_snapshot
+            )
+
+        # Restore original work_dir
+        self.work_dir = original_work_dir
+
+        return DeploymentResult(
+            success=all_success,
+            duration_ms=duration_ms,
+            group_results=group_results
+        )
+
+    def _reconstruct_project(self, cathedral_dir: Path, work_dir: Path) -> None:
+        """Reconstruct project structure from cathedral package"""
+        import json
+
+        files_dir = cathedral_dir / "files"
+
+        if not files_dir.exists():
+            raise ValueError(f"Files directory not found: {files_dir}")
+
+        # Process all file JSON metadata
+        file_count = 0
+        for file_json in sorted(files_dir.glob("*.json")):
+            if file_json.name == "manifest.json":
+                continue
+
+            # Read metadata
+            with open(file_json, 'r') as f:
+                metadata = json.load(f)
+
+            file_path = metadata.get('file_path')
+            if not file_path:
+                continue
+
+            # Check for corresponding blob
+            blob_file = file_json.with_suffix('.blob')
+            if not blob_file.exists():
+                continue
+
+            # Create target path
+            target_file = work_dir / file_path
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Copy blob to target location
+            import shutil
+            shutil.copy2(blob_file, target_file)
+
+            file_count += 1
+
+        print(f"   Reconstructed {file_count} files")

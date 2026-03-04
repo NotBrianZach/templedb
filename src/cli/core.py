@@ -24,6 +24,8 @@ class TempleDBCLI:
             epilog="Use 'templedb <command> --help' for command-specific help"
         )
         self.parser.add_argument('--version', action='version', version='TempleDB 0.7.0')
+        self.parser.add_argument('-C', dest='project_dir', metavar='PATH',
+                                help='Run as if templedb was started in PATH instead of CWD')
         self.subparsers = self.parser.add_subparsers(dest="command", required=True)
 
         # Command registry: maps command names to handler functions
@@ -109,28 +111,45 @@ class TempleDBCLI:
         try:
             args = self.parser.parse_args(argv)
 
-            # Determine which command to run
-            if '.' in args.command:
-                # Direct subcommand
-                handler = self.commands.get(args.command)
-            else:
-                # Check for subcommand in args
-                subcommand_attr = f"{args.command}_subcommand"
-                if hasattr(args, subcommand_attr):
-                    subcommand = getattr(args, subcommand_attr)
-                    handler = self.commands.get(f"{args.command}.{subcommand}")
-                else:
+            # Handle -C flag: change directory before executing command
+            import os
+            original_cwd = None
+            if hasattr(args, 'project_dir') and args.project_dir:
+                original_cwd = os.getcwd()
+                project_path = Path(args.project_dir).resolve()
+                if not project_path.exists():
+                    print(f"Error: directory does not exist: {project_path}", file=sys.stderr)
+                    return 1
+                os.chdir(project_path)
+
+            try:
+                # Determine which command to run
+                if '.' in args.command:
+                    # Direct subcommand
                     handler = self.commands.get(args.command)
+                else:
+                    # Check for subcommand in args
+                    subcommand_attr = f"{args.command}_subcommand"
+                    if hasattr(args, subcommand_attr):
+                        subcommand = getattr(args, subcommand_attr)
+                        handler = self.commands.get(f"{args.command}.{subcommand}")
+                    else:
+                        handler = self.commands.get(args.command)
 
-            if handler is None:
-                self.parser.error(f"No handler registered for command: {args.command}")
-                return 1
+                if handler is None:
+                    self.parser.error(f"No handler registered for command: {args.command}")
+                    return 1
 
-            # Execute the command
-            result = handler(args)
+                # Execute the command
+                result = handler(args)
 
-            # Return exit code (0 if None)
-            return result if result is not None else 0
+                # Return exit code (0 if None)
+                return result if result is not None else 0
+
+            finally:
+                # Restore original directory
+                if original_cwd:
+                    os.chdir(original_cwd)
 
         except KeyboardInterrupt:
             print("\nInterrupted", file=sys.stderr)

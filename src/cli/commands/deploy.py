@@ -479,6 +479,218 @@ class DeployCommands(Command):
             traceback.print_exc()
             return 1
 
+    def history(self, args) -> int:
+        """Show deployment history for a project"""
+        try:
+            project_slug = args.slug
+            project = self.get_project_or_exit(project_slug)
+
+            from deployment_tracker import DeploymentTracker
+            tracker = DeploymentTracker(db_utils)
+
+            target = args.target if hasattr(args, 'target') and args.target else None
+            limit = args.limit if hasattr(args, 'limit') and args.limit else 10
+
+            print(f"\n📜 Deployment History: {project_slug}")
+            if target:
+                print(f"   Target: {target}")
+            print()
+
+            # Get deployment history
+            history = tracker.get_deployment_history(
+                project_id=project['id'],
+                target_name=target,
+                limit=limit
+            )
+
+            if not history:
+                print("   No deployments found")
+                return 0
+
+            # Display history
+            for record in history:
+                status_icon = {
+                    'success': '✅',
+                    'failed': '❌',
+                    'in_progress': '🔄',
+                    'rolled_back': '⏪'
+                }.get(record.status, '❓')
+
+                print(f"{status_icon} #{record.id} - {record.target_name}")
+                print(f"   Status: {record.status}")
+                print(f"   Started: {record.started_at}")
+                if record.completed_at:
+                    print(f"   Duration: {record.duration_ms / 1000:.1f}s")
+                if record.commit_hash:
+                    print(f"   Commit: {record.commit_hash[:8]}")
+                if record.deployed_by:
+                    print(f"   By: {record.deployed_by}")
+                if record.groups_deployed:
+                    print(f"   Groups: {', '.join(record.groups_deployed)}")
+                if record.error_message:
+                    print(f"   Error: {record.error_message[:100]}")
+                print()
+
+            return 0
+
+        except Exception as e:
+            print(f"✗ Failed to get deployment history: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            return 1
+
+    def rollback(self, args) -> int:
+        """Rollback to a previous deployment"""
+        try:
+            project_slug = args.slug
+            project = self.get_project_or_exit(project_slug)
+
+            from deployment_tracker import DeploymentTracker
+            tracker = DeploymentTracker(db_utils)
+
+            target = args.target if hasattr(args, 'target') and args.target else 'production'
+            to_deployment_id = args.to_id if hasattr(args, 'to_id') and args.to_id else None
+            reason = args.reason if hasattr(args, 'reason') and args.reason else None
+
+            print(f"\n⏪ Rolling back {project_slug} on {target}...\n")
+
+            # Get current deployment
+            current = tracker.get_deployment_history(
+                project_id=project['id'],
+                target_name=target,
+                limit=1,
+                status='success'
+            )
+
+            if not current:
+                print("✗ No successful deployment found to rollback from", file=sys.stderr)
+                return 1
+
+            current_deployment = current[0]
+
+            # If no specific target, get last successful before current
+            if not to_deployment_id:
+                previous = tracker.get_last_successful_deployment(
+                    project_id=project['id'],
+                    target_name=target,
+                    before_deployment_id=current_deployment.id
+                )
+
+                if not previous:
+                    print("✗ No previous deployment found to rollback to", file=sys.stderr)
+                    return 1
+
+                to_deployment_id = previous.id
+                print(f"📌 Rolling back from deployment #{current_deployment.id} to #{to_deployment_id}")
+            else:
+                print(f"📌 Rolling back from deployment #{current_deployment.id} to #{to_deployment_id}")
+
+            # Get target deployment
+            target_deployment = None
+            all_deployments = tracker.get_deployment_history(
+                project_id=project['id'],
+                target_name=target,
+                limit=100
+            )
+            for d in all_deployments:
+                if d.id == to_deployment_id:
+                    target_deployment = d
+                    break
+
+            if not target_deployment:
+                print(f"✗ Deployment #{to_deployment_id} not found", file=sys.stderr)
+                return 1
+
+            if target_deployment.status != 'success':
+                print(f"✗ Cannot rollback to deployment with status: {target_deployment.status}", file=sys.stderr)
+                return 1
+
+            # Show what will be rolled back
+            print(f"\n📋 Rollback Plan:")
+            print(f"   Current: Deployment #{current_deployment.id}")
+            print(f"            Started: {current_deployment.started_at}")
+            if current_deployment.commit_hash:
+                print(f"            Commit: {current_deployment.commit_hash[:8]}")
+            print()
+            print(f"   Target:  Deployment #{target_deployment.id}")
+            print(f"            Started: {target_deployment.started_at}")
+            if target_deployment.commit_hash:
+                print(f"            Commit: {target_deployment.commit_hash[:8]}")
+            print()
+
+            # Confirm (unless --yes flag)
+            if not (hasattr(args, 'yes') and args.yes):
+                response = input("   Proceed with rollback? [y/N]: ")
+                if response.lower() not in ['y', 'yes']:
+                    print("   Rollback cancelled")
+                    return 0
+
+            print("\n🔄 Performing rollback...\n")
+
+            from deployment_orchestrator import DeploymentOrchestrator
+            from deployment_config import DeploymentConfigManager
+
+            config_manager = DeploymentConfigManager(db_utils)
+            config = config_manager.get_config(project['id'])
+
+            if not config.groups:
+                print("✗ No deployment configuration found - cannot rollback", file=sys.stderr)
+                return 1
+
+            # Get commit hash to rollback to
+            if not target_deployment.commit_hash:
+                print("✗ Target deployment has no commit hash - cannot rollback", file=sys.stderr)
+                return 1
+
+            # Create orchestrator and execute rollback
+            # Note: work_dir will be created by orchestrator.rollback()
+            orchestrator = DeploymentOrchestrator(
+                project=project,
+                target_name=target,
+                config=config,
+                db_utils=db_utils,
+                work_dir=Path("/tmp")  # Placeholder, will be replaced in rollback()
+            )
+
+            # Execute rollback
+            result = orchestrator.rollback(
+                to_commit_hash=target_deployment.commit_hash,
+                dry_run=False,
+                validate_env=True
+            )
+
+            if result.success:
+                # Record rollback relationship
+                # Get the rollback deployment ID from tracker
+                rollback_deployments = tracker.get_deployment_history(
+                    project_id=project['id'],
+                    target_name=target,
+                    limit=1
+                )
+
+                if rollback_deployments:
+                    rollback_deployment_id = rollback_deployments[0].id
+                    tracker.record_rollback(
+                        from_deployment_id=current_deployment.id,
+                        to_deployment_id=target_deployment.id,
+                        rollback_deployment_id=rollback_deployment_id,
+                        reason=reason
+                    )
+
+                print("\n✅ Rollback completed successfully!")
+                return 0
+            else:
+                print(f"\n✗ Rollback failed: {result.error_message}")
+                return 1
+
+            return 0
+
+        except Exception as e:
+            print(f"✗ Rollback failed: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            return 1
+
 
 def register(cli):
     """Register deployment commands with CLI"""
@@ -522,3 +734,19 @@ def register(cli):
     target_parser.add_argument('--set-connection', action='store_true', help='Set connection string for target')
     target_parser.add_argument('connection_string', nargs='?', help='Connection string (supports ${ENV_VAR} syntax)')
     cli.commands['deploy.target'] = deploy_handler.target
+
+    # deploy history command
+    history_parser = subparsers.add_parser('history', help='Show deployment history')
+    history_parser.add_argument('slug', help='Project slug')
+    history_parser.add_argument('--target', help='Filter by target')
+    history_parser.add_argument('--limit', type=int, default=10, help='Number of deployments to show (default: 10)')
+    cli.commands['deploy.history'] = deploy_handler.history
+
+    # deploy rollback command
+    rollback_parser = subparsers.add_parser('rollback', help='Rollback to previous deployment')
+    rollback_parser.add_argument('slug', help='Project slug')
+    rollback_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
+    rollback_parser.add_argument('--to-id', type=int, help='Deployment ID to rollback to (default: previous successful)')
+    rollback_parser.add_argument('--reason', help='Reason for rollback')
+    rollback_parser.add_argument('--yes', action='store_true', help='Skip confirmation prompt')
+    cli.commands['deploy.rollback'] = deploy_handler.rollback

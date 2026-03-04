@@ -164,8 +164,9 @@ class CathedralPackage:
         with open(file_blob, 'rb') as f:
             return f.read()
 
-    def write_vcs_data(self, branches: List[Dict], commits: List[Dict], history: List[Dict]):
-        """Write VCS data"""
+    def write_vcs_data(self, branches: List[Dict], commits: List[Dict], history: List[Dict],
+                      commit_files: List[Dict] = None, tags: List[Dict] = None):
+        """Write VCS data (including new git integration fields)"""
         with open(self.vcs_dir / "branches.json", 'w') as f:
             json.dump(branches, f, indent=2)
         with open(self.vcs_dir / "commits.json", 'w') as f:
@@ -173,15 +174,36 @@ class CathedralPackage:
         with open(self.vcs_dir / "history.json", 'w') as f:
             json.dump(history, f, indent=2)
 
-    def read_vcs_data(self) -> tuple[List[Dict], List[Dict], List[Dict]]:
-        """Read VCS data"""
+        # Write new git integration data (optional for backwards compatibility)
+        if commit_files is not None:
+            with open(self.vcs_dir / "commit_files.json", 'w') as f:
+                json.dump(commit_files, f, indent=2)
+
+        if tags is not None:
+            with open(self.vcs_dir / "tags.json", 'w') as f:
+                json.dump(tags, f, indent=2)
+
+    def read_vcs_data(self) -> tuple[List[Dict], List[Dict], List[Dict], List[Dict], List[Dict]]:
+        """Read VCS data (including new git integration fields if available)"""
         with open(self.vcs_dir / "branches.json", 'r') as f:
             branches = json.load(f)
         with open(self.vcs_dir / "commits.json", 'r') as f:
             commits = json.load(f)
         with open(self.vcs_dir / "history.json", 'r') as f:
             history = json.load(f)
-        return branches, commits, history
+
+        # Read new git integration data (optional for backwards compatibility)
+        commit_files = []
+        if (self.vcs_dir / "commit_files.json").exists():
+            with open(self.vcs_dir / "commit_files.json", 'r') as f:
+                commit_files = json.load(f)
+
+        tags = []
+        if (self.vcs_dir / "tags.json").exists():
+            with open(self.vcs_dir / "tags.json", 'r') as f:
+                tags = json.load(f)
+
+        return branches, commits, history, commit_files, tags
 
     def write_files_manifest(self, files: List[FileMetadata]):
         """Write files/manifest.json with list of all files"""

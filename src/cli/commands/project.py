@@ -3,6 +3,7 @@
 Project management commands
 """
 import sys
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -13,6 +14,7 @@ from cli.core import Command
 from cli.commands.checkout import CheckoutCommand
 from cli.commands.commit import CommitCommand
 from repositories import ProjectRepository, FileRepository
+from project_context import ProjectContext, get_project_context
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,6 +28,54 @@ class ProjectCommands(Command):
         """Initialize with repositories"""
         self.project_repo = ProjectRepository()
         self.file_repo = FileRepository()
+
+    def init_project(self, args) -> int:
+        """Initialize current directory as a TempleDB project"""
+        project_path = Path(os.getcwd()).resolve()
+
+        # Check if already in a project
+        existing_ctx = ProjectContext.discover(project_path)
+        if existing_ctx:
+            logger.error(f"Already in a TempleDB project: {existing_ctx.slug}")
+            logger.error(f"Project root: {existing_ctx.root}")
+            return 1
+
+        # Determine slug
+        slug = args.slug if args.slug else project_path.name
+
+        # Check if project with this slug exists
+        project = self.project_repo.get_by_slug(slug)
+        if project:
+            logger.error(f"Project with slug '{slug}' already exists")
+            logger.error("Use 'templedb project import' to import into existing project")
+            return 1
+
+        logger.info(f"Initializing project '{slug}' in {project_path}")
+
+        # Create project in database
+        project_id = self.project_repo.create(
+            slug=slug,
+            name=args.name or slug,
+            repo_url=str(project_path),  # Keep for backward compatibility
+            git_branch='main'
+        )
+
+        # Create .templedb marker
+        ProjectContext.create_marker(
+            project_root=project_path,
+            slug=slug,
+            project_id=project_id
+        )
+
+        print(f"✅ Initialized TempleDB project: {slug}")
+        print(f"   Project root: {project_path}")
+        print(f"   .templedb marker created")
+        print()
+        print("Next steps:")
+        print(f"   templedb sync      # Scan and import files")
+        print(f"   templedb status    # Show current project status")
+
+        return 0
 
     def import_project(self, args) -> int:
         """Import a project from filesystem into database"""
@@ -46,17 +96,35 @@ class ProjectCommands(Command):
         project = self.project_repo.get_by_slug(slug)
 
         if not project:
-            # Create project
+            # Create project (repo_url is now optional/legacy)
             logger.info(f"Creating new project: {slug}")
-            self.project_repo.create(
+            project_id = self.project_repo.create(
                 slug=slug,
                 name=slug,
-                repo_url=str(project_path),
+                repo_url=str(project_path),  # Keep for backward compatibility
                 git_branch='main'
             )
-            logger.info(f"Created project '{slug}'")
+
+            # Create .templedb marker for CWD-based discovery
+            ProjectContext.create_marker(
+                project_root=project_path,
+                slug=slug,
+                project_id=project_id
+            )
+            logger.info(f"Created project '{slug}' with .templedb marker")
         else:
             logger.info(f"Updating existing project: {slug}")
+            project_id = project['id']
+
+            # Create .templedb marker if it doesn't exist (upgrade legacy projects)
+            marker_dir = project_path / ".templedb"
+            if not marker_dir.exists():
+                ProjectContext.create_marker(
+                    project_root=project_path,
+                    slug=slug,
+                    project_id=project_id
+                )
+                logger.info(f"Added .templedb marker to existing project")
 
         # Use Python importer
         try:
@@ -126,23 +194,32 @@ class ProjectCommands(Command):
 
     def sync_project(self, args) -> int:
         """Re-import project from filesystem"""
-        project = self.project_repo.get_by_slug(args.slug)
-        if not project:
-            logger.error(f"Project '{args.slug}' not found")
-            return 1
+        # If no slug provided, try CWD-based discovery
+        if hasattr(args, 'slug') and args.slug:
+            slug = args.slug
+            project = self.project_repo.get_by_slug(slug)
+            if not project:
+                logger.error(f"Project '{slug}' not found")
+                return 1
 
-        repo_path = project.get('repo_url')
-        if not repo_path or not Path(repo_path).exists():
-            logger.error(f"Project path not found: {repo_path}")
-            return 1
+            repo_path = project.get('repo_url')
+            if not repo_path or not Path(repo_path).exists():
+                logger.error(f"Project path not found: {repo_path}")
+                return 1
+        else:
+            # CWD-based discovery
+            ctx = get_project_context(required=True)
+            slug = ctx.slug
+            repo_path = str(ctx.root)
+            logger.info(f"Discovered project from CWD: {slug}")
 
-        logger.info(f"Syncing {args.slug} from {repo_path}...")
+        logger.info(f"Syncing {slug} from {repo_path}...")
 
         # Use Python importer
         try:
             from importer import ProjectImporter
 
-            importer = ProjectImporter(args.slug, repo_path, dry_run=False)
+            importer = ProjectImporter(slug, repo_path, dry_run=False)
             stats = importer.import_files()
 
             print(f"\n📈 Import Statistics:")
@@ -222,6 +299,12 @@ def register(cli):
     )
     subparsers = project_parser.add_subparsers(dest='project_subcommand', required=True)
 
+    # project init
+    init_parser = subparsers.add_parser('init', help='Initialize current directory as TempleDB project')
+    init_parser.add_argument('--slug', help='Project slug (default: directory name)')
+    init_parser.add_argument('--name', help='Project name (default: slug)')
+    cli.commands['project.init'] = cmd.init_project
+
     # project import
     import_parser = subparsers.add_parser('import', help='Import project from filesystem')
     import_parser.add_argument('path', help='Path to project directory')
@@ -241,7 +324,7 @@ def register(cli):
 
     # project sync
     sync_parser = subparsers.add_parser('sync', help='Re-import project from filesystem')
-    sync_parser.add_argument('slug', help='Project slug')
+    sync_parser.add_argument('slug', nargs='?', help='Project slug (optional, uses CWD if omitted)')
     cli.commands['project.sync'] = cmd.sync_project
 
     # project rm

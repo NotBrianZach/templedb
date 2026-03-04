@@ -224,25 +224,241 @@ class ProjectWatcher(FileSystemEventHandler):
 - Convert natural language to SQL
 - Interactive query refinement
 
-### Multi-User & Collaboration
+### 14. Multi-User & Collaboration 🔴 **Critical Architectural Gap**
 
-**User Management**
-- User accounts and authentication
-- Permission levels (read, write, admin)
-- Audit logging
-- Team workspaces
+**Current State: Single-User Only**
+
+TempleDB currently assumes single-user operation throughout the codebase. This is a fundamental architectural limitation that affects multiple layers:
+
+#### Database Layer Issues
+- **SQLite (single writer)**: Only one process can write at a time
+  - Concurrent writes cause "database locked" errors
+  - No multi-version concurrency control (MVCC) like PostgreSQL
+  - No row-level locking
+  - No transaction isolation between users
+  - No user-based access control at DB level
+
+#### Filesystem & Path Assumptions
+- **Absolute paths**: Assumptions about `/home/zach/...` paths throughout
+  - ✅ *Partially addressed by CWD-based discovery*
+  - ⚠️  Still issues with checkout paths and workspace directories
+- User home directory dependencies (`~/.templedb/`, `~/.age/`)
+- No multi-tenant project organization
+- Shared filesystem conflicts (NFS, network drives)
+
+#### Security & Access Control
+- **Age encryption keys**: Stored per-user in home directory
+  - `~/.config/sops/age/keys.txt` - single user assumption
+  - No key distribution mechanism for teams
+  - No shared key management
+  - Users must share dangerous private keys OR re-encrypt for each user
+- **No authentication system**:
+  - No login, sessions, or user identity verification
+  - Commands assume `$USER` environment variable (easily spoofed)
+  - No password, tokens, or credentials
+- **No authorization system**:
+  - Any database access = full admin rights
+  - No read-only access mode
+  - No project-level permissions
+  - No file-level access control
+  - No concept of "owners" vs "collaborators"
+- **Audit logs are unverified**:
+  - Stores `$USER` from environment but no verification
+  - No cryptographic signatures
+  - No non-repudiation
+
+#### Session & State Management
+- No concept of "who is currently logged in"
+- No session tokens or credentials
+- No API authentication for remote access
+- No way to track active users
+
+#### Concurrency & Conflict Scenarios
+- **File conflicts**: Multiple users editing same file simultaneously
+  - Optimistic locking exists but assumes single user will resolve
+  - No pessimistic locking available
+  - Last-write-wins can lose data
+- **Cathedral conflicts**: Exports/imports could clobber other users' work
+- **Checkout conflicts**: Multiple users checking out same project
+- **Deployment races**: Two users deploying simultaneously
+
+#### Proposed Solutions
+
+**Option A: Client-Server Architecture** ⭐ **Recommended Long-Term**
+
+```
+┌─────────────┐         ┌─────────────────┐
+│TempleDB CLI │────────▶│ TempleDB Server │
+│  (Client)   │◀────────│  (PostgreSQL)   │
+└─────────────┘  gRPC   └─────────────────┘
+     User 1                    │
+                          ┌────┴────┐
+┌─────────────┐          │ Auth    │
+│TempleDB CLI │──────────│ RBAC    │
+│  (Client)   │  gRPC    │ Audit   │
+└─────────────┘          └─────────┘
+     User 2
+```
+
+**Pros:**
+- Proper multi-user with PostgreSQL
+- Central authentication & authorization
+- Network access for remote teams
+- Row-level security (RLS)
+- ACID compliance with concurrent writes
+- Cloud deployment ready
+- Mature ecosystem (connection pooling, replication, backups)
+
+**Cons:**
+- Major architecture change
+- Requires server infrastructure
+- Complexity for single-user case
+- Database schema migration needed
+- Network dependency (but could cache locally)
+
+**Implementation Roadmap:**
+- [ ] Design gRPC or REST API
+- [ ] User authentication (JWT tokens, sessions)
+- [ ] Role-based access control (RBAC) - Owner, Admin, Developer, Viewer
+- [ ] Migrate schema from SQLite to PostgreSQL
+- [ ] Handle offline mode with local SQLite cache
+- [ ] Multi-tenancy design (organizations, teams, projects)
+- [ ] Secret sharing with envelope encryption
+- [ ] Audit logging with verified identities
+
+**Option B: Distributed/P2P Architecture**
+
+```
+┌─────────────┐       ┌─────────────┐       ┌─────────────┐
+│TempleDB CLI │◀─────▶│TempleDB CLI │◀─────▶│TempleDB CLI │
+│  (User 1)   │       │  (User 2)   │       │  (User 3)   │
+└─────────────┘       └─────────────┘       └─────────────┘
+       │                     │                      │
+    SQLite               SQLite                SQLite
+```
+
+**Pros:**
+- No central server needed
+- Local-first, offline-friendly
+- Peer-to-peer collaboration
+- Like Git's distributed model
+- No single point of failure
+
+**Cons:**
+- Complex conflict resolution (CRDTs required)
+- Eventual consistency issues
+- Requires distributed systems expertise
+- Merge conflicts at database level (complex)
+- Harder to enforce authorization
+
+**Implementation:**
+- [ ] CRDTs (Conflict-free Replicated Data Types)
+- [ ] Vector clocks or Lamport timestamps
+- [ ] Sync protocol design
+- [ ] Peer discovery mechanism
+- [ ] Offline-first architecture
+- [ ] Byzantine fault tolerance considerations
+
+**Option C: Hybrid - SQLite + File Locking** ⚠️ **Not Recommended**
+
+Keep SQLite but add explicit file locking for multi-user on shared filesystem.
+
+**Cons:**
+- SQLite on NFS is dangerous (corruption risk)
+- Still single-writer bottleneck
+- Poor performance
+- File locking issues (stale locks, lock server crashes)
+- Not recommended by SQLite developers
+
+**Option D: "Handoff" Model - Cooperative Locking**
+
+One active user at a time, explicit handoff between users.
+
+**Pros:**
+- Minimal changes to current architecture
+- Clear ownership model
+- No complex concurrency
+
+**Cons:**
+- Not true collaboration
+- Bottleneck on popular projects
+- Frustrating developer experience
+- Doesn't scale
+
+**User Management Roadmap**
+
+If we pursue Option A (recommended), here's the phased approach:
+
+**Phase 1: Authentication & Identity (Foundation)**
+- [ ] User registration and login
+- [ ] Password hashing (bcrypt/argon2)
+- [ ] JWT or session-based authentication
+- [ ] User profiles (name, email, avatar, preferences)
+- [ ] API key generation for automation/CI
+- [ ] MFA/2FA support
+
+**Phase 2: Authorization & Access Control**
+- [ ] Role-based access control (RBAC):
+  - **Owner**: Full control, can delete project
+  - **Admin**: Manage users, settings, deployments
+  - **Developer**: Read/write code, create commits
+  - **Viewer**: Read-only access
+- [ ] Project-level permissions
+- [ ] Fine-grained permissions (optional):
+  - Branch protection rules
+  - File-level ACLs
+  - Secret access control
+- [ ] Team/organization hierarchy
+- [ ] Audit logging with verified user identities
+- [ ] Permission inheritance
+
+**Phase 3: Concurrent Access & Database Migration**
+- [ ] Migrate from SQLite to PostgreSQL
+- [ ] Transaction isolation levels (Read Committed, Serializable)
+- [ ] Pessimistic locking for critical operations
+- [ ] Optimistic locking with user attribution
+- [ ] Conflict detection and resolution UI
+- [ ] Concurrent file editing with operational transforms
+- [ ] Real-time notifications of conflicts
+
+**Phase 4: Shared Secrets & Key Management**
+- [ ] Key management service (KMS)
+- [ ] Envelope encryption for shared secrets:
+  - Data Encryption Key (DEK) per secret
+  - Key Encryption Keys (KEK) per user
+  - Users can decrypt with their KEK
+- [ ] Secret sharing (per-user, per-team, per-project)
+- [ ] Key rotation
+- [ ] Secret access audit logs
+- [ ] Integration with external KMS:
+  - HashiCorp Vault
+  - AWS Secrets Manager
+  - Google Secret Manager
+  - Azure Key Vault
+
+**Phase 5: Collaboration Features**
+- [ ] User presence indicators ("John is viewing main.py")
+- [ ] File checkout/lock status
+- [ ] Comments and code discussions
+- [ ] Code review workflow (approve, request changes)
+- [ ] @mentions and notifications
+- [ ] Real-time activity feed
+- [ ] Conflict resolution UI
 
 **Remote Sync**
-- Sync database between machines
-- Conflict resolution
+- Sync database state between machines
+- Conflict resolution strategies
 - Distributed version control
-- Central server optional
+- Central server optional (hybrid mode)
+- Push/pull model like git
 
 **Code Review Workflow**
 - Review merge requests
-- Comment on lines of code
+- Comment on specific lines of code
 - Approve/reject changes
 - Track review status
+- Request changes
+- Mark conversations resolved
 
 ### Testing & Quality
 

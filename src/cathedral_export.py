@@ -157,7 +157,7 @@ class CathedralExporter:
         cursor = self.conn.cursor()
         rows = cursor.execute("""
             SELECT id, branch_id, parent_commit_id, commit_hash, author,
-                   commit_message, commit_timestamp
+                   author_email, commit_message, commit_timestamp
             FROM vcs_commits
             WHERE project_id = ?
             ORDER BY commit_timestamp
@@ -183,6 +183,51 @@ class CathedralExporter:
                 SELECT id FROM vcs_commits WHERE project_id = ?
             )
             ORDER BY commit_id
+        """, (project_id,)).fetchall()
+        return [dict_from_row(row) for row in rows]
+
+    def get_commit_files(self, project_id: int) -> List[Dict]:
+        """Get commit file changes (for git integration)"""
+        cursor = self.conn.cursor()
+
+        # Check if table exists
+        table_check = cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='commit_files'
+        """).fetchone()
+
+        if not table_check:
+            return []
+
+        rows = cursor.execute("""
+            SELECT cf.id, cf.commit_id, cf.file_id, cf.change_type,
+                   cf.old_content_hash, cf.new_content_hash,
+                   cf.old_path, cf.new_path
+            FROM commit_files cf
+            JOIN vcs_commits vc ON cf.commit_id = vc.id
+            WHERE vc.project_id = ?
+            ORDER BY cf.commit_id, cf.id
+        """, (project_id,)).fetchall()
+        return [dict_from_row(row) for row in rows]
+
+    def get_vcs_tags(self, project_id: int) -> List[Dict]:
+        """Get VCS tags (for git integration)"""
+        cursor = self.conn.cursor()
+
+        # Check if table exists
+        table_check = cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='vcs_tags'
+        """).fetchone()
+
+        if not table_check:
+            return []
+
+        rows = cursor.execute("""
+            SELECT id, tag_name, commit_id
+            FROM vcs_tags
+            WHERE project_id = ?
+            ORDER BY id
         """, (project_id,)).fetchall()
         return [dict_from_row(row) for row in rows]
 
@@ -365,8 +410,10 @@ class CathedralExporter:
             branches = self.get_vcs_branches(project_id)
             commits = self.get_vcs_commits(project_id)
             history = self.get_vcs_history(project_id)
-            package.write_vcs_data(branches, commits, history)
-            logger.info(f"✓ Exported {len(branches)} branches, {len(commits)} commits")
+            commit_files = self.get_commit_files(project_id)
+            tags = self.get_vcs_tags(project_id)
+            package.write_vcs_data(branches, commits, history, commit_files, tags)
+            logger.info(f"✓ Exported {len(branches)} branches, {len(commits)} commits, {len(tags)} tags")
 
         # Export environments
         if include_environments:
