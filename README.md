@@ -57,23 +57,49 @@ TempleDB uses a **checkout/commit workflow** - your files live in the database, 
 - Multiple agents can work **safely** (optimistic locking with version tracking)
 
 **Example workflow (AI Agent via MCP):**
-```python
-# Claude Code/Agent using TempleDB MCP tools
-# 1. List projects to find what to work on
-projects = mcp_templedb_project_list()
+```bash
+# User starts Claude Code with TempleDB MCP server configured
+$ claude-code
 
-# 2. Check current status
-status = mcp_templedb_vcs_status(project="myproject")
+# Interactive session:
+User: "Fix the authentication bug in myproject"
 
-# 3. Make changes using standard file tools (Read, Edit, Write)
-Read(file_path="/path/to/project/src/main.py")
-Edit(file_path="/path/to/project/src/main.py", old_string="...", new_string="...")
+Claude: Let me help you fix the authentication bug. I'll use the TempleDB MCP
+        tools to work directly with your database.
 
-# 4. Stage and commit changes via MCP
-mcp_templedb_vcs_add(project="myproject", files=["src/main.py"])
-mcp_templedb_vcs_commit(project="myproject", message="Fix bug", author="Claude <noreply@anthropic.com>")
+# Claude uses MCP tools behind the scenes:
+mcp_templedb_project_show(project="myproject")
+mcp_templedb_vcs_status(project="myproject")
+mcp_templedb_search_content(query="auth", project="myproject")
 
-# Database stays normalized - no temporary checkouts needed!
+Claude: I found the issue in src/auth.py. Let me check the current implementation.
+
+mcp_templedb_query(query="""
+  SELECT cb.content_text FROM project_files pf
+  JOIN file_contents fc ON fc.file_id = pf.id
+  JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+  WHERE pf.file_path = 'src/auth.py' AND pf.project_id =
+    (SELECT id FROM projects WHERE slug = 'myproject')
+""")
+
+Claude: I see the problem - the token validation is missing. I'll fix it now.
+
+# Claude edits directly, then stages and commits
+mcp_templedb_vcs_add(project="myproject", files=["src/auth.py"])
+mcp_templedb_vcs_commit(
+  project="myproject",
+  message="Fix authentication token validation",
+  author="Claude <noreply@anthropic.com>"
+)
+
+Claude: ✓ Fixed! The authentication bug has been resolved and committed.
+        The database stays normalized - no temporary checkouts needed!
+
+User: "Show me the commit history"
+
+mcp_templedb_vcs_log(project="myproject", limit=5)
+
+Claude: Here are the last 5 commits for myproject: [displays commit history]
 ```
 
 **See [HOWTO_EXPLORE.md](HOWTO_EXPLORE.md) for complete examples.**
@@ -243,13 +269,12 @@ This ensures AI assistants have comprehensive understanding of TempleDB's philos
 
 ### MCP Server for AI Agents
 
-TempleDB includes a Model Context Protocol (MCP) server that exposes the database directly to AI agents:
+TempleDB includes a Model Context Protocol (MCP) server that exposes the database directly to AI agents like Claude Code:
+
+**Setup (one-time):**
 
 ```bash
-# Start the MCP server
-./templedb mcp serve
-
-# Or configure in Claude Desktop's config:
+# Option 1: Configure in Claude Desktop (~/.config/claude/claude_desktop_config.json)
 {
   "mcpServers": {
     "templedb": {
@@ -258,23 +283,47 @@ TempleDB includes a Model Context Protocol (MCP) server that exposes the databas
     }
   }
 }
+
+# Option 2: Or start manually for testing
+./templedb mcp serve
+```
+
+**Usage:**
+
+```bash
+# Start Claude Code (MCP server auto-connects if configured)
+$ claude-code
+
+# Now interact naturally - Claude uses TempleDB MCP tools automatically:
+You: "Show me all Python files in myproject"
+Claude: [uses mcp_templedb_search_files to query database]
+
+You: "Fix the bug in auth.py"
+Claude: [reads from DB, edits, commits - all via MCP tools]
+
+You: "What changed in the last 3 commits?"
+Claude: [uses mcp_templedb_vcs_log to show history]
 ```
 
 **Available MCP Tools:**
 - `templedb_project_list/show/import/sync` - Project management
-- `templedb_vcs_status/add/commit/log/diff` - Version control operations
-- `templedb_search_files/content` - Code search
-- `templedb_query` - Direct SQL queries
-- `templedb_context_generate` - Generate LLM context
+- `templedb_vcs_status/add/commit/log/diff/branch` - Version control operations
+- `templedb_search_files/content` - Code search across all projects
+- `templedb_query` - Direct SQL queries for complex analysis
+- `templedb_context_generate` - Generate LLM context for projects
+- `templedb_commit_list/create` - Commit tracking and creation
+- `templedb_env_get/set/list` - Environment variable management
+- `templedb_deploy` - Deployment orchestration
 
 **Agent Workflow Benefits:**
 - ✅ No filesystem checkouts needed - direct database access
 - ✅ Atomic operations with ACID guarantees
 - ✅ Multi-agent coordination via database transactions
 - ✅ Query across all projects with SQL
-- ✅ Automatic conflict detection
+- ✅ Automatic conflict detection and version tracking
+- ✅ Natural language interface - just ask Claude to do things!
 
-See the MCP example workflow above for how agents use these tools.
+See the interactive example workflow above for a complete session.
 
 ---
 
