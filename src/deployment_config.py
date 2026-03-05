@@ -22,6 +22,11 @@ class DeploymentGroup:
     post_deploy: List[str] = field(default_factory=list)
     required_env_vars: List[str] = field(default_factory=list)
     continue_on_failure: bool = False
+    # Retry and timeout configuration
+    retry_attempts: int = 1  # Number of retry attempts (1 = no retries)
+    retry_delay: int = 5     # Seconds to wait between retries
+    timeout: Optional[int] = None  # Command timeout in seconds (None = use defaults)
+    hook_timeout: int = 30   # Timeout for pre/post hooks in seconds
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'DeploymentGroup':
@@ -36,12 +41,16 @@ class DeploymentGroup:
             test_command=data.get('test_command'),
             post_deploy=data.get('post_deploy', []),
             required_env_vars=data.get('required_env_vars', []),
-            continue_on_failure=data.get('continue_on_failure', False)
+            continue_on_failure=data.get('continue_on_failure', False),
+            retry_attempts=data.get('retry_attempts', 1),
+            retry_delay=data.get('retry_delay', 5),
+            timeout=data.get('timeout'),
+            hook_timeout=data.get('hook_timeout', 30)
         )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
-        return {
+        result = {
             'name': self.name,
             'order': self.order,
             'file_patterns': self.file_patterns,
@@ -53,6 +62,16 @@ class DeploymentGroup:
             'required_env_vars': self.required_env_vars,
             'continue_on_failure': self.continue_on_failure
         }
+        # Only include retry/timeout config if non-default
+        if self.retry_attempts != 1:
+            result['retry_attempts'] = self.retry_attempts
+        if self.retry_delay != 5:
+            result['retry_delay'] = self.retry_delay
+        if self.timeout is not None:
+            result['timeout'] = self.timeout
+        if self.hook_timeout != 30:
+            result['hook_timeout'] = self.hook_timeout
+        return result
 
 
 @dataclass

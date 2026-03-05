@@ -79,6 +79,7 @@ age/
 
 # Nix environment cache
 .direnv/
+.templedb-nix/
 nix-envs/*.nix.tmp
 nix-envs/*.generated
 

@@ -56,24 +56,31 @@ TempleDB uses a **checkout/commit workflow** - your files live in the database, 
 - Commits are **atomic** with conflict detection
 - Multiple agents can work **safely** (optimistic locking with version tracking)
 
-**Example workflow (AI Agent via MCP):**
+**Example workflow (AI Agent with Claude Code):**
 ```bash
-# User starts Claude Code with TempleDB MCP server configured
+# User initializes project (one-time setup)
+$ cd ~/myproject
+$ templedb project init
+✓ Created .templedb/ marker
+✓ Project 'myproject' initialized in database
+
+# User starts Claude Code in project directory
+$ cd ~/myproject
 $ claude-code
 
 # Interactive session:
-User: "Fix the authentication bug in myproject"
+User: "Fix the authentication bug"
 
-Claude: Let me help you fix the authentication bug. I'll use the TempleDB MCP
-        tools to work directly with your database.
+Claude: Let me help you fix the authentication bug. I'll search the codebase
+        using TempleDB MCP tools.
 
 # Claude uses MCP tools behind the scenes:
-mcp_templedb_project_show(project="myproject")
 mcp_templedb_vcs_status(project="myproject")
 mcp_templedb_search_content(query="auth", project="myproject")
 
-Claude: I found the issue in src/auth.py. Let me check the current implementation.
+Claude: I found the issue in src/auth.py at line 42. Let me read the current code.
 
+# Claude reads directly from database (no checkout needed!)
 mcp_templedb_query(query="""
   SELECT cb.content_text FROM project_files pf
   JOIN file_contents fc ON fc.file_id = pf.id
@@ -82,9 +89,15 @@ mcp_templedb_query(query="""
     (SELECT id FROM projects WHERE slug = 'myproject')
 """)
 
-Claude: I see the problem - the token validation is missing. I'll fix it now.
+Claude: The token validation is missing. I'll fix it using the Edit tool.
 
-# Claude edits directly, then stages and commits
+# Claude edits the file directly in the project directory
+Edit(file_path="/home/user/myproject/src/auth.py",
+     old_string="...", new_string="...")
+
+Claude: Now I'll commit the changes to TempleDB.
+
+# Claude stages and commits using MCP
 mcp_templedb_vcs_add(project="myproject", files=["src/auth.py"])
 mcp_templedb_vcs_commit(
   project="myproject",
@@ -93,13 +106,16 @@ mcp_templedb_vcs_commit(
 )
 
 Claude: ✓ Fixed! The authentication bug has been resolved and committed.
-        The database stays normalized - no temporary checkouts needed!
 
-User: "Show me the commit history"
+User: "Show me what changed in the last 3 commits"
 
-mcp_templedb_vcs_log(project="myproject", limit=5)
+# Claude queries commit history
+mcp_templedb_vcs_log(project="myproject", limit=3)
 
-Claude: Here are the last 5 commits for myproject: [displays commit history]
+Claude: Here are the last 3 commits:
+        1. Fix authentication token validation (just now)
+        2. Add user registration endpoint (2 hours ago)
+        3. Update API documentation (yesterday)
 ```
 
 **See [HOWTO_EXPLORE.md](HOWTO_EXPLORE.md) for complete examples.**
@@ -329,76 +345,79 @@ See the interactive example workflow above for a complete session.
 
 ## Quick Start
 
-### 1. Import a Project
+### 1. Initialize a Project
+
+TempleDB uses git-like CWD-based project discovery with `.templedb/` markers:
 
 ```bash
-# Import your project into the database
-./templedb project import /path/to/your/project
+# Initialize current directory as a TempleDB project
+cd ~/myproject
+./templedb project init
 
-# Or specify a custom slug
+# Or import an existing project from elsewhere
 ./templedb project import /path/to/project --slug myproject
 ```
+
+This creates a `.templedb/` marker in your project root - just like `.git/`!
 
 ### 2. View Projects
 
 ```bash
-# View status
+# View database status
 ./templedb status
 
 # List all projects
 ./templedb project list
 
-# Show project details
+# Show current project details (from anywhere in project tree)
+cd ~/myproject/src
+./templedb project show
+
+# Or show specific project
 ./templedb project show myproject
 ```
 
 ### 3. Work with Files
 
-**Option A: AI Agent/Claude CLI (via MCP - recommended for agents)**
-
-```python
-# TempleDB MCP server provides direct database access for AI agents
-# No filesystem checkouts needed - agents work directly with the database!
-
-# Check project status
-mcp_templedb_vcs_status(project="myproject")
-
-# Search for files to modify
-mcp_templedb_search_files(pattern="%.py", project="myproject")
-
-# Read file content directly from database
-mcp_templedb_query(query="""
-  SELECT cb.content_text
-  FROM project_files pf
-  JOIN file_contents fc ON fc.file_id = pf.id
-  JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
-  WHERE pf.file_path = 'src/main.py' AND pf.project_id = (
-    SELECT id FROM projects WHERE slug = 'myproject'
-  )
-""")
-
-# Make changes using standard file operations (Read/Edit/Write)
-# Then stage and commit
-mcp_templedb_vcs_add(project="myproject", files=["src/main.py"])
-mcp_templedb_vcs_commit(project="myproject", message="Fix auth", author="Agent")
-```
-
-**Option B: Human Developer (Checkout/Commit Workflow)**
+**Option A: AI Agent/Claude Code (via MCP - recommended for agents)**
 
 ```bash
-# 1. Checkout project to filesystem
+# Start Claude Code in your project directory
+cd ~/myproject
+claude-code
+
+# Claude uses TempleDB MCP tools to:
+# - Check project status: mcp_templedb_vcs_status(project="myproject")
+# - Search files: mcp_templedb_search_content(query="auth")
+# - Read from database: mcp_templedb_query(...)
+# - Edit files directly: Edit(file_path="src/main.py", ...)
+# - Commit changes: mcp_templedb_vcs_commit(...)
+
+# No checkouts needed - Claude edits files in-place and commits to database!
+```
+
+**Option B: Human Developer (Direct Editing)**
+
+```bash
+# Work in your project directory (like with git)
+cd ~/myproject
+vim src/main.py              # Edit files normally
+
+# Sync changes to database
+./templedb project sync
+
+# Or use VCS workflow with staging
+./templedb vcs add src/main.py
+./templedb vcs commit -m "Fixed authentication"
+```
+
+**Option C: Explicit Checkout/Commit Workflow**
+
+```bash
+# For working in isolated temp locations
 ./templedb project checkout myproject /tmp/workspace
-
-# 2. Edit with your favorite tools
-cd /tmp/workspace
-vim src/main.py              # Use any editor
-grep -r "TODO" .             # Search with standard tools
-tree                         # Explore structure
-
-# 3. Commit changes back to database
-./templedb project commit myproject /tmp/workspace -m "Fixed authentication"
-
-# 4. Cleanup (optional)
+cd /tmp/workspace && vim src/main.py
+./templedb project commit myproject /tmp/workspace -m "Fix"
 rm -rf /tmp/workspace
 ```
 
@@ -561,11 +580,11 @@ ORDER BY version_number DESC;
 ### User Guides
 - **[GUIDE.md](GUIDE.md)** - Complete usage guide (checkout/commit workflow, SQL queries, CLI commands)
 - **[QUICKSTART.md](QUICKSTART.md)** - Advanced workflows for existing users
+- **[DIRENV_INTEGRATION.md](DIRENV_INTEGRATION.md)** ⭐ NEW - Auto-load environments with direnv (v2.0)
 - **[FILES.md](FILES.md)** - How file tracking and versioning works
 - **[TUI.md](TUI.md)** - Terminal UI guide
 - **[EXAMPLES.md](EXAMPLES.md)** - SQL query examples and common patterns
-- **[AGENT_SESSIONS.md](AGENT_SESSIONS.md)** - AI agent session management guide
-- **[MULTI_AGENT_COORDINATION.md](MULTI_AGENT_COORDINATION.md)** ⭐ - Multi-agent coordination and work items
+- **[WORK_COORDINATION.md](WORK_COORDINATION.md)** ⭐ - Work items and multi-agent coordination
 - **[VCS_METADATA_GUIDE.md](VCS_METADATA_GUIDE.md)** - Commit metadata and AI attribution
 
 ### Critical Reference
@@ -574,6 +593,8 @@ ORDER BY version_number DESC;
 
 ### Advanced Topics
 - **[Deployment Guide](docs/DEPLOYMENT_EXAMPLE.md)** ⭐ - Complete deployment workflow for production
+- **[Deployment Resilience](DEPLOYMENT_RESILIENCE.md)** ⭐ NEW - Retry logic, error handling, and production best practices
+- **[Deployment Rollback](DEPLOYMENT_ROLLBACK.md)** - Rollback failed deployments
 - **[Performance & Optimization](docs/advanced/ADVANCED.md)** - Tuning, Nix environments
 - **[Yubikey Secrets](docs/advanced/YUBIKEY_SECRETS.md)** - Hardware-backed encryption
 - **[Multi-User Setup](docs/advanced/CATHEDRAL.md)** - Teams and collaboration

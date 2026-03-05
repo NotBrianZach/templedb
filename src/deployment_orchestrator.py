@@ -28,6 +28,21 @@ class GroupResult:
     error_message: Optional[str] = None
     skipped: bool = False
     skip_reason: Optional[str] = None
+    # Distinguish deployment vs hook failures
+    deployment_success: bool = True  # Core deployment (migrations/builds) succeeded
+    pre_hook_success: bool = True    # Pre-deploy hooks succeeded
+    post_hook_success: bool = True   # Post-deploy hooks succeeded
+    post_hook_errors: List[str] = field(default_factory=list)  # Post-hook error details
+
+    @property
+    def has_warnings(self) -> bool:
+        """Check if deployment succeeded with warnings (e.g., post-hook failures)"""
+        return self.deployment_success and not self.post_hook_success
+
+    @property
+    def is_partial_success(self) -> bool:
+        """Check if core deployment succeeded but hooks failed"""
+        return self.deployment_success and (not self.pre_hook_success or not self.post_hook_success)
 
 
 @dataclass
@@ -158,47 +173,86 @@ class DeploymentOrchestrator:
 
         return sorted(set(matching_files))
 
-    def run_hook(self, hook_command: str, dry_run: bool = False) -> bool:
-        """Run a pre/post deploy hook"""
+    def run_hook(
+        self,
+        hook_command: str,
+        dry_run: bool = False,
+        timeout: int = 30,
+        retry_attempts: int = 1,
+        retry_delay: int = 5
+    ) -> bool:
+        """
+        Run a pre/post deploy hook with retry logic
+
+        Args:
+            hook_command: Shell command to execute
+            dry_run: If True, just print what would be done
+            timeout: Command timeout in seconds
+            retry_attempts: Number of retry attempts (1 = no retries)
+            retry_delay: Seconds to wait between retries
+        """
         if dry_run:
             print(f"      [DRY RUN] Would run: {hook_command}")
             return True
 
-        try:
-            # Substitute environment variables
-            for var_name, var_value in self.env_vars.items():
-                hook_command = hook_command.replace(f"${var_name}", var_value)
-                hook_command = hook_command.replace(f"${{{var_name}}}", var_value)
+        for attempt in range(retry_attempts):
+            try:
+                # Substitute environment variables
+                cmd = hook_command
+                for var_name, var_value in self.env_vars.items():
+                    cmd = cmd.replace(f"${var_name}", var_value)
+                    cmd = cmd.replace(f"${{{var_name}}}", var_value)
 
-            result = subprocess.run(
-                hook_command,
-                shell=True,
-                cwd=self.work_dir,
-                env={**subprocess.os.environ, **self.env_vars},
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
+                result = subprocess.run(
+                    cmd,
+                    shell=True,
+                    cwd=self.work_dir,
+                    env={**subprocess.os.environ, **self.env_vars},
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout
+                )
 
-            if result.returncode != 0:
-                print(f"      ✗ Hook failed: {hook_command}")
-                if result.stderr:
-                    print(f"        {result.stderr[:200]}")
-                return False
+                if result.returncode != 0:
+                    if attempt < retry_attempts - 1:
+                        print(f"      ⚠️  Hook failed (attempt {attempt+1}/{retry_attempts}), retrying in {retry_delay}s...")
+                        if result.stderr:
+                            print(f"        Error: {result.stderr[:200]}")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        print(f"      ✗ Hook failed after {retry_attempts} attempts: {hook_command}")
+                        if result.stderr:
+                            print(f"        {result.stderr[:200]}")
+                        return False
 
-            if result.stdout:
-                # Show first line of output
-                first_line = result.stdout.strip().split('\n')[0]
-                print(f"      ✓ {first_line[:80]}")
+                if result.stdout:
+                    # Show first line of output
+                    first_line = result.stdout.strip().split('\n')[0]
+                    print(f"      ✓ {first_line[:80]}")
+                else:
+                    print(f"      ✓ Hook completed")
 
-            return True
+                return True  # Success, exit retry loop
 
-        except subprocess.TimeoutExpired:
-            print(f"      ✗ Hook timed out: {hook_command}")
-            return False
-        except Exception as e:
-            print(f"      ✗ Hook error: {e}")
-            return False
+            except subprocess.TimeoutExpired:
+                if attempt < retry_attempts - 1:
+                    print(f"      ⚠️  Hook timed out (attempt {attempt+1}/{retry_attempts}), retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print(f"      ✗ Hook timed out after {retry_attempts} attempts: {hook_command}")
+                    return False
+            except Exception as e:
+                if attempt < retry_attempts - 1:
+                    print(f"      ⚠️  Hook error (attempt {attempt+1}/{retry_attempts}): {e}, retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print(f"      ✗ Hook error after {retry_attempts} attempts: {e}")
+                    return False
+
+        return False  # Should not reach here
 
     def deploy_migration_group(
         self,
@@ -477,17 +531,28 @@ class DeploymentOrchestrator:
 
         start_time = time.time()
 
-        # Run pre-deploy hooks
+        # Run pre-deploy hooks with retry logic
+        pre_hook_success = True
         if group.pre_deploy:
             print(f"   Running pre-deploy hooks...")
             for hook in group.pre_deploy:
-                if not self.run_hook(hook, dry_run):
+                if not self.run_hook(
+                    hook,
+                    dry_run,
+                    timeout=group.hook_timeout,
+                    retry_attempts=group.retry_attempts,
+                    retry_delay=group.retry_delay
+                ):
+                    pre_hook_success = False
                     duration_ms = int((time.time() - start_time) * 1000)
                     return GroupResult(
                         group_name=group.name,
                         success=False,
                         duration_ms=duration_ms,
-                        error_message=f"Pre-deploy hook failed: {hook}"
+                        error_message=f"Pre-deploy hook failed: {hook}",
+                        deployment_success=False,
+                        pre_hook_success=False,
+                        post_hook_success=True
                     )
 
         # Handle migration groups specially
@@ -502,20 +567,45 @@ class DeploymentOrchestrator:
                 success=True,
                 duration_ms=0,
                 skipped=True,
-                skip_reason="No deployment logic for this group type yet"
+                skip_reason="No deployment logic for this group type yet",
+                deployment_success=True,
+                pre_hook_success=pre_hook_success,
+                post_hook_success=True
             )
 
-        # Run post-deploy hooks if successful
-        if result.success and group.post_deploy:
+        # Run post-deploy hooks if deployment succeeded
+        # Post-hook failures don't fail the deployment, just create warnings
+        post_hook_success = True
+        post_hook_errors = []
+        if result.deployment_success and group.post_deploy:
             print(f"   Running post-deploy hooks...")
             for hook in group.post_deploy:
-                if not self.run_hook(hook, dry_run):
-                    result.success = False
-                    result.error_message = f"Post-deploy hook failed: {hook}"
-                    break
+                if not self.run_hook(
+                    hook,
+                    dry_run,
+                    timeout=group.hook_timeout,
+                    retry_attempts=group.retry_attempts,
+                    retry_delay=group.retry_delay
+                ):
+                    post_hook_success = False
+                    post_hook_errors.append(f"Post-deploy hook failed: {hook}")
+                    print(f"      ⚠️  Warning: Post-deploy hook failed but deployment continues")
+
+        # Update result with post-hook status
+        result.post_hook_success = post_hook_success
+        result.post_hook_errors = post_hook_errors
+
+        # Overall success requires both deployment and post-hooks to succeed
+        # But we distinguish between deployment success and hook success
+        if not post_hook_success:
+            result.success = False
+            result.error_message = "; ".join(post_hook_errors) if post_hook_errors else "Post-deploy hooks failed"
 
         if result.success and not result.skipped:
             print(f"   ✅ Completed in {result.duration_ms}ms")
+        elif result.has_warnings:
+            print(f"   ⚠️  Deployed with warnings in {result.duration_ms}ms")
+            print(f"       Deployment succeeded but post-hooks failed")
         elif result.skipped:
             print(f"   ⏭️  Skipped: {result.skip_reason}")
 
