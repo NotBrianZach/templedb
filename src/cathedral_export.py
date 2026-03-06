@@ -279,9 +279,11 @@ class CathedralExporter:
         include_vcs: bool = True,
         include_environments: bool = True,
         include_secrets: bool = False,
-        compress: bool = False,
+        compress: bool = True,  # Changed default to True
         compression_level: Optional[int] = None,
-        exclude_patterns: Optional[List[str]] = None
+        exclude_patterns: Optional[List[str]] = None,
+        exclude_history: bool = False,
+        compact_json: bool = False
     ) -> bool:
         """
         Export a project to a .cathedral package
@@ -293,9 +295,11 @@ class CathedralExporter:
             include_vcs: Include VCS data
             include_environments: Include Nix environments
             include_secrets: Include encrypted secrets (not implemented yet)
-            compress: Compress the package after export
+            compress: Compress the package after export (default: True)
             compression_level: Compression level (gzip: 1-9 default 6, zstd: 1-22 default 3)
             exclude_patterns: List of glob patterns to exclude (e.g., ["*.log", "node_modules/*"])
+            exclude_history: Exclude full git history (export current state only)
+            compact_json: Use compact JSON format (no pretty-printing)
 
         Returns:
             True if export succeeded
@@ -333,7 +337,7 @@ class CathedralExporter:
             metadata={},  # TODO: Add custom metadata
             statistics=stats
         )
-        package.write_project(project_meta)
+        package.write_project(project_meta, compact=compact_json)
         logger.info(f"✓ Wrote project metadata")
 
         # Export files
@@ -383,7 +387,7 @@ class CathedralExporter:
                 file_metadata_list.append(file_meta)
 
                 # Write file metadata
-                package.write_file_metadata(file_id, file_meta)
+                package.write_file_metadata(file_id, file_meta, compact=compact_json)
 
                 # Get and write file content (already fetched in batch query)
                 content = b''
@@ -398,7 +402,7 @@ class CathedralExporter:
                 files_exported += 1
 
             # Write files manifest
-            package.write_files_manifest(file_metadata_list)
+            package.write_files_manifest(file_metadata_list, compact=compact_json)
             if files_excluded > 0:
                 logger.info(f"✓ Exported {files_exported} files ({files_excluded} excluded)")
             else:
@@ -408,11 +412,31 @@ class CathedralExporter:
         if include_vcs:
             logger.info(f"🌿 Exporting VCS data...")
             branches = self.get_vcs_branches(project_id)
-            commits = self.get_vcs_commits(project_id)
-            history = self.get_vcs_history(project_id)
-            commit_files = self.get_commit_files(project_id)
+
+            if exclude_history:
+                # Only export current state: latest commit on each branch
+                logger.info(f"   (excluding full history, exporting current state only)")
+                commits = []
+                history = []
+                commit_files = []
+
+                # Get latest commit for each branch
+                for branch in branches:
+                    if branch.get('latest_commit_id'):
+                        cursor = self.conn.cursor()
+                        commit = cursor.execute("""
+                            SELECT * FROM vcs_commits WHERE id = ?
+                        """, (branch['latest_commit_id'],)).fetchone()
+                        if commit:
+                            commits.append(dict_from_row(commit))
+            else:
+                # Full history export
+                commits = self.get_vcs_commits(project_id)
+                history = self.get_vcs_history(project_id)
+                commit_files = self.get_commit_files(project_id)
+
             tags = self.get_vcs_tags(project_id)
-            package.write_vcs_data(branches, commits, history, commit_files, tags)
+            package.write_vcs_data(branches, commits, history, commit_files, tags, compact=compact_json)
             logger.info(f"✓ Exported {len(branches)} branches, {len(commits)} commits, {len(tags)} tags")
 
         # Export environments
@@ -424,7 +448,7 @@ class CathedralExporter:
                     env_file = package.environments_dir / f"{env['env_name']}.json"
                     import json
                     with open(env_file, 'w') as f:
-                        json.dump(env, f, indent=2)
+                        json.dump(env, f, indent=None if compact_json else 2)
                 logger.info(f"✓ Exported {len(environments)} environments")
 
         # Create manifest
@@ -449,7 +473,7 @@ class CathedralExporter:
         checksum = package.calculate_package_checksum()
         manifest.checksums['sha256'] = checksum
 
-        package.write_manifest(manifest)
+        package.write_manifest(manifest, compact=compact_json)
         logger.info(f"✓ Wrote manifest with checksum: {checksum[:16]}...")
 
         logger.info(f"\n✅ Export complete: {package_path}")
@@ -481,9 +505,11 @@ class CathedralExporter:
 def export_project(
     slug: str,
     output_dir: Optional[Path] = None,
-    compress: bool = False,
+    compress: bool = True,  # Changed default to True
     compression_level: Optional[int] = None,
     exclude_patterns: Optional[List[str]] = None,
+    exclude_history: bool = False,
+    compact_json: bool = False,
     **kwargs
 ) -> bool:
     """
@@ -492,9 +518,11 @@ def export_project(
     Args:
         slug: Project slug
         output_dir: Output directory (default: current directory)
-        compress: Compress the package (default: False)
+        compress: Compress the package (default: True)
         compression_level: Compression level (gzip: 1-9, zstd: 1-22)
         exclude_patterns: List of glob patterns to exclude (e.g., ["*.log", "node_modules/*"])
+        exclude_history: Exclude full git history (export current state only)
+        compact_json: Use compact JSON format (no pretty-printing)
         **kwargs: Additional options (include_files, include_vcs, etc)
 
     Returns:
@@ -508,6 +536,8 @@ def export_project(
             compress=compress,
             compression_level=compression_level,
             exclude_patterns=exclude_patterns,
+            exclude_history=exclude_history,
+            compact_json=compact_json,
             **kwargs
         )
 

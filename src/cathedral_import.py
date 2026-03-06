@@ -424,8 +424,32 @@ class CathedralImporter:
             return False
         logger.info(f"✓ Package integrity verified")
 
-        # Read manifest and project metadata
+        # Read manifest and validate version
         manifest = package.read_manifest()
+
+        # Version validation
+        from cathedral_format import CATHEDRAL_FORMAT_VERSION
+        from packaging import version as pkg_version
+
+        try:
+            pkg_ver = pkg_version.parse(manifest.version)
+            current_ver = pkg_version.parse(CATHEDRAL_FORMAT_VERSION)
+
+            if pkg_ver > current_ver:
+                logger.error(f"❌ Package format too new: {manifest.version} (current: {CATHEDRAL_FORMAT_VERSION})")
+                logger.error(f"   Please upgrade TempleDB to import this package")
+                return False
+
+            if pkg_ver < pkg_version.parse("1.0.0"):
+                logger.warning(f"⚠️  Old package format: {manifest.version}")
+                logger.warning(f"   Import may fail or produce unexpected results")
+
+        except Exception as e:
+            logger.warning(f"⚠️  Could not validate package version: {e}")
+
+        logger.info(f"✓ Package format version: {manifest.version}")
+
+        # Read project metadata
         project_meta = package.read_project()
 
         # Override slug if requested

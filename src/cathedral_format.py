@@ -117,10 +117,10 @@ class CathedralPackage:
         self.secrets_dir.mkdir(exist_ok=True)
         self.metadata_dir.mkdir(exist_ok=True)
 
-    def write_manifest(self, manifest: CathedralManifest):
+    def write_manifest(self, manifest: CathedralManifest, compact: bool = False):
         """Write manifest.json"""
         with open(self.manifest_path, 'w') as f:
-            json.dump(manifest.to_dict(), f, indent=2)
+            json.dump(manifest.to_dict(), f, indent=None if compact else 2)
 
     def read_manifest(self) -> CathedralManifest:
         """Read manifest.json"""
@@ -128,10 +128,10 @@ class CathedralPackage:
             data = json.load(f)
         return CathedralManifest.from_dict(data)
 
-    def write_project(self, project: ProjectMetadata):
+    def write_project(self, project: ProjectMetadata, compact: bool = False):
         """Write project.json"""
         with open(self.project_path, 'w') as f:
-            json.dump(project.to_dict(), f, indent=2)
+            json.dump(project.to_dict(), f, indent=None if compact else 2)
 
     def read_project(self) -> ProjectMetadata:
         """Read project.json"""
@@ -139,11 +139,11 @@ class CathedralPackage:
             data = json.load(f)
         return ProjectMetadata.from_dict(data)
 
-    def write_file_metadata(self, file_id: int, metadata: FileMetadata):
+    def write_file_metadata(self, file_id: int, metadata: FileMetadata, compact: bool = False):
         """Write file metadata as JSON"""
         file_json = self.files_dir / f"file-{file_id:06d}.json"
         with open(file_json, 'w') as f:
-            json.dump(metadata.to_dict(), f, indent=2)
+            json.dump(metadata.to_dict(), f, indent=None if compact else 2)
 
     def write_file_content(self, file_id: int, content: bytes):
         """Write file content as blob"""
@@ -165,23 +165,24 @@ class CathedralPackage:
             return f.read()
 
     def write_vcs_data(self, branches: List[Dict], commits: List[Dict], history: List[Dict],
-                      commit_files: List[Dict] = None, tags: List[Dict] = None):
+                      commit_files: List[Dict] = None, tags: List[Dict] = None, compact: bool = False):
         """Write VCS data (including new git integration fields)"""
+        indent = None if compact else 2
         with open(self.vcs_dir / "branches.json", 'w') as f:
-            json.dump(branches, f, indent=2)
+            json.dump(branches, f, indent=indent)
         with open(self.vcs_dir / "commits.json", 'w') as f:
-            json.dump(commits, f, indent=2)
+            json.dump(commits, f, indent=indent)
         with open(self.vcs_dir / "history.json", 'w') as f:
-            json.dump(history, f, indent=2)
+            json.dump(history, f, indent=indent)
 
         # Write new git integration data (optional for backwards compatibility)
         if commit_files is not None:
             with open(self.vcs_dir / "commit_files.json", 'w') as f:
-                json.dump(commit_files, f, indent=2)
+                json.dump(commit_files, f, indent=indent)
 
         if tags is not None:
             with open(self.vcs_dir / "tags.json", 'w') as f:
-                json.dump(tags, f, indent=2)
+                json.dump(tags, f, indent=indent)
 
     def read_vcs_data(self) -> tuple[List[Dict], List[Dict], List[Dict], List[Dict], List[Dict]]:
         """Read VCS data (including new git integration fields if available)"""
@@ -205,14 +206,14 @@ class CathedralPackage:
 
         return branches, commits, history, commit_files, tags
 
-    def write_files_manifest(self, files: List[FileMetadata]):
+    def write_files_manifest(self, files: List[FileMetadata], compact: bool = False):
         """Write files/manifest.json with list of all files"""
         manifest = {
             "total_files": len(files),
             "files": [{"file_id": f.file_id, "file_path": f.file_path, "hash_sha256": f.hash_sha256} for f in files]
         }
         with open(self.files_dir / "manifest.json", 'w') as f:
-            json.dump(manifest, f, indent=2)
+            json.dump(manifest, f, indent=None if compact else 2)
 
     def calculate_package_checksum(self) -> str:
         """Calculate SHA256 checksum of entire package"""
