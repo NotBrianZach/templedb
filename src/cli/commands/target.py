@@ -7,6 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class TargetCommands(Command):
@@ -34,7 +37,7 @@ class TargetCommands(Command):
             """, (project['id'], target_name, target_type))
 
             if existing:
-                print(f"✗ Target '{target_name}' ({target_type}) already exists for {project_slug}", file=sys.stderr)
+                logger.error(f"Target '{target_name}' ({target_type}) already exists for {project_slug}")
                 print(f"\n💡 To update: ./templedb target update {project_slug} {target_name} --host <new_host>")
                 return 1
 
@@ -81,7 +84,7 @@ class TargetCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to add target: {e}", file=sys.stderr)
+            logger.error(f"Failed to add target: {e}")
             import traceback
             traceback.print_exc()
             return 1
@@ -163,7 +166,7 @@ class TargetCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to list targets: {e}", file=sys.stderr)
+            logger.error(f"Failed to list targets: {e}")
             return 1
 
     def update(self, args) -> int:
@@ -180,7 +183,7 @@ class TargetCommands(Command):
             """, (project['id'], target_name))
 
             if not target:
-                print(f"✗ Target '{target_name}' not found for {project_slug}", file=sys.stderr)
+                logger.error(f"Target '{target_name}' not found for {project_slug}")
                 return 1
 
             # Build update statement dynamically based on provided args
@@ -204,7 +207,7 @@ class TargetCommands(Command):
                 params.append(args.url)
 
             if not updates:
-                print(f"✗ No updates specified", file=sys.stderr)
+                logger.error(f"No updates specified")
                 print(f"\n💡 Usage: ./templedb target update {project_slug} {target_name} --host <host> --region <region>")
                 return 1
 
@@ -217,7 +220,7 @@ class TargetCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to update target: {e}", file=sys.stderr)
+            logger.error(f"Failed to update target: {e}")
             return 1
 
     def remove(self, args) -> int:
@@ -234,7 +237,7 @@ class TargetCommands(Command):
             """, (project['id'], target_name))
 
             if not target:
-                print(f"✗ Target '{target_name}' not found for {project_slug}", file=sys.stderr)
+                logger.error(f"Target '{target_name}' not found for {project_slug}")
                 return 1
 
             # Confirm deletion unless --force
@@ -252,7 +255,7 @@ class TargetCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to remove target: {e}", file=sys.stderr)
+            logger.error(f"Failed to remove target: {e}")
             return 1
 
     def show(self, args) -> int:
@@ -269,7 +272,7 @@ class TargetCommands(Command):
             """, (project['id'], target_name))
 
             if not target:
-                print(f"✗ Target '{target_name}' not found for {project_slug}", file=sys.stderr)
+                logger.error(f"Target '{target_name}' not found for {project_slug}")
                 return 1
 
             print(f"\n📍 Deployment Target: {target_name}\n")
@@ -315,7 +318,7 @@ class TargetCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to show target: {e}", file=sys.stderr)
+            logger.error(f"Failed to show target: {e}")
             import traceback
             traceback.print_exc()
             return 1

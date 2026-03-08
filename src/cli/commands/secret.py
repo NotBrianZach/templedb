@@ -58,12 +58,12 @@ class SecretCommands(Command):
             )
             return proc.stdout
         except FileNotFoundError:
-            print("error: age not found on PATH", file=sys.stderr)
-            print("Install age: https://github.com/FiloSottile/age/releases", file=sys.stderr)
+            logger.error("age not found on PATH")
+            logger.info("Install age: https://github.com/FiloSottile/age/releases")
             sys.exit(1)
         except subprocess.CalledProcessError as e:
             err = e.stderr.decode("utf-8", errors="replace")
-            print(f"error: age encryption failed: {err.strip()}", file=sys.stderr)
+            logger.error(f"age encryption failed: {err.strip()}")
             sys.exit(1)
 
     def _age_decrypt(self, encrypted: bytes) -> bytes:
@@ -74,12 +74,12 @@ class SecretCommands(Command):
                    os.path.expanduser("~/.config/sops/age/keys.txt")
 
         if not os.path.exists(key_file):
-            print(f"error: age key file not found: {key_file}", file=sys.stderr)
-            print("\nGenerate a key with:", file=sys.stderr)
-            print("  mkdir -p ~/.config/sops/age", file=sys.stderr)
-            print("  age-keygen -o ~/.config/sops/age/keys.txt", file=sys.stderr)
-            print("\nThen set environment variable:", file=sys.stderr)
-            print("  export TEMPLEDB_AGE_KEY_FILE=~/.config/sops/age/keys.txt", file=sys.stderr)
+            logger.error(f"age key file not found: {key_file}")
+            logger.info("Generate a key with:")
+            logger.info("  mkdir -p ~/.config/sops/age")
+            logger.info("  age-keygen -o ~/.config/sops/age/keys.txt")
+            logger.info("Then set environment variable:")
+            logger.info("  export TEMPLEDB_AGE_KEY_FILE=~/.config/sops/age/keys.txt")
             sys.exit(1)
 
         try:
@@ -91,13 +91,13 @@ class SecretCommands(Command):
             )
             return proc.stdout
         except FileNotFoundError:
-            print("error: age not found on PATH", file=sys.stderr)
-            print("Install age: https://github.com/FiloSottile/age/releases", file=sys.stderr)
+            logger.error("age not found on PATH")
+            logger.info("Install age: https://github.com/FiloSottile/age/releases")
             sys.exit(1)
         except subprocess.CalledProcessError as e:
             err = e.stderr.decode("utf-8", errors="replace")
-            print(f"error: age decryption failed: {err.strip()}", file=sys.stderr)
-            print("\nMake sure you're using the correct age key.", file=sys.stderr)
+            logger.error(f"age decryption failed: {err.strip()}")
+            logger.info("Make sure you're using the correct age key")
             sys.exit(1)
 
     def _get_project_id(self, slug: str) -> int:
@@ -171,8 +171,8 @@ class SecretCommands(Command):
         """, (project_id, profile))
 
         if not row:
-            print(f"error: no secrets found for {slug} (profile: {profile})", file=sys.stderr)
-            print(f"Run: templedb secret init {slug} --age-recipient <key>", file=sys.stderr)
+            logger.error(f"no secrets found for {slug} (profile: {profile})")
+            logger.info(f"Run: templedb secret init {slug} --age-recipient <key>")
             sys.exit(1)
 
         # Decrypt
@@ -196,7 +196,8 @@ class SecretCommands(Command):
             try:
                 yaml.safe_load(edited_text)
             except yaml.YAMLError as e:
-                print(f"error: invalid YAML: {e}", file=sys.stderr)
+                logger.error(f"invalid YAML: {e}")
+                logger.info("Fix the YAML syntax and try again")
                 os.unlink(temp_path)
                 sys.exit(1)
 
@@ -219,8 +220,8 @@ class SecretCommands(Command):
                     )
                     age_recipient = proc.stdout.decode('utf-8').strip()
                 except (subprocess.CalledProcessError, FileNotFoundError):
-                    print("error: could not determine age recipient", file=sys.stderr)
-                    print("Set TEMPLEDB_AGE_RECIPIENT environment variable", file=sys.stderr)
+                    logger.error("could not determine age recipient")
+                    logger.info("Set TEMPLEDB_AGE_RECIPIENT environment variable")
                     os.unlink(temp_path)
                     sys.exit(1)
 
@@ -261,7 +262,8 @@ class SecretCommands(Command):
         """, (project_id, profile))
 
         if not row:
-            print(f"error: no secrets found for {slug} (profile: {profile})", file=sys.stderr)
+            logger.error(f"no secrets found for {slug} (profile: {profile})")
+            logger.info(f"Run: templedb secret init {slug} --age-recipient <key>")
             sys.exit(1)
 
         # Decrypt
@@ -284,7 +286,8 @@ class SecretCommands(Command):
                 escaped_value = str(value).replace("'", "'\\''")
                 print(f"export {key}='{escaped_value}'")
         else:
-            print(f"error: unknown format: {fmt}", file=sys.stderr)
+            logger.error(f"unknown format: {fmt}")
+            logger.info("Supported formats: yaml, json, env, shell")
             sys.exit(1)
 
         self._audit_log('export-secret', slug, profile, {'format': fmt})
@@ -303,7 +306,8 @@ class SecretCommands(Command):
         """, (project_id, profile))
 
         if not row:
-            print(f"error: no secrets found for {slug} (profile: {profile})", file=sys.stderr)
+            logger.error(f"no secrets found for {slug} (profile: {profile})")
+            logger.info(f"Run: templedb secret init {slug} --age-recipient <key>")
             sys.exit(1)
 
         # Print raw encrypted blob

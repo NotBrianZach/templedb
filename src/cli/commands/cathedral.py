@@ -9,6 +9,9 @@ from typing import Optional
 # Import will be resolved at runtime
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class CathedralCommands(Command):
@@ -46,9 +49,8 @@ class CathedralCommands(Command):
             return 0 if success else 1
 
         except Exception as e:
-            print(f"✗ Export failed: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Export failed: {e}")
+            logger.debug("Full traceback:", exc_info=True)
             return 1
 
     def import_package(self, args) -> int:
@@ -59,7 +61,8 @@ class CathedralCommands(Command):
             package_path = Path(args.package_path)
 
             if not package_path.exists():
-                print(f"Error: Package not found: {package_path}", file=sys.stderr)
+                logger.error(f"Package not found: {package_path}")
+                logger.info("Check that the path is correct and the package exists")
                 return 1
 
             success = import_project(
@@ -71,9 +74,8 @@ class CathedralCommands(Command):
             return 0 if success else 1
 
         except Exception as e:
-            print(f"✗ Import failed: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Import failed: {e}")
+            logger.debug("Full traceback:", exc_info=True)
             return 1
 
     def inspect(self, args) -> int:
@@ -87,7 +89,8 @@ class CathedralCommands(Command):
             package_path = Path(args.package_path)
 
             if not package_path.exists():
-                print(f"Error: Package not found: {package_path}", file=sys.stderr)
+                logger.error(f"Package not found: {package_path}")
+                logger.info("Check that the path is correct and the package exists")
                 return 1
 
             # Get compression info
@@ -144,7 +147,8 @@ class CathedralCommands(Command):
                     if package.verify_integrity():
                         print("✅ Checksums valid")
                     else:
-                        print("❌ Checksum mismatch!", file=sys.stderr)
+                        logger.error("Checksum mismatch - package integrity verification failed")
+                        logger.info("The package may be corrupted or tampered with")
                         return 1
 
                 return 0
@@ -155,7 +159,8 @@ class CathedralCommands(Command):
                     shutil.rmtree(temp_dir)
 
         except Exception as e:
-            print(f"✗ Inspection failed: {e}", file=sys.stderr)
+            logger.error(f"Inspection failed: {e}")
+            logger.debug("Full traceback:", exc_info=True)
             import traceback
             traceback.print_exc()
             return 1
@@ -169,7 +174,8 @@ class CathedralCommands(Command):
             package_path = Path(args.package_path)
 
             if not package_path.exists():
-                print(f"Error: Package not found: {package_path}", file=sys.stderr)
+                logger.error(f"Package not found: {package_path}")
+                logger.info("Check that the path is correct and the package exists")
                 return 1
 
             # Auto-decompress if needed
@@ -179,7 +185,8 @@ class CathedralCommands(Command):
                 package_path = auto_decompress(package_path)
 
             if not package_path.is_dir():
-                print(f"Error: Package must be a directory: {package_path}", file=sys.stderr)
+                logger.error(f"Package must be a directory: {package_path}")
+                logger.info("Cathedral packages should be directories, not files")
                 return 1
 
             # Load and verify package
@@ -198,11 +205,13 @@ class CathedralCommands(Command):
 
                 return 0
             else:
-                print("❌ Package integrity verification failed!", file=sys.stderr)
+                logger.error("Package integrity verification failed")
+                logger.info("The package may be corrupted or tampered with")
                 return 1
 
         except Exception as e:
-            print(f"✗ Verification failed: {e}", file=sys.stderr)
+            logger.error(f"Verification failed: {e}")
+            logger.debug("Full traceback:", exc_info=True)
             import traceback
             traceback.print_exc()
             return 1

@@ -53,7 +53,7 @@ class SystemCommands(Command):
             print(f"✓ Backup complete: {backup_path} ({size_mb:.2f} MB)")
             return 0
         except Exception as e:
-            print(f"✗ Backup failed: {e}", file=sys.stderr)
+            logger.error(f"Backup failed: {e}")
             return 1
 
     def restore(self, args) -> int:
@@ -61,7 +61,7 @@ class SystemCommands(Command):
         backup_path = Path(args.path).resolve()
 
         if not backup_path.exists():
-            print(f"Error: Backup file not found: {backup_path}", file=sys.stderr)
+            logger.error(f"Backup file not found: {backup_path}")
             return 1
 
         # Confirm
@@ -86,7 +86,7 @@ class SystemCommands(Command):
             print(f"✓ Database restored from {backup_path}")
             return 0
         except Exception as e:
-            print(f"✗ Restore failed: {e}", file=sys.stderr)
+            logger.error(f"Restore failed: {e}")
             return 1
 
     def status(self, args) -> int:

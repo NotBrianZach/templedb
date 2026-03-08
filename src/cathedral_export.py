@@ -202,7 +202,7 @@ class CathedralExporter:
         rows = cursor.execute("""
             SELECT cf.id, cf.commit_id, cf.file_id, cf.change_type,
                    cf.old_content_hash, cf.new_content_hash,
-                   cf.old_path, cf.new_path
+                   cf.old_file_path as old_path, cf.new_file_path as new_path
             FROM commit_files cf
             JOIN vcs_commits vc ON cf.commit_id = vc.id
             WHERE vc.project_id = ?

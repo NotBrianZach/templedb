@@ -8,6 +8,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
+from logger import get_logger
+
+logger = get_logger(__name__)
 from migration_tracker import MigrationTracker
 
 
@@ -53,7 +56,7 @@ class MigrationCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to list migrations: {e}", file=sys.stderr)
+            logger.error(f"Failed to list migrations: {e}")
             import traceback
             traceback.print_exc()
             return 1
@@ -77,7 +80,7 @@ class MigrationCommands(Command):
             """, (project_slug, f"%{migration_path}%"))
 
             if not result:
-                print(f"✗ Migration not found: {migration_path}", file=sys.stderr)
+                logger.error(f"Migration not found: {migration_path}")
                 print(f"   Use: ./templedb migration list {project_slug}")
                 return 1
 
@@ -90,7 +93,7 @@ class MigrationCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to show migration: {e}", file=sys.stderr)
+            logger.error(f"Failed to show migration: {e}")
             return 1
 
     def status(self, args) -> int:
@@ -141,7 +144,7 @@ class MigrationCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to get migration status: {e}", file=sys.stderr)
+            logger.error(f"Failed to get migration status: {e}")
             import traceback
             traceback.print_exc()
             return 1
@@ -180,7 +183,7 @@ class MigrationCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to get migration history: {e}", file=sys.stderr)
+            logger.error(f"Failed to get migration history: {e}")
             return 1
 
     def mark_applied(self, args) -> int:
@@ -203,7 +206,7 @@ class MigrationCommands(Command):
                     break
 
             if not migration:
-                print(f"✗ Migration not found: {migration_file}", file=sys.stderr)
+                logger.error(f"Migration not found: {migration_file}")
                 return 1
 
             # Mark as applied
@@ -219,7 +222,7 @@ class MigrationCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to mark migration: {e}", file=sys.stderr)
+            logger.error(f"Failed to mark migration: {e}")
             return 1
 
 

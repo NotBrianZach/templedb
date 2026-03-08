@@ -37,6 +37,61 @@ VCS_ENABLED = True
 # TUI
 TUI_THEME = "dark"  # or "light"
 
+# Large Blob Storage Configuration
+# Files larger than this threshold are stored externally on filesystem
+BLOB_INLINE_THRESHOLD = int(os.environ.get(
+    'TEMPLEDB_BLOB_INLINE_THRESHOLD',
+    10 * 1024 * 1024  # 10MB default
+))
+
+# Maximum file size that can be stored (prevents runaway imports)
+BLOB_MAX_SIZE = int(os.environ.get(
+    'TEMPLEDB_BLOB_MAX_SIZE',
+    1024 * 1024 * 1024  # 1GB default
+))
+
+# Chunk size for streaming large files
+BLOB_CHUNK_SIZE = int(os.environ.get(
+    'TEMPLEDB_BLOB_CHUNK_SIZE',
+    50 * 1024 * 1024  # 50MB chunks
+))
+
+# Blob storage directories
+BLOB_STORAGE_DIR = os.path.join(DB_DIR, "blobs")
+BLOB_CACHE_DIR = os.path.join(DB_DIR, "blob-cache")
+
+# Compression settings
+BLOB_COMPRESSION_ENABLED = os.environ.get(
+    'TEMPLEDB_BLOB_COMPRESSION',
+    'true'
+).lower() in ('true', '1', 'yes')
+
+BLOB_COMPRESSION_THRESHOLD = int(os.environ.get(
+    'TEMPLEDB_BLOB_COMPRESSION_THRESHOLD',
+    1 * 1024 * 1024  # Compress blobs >1MB
+))
+
+# Lazy fetch (download blobs on-demand)
+BLOB_LAZY_FETCH = os.environ.get(
+    'TEMPLEDB_BLOB_LAZY_FETCH',
+    'false'  # Disabled by default for reliability
+).lower() in ('true', '1', 'yes')
+
+# Cache settings (for remote blobs, future use)
+BLOB_CACHE_MAX_SIZE = int(os.environ.get(
+    'TEMPLEDB_BLOB_CACHE_MAX_SIZE',
+    10 * 1024 * 1024 * 1024  # 10GB
+))
+
+BLOB_CACHE_EVICTION_POLICY = os.environ.get(
+    'TEMPLEDB_BLOB_CACHE_EVICTION_POLICY',
+    'lru'  # lru, lfu, fifo
+).lower()
+
+# Ensure blob directories exist
+os.makedirs(BLOB_STORAGE_DIR, exist_ok=True)
+os.makedirs(BLOB_CACHE_DIR, exist_ok=True)
+
 # Logging Configuration
 LOG_LEVEL = os.environ.get('TEMPLEDB_LOG_LEVEL', 'INFO')
 LOG_FILE = os.path.join(DB_DIR, "templedb.log")

@@ -614,8 +614,7 @@ class DeploymentOrchestrator:
     def deploy(
         self,
         dry_run: bool = False,
-        validate_env: bool = True,
-        skip_groups: Optional[List[str]] = None
+        validate_env: bool = True
     ) -> DeploymentResult:
         """Execute full deployment"""
         start_time = time.time()
@@ -667,11 +666,6 @@ class DeploymentOrchestrator:
         sorted_groups = sorted(self.config.groups, key=lambda g: g.order)
 
         for group in sorted_groups:
-            # Skip if requested
-            if skip_groups and group.name in skip_groups:
-                print(f"\n⏭️  Skipping: {group.name} (user requested)")
-                continue
-
             result = self.deploy_group(group, dry_run)
             group_results.append(result)
 

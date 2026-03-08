@@ -174,9 +174,30 @@ def register(cli):
     """Register direnv command with CLI"""
     cmd = DirenvCommand()
 
-    # Create direnv command group
-    direnv_parser = cli.register_command('direnv', None, help_text='Direnv integration and .envrc management')
+    # Create direnv command group (generate is the default handler)
+    direnv_parser = cli.register_command('direnv', cmd.generate, help_text='Direnv integration and .envrc management')
+
+    # Add optional arguments that apply to all subcommands
+    direnv_parser.add_argument('--profile', default='default',
+                               help='Secret profile (default/staging/production, auto-detected from git branch)')
+    direnv_parser.add_argument('--environment', '--env', default='default',
+                               help='Environment for env_vars (default/development/production)')
+    direnv_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True,
+                               help="Don't emit 'use nix' directive")
+    direnv_parser.add_argument('--branch', help='Override git branch detection')
+    direnv_parser.add_argument('--ref', help='Override git ref/commit detection')
+    direnv_parser.add_argument('--write', '-w', action='store_true',
+                               help='Write output to .envrc file (instead of stdout)')
+    direnv_parser.add_argument('--no-auto-reload', dest='auto_reload', action='store_false', default=True,
+                               help="Don't add watch_file directive for auto-reload")
+    direnv_parser.add_argument('--no-validate', dest='validate', action='store_false', default=True,
+                               help='Skip validation of generated .envrc')
+
     subparsers = direnv_parser.add_subparsers(dest='direnv_subcommand')
+
+    # When no subcommand is given, the slug argument should come from args (will be None by default)
+    # We'll set slug=None as attribute if not present
+    direnv_parser.set_defaults(slug=None)
 
     # Generate subcommand (default behavior)
     gen_parser = subparsers.add_parser('generate', help='Generate .envrc (default if no subcommand)', aliases=['gen'])

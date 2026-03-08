@@ -25,114 +25,61 @@ class ProjectCommands(Command):
 
     def __init__(self):
         super().__init__()
-        """Initialize with repositories"""
-        self.project_repo = ProjectRepository()
-        self.file_repo = FileRepository()
+        """Initialize with service context"""
+        from services.context import ServiceContext
+        self.ctx = ServiceContext()
+        self.service = self.ctx.get_project_service()
+
+        # Keep repositories for backward compatibility with methods not yet refactored
+        self.project_repo = self.ctx.project_repo
+        self.file_repo = self.ctx.file_repo
 
     def init_project(self, args) -> int:
         """Initialize current directory as a TempleDB project"""
+        from error_handler import ValidationError
+
         project_path = Path(os.getcwd()).resolve()
 
-        # Check if already in a project
-        existing_ctx = ProjectContext.discover(project_path)
-        if existing_ctx:
-            logger.error(f"Already in a TempleDB project: {existing_ctx.slug}")
-            logger.error(f"Project root: {existing_ctx.root}")
+        try:
+            result = self.service.init_project(
+                project_path=project_path,
+                slug=args.slug,
+                name=args.name
+            )
+
+            print(f"✅ Initialized TempleDB project: {result['slug']}")
+            print(f"   Project root: {result['root']}")
+            print(f"   .templedb marker created")
+            print()
+            print("Next steps:")
+            print(f"   templedb sync      # Scan and import files")
+            print(f"   templedb status    # Show current project status")
+
+            return 0
+
+        except ValidationError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"{e.solution}")
             return 1
-
-        # Determine slug
-        slug = args.slug if args.slug else project_path.name
-
-        # Check if project with this slug exists
-        project = self.project_repo.get_by_slug(slug)
-        if project:
-            logger.error(f"Project with slug '{slug}' already exists")
-            logger.error("Use 'templedb project import' to import into existing project")
+        except Exception as e:
+            logger.error(f"Failed to initialize project: {e}")
+            logger.debug("Full error:", exc_info=True)
             return 1
-
-        logger.info(f"Initializing project '{slug}' in {project_path}")
-
-        # Create project in database
-        project_id = self.project_repo.create(
-            slug=slug,
-            name=args.name or slug,
-            repo_url=str(project_path),  # Keep for backward compatibility
-            git_branch='main'
-        )
-
-        # Create .templedb marker
-        ProjectContext.create_marker(
-            project_root=project_path,
-            slug=slug,
-            project_id=project_id
-        )
-
-        print(f"✅ Initialized TempleDB project: {slug}")
-        print(f"   Project root: {project_path}")
-        print(f"   .templedb marker created")
-        print()
-        print("Next steps:")
-        print(f"   templedb sync      # Scan and import files")
-        print(f"   templedb status    # Show current project status")
-
-        return 0
 
     def import_project(self, args) -> int:
         """Import a project from filesystem into database"""
-        project_path = Path(args.path).resolve()
+        from error_handler import ValidationError
 
-        if not project_path.exists():
-            logger.error(f"Path does not exist: {project_path}")
-            return 1
-
-        if not project_path.is_dir():
-            logger.error(f"Path is not a directory: {project_path}")
-            return 1
-
-        # Determine slug
-        slug = args.slug if args.slug else project_path.name
-
-        # Check if project exists, create if not
-        project = self.project_repo.get_by_slug(slug)
-
-        if not project:
-            # Create project (repo_url is now optional/legacy)
-            logger.info(f"Creating new project: {slug}")
-            project_id = self.project_repo.create(
-                slug=slug,
-                name=slug,
-                repo_url=str(project_path),  # Keep for backward compatibility
-                git_branch='main'
-            )
-
-            # Create .templedb marker for CWD-based discovery
-            ProjectContext.create_marker(
-                project_root=project_path,
-                slug=slug,
-                project_id=project_id
-            )
-            logger.info(f"Created project '{slug}' with .templedb marker")
-        else:
-            logger.info(f"Updating existing project: {slug}")
-            project_id = project['id']
-
-            # Create .templedb marker if it doesn't exist (upgrade legacy projects)
-            marker_dir = project_path / ".templedb"
-            if not marker_dir.exists():
-                ProjectContext.create_marker(
-                    project_root=project_path,
-                    slug=slug,
-                    project_id=project_id
-                )
-                logger.info(f"Added .templedb marker to existing project")
-
-        # Use Python importer
         try:
-            from importer import ProjectImporter
-
+            project_path = Path(args.path).resolve()
             dry_run = hasattr(args, 'dry_run') and args.dry_run
-            importer = ProjectImporter(slug, str(project_path), dry_run=dry_run)
-            stats = importer.import_files()
+
+            stats = self.service.import_project(
+                project_path=project_path,
+                slug=args.slug,
+                dry_run=dry_run
+            )
 
             print(f"\n📈 Import Statistics:")
             print(f"   Files scanned: {stats.total_files_scanned}")
@@ -142,13 +89,19 @@ class ProjectCommands(Command):
             print(f"   SQL objects: {stats.sql_objects_found}")
 
             return 0
+
+        except ValidationError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"{e.solution}")
+            return 1
         except Exception as e:
             logger.error(f"Import failed: {e}", exc_info=True)
             return 1
 
     def list_projects(self, args) -> int:
         """List all projects"""
-        projects = self.project_repo.get_all()
+        projects = self.service.get_all()
 
         if not projects:
             print("No projects found")
@@ -164,33 +117,39 @@ class ProjectCommands(Command):
 
     def show_project(self, args) -> int:
         """Show detailed project information"""
-        project = self.project_repo.get_by_slug(args.slug)
-        if not project:
-            logger.error(f"Project '{args.slug}' not found")
+        from error_handler import ResourceNotFoundError
+
+        try:
+            project = self.service.get_by_slug(args.slug, required=True)
+
+            print(f"\nProject: {project['slug']}")
+            print(f"Name: {project['name']}")
+            print(f"Repository: {project.get('repo_url', 'N/A')}")
+            print(f"Branch: {project.get('git_branch', 'N/A')}")
+
+            # Get file statistics
+            stats = self.service.get_statistics(project['id'])
+
+            if stats:
+                print(f"\nFiles: {stats['file_count']}")
+                print(f"Lines of code: {stats['total_lines']:,}")
+                print(f"File types: {stats['file_types']}")
+
+            # Get VCS info
+            vcs_info = self.service.get_vcs_info(project['id'])
+
+            if vcs_info and vcs_info['branch_count'] > 0:
+                print(f"\nVCS Branches: {vcs_info['branch_count']}")
+                print(f"VCS Commits: {vcs_info['commit_count']}")
+
+            print()
+            return 0
+
+        except ResourceNotFoundError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"{e.solution}")
             return 1
-
-        print(f"\nProject: {project['slug']}")
-        print(f"Name: {project['name']}")
-        print(f"Repository: {project.get('repo_url', 'N/A')}")
-        print(f"Branch: {project.get('git_branch', 'N/A')}")
-
-        # Get file statistics
-        stats = self.project_repo.get_statistics(project['id'])
-
-        if stats:
-            print(f"\nFiles: {stats['file_count']}")
-            print(f"Lines of code: {stats['total_lines']:,}")
-            print(f"File types: {stats['file_types']}")
-
-        # Get VCS info
-        vcs_info = self.project_repo.get_vcs_info(project['id'])
-
-        if vcs_info and vcs_info['branch_count'] > 0:
-            print(f"\nVCS Branches: {vcs_info['branch_count']}")
-            print(f"VCS Commits: {vcs_info['commit_count']}")
-
-        print()
-        return 0
 
     def sync_project(self, args) -> int:
         """Re-import project from filesystem"""
@@ -236,21 +195,28 @@ class ProjectCommands(Command):
 
     def remove_project(self, args) -> int:
         """Remove a project from database"""
-        project = self.project_repo.get_by_slug(args.slug)
-        if not project:
-            logger.error(f"Project '{args.slug}' not found")
+        from error_handler import ResourceNotFoundError
+
+        try:
+            # Verify project exists
+            project = self.service.get_by_slug(args.slug, required=True)
+
+            if not args.force:
+                response = input(f"Remove project '{args.slug}' and all its data? (yes/no): ")
+                if response.lower() != 'yes':
+                    print("Cancelled")
+                    return 0
+
+            # Delete project via service
+            self.service.delete_project(args.slug)
+            logger.info(f"Removed project: {args.slug}")
+            return 0
+
+        except ResourceNotFoundError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"{e.solution}")
             return 1
-
-        if not args.force:
-            response = input(f"Remove project '{args.slug}' and all its data? (yes/no): ")
-            if response.lower() != 'yes':
-                print("Cancelled")
-                return 0
-
-        # Delete project (cascade will handle related records)
-        self.project_repo.delete(project['id'])
-        logger.info(f"Removed project: {args.slug}")
-        return 0
 
     def generate_envrc(self, args) -> int:
         """Generate .envrc file for a project"""

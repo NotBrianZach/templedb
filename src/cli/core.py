@@ -132,7 +132,12 @@ class TempleDBCLI:
                     subcommand_attr = f"{args.command}_subcommand"
                     if hasattr(args, subcommand_attr):
                         subcommand = getattr(args, subcommand_attr)
-                        handler = self.commands.get(f"{args.command}.{subcommand}")
+                        # Only use subcommand if it's not None (i.e., actually specified)
+                        if subcommand is not None:
+                            handler = self.commands.get(f"{args.command}.{subcommand}")
+                        else:
+                            # No subcommand specified, use base command handler
+                            handler = self.commands.get(args.command)
                     else:
                         handler = self.commands.get(args.command)
 

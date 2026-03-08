@@ -3,4 +3,6 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-cd "$SCRIPT_DIR/src" && exec python3 -m cli "$@"
+# Set PYTHONPATH to include src directory, but don't change CWD
+export PYTHONPATH="$SCRIPT_DIR/src:$PYTHONPATH"
+exec python3 -m cli "$@"

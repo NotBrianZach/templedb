@@ -21,112 +21,93 @@ class EnvCommands(Command):
 
     def __init__(self):
         super().__init__()
-        self.project_repo = ProjectRepository()
-        self.env_repo = BaseRepository()  # Generic repository for env-specific queries
-        self.script_dir = Path(__file__).parent.parent.parent.parent.resolve()
-        self.nix_env_dir = Path(DB_PATH).parent / "nix-envs"
-        self.nix_env_dir.mkdir(exist_ok=True)
+        from services.context import ServiceContext
+        self.ctx = ServiceContext()
+        self.service = self.ctx.get_environment_service()
+
+        # Keep for methods not yet refactored
+        self.project_repo = self.ctx.project_repo
+        self.env_repo = self.ctx.base_repo
+        self.script_dir = self.ctx.script_dir
+        self.nix_env_dir = self.service.nix_env_dir
 
     def enter(self, args) -> int:
         """Enter a Nix FHS environment"""
-        project = self.get_project_or_exit(args.project)
-        env_name = args.env_name if hasattr(args, 'env_name') and args.env_name else 'dev'
+        from error_handler import ResourceNotFoundError, ValidationError
 
-        # Check if environment exists
-        env = self.env_repo.query_one("""
-            SELECT * FROM nix_environments
-            WHERE project_id = ? AND env_name = ?
-        """, (project['id'], env_name))
+        try:
+            project_slug = args.project
+            env_name = args.env_name if hasattr(args, 'env_name') and args.env_name else 'dev'
 
-        if not env:
-            logger.error(f"Environment '{env_name}' not found for project '{args.project}'")
-            print(f"\nTip: List available environments with: templedb env list {args.project}", file=sys.stderr)
+            # Prepare environment session (generates Nix file, creates session)
+            session = self.service.prepare_environment_session(
+                project_slug=project_slug,
+                env_name=env_name
+            )
+
+            print(f"\n🏛️  Entering {project_slug}:{env_name} environment...")
+            print(f"📦 Nix expression: {session.nix_file}")
+            print(f"⏱️  Session ID: {session.session_id}\n")
+
+            # Enter nix-shell
+            os.chdir(str(self.script_dir))
+            result = subprocess.run(["nix-shell", str(session.nix_file)])
+            exit_code = result.returncode
+
+            # End session tracking
+            self.service.end_environment_session(
+                session_id=session.session_id,
+                exit_code=exit_code
+            )
+
+            print(f"\n👋 Exited {project_slug}:{env_name} environment")
+            return exit_code
+
+        except ResourceNotFoundError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
             return 1
 
-        # Generate Nix expression if needed
-        nix_file = self.nix_env_dir / f"{args.project}-{env_name}.nix"
-        if not nix_file.exists():
-            print(f"🔨 Generating Nix expression for {args.project}:{env_name}...")
-            result = subprocess.run([
-                sys.executable,
-                str(self.script_dir / "src" / "nix_env_generator.py"),
-                "generate",
-                "-p", args.project,
-                "-e", env_name
-            ], capture_output=True, text=True)
-            if result.returncode != 0:
-                print("Error: Failed to generate Nix expression", file=sys.stderr)
-                if result.stderr:
-                    print(result.stderr, file=sys.stderr)
-                return 1
+        except ValidationError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
+            return 1
 
-        # Start session tracking
-        session_id = self.env_repo.execute("""
-            INSERT INTO nix_env_sessions (environment_id, started_at)
-            VALUES (?, datetime('now'))
-        """, (env['id'],))
-
-        print(f"\n🏛️  Entering {args.project}:{env_name} environment...")
-        print(f"📦 Nix expression: {nix_file}")
-        print(f"⏱️  Session ID: {session_id}\n")
-
-        # Enter nix-shell
-        os.chdir(str(self.script_dir))
-        result = subprocess.run(["nix-shell", str(nix_file)])
-        exit_code = result.returncode
-
-        # End session tracking
-        self.env_repo.execute("""
-            UPDATE nix_env_sessions
-            SET ended_at = datetime('now'), exit_code = ?
-            WHERE id = ?
-        """, (exit_code, session_id))
-
-        print(f"\n👋 Exited {args.project}:{env_name} environment")
-        return exit_code
+        except Exception as e:
+            logger.error(f"Failed to enter environment: {e}")
+            logger.debug("Full error:", exc_info=True)
+            return 1
 
     def list_envs(self, args) -> int:
         """List environments"""
-        project_slug = args.project if hasattr(args, 'project') and args.project else None
+        try:
+            project_slug = args.project if hasattr(args, 'project') and args.project else None
 
-        if project_slug:
-            rows = self.env_repo.query_all("""
-                SELECT
-                    env_name,
-                    description,
-                    (LENGTH(base_packages) - LENGTH(REPLACE(base_packages, ',', '')) + 1) as package_count,
-                    (SELECT COUNT(*) FROM nix_env_sessions WHERE environment_id = ne.id) as session_count
-                FROM nix_environments ne
-                WHERE project_id = (SELECT id FROM projects WHERE slug = ?)
-                ORDER BY env_name
-            """, (project_slug,))
-        else:
-            rows = self.env_repo.query_all("""
-                SELECT
-                    p.slug as project_slug,
-                    ne.env_name,
-                    (LENGTH(ne.base_packages) - LENGTH(REPLACE(ne.base_packages, ',', '')) + 1) as package_count,
-                    (SELECT COUNT(*) FROM nix_env_sessions WHERE environment_id = ne.id) as session_count
-                FROM nix_environments ne
-                JOIN projects p ON ne.project_id = p.id
-                ORDER BY p.slug, ne.env_name
-            """)
+            # Get environments from service
+            rows = self.service.list_environments(project_slug=project_slug)
 
-        if not rows:
+            if not rows:
+                if project_slug:
+                    print(f"No environments found for project '{project_slug}'")
+                    print(f"\nCreate one with: templedb env detect {project_slug}")
+                else:
+                    print("No environments found")
+                return 0
+
             if project_slug:
-                print(f"No environments found for project '{project_slug}'")
-                print(f"\nCreate one with: templedb env detect {project_slug}")
+                columns = ['env_name', 'package_count', 'session_count', 'description']
             else:
-                print("No environments found")
+                columns = ['project_slug', 'env_name', 'package_count', 'session_count']
+
+            print(self.format_table(rows, columns, title="Nix Environments"))
             return 0
 
-        if project_slug:
-            columns = ['env_name', 'package_count', 'session_count', 'description']
-        else:
-            columns = ['project_slug', 'env_name', 'package_count', 'session_count']
-
-        print(self.format_table(rows, columns, title="Nix Environments"))
-        return 0
+        except Exception as e:
+            logger.error(f"Failed to list environments: {e}")
+            logger.debug("Full error:", exc_info=True)
+            return 1
 
     def generate(self, args) -> int:
         """Generate Nix expression"""
@@ -145,7 +126,7 @@ class EnvCommands(Command):
             print(result.stdout)
             return 0
         else:
-            print(f"✗ Failed to generate Nix expression", file=sys.stderr)
+            logger.error(f"Failed to generate Nix expression")
             print(result.stderr, file=sys.stderr)
             return 1
 
@@ -165,7 +146,7 @@ class EnvCommands(Command):
             print(result.stdout)
             return 0
         else:
-            print(f"✗ Detection failed", file=sys.stderr)
+            logger.error(f"Detection failed")
             print(result.stderr, file=sys.stderr)
             return 1
 
@@ -187,7 +168,7 @@ class EnvCommands(Command):
             print(result.stdout)
             return 0
         else:
-            print(f"✗ Failed to create environment", file=sys.stderr)
+            logger.error(f"Failed to create environment")
             print(result.stderr, file=sys.stderr)
             return 1
 
@@ -214,7 +195,7 @@ class EnvCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to set environment variable: {e}", file=sys.stderr)
+            logger.error(f"Failed to set environment variable: {e}")
             import traceback
             traceback.print_exc()
             return 1
@@ -233,7 +214,7 @@ class EnvCommands(Command):
             """, (project['id'], var_name_with_target))
 
             if not result:
-                print(f"✗ Variable '{args.var_name}' not found for {args.project} ({target})", file=sys.stderr)
+                logger.error(f"Variable '{args.var_name}' not found for {args.project} ({target})")
                 return 1
 
             print(f"{args.var_name}={result['var_value']}")
@@ -241,7 +222,7 @@ class EnvCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to get environment variable: {e}", file=sys.stderr)
+            logger.error(f"Failed to get environment variable: {e}")
             return 1
 
     def var_list(self, args) -> int:
@@ -293,7 +274,7 @@ class EnvCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to list environment variables: {e}", file=sys.stderr)
+            logger.error(f"Failed to list environment variables: {e}")
             import traceback
             traceback.print_exc()
             return 1
@@ -314,7 +295,7 @@ class EnvCommands(Command):
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to delete environment variable: {e}", file=sys.stderr)
+            logger.error(f"Failed to delete environment variable: {e}")
             return 1
 
 

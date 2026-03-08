@@ -653,14 +653,14 @@ export TEMPLEDB_LOG_LEVEL=DEBUG
 
 ### Skip Deployment Groups
 
-If you only want to deploy certain parts:
+All deployment groups configured in your deployment config will run in order. To control which groups run, modify your deployment configuration using the `continue_on_failure` flag for optional groups:
 
 ```bash
-# Skip build step (if already built)
-./templedb deploy run myproject --target staging --skip-group typescript_build
+# View current deployment configuration
+./templedb deploy config myproject --show
 
-# Deploy only migrations
-./templedb deploy run myproject --target staging --skip-group typescript_build
+# Initialize or modify deployment configuration
+# Edit the configuration in the database to set continue_on_failure=true for optional groups
 ```
 
 ### Custom Deployment Scripts

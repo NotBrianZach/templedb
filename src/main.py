@@ -2,6 +2,17 @@
 """
 templedb - SQLite project config + sops(age) secrets store (Python port)
 
+⚠️ DEPRECATED: This file (main.py) is deprecated and will be removed in a future version.
+⚠️ Please use the modern CLI via: python3 -m cli or ./templedb
+⚠️
+⚠️ The modern CLI provides the same functionality with better architecture:
+⚠️   - Service layer for business logic
+⚠️   - Better error handling
+⚠️   - Improved testability
+⚠️   - Consistent command structure
+⚠️
+⚠️ This file is kept temporarily for backward compatibility only.
+
 Dependencies (stdlib except PyYAML):
   - python>=3.10
   - PyYAML (yaml)
@@ -329,9 +340,11 @@ def audit(conn: sqlite3.Connection, action: str, slug: str, profile: str, detail
             (actor, action, slug, profile, json.dumps(details)),
         )
         conn.commit()
-    except Exception:
+    except Exception as e:
         # best-effort: never fail the main command on audit
-        pass
+        logger.warning(f"Audit logging failed (non-critical): {e}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Audit failure traceback:", exc_info=True)
 
 
 # -------------------------
@@ -998,41 +1011,55 @@ def cmd_direnv(conn: sqlite3.Connection, slug: Optional[str], profile: str, load
 
     # Load and export global environment variables
     emit(f"# --- Environment Variables (environment: {environment}) ---")
-    env_rows = conn.execute(
-        "SELECT key, value FROM env_vars WHERE environment = ?",
-        (environment,),
-    ).fetchall()
+    env_count = 0  # Initialize before try block
+    try:
+        env_rows = conn.execute(
+            "SELECT key, value FROM env_vars WHERE environment = ?",
+            (environment,),
+        ).fetchall()
 
-    env_count = 0
-    for env_row in env_rows:
-        emit(f"export {env_row['key']}={shell_escape(env_row['value'])}")
-        env_count += 1
+        for env_row in env_rows:
+            emit(f"export {env_row['key']}={shell_escape(env_row['value'])}")
+            env_count += 1
 
-    if env_count > 0:
-        emit(f"# Loaded {env_count} environment variable(s)", to_stderr=True)
-    else:
-        emit(f"# No environment variables for environment '{environment}'", to_stderr=True)
+        if env_count > 0:
+            emit(f"# Loaded {env_count} environment variable(s)", to_stderr=True)
+        else:
+            emit(f"# No environment variables for environment '{environment}'", to_stderr=True)
+    except sqlite3.OperationalError as e:
+        if "no such table: env_vars" in str(e):
+            emit(f"# env_vars table not found (feature not initialized)", to_stderr=True)
+        else:
+            raise
 
     emit()
 
     # Load and export resolved compound values
     emit("# --- Compound Values (templated variables) ---")
-    compound_rows = conn.execute(
-        "SELECT key, value_template FROM compound_values WHERE project_id=? AND profile=?",
-        (pid, profile),
-    ).fetchall()
+    try:
+        compound_rows = conn.execute(
+            "SELECT key, value_template FROM compound_values WHERE project_id=? AND profile=?",
+            (pid, profile),
+        ).fetchall()
 
-    compound_count = 0
-    compound_errors = []
-    for compound_row in compound_rows:
-        try:
-            resolved = resolve_template(conn, slug, profile, compound_row["value_template"])
-            emit(f"export {compound_row['key']}={shell_escape(resolved)}")
-            compound_count += 1
-        except TempledbError as e:
-            # Collect errors for reporting
-            error_msg = f"{compound_row['key']}: {e}"
-            compound_errors.append(error_msg)
+        compound_count = 0
+        compound_errors = []
+        for compound_row in compound_rows:
+            try:
+                resolved = resolve_template(conn, slug, profile, compound_row["value_template"])
+                emit(f"export {compound_row['key']}={shell_escape(resolved)}")
+                compound_count += 1
+            except TempledbError as e:
+                # Collect errors for reporting
+                error_msg = f"{compound_row['key']}: {e}"
+                compound_errors.append(error_msg)
+    except sqlite3.OperationalError as e:
+        if "no such table: compound_values" in str(e):
+            emit(f"# compound_values table not found (feature not initialized)", to_stderr=True)
+            compound_count = 0
+            compound_errors = []
+        else:
+            raise
             emit(f"# ERROR: Failed to resolve '{compound_row['key']}': {e}")
             emit(f"# Skipping this variable - check template syntax", to_stderr=True)
 

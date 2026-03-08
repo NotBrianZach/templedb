@@ -7,8 +7,11 @@ Provides connection pooling and query optimization
 import os
 import sqlite3
 import threading
+import logging
 from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = os.environ.get(
     'TEMPLEDB_PATH',
@@ -54,19 +57,47 @@ def transaction():
 
 def query_one(sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
     """Execute query and return single row as dict"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    row = cursor.fetchone()
-    return dict(row) if row else None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    except sqlite3.ProgrammingError as e:
+        logger.error(f"SQL syntax error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        logger.debug(f"Params: {params}")
+        raise
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database operational error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        raise
+    except sqlite3.DatabaseError as e:
+        logger.error(f"Database error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        raise
 
 
 def query_all(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
     """Execute query and return all rows as list of dicts"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    return [dict(row) for row in cursor.fetchall()]
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.ProgrammingError as e:
+        logger.error(f"SQL syntax error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        logger.debug(f"Params: {params}")
+        raise
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database operational error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        raise
+    except sqlite3.DatabaseError as e:
+        logger.error(f"Database error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        raise
 
 
 def execute(sql: str, params: tuple = (), commit: bool = True) -> int:
@@ -81,12 +112,31 @@ def execute(sql: str, params: tuple = (), commit: bool = True) -> int:
     Returns:
         Last inserted row ID
     """
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    if commit:
-        conn.commit()
-    return cursor.lastrowid
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        if commit:
+            conn.commit()
+        return cursor.lastrowid
+    except sqlite3.IntegrityError as e:
+        logger.error(f"Database constraint violation: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        logger.debug(f"Params: {params}")
+        raise
+    except sqlite3.ProgrammingError as e:
+        logger.error(f"SQL syntax error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        logger.debug(f"Params: {params}")
+        raise
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database operational error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
+    except sqlite3.DatabaseError as e:
+        logger.error(f"Database error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
 
 
 def executemany(sql: str, params_list: List[tuple], commit: bool = True) -> None:
@@ -98,11 +148,29 @@ def executemany(sql: str, params_list: List[tuple], commit: bool = True) -> None
         commit: Whether to auto-commit (default True for backward compatibility)
                 Set to False when using transaction() context manager
     """
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.executemany(sql, params_list)
-    if commit:
-        conn.commit()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.executemany(sql, params_list)
+        if commit:
+            conn.commit()
+    except sqlite3.IntegrityError as e:
+        logger.error(f"Database constraint violation in batch operation: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        logger.debug(f"Batch size: {len(params_list)}")
+        raise
+    except sqlite3.ProgrammingError as e:
+        logger.error(f"SQL syntax error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database operational error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
+    except sqlite3.DatabaseError as e:
+        logger.error(f"Database error in batch operation: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
 
 
 # Prepared statement cache

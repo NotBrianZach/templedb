@@ -21,9 +21,14 @@ class VCSCommands(Command):
     """VCS command handlers"""
 
     def __init__(self):
-        """Initialize with repositories"""
+        """Initialize with service context"""
         super().__init__()  # Initialize base Command class
-        self.project_repo = ProjectRepository()
+        from services.context import ServiceContext
+        self.ctx = ServiceContext()
+        self.service = self.ctx.get_vcs_service()
+
+        # Keep repositories for methods not yet refactored
+        self.project_repo = self.ctx.project_repo
         self.vcs_repo = VCSRepository()
 
     def _get_author(self) -> str:
@@ -57,124 +62,83 @@ class VCSCommands(Command):
 
     def add(self, args) -> int:
         """Stage files for commit"""
-        project = self.get_project_or_exit(args.project)
+        from error_handler import ResourceNotFoundError, ValidationError
 
-        # Get default branch
-        branches = self.vcs_repo.get_branches(project['id'])
-        branch = next((b for b in branches if b.get('is_default')), None)
+        try:
+            # Determine what to stage
+            stage_all = hasattr(args, 'all') and args.all
+            file_patterns = args.files if hasattr(args, 'files') and args.files else None
 
-        if not branch:
-            logger.error("No default branch found")
+            if not stage_all and not file_patterns:
+                logger.error("Specify --all or provide file patterns")
+                return 1
+
+            # Stage files via service
+            count = self.service.stage_files(
+                project_slug=args.project,
+                file_patterns=file_patterns,
+                stage_all=stage_all
+            )
+
+            print(f"✓ Staged {count} file(s)")
+            return 0
+
+        except ResourceNotFoundError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
             return 1
 
-        # Handle --all flag
-        if hasattr(args, 'all') and args.all:
-            # Stage all changes
-            self.vcs_repo.execute("""
-                UPDATE vcs_working_state
-                SET staged = 1
-                WHERE project_id = ? AND branch_id = ? AND state != 'unmodified'
-            """, (project['id'], branch['id']))
+        except ValidationError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
+            return 1
 
-            # Count affected rows
-            staged_count = self.vcs_repo.query_one("""
-                SELECT COUNT(*) as count FROM vcs_working_state
-                WHERE project_id = ? AND branch_id = ? AND staged = 1
-            """, (project['id'], branch['id']))
-
-            print(f"✓ Staged {staged_count['count']} file(s)")
-            return 0
-
-        # Handle specific files
-        if hasattr(args, 'files') and args.files:
-            for file_pattern in args.files:
-                # Find matching files in working state
-                files = self.vcs_repo.query_all("""
-                    SELECT ws.id, pf.file_path
-                    FROM vcs_working_state ws
-                    JOIN project_files pf ON ws.file_id = pf.id
-                    WHERE ws.project_id = ? AND ws.branch_id = ?
-                    AND pf.file_path LIKE ?
-                """, (project['id'], branch['id'], f"%{file_pattern}%"))
-
-                if not files:
-                    print(f"   No matching files for: {file_pattern}")
-                    continue
-
-                # Stage matching files
-                for file in files:
-                    self.vcs_repo.execute("""
-                        UPDATE vcs_working_state
-                        SET staged = 1
-                        WHERE id = ?
-                    """, (file['id'],))
-                    print(f"   ✓ Staged: {file['file_path']}")
-
-            return 0
-
-        logger.error("Specify --all or provide file patterns")
-        return 1
+        except Exception as e:
+            logger.error(f"Failed to stage files: {e}")
+            logger.debug("Full error:", exc_info=True)
+            return 1
 
     def reset(self, args) -> int:
         """Unstage files"""
-        project = self.get_project_or_exit(args.project)
+        from error_handler import ResourceNotFoundError, ValidationError
 
-        # Get default branch
-        branches = self.vcs_repo.get_branches(project['id'])
-        branch = next((b for b in branches if b.get('is_default')), None)
+        try:
+            # Determine what to unstage
+            unstage_all = hasattr(args, 'all') and args.all
+            file_patterns = args.files if hasattr(args, 'files') and args.files else None
 
-        if not branch:
-            logger.error("No default branch found")
+            if not unstage_all and not file_patterns:
+                logger.error("Specify --all or provide file patterns")
+                return 1
+
+            # Unstage files via service
+            count = self.service.unstage_files(
+                project_slug=args.project,
+                file_patterns=file_patterns,
+                unstage_all=unstage_all
+            )
+
+            print(f"✓ Unstaged {count} file(s)")
+            return 0
+
+        except ResourceNotFoundError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
             return 1
 
-        # Handle --all flag
-        if hasattr(args, 'all') and args.all:
-            # Unstage all changes
-            self.vcs_repo.execute("""
-                UPDATE vcs_working_state
-                SET staged = 0
-                WHERE project_id = ? AND branch_id = ? AND staged = 1
-            """, (project['id'], branch['id']))
+        except ValidationError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
+            return 1
 
-            # Count affected rows
-            unstaged_count = self.vcs_repo.query_one("""
-                SELECT COUNT(*) as count FROM vcs_working_state
-                WHERE project_id = ? AND branch_id = ? AND state != 'unmodified'
-            """, (project['id'], branch['id']))
-
-            print(f"✓ Unstaged {unstaged_count['count']} file(s)")
-            return 0
-
-        # Handle specific files
-        if hasattr(args, 'files') and args.files:
-            for file_pattern in args.files:
-                # Find matching files in working state
-                files = self.vcs_repo.query_all("""
-                    SELECT ws.id, pf.file_path
-                    FROM vcs_working_state ws
-                    JOIN project_files pf ON ws.file_id = pf.id
-                    WHERE ws.project_id = ? AND ws.branch_id = ?
-                    AND ws.staged = 1
-                    AND pf.file_path LIKE ?
-                """, (project['id'], branch['id'], f"%{file_pattern}%"))
-
-                if not files:
-                    print(f"   No staged files matching: {file_pattern}")
-                    continue
-
-                # Unstage matching files
-                for file in files:
-                    self.vcs_repo.execute("""
-                        UPDATE vcs_working_state
-                        SET staged = 0
-                        WHERE id = ?
-                    """, (file['id'],))
-                    print(f"   ✓ Unstaged: {file['file_path']}")
-
-            return 0
-
-        logger.error("Specify --all or provide file patterns")
-        return 1
+        except Exception as e:
+            logger.error(f"Failed to unstage files: {e}")
+            logger.debug("Full error:", exc_info=True)
+            return 1
 
     def commit(self, args) -> int:
         """Create VCS commit"""
@@ -264,60 +228,74 @@ class VCSCommands(Command):
 
     def status(self, args) -> int:
         """Show working directory status"""
-        project = self.get_project_or_exit(args.project)
+        from error_handler import ResourceNotFoundError
 
-        # Auto-detect changes if requested or if working state is empty
-        if hasattr(args, 'refresh') and args.refresh:
-            self._refresh_working_state(project)
-        else:
-            # Check if working state is populated
-            existing = self.vcs_repo.query_one("""
-                SELECT COUNT(*) as count FROM vcs_working_state
-                WHERE project_id = ?
-            """, (project['id'],))
+        try:
+            project_slug = args.project
 
-            if not existing or existing['count'] == 0:
-                print("🔄 Detecting changes (first time)...")
+            # Get project first (for refresh logic)
+            project = self.service.get_project(project_slug)
+
+            # Auto-detect changes if requested or if working state is empty
+            if hasattr(args, 'refresh') and args.refresh:
                 self._refresh_working_state(project)
+            else:
+                # Check if working state is populated
+                existing = self.vcs_repo.query_one("""
+                    SELECT COUNT(*) as count FROM vcs_working_state
+                    WHERE project_id = ?
+                """, (project['id'],))
 
-        # Get current branch
-        branches = self.vcs_repo.get_branches(project['id'])
-        branch = next((b for b in branches if b.get('is_default')), None)
+                if not existing or existing['count'] == 0:
+                    print("🔄 Detecting changes (first time)...")
+                    self._refresh_working_state(project)
 
-        if branch:
-            print(f"On branch: {branch['branch_name']}")
+            # Get status from service
+            status = self.service.get_status(project_slug)
 
-        # Get changes
-        changes = self.vcs_repo.query_all("""
-            SELECT pf.file_path, ws.state, ws.staged
-            FROM vcs_working_state ws
-            JOIN project_files pf ON ws.file_id = pf.id
-            WHERE ws.project_id = ? AND ws.state != 'unmodified'
-            ORDER BY ws.staged DESC, pf.file_path
-        """, (project['id'],))
+            if not status['has_branch']:
+                print("No VCS branch initialized")
+                print("Use: templedb vcs init <project>")
+                return 0
 
-        if not changes:
-            print("No changes")
+            print(f"On branch: {status['branch']}")
+
+            # Check if any changes
+            if not status['staged'] and not status['modified'] and not status['untracked']:
+                print("No changes")
+                return 0
+
+            # Display staged changes
+            if status['staged']:
+                print("\nChanges to be committed:")
+                for file_path in status['staged']:
+                    print(f"  📝 staged      {file_path}")
+
+            # Display modified changes
+            if status['modified']:
+                print("\nChanges not staged for commit:")
+                for file_path in status['modified']:
+                    print(f"  📝 modified    {file_path}")
+
+            # Display untracked
+            if status['untracked']:
+                print("\nUntracked files:")
+                for file_path in status['untracked']:
+                    print(f"  ❓ untracked   {file_path}")
+
+            print()
             return 0
 
-        # Staged changes
-        staged = [c for c in changes if c['staged']]
-        if staged:
-            print("\nChanges to be committed:")
-            for change in staged:
-                state_symbol = {'modified': '📝', 'added': '✨', 'deleted': '🗑️'}.get(change['state'], '❓')
-                print(f"  {state_symbol} {change['state']:<10} {change['file_path']}")
+        except ResourceNotFoundError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
+            return 1
 
-        # Unstaged changes
-        unstaged = [c for c in changes if not c['staged']]
-        if unstaged:
-            print("\nChanges not staged for commit:")
-            for change in unstaged:
-                state_symbol = {'modified': '📝', 'added': '✨', 'deleted': '🗑️'}.get(change['state'], '❓')
-                print(f"  {state_symbol} {change['state']:<10} {change['file_path']}")
-
-        print()
-        return 0
+        except Exception as e:
+            logger.error(f"Failed to get status: {e}")
+            logger.debug("Full error:", exc_info=True)
+            return 1
 
     def log(self, args) -> int:
         """Show commit history"""
@@ -396,7 +374,8 @@ class VCSCommands(Command):
         """, (project['id'], f"%{args.file}%"))
 
         if not file_row:
-            print(f"Error: File not found: {args.file}", file=sys.stderr)
+            logger.error(f"File not found: {args.file}")
+            logger.info(f"Use: templedb vcs status {args.project} to see available files")
             return 1
 
         # Determine versions to compare
@@ -438,11 +417,13 @@ class VCSCommands(Command):
             label1 = f"version {versions[1]['version']}"
 
         if content1 is None:
-            print(f"Error: Could not retrieve old version", file=sys.stderr)
+            logger.error("Could not retrieve old version")
+            logger.info("The content may have been deleted or corrupted")
             return 1
 
         if content2 is None:
-            print(f"Error: Could not retrieve new version", file=sys.stderr)
+            logger.error("Could not retrieve new version")
+            logger.info("The content may have been deleted or corrupted")
             return 1
 
         # Generate and display diff
@@ -678,7 +659,8 @@ class VCSCommands(Command):
         """, (project['id'], args.commit, f"{args.commit}%"))
 
         if not commit:
-            print(f"Error: Commit not found: {args.commit}", file=sys.stderr)
+            logger.error(f"Commit not found: {args.commit}")
+            logger.info(f"Use: templedb vcs log {args.project} to see available commits")
             return 1
 
         # Print commit info

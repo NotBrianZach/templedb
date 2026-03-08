@@ -11,123 +11,49 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
 from deployment_config import DeploymentConfigManager
 from deployment_orchestrator import DeploymentOrchestrator
+from logger import get_logger
 import db_utils
+
+logger = get_logger(__name__)
 
 
 class DeployCommands(Command):
     """Deployment command handlers"""
 
+    def __init__(self):
+        super().__init__()
+        """Initialize with service context"""
+        from services.context import ServiceContext
+        self.ctx = ServiceContext()
+        self.service = self.ctx.get_deployment_service()
+
     def deploy(self, args) -> int:
         """Deploy project from TempleDB"""
-        try:
-            from cathedral_export import export_project
+        from error_handler import ResourceNotFoundError, DeploymentError
 
+        try:
             project_slug = args.slug
             target = args.target if hasattr(args, 'target') and args.target else 'production'
             dry_run = args.dry_run if hasattr(args, 'dry_run') and args.dry_run else False
-
-            # Verify project exists
-            project = self.get_project_or_exit(project_slug)
+            skip_validation = hasattr(args, 'skip_validation') and args.skip_validation
 
             print(f"🚀 Deploying {project_slug} to {target}...")
 
             if dry_run:
                 print("📋 DRY RUN - No actual deployment will occur\n")
 
-            # Step 1: Export cathedral package to temp directory
-            export_dir = Path(f"/tmp/templedb_deploy_{project_slug}")
-            export_dir.mkdir(parents=True, exist_ok=True)
-
-            print("📦 Exporting project from TempleDB...")
-            success = export_project(
-                slug=project_slug,
-                output_dir=export_dir,
-                compress=False,
-                include_files=True,
-                include_vcs=True,
-                include_environments=True
+            # Use service for deployment
+            result = self.service.deploy(
+                project_slug=project_slug,
+                target=target,
+                dry_run=dry_run,
+                skip_validation=skip_validation
             )
 
-            if not success:
-                print("✗ Export failed", file=sys.stderr)
-                return 1
-
-            cathedral_dir = export_dir / f"{project_slug}.cathedral"
-
-            if not cathedral_dir.exists():
-                print(f"✗ Cathedral directory not found: {cathedral_dir}", file=sys.stderr)
-                return 1
-
-            print(f"✓ Exported to {cathedral_dir}\n")
-
-            # Step 2: Reconstruct project from cathedral files
-            work_dir = export_dir / "working"
-            work_dir.mkdir(exist_ok=True)
-
-            print("🔧 Reconstructing project from cathedral package...")
-            self._reconstruct_project(cathedral_dir, work_dir)
-            print(f"✓ Project reconstructed to {work_dir}\n")
-
-            # Step 3: Check for deployment configuration
-            config_manager = DeploymentConfigManager(db_utils)
-            config = config_manager.get_config(project['id'])
-
-            if config.groups:
-                # Use orchestrated deployment
-                print("📋 Found deployment configuration - using orchestrator\n")
-
-                orchestrator = DeploymentOrchestrator(
-                    project=project,
-                    target_name=target,
-                    config=config,
-                    db_utils=db_utils,
-                    work_dir=work_dir
-                )
-
-                # Get optional flags
-                validate_env = not (hasattr(args, 'skip_validation') and args.skip_validation)
-                skip_groups = args.skip_group if hasattr(args, 'skip_group') and args.skip_group else None
-
-                # Execute deployment
-                result = orchestrator.deploy(
-                    dry_run=dry_run,
-                    validate_env=validate_env,
-                    skip_groups=skip_groups
-                )
-
-                return 0 if result.success else 1
-
-            else:
-                # Fallback to deploy.sh script (backwards compatibility)
-                deploy_script = work_dir / "deploy.sh"
-
-                if deploy_script.exists():
-                    print(f"🔨 Found deployment script: {deploy_script.name}")
-
-                    if dry_run:
-                        print(f"   Would execute: bash {deploy_script}")
-                        print("\n✓ Dry run complete - no actual deployment performed")
-                        return 0
-
-                    print("   Executing deployment script...\n")
-                    print("=" * 60)
-
-                    # Run the deployment script
-                    result = subprocess.run(
-                        ["bash", str(deploy_script)],
-                        cwd=work_dir,
-                        env={**subprocess.os.environ, "DEPLOYMENT_TARGET": target}
-                    )
-
-                    print("=" * 60)
-
-                    if result.returncode == 0:
-                        print("\n✅ Deployment complete!")
-                        return 0
-                    else:
-                        print(f"\n✗ Deployment failed with exit code {result.returncode}", file=sys.stderr)
-                        return result.returncode
-                else:
+            # Present results
+            if result.success:
+                if result.message and 'No deployment configuration' in result.message:
+                    # No deployment method configured
                     print("⚠️  No deployment configuration or deploy.sh found")
                     print("\n📝 To enable automated deployment:")
                     print(f"   Option 1 - Use deployment config (recommended):")
@@ -137,76 +63,51 @@ class DeployCommands(Command):
                     print(f"      2. Re-import: ./templedb project sync {project_slug}")
 
                     if not dry_run:
-                        print(f"\n💡 Deployment files available at: {work_dir}")
+                        print(f"\n💡 Deployment files available at: {result.work_dir}")
                         print("   You can manually deploy from this location")
+                else:
+                    print(f"\n✅ Deployment complete!")
+                    if dry_run:
+                        print("✓ Dry run complete - no actual deployment performed")
 
-                    return 0
+                return 0
+            else:
+                logger.error(f"Deployment failed: {result.message}")
+                return result.exit_code
 
-        except Exception as e:
-            print(f"✗ Deployment failed: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
+        except ResourceNotFoundError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
             return 1
 
-    def _reconstruct_project(self, cathedral_dir: Path, work_dir: Path) -> None:
-        """Reconstruct project structure from cathedral package"""
-        import json
+        except DeploymentError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
+            return 1
 
-        files_dir = cathedral_dir / "files"
-
-        if not files_dir.exists():
-            raise ValueError(f"Files directory not found: {files_dir}")
-
-        # Process all file JSON metadata
-        file_count = 0
-        for file_json in sorted(files_dir.glob("*.json")):
-            if file_json.name == "manifest.json":
-                continue
-
-            # Read metadata
-            with open(file_json, 'r') as f:
-                metadata = json.load(f)
-
-            file_path = metadata.get('file_path')
-            if not file_path:
-                continue
-
-            # Check for corresponding blob
-            blob_file = file_json.with_suffix('.blob')
-            if not blob_file.exists():
-                continue
-
-            # Create target path
-            target_file = work_dir / file_path
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Copy blob to target location
-            import shutil
-            shutil.copy2(blob_file, target_file)
-
-            file_count += 1
-
-        print(f"   Reconstructed {file_count} files")
+        except Exception as e:
+            logger.error(f"Deployment failed: {e}")
+            logger.debug("Full error details:", exc_info=True)
+            return 1
 
     def status(self, args) -> int:
         """Show deployment status for project"""
+        from error_handler import ResourceNotFoundError
+
         try:
             project_slug = args.slug
-            project = self.get_project_or_exit(project_slug)
 
             print(f"\n📊 Deployment Status: {project_slug}\n")
 
-            # Check for deployment targets
-            targets = self.query_all("""
-                SELECT target_name, target_type, provider, host
-                FROM deployment_targets
-                WHERE project_id = ?
-                ORDER BY target_name
-            """, (project['id'],))
+            # Get status from service
+            status = self.service.get_deployment_status(project_slug)
 
-            if targets:
+            # Display targets
+            if status['targets']:
                 print("🎯 Deployment Targets:")
-                for target in targets:
+                for target in status['targets']:
                     print(f"   • {target['target_name']} ({target['target_type']})")
                     print(f"     Provider: {target['provider'] or 'unknown'}")
                     if target['host']:
@@ -216,33 +117,19 @@ class DeployCommands(Command):
                 print("⚠️  No deployment targets configured")
                 print("   Use: ./templedb target add <project> <target_name> ...\n")
 
-            # Check for deployment script
-            deploy_files = self.query_all("""
-                SELECT file_path
-                FROM files_with_types_view
-                WHERE project_slug = ? AND file_path LIKE '%deploy%'
-                ORDER BY file_path
-            """, (project_slug,))
-
-            if deploy_files:
+            # Display deployment scripts
+            if status['deploy_scripts']:
                 print("📜 Deployment Scripts:")
-                for file in deploy_files:
-                    print(f"   • {file['file_path']}")
+                for file_path in status['deploy_scripts']:
+                    print(f"   • {file_path}")
                 print()
             else:
                 print("⚠️  No deployment scripts found\n")
 
-            # Check for migrations
-            result = self.query_one("""
-                SELECT COUNT(*) as count
-                FROM files_with_types_view
-                WHERE project_slug = ? AND type_name = 'sql_migration'
-            """, (project_slug,))
+            # Display migration count
+            print(f"🗄️  Database Migrations: {status['migration_count']}")
 
-            migration_count = result['count'] if result else 0
-            print(f"🗄️  Database Migrations: {migration_count}")
-
-            # Check for edge functions
+            # Additional file counts (kept in command for now)
             result = self.query_one("""
                 SELECT COUNT(*) as count
                 FROM files_with_types_view
@@ -252,7 +139,6 @@ class DeployCommands(Command):
             function_count = result['count'] if result else 0
             print(f"⚡ Edge Functions: {function_count}")
 
-            # Check for service files
             result = self.query_one("""
                 SELECT COUNT(*) as count
                 FROM files_with_types_view
@@ -264,6 +150,12 @@ class DeployCommands(Command):
 
             print()
             return 0
+
+        except ResourceNotFoundError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
+            return 1
 
         except Exception as e:
             print(f"✗ Failed to get deployment status: {e}", file=sys.stderr)
@@ -706,7 +598,6 @@ def register(cli):
     run_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
     run_parser.add_argument('--dry-run', action='store_true', help='Show what would be deployed without deploying')
     run_parser.add_argument('--skip-validation', action='store_true', help='Skip environment variable validation')
-    run_parser.add_argument('--skip-group', action='append', help='Skip specific deployment group(s)')
     cli.commands['deploy.run'] = deploy_handler.deploy
 
     # deploy status command
