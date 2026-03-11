@@ -9,3 +9,6 @@ rich>=13.0.0
 
 # Secret management dependencies
 PyYAML>=6.0.0  # For YAML export format in secret management
+
+# DNS provider API dependencies
+requests>=2.28.0  # For Cloudflare, Namecheap DNS automation

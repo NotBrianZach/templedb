@@ -5,8 +5,8 @@ Backup provider registry and factory
 from typing import Dict, Type, Optional, Any
 from pathlib import Path
 
-from src.backup.base import CloudBackupProvider
-from src.logger import get_logger
+from backup.base import CloudBackupProvider
+from logger import get_logger
 
 logger = get_logger(__name__)
 

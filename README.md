@@ -9,11 +9,11 @@
 
 ---
 
-## What is TempleDB? (BESIDES A Work in Progress)
+## What is TempleDB?
 
 <img src="assets/logo.svg" align="right" width="150" alt="TempleDB Logo"/>
 
-TempleDB is a database-native ai swarm centric project management system that treats your codebase as a temple - a sacred, organized space where every file, every line, every change is tracked, versioned, and queryable.
+TempleDB is a new way to write and deploy software. By moving from files to tables  your codebase becomes a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
 
 We throw out of the temple those that would lend us technical debt in the form of state duplication, namely filesystem centric tools like git, sops, and potentially including ci/cd and deployment tools like docker.
 
@@ -22,10 +22,8 @@ We throw out of the temple those that would lend us technical debt in the form o
 As TempleOS showed us the power of simplicity and first principles, so TempleDB embraces:
 
 - **Database normalization**: Single source of truth, no redundant copies
-- **ACID transactions**: Multi-agent coordination without conflicts
-- **Temporary denormalization**: Nix FHS environments for efficient editing
-- **Re-normalization workflow**: Familiar tools, normalized storage
-- **Transparent**: Query anything with SQL
+- **ACID transactions&Transparency**: Multi-agent coordination without conflicts
+- **Temporary denormalization&Re-normalization workflow**: Nix FHS environments for efficient editing
 
 **Key insight**: With k git worktree checkouts of n files, traditional agent swarm workflows require O(k²) pairwise comparisons to verify consistency—quadratic coordination cost. TempleDB maintains a single source of truth, reducing verification to O(k) comparisons. This asymptotic improvement (O(k) factor) becomes significant as teams and branches scale. Storage savings (10-50×) are a bonus.
 
@@ -267,10 +265,16 @@ See **[GETTING_STARTED.md](GETTING_STARTED.md)** for detailed installation instr
 
 ```bash
 # Launch Claude Code with full TempleDB context
-claude --append-system-prompt-file .claude/project-context.md
+./templedb claude
 
-# Or create an alias for convenience
-alias claude-templedb='claude --append-system-prompt-file .claude/project-context.md'
+# Or if you have templedb in your PATH
+templedb claude
+
+# You can also pass additional arguments
+./templedb claude --model opus
+
+# Alternatively, use the claude command directly
+claude --append-system-prompt-file .claude/project-context.md
 ```
 
 The project context file (`.claude/project-context.md`) provides:

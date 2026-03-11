@@ -6,10 +6,15 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from src.cli.commands.base import Command
-from src.backup import get_provider, list_providers
-from src.backup.manager import BackupManager, DEFAULT_DB_PATH
-from src.logger import get_logger
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from cli.core import Command
+from backup import get_provider, list_providers
+from backup.manager import BackupManager
+from logger import get_logger
+
+# Default DB path
+DEFAULT_DB_PATH = Path.home() / '.local' / 'share' / 'templedb' / 'templedb.sqlite'
 
 logger = get_logger(__name__)
 
@@ -397,3 +402,82 @@ class CloudBackupCommands(Command):
         print()
 
         return 0
+
+
+
+def register(cli):
+    """Register cloud backup commands with CLI"""
+    handler = CloudBackupCommands()
+
+    # Create cloud-backup command group
+    backup_parser = cli.register_command("cloud-backup", None, help_text="Cloud backup operations")
+    subparsers = backup_parser.add_subparsers(dest="backup_subcommand", required=True)
+
+    # providers command
+    providers_parser = subparsers.add_parser("providers", help="List available backup providers")
+    cli.commands["cloud-backup.providers"] = handler.list_providers
+
+    # backup command
+    do_backup_parser = subparsers.add_parser("backup", help="Backup database to cloud storage")
+    do_backup_parser.add_argument("-p", "--provider", required=True, help="Backup provider (gdrive, s3, dropbox, local)")
+    do_backup_parser.add_argument("--db-path", type=str, help="Path to database file")
+    do_backup_parser.add_argument("--config", type=str, help="Provider configuration file")
+    do_backup_parser.add_argument("--keep-local", action="store_true", help="Keep local backup file")
+    do_backup_parser.add_argument("--no-cleanup", action="store_true", help="Skip cleanup of old backups")
+    cli.commands["cloud-backup.backup"] = handler.do_backup
+
+    # list command
+    list_parser = subparsers.add_parser("list", help="List cloud backups")
+    list_parser.add_argument("-p", "--provider", required=True, help="Backup provider")
+    list_parser.add_argument("--config", type=str, help="Provider configuration file")
+    cli.commands["cloud-backup.list"] = handler.list_backups
+
+    # restore command
+    restore_parser = subparsers.add_parser("restore", help="Restore database from cloud backup")
+    restore_parser.add_argument("-p", "--provider", required=True, help="Backup provider")
+    restore_parser.add_argument("--backup-id", required=True, help="Backup identifier to restore")
+    restore_parser.add_argument("--db-path", type=str, help="Path to restore database to")
+    restore_parser.add_argument("--config", type=str, help="Provider configuration file")
+    restore_parser.add_argument("--no-safety-backup", action="store_true", help="Skip creating safety backup before restore")
+    cli.commands["cloud-backup.restore"] = handler.restore_backup
+
+    # cleanup command
+    cleanup_parser = subparsers.add_parser("cleanup", help="Clean up old backups")
+    cleanup_parser.add_argument("-p", "--provider", required=True, help="Backup provider")
+    cleanup_parser.add_argument("--config", type=str, help="Provider configuration file")
+    cli.commands["cloud-backup.cleanup"] = handler.cleanup_backups
+
+    # test command
+    test_parser = subparsers.add_parser("test", help="Test connection to backup provider")
+    test_parser.add_argument("-p", "--provider", required=True, help="Backup provider")
+    test_parser.add_argument("--config", type=str, help="Provider configuration file")
+    cli.commands["cloud-backup.test"] = handler.test_connection
+
+    # setup command
+    setup_parser = subparsers.add_parser("setup", help="Setup backup provider")
+    setup_parser.add_argument("provider", help="Backup provider to setup")
+    cli.commands["cloud-backup.setup"] = handler.setup_provider
+
+    # Create wrapper handler
+    def cloud_backup_handler(args):
+        subcommand = args.backup_subcommand
+        if subcommand == "providers":
+            return handler.list_providers(args)
+        elif subcommand == "backup":
+            return handler.do_backup(args)
+        elif subcommand == "list":
+            return handler.list_backups(args)
+        elif subcommand == "restore":
+            return handler.restore_backup(args)
+        elif subcommand == "cleanup":
+            return handler.cleanup_backups(args)
+        elif subcommand == "test":
+            return handler.test_connection(args)
+        elif subcommand == "setup":
+            return handler.setup_provider(args)
+        else:
+            print(f"Unknown cloud-backup subcommand: {subcommand}")
+            return 1
+
+    cli.commands["cloud-backup"] = cloud_backup_handler
+

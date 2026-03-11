@@ -11,8 +11,8 @@ from pathlib import Path
 # Ensure parent directory is in path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from cli.commands import project, vcs, env, search, system, cathedral, deploy, migration, target, secret, tui_launcher, config, workitem, mcp, direnv, merge, blob, domain, cloud_backup, claude, prompt, vibe, vibe_realtime, nixos
 from cli.core import cli
-from cli.commands import project, vcs, env, search, system, cathedral, deploy, migration, target, secret, tui_launcher, config, workitem, mcp, direnv, merge, blob, domain
 
 
 def main():
@@ -36,6 +36,12 @@ def main():
     merge.register(cli)
     blob.register(cli)
     domain.register(cli)
+    cloud_backup.register(cli)
+    claude.register(cli)
+    prompt.register(cli)
+    vibe.register(cli)
+    vibe_realtime.register_realtime_commands(cli)
+    nixos.register(cli)
 
     # TODO: Register llm commands as needed
     # from cli.commands import llm

@@ -19,6 +19,96 @@ TempleDB is a **database-native AI swarm project management system** that treats
 
 ---
 
+## Dependency Management
+
+### ⚠️ CRITICAL: Always Use Nix First
+
+**TempleDB uses Nix as the primary dependency manager** for reproducible, declarative environments.
+
+**Golden Rule**: When adding dependencies to TempleDB or any tracked project:
+
+1. ✅ **FIRST**: Add to `flake.nix` (Nix is the source of truth)
+2. ✅ **THEN**: Enter Nix shell with `nix develop`
+3. ❌ **NEVER**: Use `pip install`, `npm install`, or other package managers directly
+
+### Why Nix First?
+
+- **Reproducibility**: Exact same environment across machines and time
+- **Declarative**: All dependencies specified in version control
+- **Isolated**: No pollution of system Python/Node installations
+- **Fast**: Expression caching makes environment activation < 1s
+- **Comprehensive**: Works for Python, Node, system tools, and more
+
+### Adding Dependencies
+
+**For Python packages:**
+```nix
+# flake.nix
+python311Packages.aiohttp
+python311Packages.requests
+python311Packages.numpy
+```
+
+**For Node packages:**
+```nix
+# flake.nix
+nodejs_20
+nodePackages.typescript
+```
+
+**For system tools:**
+```nix
+# flake.nix
+ripgrep
+fd
+jq
+```
+
+### Common Mistakes to Avoid
+
+❌ **Don't do this:**
+```bash
+pip install requests          # System pollution
+npm install -g typescript     # Global installation
+apt-get install ripgrep       # System-level changes
+```
+
+✅ **Do this instead:**
+```bash
+# 1. Edit flake.nix to add python311Packages.requests
+# 2. Enter Nix environment
+nix develop
+
+# 3. Now the package is available
+python -c "import requests"   # Works!
+```
+
+### Exception: Project-Specific Dependencies
+
+If you're working on a project that **requires** npm/pip for its own build:
+- Still use Nix to provide node/python
+- Use project's package manager **inside** Nix shell
+- Example: `nix develop` → `npm install` (for that project only)
+
+### Dependency Priority Order
+
+1. **Nix** (flake.nix) - For TempleDB itself and system tools
+2. **Project package managers** - For projects being managed (inside Nix shell)
+3. **Never system package managers** - Don't use apt/brew/pacman for dev tools
+
+### Vibe Coding Dependencies
+
+The vibe coding system requires:
+```nix
+python311Packages.aiohttp     # WebSocket server
+python311Packages.watchdog    # File system monitoring
+python311Packages.websockets  # WebSocket protocol
+```
+
+**Always verify** dependencies are in flake.nix before running vibe commands.
+
+---
+
 ## Architecture Overview
 
 ### Checkout/Commit Workflow
@@ -462,29 +552,34 @@ ORDER BY c.committed_at DESC;
 
 ### When Working with TempleDB
 
-1. **Use the checkout/commit workflow** for file editing
+1. **Always use Nix for dependencies**
+   - Add to flake.nix first
+   - Run `nix develop` to activate
+   - Never use pip/npm/apt directly for TempleDB
+
+2. **Use the checkout/commit workflow** for file editing
    - Don't edit database records directly for file content
    - Always checkout → edit → commit
 
-2. **Prefer TempleDB VCS over git**
+3. **Prefer TempleDB VCS over git**
    - Use `templedb vcs` commands, not `git`
    - Database is the source of truth, not .git
 
-3. **Leverage MCP tools when available**
+4. **Leverage MCP tools when available**
    - Use `templedb_*` MCP tools in Claude Code
    - Fall back to CLI commands if MCP unavailable
 
-4. **Track agent sessions properly**
+5. **Track agent sessions properly**
    - Start session with `agent start`
    - Set `TEMPLEDB_SESSION_ID` environment variable
    - Use `--ai-assisted` flag on commits
 
-5. **Use work items for coordination**
+6. **Use work items for coordination**
    - Create work items for tasks
    - Use auto-dispatch for parallel agent work
    - Check mailbox regularly
 
-6. **Query with SQL for analysis**
+7. **Query with SQL for analysis**
    - Use views for common patterns
    - Add LIMIT clauses for large datasets
    - Leverage content-addressed storage for deduplication
@@ -508,6 +603,24 @@ ORDER BY c.committed_at DESC;
 - Use checkout/commit workflow
 
 See `.claude/skills/ANTI_GIT_GUIDELINES.md` for complete patterns.
+
+### Anti-Package-Manager Guidelines
+
+**Never use traditional package managers** for TempleDB development:
+
+❌ **Don't:**
+- `pip install <package>` → Add to flake.nix, run `nix develop`
+- `npm install -g <package>` → Add to flake.nix, run `nix develop`
+- `apt-get install <tool>` → Add to flake.nix, run `nix develop`
+- `brew install <tool>` → Add to flake.nix, run `nix develop`
+
+✅ **Do:**
+- Edit `flake.nix` to add dependencies
+- Run `nix develop` to activate environment
+- Trust Nix as the dependency source of truth
+- Use project package managers only inside Nix shell (for projects being managed)
+
+**Exception**: When working on a managed project (not TempleDB itself), you may use that project's package manager inside a Nix shell.
 
 ---
 
@@ -538,6 +651,7 @@ See `PERFORMANCE.md` for detailed benchmarks and tuning guide.
 - **Project config**: `.mcp.json` (MCP server configuration)
 - **Skills**: `.claude/skills/*/SKILL.md`
 - **System config**: `~/.config/templedb/config.yaml` (optional)
+- **Nix flake**: `flake.nix` (dependency source of truth)
 
 ### Temporary Workspaces
 - **Checkouts**: User-specified (e.g., `/tmp/workspace`)
@@ -631,6 +745,14 @@ TempleDB Workflow:
 - Work items and mailbox system for task assignment
 - Version-based conflict detection instead of content merging
 
+### Nix-First Philosophy
+
+**Declarative dependency management**:
+- All dependencies defined in flake.nix
+- Reproducible across machines and time
+- No system pollution
+- Fast activation with caching
+
 ---
 
 ## Tribute
@@ -648,6 +770,9 @@ TempleDB carries forward this philosophy: treating your codebase as a sacred spa
 **Most Common Operations:**
 
 ```bash
+# ALWAYS start with Nix environment
+nix develop
+
 # Import a project
 ./templedb project import /path/to/project
 
@@ -670,12 +795,17 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite "SELECT * FROM projects"
 
 # Launch TUI
 ./templedb tui
+
+# Launch Claude Code
+./templedb claude                    # Load from file
+./templedb claude --from-db          # Load from database
 ```
 
 ---
 
 **Database Location**: `~/.local/share/templedb/templedb.sqlite`
 **Project Root**: `/home/zach/templeDB`
+**Dependencies**: `flake.nix` (source of truth)
 **Documentation**: See README.md and docs/ directory
 **MCP Config**: `.mcp.json`
 **Skills**: `.claude/skills/*/SKILL.md`

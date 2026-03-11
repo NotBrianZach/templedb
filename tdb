@@ -36,11 +36,13 @@ Usage:
   tdb import <repo-url> [name]      Import project into TempleDB
   tdb list                          List all projects
   tdb sync <project>                Sync project with filesystem
+  tdb deployed                      List all deployed projects
 
 Examples:
   tdb claude woofs_project          # Launch Claude with woofs_project context
   tdb import https://github.com/user/repo myproject
   tdb list
+  cd \$(tdb deploy path bza)        # Jump to deployed bza project
 
 Environment:
   TEMPLEDB_USER                     Set agent identifier (default: claude-\$USER)
@@ -161,6 +163,11 @@ cmd_sync() {
     success "Project synced"
 }
 
+# List deployed projects
+cmd_deployed() {
+    ./templedb deploy list
+}
+
 # Main command dispatcher
 main() {
     if [ $# -eq 0 ]; then
@@ -183,11 +190,19 @@ main() {
         sync)
             cmd_sync "$@"
             ;;
+        deployed)
+            cmd_deployed "$@"
+            ;;
+        deploy)
+            # Pass through to templedb deploy commands
+            ./templedb deploy "$@"
+            ;;
         -h|--help|help)
             usage
             ;;
         *)
-            error "Unknown command: $command. Use 'tdb --help' for usage."
+            # Try to pass through to templedb
+            ./templedb "$command" "$@"
             ;;
     esac
 }

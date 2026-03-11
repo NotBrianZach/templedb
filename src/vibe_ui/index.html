@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TempleDB Vibe Coding</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 700px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            color: #999;
+            margin-bottom: 30px;
+        }
+
+        .status {
+            padding: 15px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+
+        .status.connected { background: #d4edda; color: #155724; }
+        .status.disconnected { background: #f8d7da; color: #721c24; }
+
+        .progress {
+            margin-bottom: 30px;
+        }
+
+        .progress-bar {
+            background: #e0e0e0;
+            border-radius: 10px;
+            height: 30px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress-fill {
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            height: 100%;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+        }
+
+        .question-card {
+            background: #f9f9f9;
+            border-left: 5px solid #667eea;
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .question-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 15px;
+        }
+
+        .badge {
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }
+
+        .badge.category { background: #667eea; color: white; }
+        .badge.difficulty { background: #764ba2; color: white; }
+
+        .code-snippet {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            overflow-x: auto;
+        }
+
+        .question-text {
+            font-size: 1.2em;
+            margin: 20px 0;
+            line-height: 1.6;
+        }
+
+        .options {
+            margin: 20px 0;
+        }
+
+        .option {
+            background: white;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 15px;
+            margin: 10px 0;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .option:hover {
+            border-color: #667eea;
+            transform: translateX(5px);
+        }
+
+        .option.selected {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+
+        .buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        button {
+            flex: 1;
+            padding: 15px;
+            border: none;
+            border-radius: 10px;
+            font-size: 1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        button.primary {
+            background: #667eea;
+            color: white;
+        }
+
+        button.primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+        }
+
+        button.secondary {
+            background: #e0e0e0;
+            color: #666;
+        }
+
+        button.secondary:hover {
+            background: #d0d0d0;
+        }
+
+        .feedback {
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            animation: slideIn 0.3s ease;
+        }
+
+        .feedback.correct {
+            background: #d4edda;
+            border-left: 5px solid #28a745;
+        }
+
+        .feedback.incorrect {
+            background: #f8d7da;
+            border-left: 5px solid #dc3545;
+        }
+
+        .feedback-icon {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+
+        .explanation {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(0,0,0,0.1);
+        }
+
+        .waiting {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+
+        .waiting-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.5; }
+            50% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 Vibe Coding</h1>
+        <p class="subtitle">Understanding AI-Generated Code</p>
+
+        <div class="status disconnected" id="status">
+            ⏳ Connecting...
+        </div>
+
+        <div class="progress">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress" style="width: 0%">
+                    0/0
+                </div>
+            </div>
+        </div>
+
+        <div id="content">
+            <div class="waiting">
+                <div class="waiting-icon">🤔</div>
+                <h2>Waiting for questions...</h2>
+                <p>Code changes will automatically generate quiz questions</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const sessionId = urlParams.get('session');
+
+        if (!sessionId) {
+            document.getElementById('content').innerHTML = '<p style="color: red;">No session ID provided</p>';
+        }
+
+        let ws;
+        let currentQuestion = null;
+        let stats = { correct: 0, total: 0 };
+
+        function connect() {
+            ws = new WebSocket(`ws://localhost:8765/ws/vibe/${sessionId}`);
+
+            ws.onopen = () => {
+                document.getElementById('status').className = 'status connected';
+                document.getElementById('status').textContent = '✓ Connected';
+
+                // Send heartbeat every 30s
+                setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'heartbeat', token: 'TODO' }));
+                    }
+                }, 30000);
+
+                // Request first question
+                ws.send(JSON.stringify({ type: 'request_question' }));
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleMessage(data);
+            };
+
+            ws.onclose = () => {
+                document.getElementById('status').className = 'status disconnected';
+                document.getElementById('status').textContent = '✗ Disconnected';
+                setTimeout(connect, 5000);
+            };
+        }
+
+        function handleMessage(data) {
+            switch (data.type) {
+                case 'question':
+                    showQuestion(data.question);
+                    break;
+                case 'answer_submitted':
+                    // Another client answered
+                    break;
+                case 'change':
+                    console.log('Code change detected:', data.file);
+                    break;
+            }
+        }
+
+        function showQuestion(question) {
+            currentQuestion = question;
+            const content = document.getElementById('content');
+
+            let html = `
+                <div class="question-card">
+                    <div class="question-header">
+                        <span class="badge category">${question.category || 'General'}</span>
+                        <span class="badge difficulty">${question.difficulty || 'Medium'}</span>
+                    </div>
+            `;
+
+            if (question.code_snippet) {
+                html += `<div class="code-snippet">${escapeHtml(question.code_snippet)}</div>`;
+            }
+
+            html += `<div class="question-text"><strong>Q:</strong> ${question.question_text}</div>`;
+
+            if (question.question_type === 'multiple_choice') {
+                html += '<div class="options" id="options">';
+                const options = JSON.parse(question.options);
+                options.forEach((opt, idx) => {
+                    html += `<div class="option" onclick="selectOption(${idx})" data-idx="${idx}">${opt}</div>`;
+                });
+                html += '</div>';
+            } else {
+                html += '<input type="text" id="answer-input" placeholder="Your answer..." style="width:100%; padding:15px; border:2px solid #e0e0e0; border-radius:10px; font-size:1em;">';
+            }
+
+            html += `
+                    <div class="buttons">
+                        <button class="secondary" onclick="skipQuestion()">Skip</button>
+                        <button class="primary" onclick="submitAnswer()">Submit Answer</button>
+                    </div>
+                </div>
+            `;
+
+            content.innerHTML = html;
+        }
+
+        function selectOption(idx) {
+            document.querySelectorAll('.option').forEach(opt => {
+                opt.classList.remove('selected');
+            });
+            document.querySelector(`[data-idx="${idx}"]`).classList.add('selected');
+        }
+
+        async function submitAnswer() {
+            let answer;
+
+            if (currentQuestion.question_type === 'multiple_choice') {
+                const selected = document.querySelector('.option.selected');
+                if (!selected) {
+                    alert('Please select an answer');
+                    return;
+                }
+                const options = JSON.parse(currentQuestion.options);
+                answer = options[parseInt(selected.dataset.idx)];
+            } else {
+                answer = document.getElementById('answer-input').value.trim();
+                if (!answer) {
+                    alert('Please enter an answer');
+                    return;
+                }
+            }
+
+            // Submit to server
+            const response = await fetch('http://localhost:8765/api/vibe/answer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: parseInt(sessionId),
+                    question_id: currentQuestion.question_id,
+                    answer: answer
+                })
+            });
+
+            const result = await response.json();
+            showFeedback(result);
+        }
+
+        function showFeedback(result) {
+            stats.total++;
+            if (result.is_correct) stats.correct++;
+            updateProgress();
+
+            const feedbackHtml = `
+                <div class="feedback ${result.is_correct ? 'correct' : 'incorrect'}">
+                    <div class="feedback-icon">${result.is_correct ? '✓' : '✗'}</div>
+                    <strong>${result.is_correct ? 'Correct!' : 'Incorrect'}</strong>
+                    ${!result.is_correct ? `<p>Correct answer: ${result.correct_answer}</p>` : ''}
+                    ${result.explanation ? `<div class="explanation"><strong>Explanation:</strong><br>${result.explanation}</div>` : ''}
+                    <div class="buttons" style="margin-top:20px;">
+                        <button class="primary" onclick="nextQuestion()">Next Question</button>
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('content').innerHTML += feedbackHtml;
+        }
+
+        function skipQuestion() {
+            nextQuestion();
+        }
+
+        function nextQuestion() {
+            currentQuestion = null;
+            ws.send(JSON.stringify({ type: 'request_question' }));
+        }
+
+        function updateProgress() {
+            const percent = stats.total > 0 ? (stats.correct / stats.total * 100) : 0;
+            const progressEl = document.getElementById('progress');
+            progressEl.style.width = percent + '%';
+            progressEl.textContent = `${stats.correct}/${stats.total}`;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        connect();
+    </script>
+</body>
+</html>

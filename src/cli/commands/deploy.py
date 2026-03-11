@@ -6,6 +6,7 @@ import sys
 import subprocess
 from pathlib import Path
 from typing import Optional
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
@@ -583,6 +584,114 @@ class DeployCommands(Command):
             traceback.print_exc()
             return 1
 
+    def list_deployed(self, args) -> int:
+        """List all deployed projects with their paths"""
+        try:
+            from pathlib import Path
+            import os
+            from datetime import datetime
+
+            deploy_base = Path("/tmp")
+            deployed_projects = []
+
+            # Find all deployed project directories
+            for item in deploy_base.glob("templedb_deploy_*"):
+                if item.is_dir():
+                    working_dir = item / "working"
+                    if working_dir.exists():
+                        # Extract project slug from directory name
+                        project_slug = item.name.replace("templedb_deploy_", "")
+
+                        # Get modification time
+                        mtime = working_dir.stat().st_mtime
+                        modified = datetime.fromtimestamp(mtime)
+
+                        # Check if .envrc exists
+                        has_envrc = (working_dir / ".envrc").exists()
+
+                        deployed_projects.append({
+                            'slug': project_slug,
+                            'path': str(working_dir),
+                            'modified': modified,
+                            'has_envrc': has_envrc
+                        })
+
+            if not deployed_projects:
+                print("No deployed projects found in /tmp/")
+                print("\nDeploy a project with:")
+                print("  ./templedb deploy run <project>")
+                return 0
+
+            # Sort by modification time (most recent first)
+            deployed_projects.sort(key=lambda x: x['modified'], reverse=True)
+
+            print(f"\n📦 Deployed Projects ({len(deployed_projects)}):\n")
+
+            for proj in deployed_projects:
+                envrc_indicator = "✓" if proj['has_envrc'] else "✗"
+                age = self._format_time_ago(proj['modified'])
+
+                print(f"  {envrc_indicator} {proj['slug']}")
+                print(f"     Path: {proj['path']}")
+                print(f"     Updated: {age}")
+                print()
+
+            print("💡 Tips:")
+            print(f"   Jump to project:  cd $(./templedb deploy path <project>)")
+            print(f"   Or use tdb:       cd $(tdb deploy path <project>)")
+            print()
+
+            return 0
+
+        except Exception as e:
+            print(f"✗ Failed to list deployed projects: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            return 1
+
+    def get_deployed_path(self, args) -> int:
+        """Get the path to a deployed project"""
+        try:
+            from pathlib import Path
+
+            project_slug = args.slug
+            deploy_dir = Path(f"/tmp/templedb_deploy_{project_slug}")
+            working_dir = deploy_dir / "working"
+
+            if not working_dir.exists():
+                print(f"✗ No deployment found for '{project_slug}'", file=sys.stderr)
+                print(f"\nDeploy with: ./templedb deploy run {project_slug}", file=sys.stderr)
+                return 1
+
+            # Just print the path (for scripting/piping)
+            print(working_dir)
+            return 0
+
+        except Exception as e:
+            print(f"✗ Failed to get deployment path: {e}", file=sys.stderr)
+            return 1
+
+    def _format_time_ago(self, dt: datetime) -> str:
+        """Format datetime as human-readable time ago"""
+        from datetime import datetime
+
+        now = datetime.now()
+        diff = now - dt
+
+        seconds = diff.total_seconds()
+
+        if seconds < 60:
+            return "just now"
+        elif seconds < 3600:
+            minutes = int(seconds / 60)
+            return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        elif seconds < 86400:
+            hours = int(seconds / 3600)
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        else:
+            days = int(seconds / 86400)
+            return f"{days} day{'s' if days != 1 else ''} ago"
+
 
 def register(cli):
     """Register deployment commands with CLI"""
@@ -641,3 +750,12 @@ def register(cli):
     rollback_parser.add_argument('--reason', help='Reason for rollback')
     rollback_parser.add_argument('--yes', action='store_true', help='Skip confirmation prompt')
     cli.commands['deploy.rollback'] = deploy_handler.rollback
+
+    # deploy list command
+    list_parser = subparsers.add_parser('list', help='List all deployed projects')
+    cli.commands['deploy.list'] = deploy_handler.list_deployed
+
+    # deploy path command
+    path_parser = subparsers.add_parser('path', help='Get path to deployed project (use with: cd $(tdb deploy path <project>))')
+    path_parser.add_argument('slug', help='Project slug')
+    cli.commands['deploy.path'] = deploy_handler.get_deployed_path

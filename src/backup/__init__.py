@@ -7,12 +7,12 @@ Pluggable cloud backup providers for TempleDB database backups.
 from pathlib import Path
 from typing import Optional
 
-from src.backup.base import CloudBackupProvider
-from src.backup.registry import BackupProviderRegistry, get_provider
+from backup.base import CloudBackupProvider
+from backup.registry import BackupProviderRegistry, get_provider
 
 # Import available providers
 try:
-    from src.backup.gdrive_provider import GDriveBackupProvider
+    from backup.gdrive_provider import GDriveBackupProvider
     BackupProviderRegistry.register('gdrive', GDriveBackupProvider)
     BackupProviderRegistry.register('google-drive', GDriveBackupProvider)
 except ImportError:

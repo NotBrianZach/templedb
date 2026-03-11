@@ -205,14 +205,12 @@ class ProjectService(BaseService):
 
         if not project_path.exists():
             raise ValidationError(
-                f"Path does not exist: {project_path}",
-                solution="Check the path and try again"
+                f"Path does not exist: {project_path}"
             )
 
         if not project_path.is_dir():
             raise ValidationError(
-                f"Path is not a directory: {project_path}",
-                solution="Provide a directory path"
+                f"Path is not a directory: {project_path}"
             )
 
         # Determine slug
