@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "templedb"
+version = "0.1.0"
+description = "Database-native development environment and project manager"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "TempleDB Contributors"},
+]
+keywords = ["database", "project-management", "nix", "secrets", "vcs"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Version Control",
+]
+
+dependencies = [
+    "pyyaml",
+    "textual",
+    "rich",
+]
+
+[project.optional-dependencies]
+# Cloud backup dependencies
+backup = [
+    "google-api-python-client",
+    "google-auth",
+    "google-auth-oauthlib",
+    "google-auth-httplib2",
+]
+
+# Vibe coding real-time dependencies
+vibe = [
+    "aiohttp",
+    "watchdog",
+    "websockets",
+]
+
+# DNS management
+dns = [
+    "requests",
+]
+
+# Encryption
+crypto = [
+    "cryptography",
+]
+
+# All optional features
+all = [
+    "templedb[backup,vibe,dns,crypto]",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/templedb"
+Documentation = "https://github.com/yourusername/templedb/blob/main/README.md"
+Repository = "https://github.com/yourusername/templedb"
+Issues = "https://github.com/yourusername/templedb/issues"
+
+[project.scripts]
+templedb = "cli:main"
+
+[tool.setuptools]
+packages = ["cli", "services", "backup", "repositories"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+"*" = ["*.sql", "*.md"]
