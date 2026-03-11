@@ -13,9 +13,9 @@
 
 <img src="assets/logo.svg" align="right" width="150" alt="TempleDB Logo"/>
 
-TempleDB is a new way to write and deploy software. By moving from files to tables  your codebase becomes a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
+TempleDB is a new way to write and deploy software. By moving from files to sqlite tables  your codebase becomes a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
 
-We throw out of the temple those that would lend us technical debt in the form of state duplication, namely filesystem centric tools like git, sops, and potentially including ci/cd and deployment tools like docker.
+We throw out of the temple those that would lend us technical debt in the form of state duplication, namely filesystem centric tools like git, sops, and potentially including ci/cd and deployment tools like docker. (though in the case of git it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for nixos to tide us over until the day we can make some much more radical changes to operating systems)
 
 ### Philosophy
 
