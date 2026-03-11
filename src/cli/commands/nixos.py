@@ -157,6 +157,236 @@ class NixOSCommand(Command):
             logger.error(f"Failed to detect dependencies: {e}", exc_info=True)
             return 1
 
+    def system_test(self, args) -> int:
+        """Test system configuration (nixos-rebuild test)"""
+        try:
+            from services.system_service import SystemService, SystemServiceError
+
+            service = SystemService()
+            print(f"🔧 Testing system configuration: {args.slug}")
+
+            if args.dry_run:
+                print("⚠️  DRY RUN MODE - No changes will be made")
+
+            result = service.test_system(args.slug, dry_run=args.dry_run)
+
+            if result['success']:
+                print("\n✅ Test successful!")
+                if result.get('nixos_generation'):
+                    print(f"   NixOS generation: {result['nixos_generation']}")
+                print("\n💡 To apply permanently: ./templedb nixos system-switch {args.slug}")
+            else:
+                print(f"\n❌ Test failed (exit code {result['exit_code']})")
+
+            if result['stdout']:
+                print("\n📋 Output:")
+                print(result['stdout'])
+
+            if result['stderr']:
+                print("\n⚠️  Errors/Warnings:")
+                print(result['stderr'])
+
+            return 0 if result['success'] else 1
+
+        except Exception as e:
+            logger.error(f"Failed to test system: {e}", exc_info=True)
+            return 1
+
+    def system_switch(self, args) -> int:
+        """Switch to system configuration (nixos-rebuild switch)"""
+        try:
+            from services.system_service import SystemService, SystemServiceError
+
+            service = SystemService()
+            print(f"🚀 Switching to system configuration: {args.slug}")
+
+            if args.dry_run:
+                print("⚠️  DRY RUN MODE - No changes will be made")
+            else:
+                print("⚠️  This will activate the configuration permanently!")
+                print("   Consider running 'nixos system-test' first.")
+                response = input("\nContinue? (yes/no): ")
+                if response.lower() != 'yes':
+                    print("Cancelled")
+                    return 0
+
+            result = service.switch_system(args.slug, dry_run=args.dry_run)
+
+            if result['success']:
+                print("\n✅ Switch successful!")
+                if result.get('nixos_generation'):
+                    print(f"   NixOS generation: {result['nixos_generation']}")
+                print("\n✨ System configuration is now active and will persist across reboots.")
+            else:
+                print(f"\n❌ Switch failed (exit code {result['exit_code']})")
+
+            if result['stdout']:
+                print("\n📋 Output:")
+                print(result['stdout'])
+
+            if result['stderr']:
+                print("\n⚠️  Errors/Warnings:")
+                print(result['stderr'])
+
+            return 0 if result['success'] else 1
+
+        except Exception as e:
+            logger.error(f"Failed to switch system: {e}", exc_info=True)
+            return 1
+
+    def system_status(self, args) -> int:
+        """Show current system deployment status"""
+        try:
+            from services.system_service import SystemService
+
+            service = SystemService()
+            active = service.get_active_deployment()
+
+            if not active:
+                print("⚠️  No active system deployment found")
+                return 0
+
+            print("\n╔══════════════════════════════════════════════════════════╗")
+            print("║          Active System Deployment                       ║")
+            print("╚══════════════════════════════════════════════════════════╝")
+            print(f"\nProject:    {active['project_name']} ({active['project_slug']})")
+            print(f"Deployed:   {active['deployed_at']}")
+            print(f"Checkout:   {active['checkout_path']}")
+            print(f"Config:     {active['config_path']}")
+            print(f"Generation: {active['nixos_generation'] or 'N/A'}")
+            print(f"Command:    {active['command']}")
+            print()
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to get status: {e}", exc_info=True)
+            return 1
+
+    def system_history(self, args) -> int:
+        """Show deployment history"""
+        try:
+            from services.system_service import SystemService
+
+            service = SystemService()
+            history = service.get_deployment_history(
+                project_slug=args.project,
+                limit=args.limit
+            )
+
+            if not history:
+                print("⚠️  No deployment history found")
+                return 0
+
+            print("\n╔══════════════════════════════════════════════════════════╗")
+            print("║          System Deployment History                      ║")
+            print("╚══════════════════════════════════════════════════════════╝")
+            print()
+
+            for dep in history:
+                status = "✅ ACTIVE" if dep['is_active'] else ("✓" if dep['exit_code'] == 0 else "✗")
+                print(f"ID {dep['id']:>3} | {status} | {dep['project_slug']:15} | Gen {dep['nixos_generation'] or 'N/A':>3} | {dep['command']:15} | {dep['deployed_at'][:19]}")
+
+            print()
+            print("💡 To rollback: ./templedb nixos system-rollback <deployment_id>")
+            print()
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to get history: {e}", exc_info=True)
+            return 1
+
+    def system_rollback(self, args) -> int:
+        """Rollback to previous deployment"""
+        try:
+            from services.system_service import SystemService
+
+            service = SystemService()
+
+            if args.deployment_id:
+                print(f"⏪ Rolling back to deployment {args.deployment_id}")
+                deployment_id = args.deployment_id
+            else:
+                # Get previous non-active deployment
+                history = service.get_deployment_history(limit=2)
+                if len(history) < 2:
+                    print("❌ No previous deployment found to rollback to")
+                    return 1
+
+                deployment_id = history[1]['id']
+                print(f"⏪ Rolling back to previous deployment (ID: {deployment_id})")
+
+            result = service.rollback_to_deployment(deployment_id)
+
+            if result['success']:
+                print("\n✅ Rollback successful!")
+            else:
+                print(f"\n❌ Rollback failed (exit code {result['exit_code']})")
+
+            if result['stdout']:
+                print("\n📋 Output:")
+                print(result['stdout'])
+
+            if result['stderr']:
+                print("\n⚠️  Errors/Warnings:")
+                print(result['stderr'])
+
+            return 0 if result['success'] else 1
+
+        except Exception as e:
+            logger.error(f"Failed to rollback: {e}", exc_info=True)
+            return 1
+
+    def set_type(self, args) -> int:
+        """Set project type"""
+        try:
+            from services.system_service import SystemService
+
+            service = SystemService()
+            service.set_project_type(args.slug, args.type)
+            print(f"✅ Set {args.slug} type to {args.type}")
+
+            if args.type == 'nixos-config':
+                print("\n💡 You can now use:")
+                print(f"   ./templedb nixos system-test {args.slug}")
+                print(f"   ./templedb nixos system-switch {args.slug}")
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to set type: {e}", exc_info=True)
+            return 1
+
+    def list_configs(self, args) -> int:
+        """List all nixos-config projects"""
+        try:
+            from services.system_service import SystemService
+
+            service = SystemService()
+            projects = service.get_nixos_config_projects()
+
+            if not projects:
+                print("⚠️  No nixos-config projects found")
+                print("\n💡 To mark a project as nixos-config:")
+                print("   ./templedb nixos set-type <project> nixos-config")
+                return 0
+
+            print("\n╔══════════════════════════════════════════════════════════╗")
+            print("║          NixOS Configuration Projects                   ║")
+            print("╚══════════════════════════════════════════════════════════╝")
+            print()
+
+            for proj in projects:
+                print(f"  {proj['slug']:20} | {proj['project_type']:12} | {proj['created_at'][:10]}")
+
+            print()
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to list configs: {e}", exc_info=True)
+            return 1
+
 
 def register(cli):
     """Register NixOS commands with CLI"""
@@ -188,3 +418,40 @@ def register(cli):
     export_parser.add_argument('slug', help='Project slug')
     export_parser.add_argument('-o', '--output', help='Output directory (default: /tmp/nixos-gen)')
     cli.commands['nixos.export'] = cmd.export
+
+    # nixos system-test command
+    test_parser = subparsers.add_parser('system-test', help='Test system configuration (nixos-rebuild test)')
+    test_parser.add_argument('slug', help='Project slug (must be nixos-config type)')
+    test_parser.add_argument('--dry-run', action='store_true', help='Show what would be done')
+    cli.commands['nixos.system-test'] = cmd.system_test
+
+    # nixos system-switch command
+    switch_parser = subparsers.add_parser('system-switch', help='Switch to system configuration (nixos-rebuild switch)')
+    switch_parser.add_argument('slug', help='Project slug (must be nixos-config type)')
+    switch_parser.add_argument('--dry-run', action='store_true', help='Show what would be done')
+    cli.commands['nixos.system-switch'] = cmd.system_switch
+
+    # nixos system-status command
+    status_parser = subparsers.add_parser('system-status', help='Show current system deployment status')
+    cli.commands['nixos.system-status'] = cmd.system_status
+
+    # nixos system-history command
+    history_parser = subparsers.add_parser('system-history', help='Show deployment history')
+    history_parser.add_argument('--project', help='Filter by project')
+    history_parser.add_argument('--limit', type=int, default=10, help='Number of records')
+    cli.commands['nixos.system-history'] = cmd.system_history
+
+    # nixos system-rollback command
+    rollback_parser = subparsers.add_parser('system-rollback', help='Rollback to previous deployment')
+    rollback_parser.add_argument('deployment_id', type=int, nargs='?', help='Deployment ID (default: previous)')
+    cli.commands['nixos.system-rollback'] = cmd.system_rollback
+
+    # nixos set-type command
+    set_type_parser = subparsers.add_parser('set-type', help='Set project type')
+    set_type_parser.add_argument('slug', help='Project slug')
+    set_type_parser.add_argument('type', choices=['regular', 'nixos-config', 'service', 'library'], help='Project type')
+    cli.commands['nixos.set-type'] = cmd.set_type
+
+    # nixos list-configs command
+    list_parser = subparsers.add_parser('list-configs', help='List all nixos-config projects')
+    cli.commands['nixos.list-configs'] = cmd.list_configs

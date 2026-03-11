@@ -218,10 +218,27 @@ class VibeRealtimeCommands(Command):
 
         try:
             cmd = [str(templedb_path), "claude", "--from-db", "--project", project]
+
+            # Add any provided Claude args
             if claude_args:
                 cmd.extend(claude_args)
 
-            process = subprocess.Popen(cmd)
+            # If no args provided, pipe a default welcome message to start interactive session
+            stdin_input = None
+            if not claude_args:
+                stdin_input = "I'm ready to help you code. What would you like to work on?\n"
+
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE if stdin_input else None,
+                text=True
+            )
+
+            # Send initial input if provided
+            if stdin_input and process.stdin:
+                process.stdin.write(stdin_input)
+                process.stdin.close()
+
             print("   ✓ Claude Code launched")
             return process
         except Exception as e:
