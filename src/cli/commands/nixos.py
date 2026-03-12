@@ -200,6 +200,9 @@ class NixOSCommand(Command):
             service = SystemService()
             print(f"🚀 Switching to system configuration: {args.slug}")
 
+            if args.with_home_manager:
+                print("   Including home-manager rebuild")
+
             if args.dry_run:
                 print("⚠️  DRY RUN MODE - No changes will be made")
             else:
@@ -210,12 +213,27 @@ class NixOSCommand(Command):
                     print("Cancelled")
                     return 0
 
-            result = service.switch_system(args.slug, dry_run=args.dry_run)
+            result = service.switch_system(
+                args.slug,
+                dry_run=args.dry_run,
+                with_home_manager=args.with_home_manager
+            )
 
             if result['success']:
                 print("\n✅ Switch successful!")
                 if result.get('nixos_generation'):
                     print(f"   NixOS generation: {result['nixos_generation']}")
+
+                # Show home-manager results if applicable
+                if result.get('home_manager'):
+                    hm = result['home_manager']
+                    if hm['success']:
+                        print(f"   home-manager generation: {hm.get('generation', 'N/A')}")
+                    else:
+                        print(f"   ⚠️  home-manager rebuild failed")
+                        if hm.get('error'):
+                            print(f"      Error: {hm['error']}")
+
                 print("\n✨ System configuration is now active and will persist across reboots.")
             else:
                 print(f"\n❌ Switch failed (exit code {result['exit_code']})")
@@ -429,6 +447,7 @@ def register(cli):
     switch_parser = subparsers.add_parser('system-switch', help='Switch to system configuration (nixos-rebuild switch)')
     switch_parser.add_argument('slug', help='Project slug (must be nixos-config type)')
     switch_parser.add_argument('--dry-run', action='store_true', help='Show what would be done')
+    switch_parser.add_argument('--with-home-manager', action='store_true', help='Also rebuild home-manager after NixOS')
     cli.commands['nixos.system-switch'] = cmd.system_switch
 
     # nixos system-status command
