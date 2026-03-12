@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
-from src.backup.base import CloudBackupProvider
-from src.backup.registry import get_provider, load_provider_from_config
-from src.logger import get_logger
+from backup.base import CloudBackupProvider
+from backup.registry import get_provider, load_provider_from_config
+from logger import get_logger
 
 logger = get_logger(__name__)
 

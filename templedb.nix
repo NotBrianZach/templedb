@@ -33,23 +33,18 @@ pkgs.python3Packages.buildPythonApplication rec {
   # Don't run tests during build (for now)
   doCheck = false;
 
-  # Install the CLI entry point
+  # Install the tdb wrapper script
   postInstall = ''
-    # Create wrapper scripts
-    mkdir -p $out/bin
-
-    # Main templedb CLI
-    cat > $out/bin/templedb <<'EOF'
-#!/usr/bin/env bash
-export PYTHONPATH="${pkgs.python3Packages.makePythonPath propagatedBuildInputs}:$PYTHONPATH"
-exec ${pkgs.python3}/bin/python3 $out/lib/python*/site-packages/templedb/main.py "$@"
-EOF
-    chmod +x $out/bin/templedb
-
-    # tdb wrapper
+    # Copy tdb wrapper (templedb entry point is created automatically by setuptools)
     cp ${./tdb} $out/bin/tdb
     chmod +x $out/bin/tdb
+
+    # Fix tdb to use installed templedb instead of relative path
+    substituteInPlace $out/bin/tdb \
+      --replace './templedb' 'templedb'
   '';
+
+  nativeBuildInputs = [ pkgs.makeWrapper ];
 
   meta = with lib; {
     description = "Database-native development environment and project manager";

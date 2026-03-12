@@ -110,7 +110,7 @@ class CloudBackupProvider(ABC):
             Number of backups deleted
         """
         from datetime import timedelta
-        from src.logger import get_logger
+        from logger import get_logger
 
         logger = get_logger(__name__)
         backups = self.list_backups()

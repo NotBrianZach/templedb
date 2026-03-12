@@ -19,20 +19,20 @@ except ImportError:
     pass
 
 try:
-    from src.backup.dropbox_provider import DropboxBackupProvider
+    from backup.dropbox_provider import DropboxBackupProvider
     BackupProviderRegistry.register('dropbox', DropboxBackupProvider)
 except ImportError:
     pass
 
 try:
-    from src.backup.s3_provider import S3BackupProvider
+    from backup.s3_provider import S3BackupProvider
     BackupProviderRegistry.register('s3', S3BackupProvider)
     BackupProviderRegistry.register('aws', S3BackupProvider)
 except ImportError:
     pass
 
 # Always available
-from src.backup.local_provider import LocalBackupProvider
+from backup.local_provider import LocalBackupProvider
 BackupProviderRegistry.register('local', LocalBackupProvider)
 BackupProviderRegistry.register('filesystem', LocalBackupProvider)
 

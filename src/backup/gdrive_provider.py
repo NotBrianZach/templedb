@@ -17,8 +17,8 @@ try:
 except ImportError:
     GDRIVE_AVAILABLE = False
 
-from src.backup.base import CloudBackupProvider
-from src.logger import get_logger
+from backup.base import CloudBackupProvider
+from logger import get_logger
 
 logger = get_logger(__name__)
 
