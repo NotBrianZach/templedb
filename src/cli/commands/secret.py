@@ -67,24 +67,40 @@ class SecretCommands(Command):
             sys.exit(1)
 
     def _age_decrypt(self, encrypted: bytes) -> bytes:
-        """Decrypt age-encrypted data using age key file."""
-        # Check for key file in environment or default location
-        key_file = os.environ.get("TEMPLEDB_AGE_KEY_FILE") or \
-                   os.environ.get("SOPS_AGE_KEY_FILE") or \
-                   os.path.expanduser("~/.config/sops/age/keys.txt")
+        """Decrypt age-encrypted data using any available key."""
+        # Collect all available identity files
+        key_file_candidates = [
+            os.environ.get("TEMPLEDB_AGE_KEY_FILE"),
+            os.environ.get("SOPS_AGE_KEY_FILE"),
+            os.path.expanduser("~/.config/sops/age/keys.txt"),
+            os.path.expanduser("~/.age/key.txt"),
+            os.path.expanduser("~/.config/age-plugin-yubikey/identities.txt")
+        ]
 
-        if not os.path.exists(key_file):
-            logger.error(f"age key file not found: {key_file}")
-            logger.info("Generate a key with:")
-            logger.info("  mkdir -p ~/.config/sops/age")
-            logger.info("  age-keygen -o ~/.config/sops/age/keys.txt")
-            logger.info("Then set environment variable:")
-            logger.info("  export TEMPLEDB_AGE_KEY_FILE=~/.config/sops/age/keys.txt")
+        # Filter to only existing files
+        available_key_files = [kf for kf in key_file_candidates if kf and os.path.exists(kf)]
+
+        if not available_key_files:
+            logger.error("No age key files found")
+            logger.info("Tried locations:")
+            for kf in key_file_candidates:
+                if kf:
+                    logger.info(f"  {kf}")
+            logger.info("\nGenerate a key with:")
+            logger.info("  age-keygen -o ~/.age/key.txt")
+            logger.info("Or setup Yubikey:")
+            logger.info("  age-plugin-yubikey --generate")
             sys.exit(1)
+
+        # Build age command with ALL available identity files
+        # age will try each identity until one works (any-of-N decryption)
+        age_cmd = ["age", "-d"]
+        for key_file in available_key_files:
+            age_cmd.extend(["-i", key_file])
 
         try:
             proc = subprocess.run(
-                ["age", "-d", "-i", key_file],
+                age_cmd,
                 input=encrypted,
                 capture_output=True,
                 check=True,
@@ -97,7 +113,13 @@ class SecretCommands(Command):
         except subprocess.CalledProcessError as e:
             err = e.stderr.decode("utf-8", errors="replace")
             logger.error(f"age decryption failed: {err.strip()}")
-            logger.info("Make sure you're using the correct age key")
+            logger.info(f"\nTried {len(available_key_files)} identity file(s):")
+            for kf in available_key_files:
+                logger.info(f"  - {kf}")
+            logger.info("\nPossible reasons:")
+            logger.info("  1. None of your keys can decrypt this secret")
+            logger.info("  2. Yubikey not inserted or PIN incorrect")
+            logger.info("  3. Secret was encrypted with different keys")
             sys.exit(1)
 
     def _get_project_id(self, slug: str) -> int:
