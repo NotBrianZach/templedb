@@ -56,20 +56,55 @@ class KeyCommands(Command):
 
         return None
 
-    def _get_age_plugin_yubikey_recipient(self):
-        """Get age recipient for plugged-in Yubikey"""
+    def _get_age_plugin_yubikey_recipient(self, slot=None):
+        """Get age recipient for plugged-in Yubikey
+
+        Args:
+            slot: PIV slot number (1, 2, 9a, 9c, 9d, 9e). Defaults to first slot found.
+        """
         try:
+            # Use --list to get all identities
             proc = subprocess.run(
-                ["age-plugin-yubikey", "--identity"],
+                ["age-plugin-yubikey", "--list"],
                 capture_output=True,
                 check=True,
                 text=True
             )
-            # Look for age1yubikey... line
-            for line in proc.stdout.split('\n'):
+
+            # Parse output to match slot with recipient
+            # Format is:
+            # #       Serial: 19101846, Slot: 1
+            # # ...
+            # age1yubikey...
+
+            lines = proc.stdout.split('\n')
+            current_slot = None
+            slot_recipients = {}
+
+            for line in lines:
                 line = line.strip()
-                if line.startswith('age1yubikey'):
-                    return line
+                # Check for slot line
+                if 'Slot:' in line:
+                    parts = line.split('Slot:')
+                    if len(parts) > 1:
+                        current_slot = parts[1].strip()
+                # Check for recipient line
+                elif line.startswith('age1yubikey') and current_slot:
+                    slot_recipients[current_slot] = line
+                    current_slot = None
+
+            # If slot specified, return that slot's recipient
+            if slot:
+                # Normalize slot (9a -> 9a, 2 -> 2)
+                slot_str = str(slot).lower()
+                if slot_str in slot_recipients:
+                    return slot_recipients[slot_str]
+
+            # Otherwise return first recipient found
+            if slot_recipients:
+                first_slot = sorted(slot_recipients.keys())[0]
+                return slot_recipients[first_slot]
+
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
         return None
@@ -133,6 +168,137 @@ class KeyCommands(Command):
             1 if success else 0
         ))
 
+    def _add_key_to_all_secrets(self, key_id: int, key_name: str, recipient: str, lazy_mode: bool = True):
+        """Add newly registered key to all existing secrets (lazy mode)
+
+        Args:
+            key_id: Database ID of the new key
+            key_name: Name of the new key
+            recipient: Age recipient for the key
+            lazy_mode: If True, automatically add to all secrets without prompting
+        """
+        if not lazy_mode:
+            return 0
+
+        # Get all existing secrets
+        secrets = self.repo.query_all("""
+            SELECT sb.id, p.slug, sb.profile, sb.secret_blob
+            FROM secret_blobs sb
+            JOIN projects p ON sb.project_id = p.id
+            ORDER BY p.slug, sb.profile
+        """, ())
+
+        if not secrets:
+            logger.info("No existing secrets to add key to")
+            return 0
+
+        logger.info(f"\n{'='*70}")
+        logger.info(f"Lazy Mode: Adding {key_name} to {len(secrets)} existing secret(s)")
+        logger.info(f"{'='*70}\n")
+
+        success_count = 0
+        failed_count = 0
+
+        for secret in secrets:
+            try:
+                # Decrypt with existing keys
+                decrypted = self._age_decrypt(secret['secret_blob'])
+
+                # Get all current recipients for this secret
+                current_keys = self.repo.query_all("""
+                    SELECT ek.recipient
+                    FROM secret_key_assignments ska
+                    JOIN encryption_keys ek ON ska.key_id = ek.id
+                    WHERE ska.secret_blob_id = ? AND ek.is_active = 1
+                """, (secret['id'],))
+
+                recipients = [k['recipient'] for k in current_keys]
+
+                # Add new recipient
+                recipients.append(recipient)
+
+                # Re-encrypt with all recipients including new one
+                encrypted = self._age_encrypt_multi(decrypted, recipients)
+
+                # Update secret blob
+                self.repo.execute("""
+                    UPDATE secret_blobs
+                    SET secret_blob = ?, updated_at = datetime('now')
+                    WHERE id = ?
+                """, (encrypted, secret['id']))
+
+                # Add key assignment
+                self.repo.execute("""
+                    INSERT INTO secret_key_assignments (secret_blob_id, key_id, added_by)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(secret_blob_id, key_id) DO NOTHING
+                """, (secret['id'], key_id, os.environ.get('USER', 'unknown')))
+
+                logger.info(f"  ✓ Added to {secret['slug']} ({secret['profile']})")
+                success_count += 1
+
+            except Exception as e:
+                logger.error(f"  ✗ Failed to add to {secret['slug']} ({secret['profile']}): {e}")
+                failed_count += 1
+
+        logger.info(f"\n{'='*70}")
+        logger.info(f"Lazy Mode Complete")
+        logger.info(f"{'='*70}")
+        logger.info(f"Success: {success_count}, Failed: {failed_count}\n")
+
+        return 0 if failed_count == 0 else 1
+
+    def _age_decrypt(self, encrypted: bytes) -> bytes:
+        """Decrypt age-encrypted data using any available key"""
+        # Collect all available identity files
+        key_file_candidates = [
+            os.environ.get("TEMPLEDB_AGE_KEY_FILE"),
+            os.environ.get("SOPS_AGE_KEY_FILE"),
+            os.path.expanduser("~/.config/sops/age/keys.txt"),
+            os.path.expanduser("~/.age/key.txt"),
+            os.path.expanduser("~/.config/age-plugin-yubikey/identities.txt")
+        ]
+
+        available_key_files = [kf for kf in key_file_candidates if kf and os.path.exists(kf)]
+
+        if not available_key_files:
+            raise Exception("No age key files found")
+
+        age_cmd = ["age", "-d"]
+        for key_file in available_key_files:
+            age_cmd.extend(["-i", key_file])
+
+        try:
+            proc = subprocess.run(
+                age_cmd,
+                input=encrypted,
+                capture_output=True,
+                check=True,
+            )
+            return proc.stdout
+        except subprocess.CalledProcessError as e:
+            err = e.stderr.decode("utf-8", errors="replace")
+            raise Exception(f"age decryption failed: {err.strip()}")
+
+    def _age_encrypt_multi(self, plaintext: bytes, recipients: list) -> bytes:
+        """Encrypt data using age with multiple recipients"""
+        age_cmd = ["age"]
+        for recipient in recipients:
+            age_cmd.extend(["-r", recipient])
+        age_cmd.append("-a")
+
+        try:
+            proc = subprocess.run(
+                age_cmd,
+                input=plaintext,
+                capture_output=True,
+                check=True,
+            )
+            return proc.stdout
+        except subprocess.CalledProcessError as e:
+            err = e.stderr.decode("utf-8", errors="replace")
+            raise Exception(f"age encryption failed: {err.strip()}")
+
     def key_add(self, args) -> int:
         """Add a new encryption key to the registry"""
         key_name = args.name
@@ -159,11 +325,12 @@ class KeyCommands(Command):
             logger.error("No Yubikey detected. Please insert Yubikey and try again.")
             return 1
 
-        # Get age recipient
-        recipient = self._get_age_plugin_yubikey_recipient()
+        # Get age recipient for the specified slot
+        recipient = self._get_age_plugin_yubikey_recipient(slot=piv_slot)
         if not recipient:
-            logger.error("Could not get age recipient from Yubikey")
+            logger.error(f"Could not get age recipient from Yubikey slot {piv_slot}")
             logger.info("Run: age-plugin-yubikey --generate")
+            logger.info("Or use --slot to specify a different slot")
             return 1
 
         serial_number = yubikey_info.get('serial')
@@ -202,6 +369,11 @@ class KeyCommands(Command):
                 logger.info(f"  Serial: {serial_number}")
             logger.info(f"  Slot: {piv_slot}")
             logger.info(f"  Location: {location}")
+
+            # Lazy mode: automatically add to all existing secrets
+            lazy_mode = getattr(args, 'lazy', True)  # Default to lazy mode
+            if lazy_mode:
+                self._add_key_to_all_secrets(key_id, key_name, recipient, lazy_mode=True)
 
             return 0
 
@@ -257,6 +429,11 @@ class KeyCommands(Command):
             logger.info(f"  Recipient: {recipient}")
             logger.info(f"  Path: {key_path}")
             logger.info(f"  Location: {location}")
+
+            # Lazy mode: automatically add to all existing secrets
+            lazy_mode = getattr(args, 'lazy', True)  # Default to lazy mode
+            if lazy_mode:
+                self._add_key_to_all_secrets(key_id, key_name, recipient, lazy_mode=True)
 
             return 0
 
@@ -531,6 +708,10 @@ def register(cli):
     add_parser.add_argument('--path', help='Path to key file (for filesystem keys)')
     add_parser.add_argument('--slot', help='PIV slot for Yubikey (default: 9a)')
     add_parser.add_argument('--notes', help='Additional notes')
+    add_parser.add_argument('--lazy', action='store_true', default=True,
+                            help='Lazy mode: automatically add key to all existing secrets (default)')
+    add_parser.add_argument('--no-lazy', dest='lazy', action='store_false',
+                            help='Corpo mode: only register key without adding to secrets')
     cli.commands['key.add'] = cmd.key_add
 
     # key list
