@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
+from cli.tty_utils import is_tty, is_emacs_vterm
 from db_utils import DB_PATH
 
 
@@ -67,6 +68,13 @@ class ClaudeCommands(Command):
 
     def launch_claude(self, args) -> int:
         """Launch Claude Code with TempleDB project context"""
+        # Check if we need PTY wrapper (Emacs vterm or other non-TTY)
+        use_pty_wrapper = not is_tty()
+
+        if use_pty_wrapper and is_emacs_vterm():
+            print("⚡ Detected Emacs vterm - using PTY wrapper for Claude Code", file=sys.stderr)
+            print("", file=sys.stderr)
+
         # Check if claude is installed
         if not shutil.which('claude'):
             print("Error: 'claude' command not found in PATH", file=sys.stderr)
@@ -113,10 +121,29 @@ class ClaudeCommands(Command):
         if hasattr(args, 'claude_args') and args.claude_args:
             cmd.extend(args.claude_args)
 
+        # Dry run mode - just show what would be executed
+        if hasattr(args, 'dry_run') and args.dry_run:
+            if use_pty_wrapper:
+                wrapped_cmd = ['script', '-q', '-c', ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in cmd), '/dev/null']
+                print("Would execute (with PTY wrapper):", file=sys.stderr)
+                print(' '.join(wrapped_cmd), file=sys.stderr)
+            else:
+                print("Would execute (direct):", file=sys.stderr)
+                print(' '.join(cmd), file=sys.stderr)
+            return 0
+
         # Launch Claude Code
         try:
-            result = subprocess.run(cmd, check=False)
-            return result.returncode
+            if use_pty_wrapper:
+                # Use 'script' command wrapper for non-TTY environments (like Emacs vterm)
+                # This allocates a pseudo-TTY that Ink can use
+                wrapped_cmd = ['script', '-q', '-c', ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in cmd), '/dev/null']
+                result = subprocess.run(wrapped_cmd, check=False)
+                return result.returncode
+            else:
+                # Direct execution for proper TTY environments
+                result = subprocess.run(cmd, check=False)
+                return result.returncode
         except KeyboardInterrupt:
             return 0
         except Exception as e:
@@ -161,4 +188,11 @@ def register(cli):
         'claude_args',
         nargs='*',
         help='Additional arguments to pass to claude'
+    )
+
+    # Debug flag to show what command would be run
+    claude_parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Show the command that would be executed without running it'
     )

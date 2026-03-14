@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
+from cli.tty_utils import require_tty
 
 
 class TUICommands(Command):
@@ -15,6 +16,10 @@ class TUICommands(Command):
 
     def launch_tui(self, args) -> int:
         """Launch the TempleDB TUI"""
+        # Check TTY before launching interactive tool
+        # Textual TUI requires a TTY
+        require_tty("TempleDB TUI", allow_override=True)
+
         # Check if textual is installed
         try:
             import textual

@@ -585,6 +585,7 @@ ORDER BY version_number DESC;
 - **[GUIDE.md](GUIDE.md)** - Complete usage guide (checkout/commit workflow, SQL queries, CLI commands)
 - **[QUICKSTART.md](QUICKSTART.md)** - Advanced workflows for existing users
 - **[DIRENV_INTEGRATION.md](DIRENV_INTEGRATION.md)** ⭐ NEW - Auto-load environments with direnv (v2.0)
+- **[docs/VIBE.md](docs/VIBE.md)** ⭐ NEW - Vibe coding: Interactive learning from AI-generated code changes
 - **[FILES.md](FILES.md)** - How file tracking and versioning works
 - **[TUI.md](TUI.md)** - Terminal UI guide
 - **[EXAMPLES.md](EXAMPLES.md)** - SQL query examples and common patterns
@@ -700,6 +701,31 @@ templedb restore <path>            # Restore from backup
 templedb status                    # Show database status
 templedb help                      # Show help
 ```
+
+---
+
+## Troubleshooting
+
+### Claude Code in Emacs vterm
+
+**Good news!** TempleDB now automatically detects Emacs vterm and uses a PTY wrapper (`script` command) to make Claude Code work properly.
+
+When you run `templedb claude` in vterm, you'll see:
+
+```
+⚡ Detected Emacs vterm - using PTY wrapper for Claude Code
+
+[Claude Code launches normally]
+```
+
+This works transparently - no configuration needed!
+
+**Other non-TTY environments:**
+
+If you're in a piped environment or CI/CD, Claude Code cannot run interactively. Use these alternatives:
+- Use non-interactive TempleDB commands
+- Run in a real terminal for interactive tools
+- See [docs/TTY_DETECTION.md](docs/TTY_DETECTION.md) for details
 
 ---
 
