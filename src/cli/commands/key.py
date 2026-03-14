@@ -456,6 +456,65 @@ class KeyCommands(Command):
         logger.info(f"✓ Enabled key: {key_name}")
         return 0
 
+    def key_setup_yubikey(self, args) -> int:
+        """Interactive setup to generate age identity on Yubikey"""
+        logger.info("=" * 70)
+        logger.info("Yubikey Age Identity Setup")
+        logger.info("=" * 70)
+        logger.info("")
+        logger.info("This will:")
+        logger.info("  1. Generate an age identity on your Yubikey")
+        logger.info("  2. Set/use your Yubikey PIN")
+        logger.info("  3. Save the identity to ~/.config/age-plugin-yubikey/identities.txt")
+        logger.info("")
+        logger.info("You'll be prompted for:")
+        logger.info("  - Yubikey PIN (default: 123456 if never changed)")
+        logger.info("  - New PIN (if you want to change it)")
+        logger.info("")
+
+        # Check if Yubikey is connected
+        yubikey_info = self._get_yubikey_info()
+        if not yubikey_info:
+            logger.error("No Yubikey detected. Please insert Yubikey and try again.")
+            return 1
+
+        input("Press Enter to continue...")
+        logger.info("")
+        logger.info("Generating age identity on Yubikey...")
+
+        try:
+            # Run age-plugin-yubikey --generate
+            proc = subprocess.run(
+                ["age-plugin-yubikey", "--generate"],
+                check=True
+            )
+
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("Identity Generated Successfully!")
+            logger.info("=" * 70)
+            logger.info("")
+
+            # Get the recipient
+            recipient = self._get_age_plugin_yubikey_recipient()
+            if recipient:
+                logger.info(f"Recipient: {recipient}")
+                logger.info("")
+                logger.info("Now you can add it to TempleDB:")
+                logger.info(f"  ./templedb key add yubikey --name yubikey-1 --location \"daily-use\"")
+            else:
+                logger.warning("Could not extract recipient. Check ~/.config/age-plugin-yubikey/identities.txt")
+
+            return 0
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to generate Yubikey identity: {e}")
+            return 1
+        except FileNotFoundError:
+            logger.error("age-plugin-yubikey not found")
+            logger.info("Install with: cargo install age-plugin-yubikey")
+            return 1
+
 
 def register(cli):
     """Register key management commands"""
@@ -498,3 +557,8 @@ def register(cli):
     enable_parser = subparsers.add_parser('enable', help='Enable a key')
     enable_parser.add_argument('name', help='Key name')
     cli.commands['key.enable'] = cmd.key_enable
+
+    # key setup-yubikey
+    setup_yubikey_parser = subparsers.add_parser('setup-yubikey',
+                                                   help='Generate age identity on Yubikey')
+    cli.commands['key.setup-yubikey'] = cmd.key_setup_yubikey
