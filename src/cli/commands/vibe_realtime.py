@@ -6,6 +6,7 @@ Launches Claude Code + Quiz UI + Auto-generates questions
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -18,6 +19,23 @@ from cli.core import Command
 
 class VibeRealtimeCommands(Command):
     """Real-time vibe coding session orchestration"""
+
+    def _find_available_port(self, start_port: int = 8765, end_port: int = 8800) -> int:
+        """Find an available port in the given range"""
+        for port in range(start_port, end_port + 1):
+            try:
+                # Try to bind to the port
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1)
+                sock.bind(('localhost', port))
+                sock.close()
+                return port
+            except OSError:
+                # Port is in use, try next one
+                continue
+
+        # No available ports found
+        raise RuntimeError(f"No available ports in range {start_port}-{end_port}")
 
     def _check_dependencies(self) -> bool:
         """Check if required dependencies are available"""
@@ -69,13 +87,36 @@ class VibeRealtimeCommands(Command):
 
         ui_mode = args.ui or 'browser'
 
+        # Determine port (auto-assign if not specified)
+        if args.port is None:
+            try:
+                port = self._find_available_port()
+                print(f"🔌 Auto-assigned port {port}")
+            except RuntimeError as e:
+                print(f"❌ {e}")
+                print("💡 Try specifying a port manually with --port")
+                return 1
+        else:
+            port = args.port
+            # Verify the specified port is available
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1)
+                sock.bind(('localhost', port))
+                sock.close()
+            except OSError:
+                print(f"❌ Port {port} is already in use")
+                print("💡 Try a different port with --port or omit it for auto-assignment")
+                return 1
+
         print(f"🎯 Starting Vibe Coding Session for '{project}'")
         print(f"   UI mode: {ui_mode}")
+        print(f"   Port: {port}")
         print()
 
         # 1. Start vibe server
         print("1️⃣  Starting vibe server...")
-        vibe_server = self._start_vibe_server(args.port)
+        vibe_server = self._start_vibe_server(port)
         if not vibe_server:
             print("❌ Failed to start vibe server")
             return 1
@@ -84,7 +125,7 @@ class VibeRealtimeCommands(Command):
 
         # 2. Initialize session via API
         print("2️⃣  Initializing vibe session...")
-        session_info = self._init_session(project, args.port)
+        session_info = self._init_session(project, port)
         if not session_info:
             print("❌ Failed to initialize session")
             vibe_server.terminate()
@@ -95,7 +136,7 @@ class VibeRealtimeCommands(Command):
 
         # 3. Start quiz UI
         print(f"3️⃣  Launching quiz UI ({ui_mode})...")
-        ui_process = self._start_ui(ui_mode, session_id, args.port)
+        ui_process = self._start_ui(ui_mode, session_id, port)
 
         # 4. Launch Claude Code
         print("4️⃣  Launching Claude Code...")
@@ -103,7 +144,7 @@ class VibeRealtimeCommands(Command):
 
         # 5. Start file watcher for auto-question generation
         print("5️⃣  Starting file watcher...")
-        watcher_process = self._start_file_watcher(project, session_id, args.port)
+        watcher_process = self._start_file_watcher(project, session_id, port)
 
         print()
         print("=" * 60)
@@ -111,8 +152,8 @@ class VibeRealtimeCommands(Command):
         print("=" * 60)
         print()
         print(f"  Session ID: {session_id}")
-        print(f"  Quiz UI: http://localhost:{args.port}/")
-        print(f"  WebSocket: ws://localhost:{args.port}/ws/vibe/{session_id}")
+        print(f"  Quiz UI: http://localhost:{port}/")
+        print(f"  WebSocket: ws://localhost:{port}/ws/vibe/{session_id}")
         print()
         print("💡 Tips:")
         print("  - Code changes will automatically generate quiz questions")
@@ -141,7 +182,7 @@ class VibeRealtimeCommands(Command):
         finally:
             # Cleanup
             self._cleanup(vibe_server, ui_process, claude_process, watcher_process,
-                         session_id, args.port)
+                         session_id, port)
 
         return 0
 
@@ -217,33 +258,122 @@ class VibeRealtimeCommands(Command):
         templedb_path = Path(__file__).parent.parent.parent.parent / "templedb"
 
         try:
+            # Generate project-specific prompt if it doesn't exist
+            self._ensure_project_prompt(project)
+
             cmd = [str(templedb_path), "claude", "--from-db", "--project", project]
 
             # Add any provided Claude args
             if claude_args:
                 cmd.extend(claude_args)
 
-            # If no args provided, pipe a default welcome message to start interactive session
-            stdin_input = None
-            if not claude_args:
-                stdin_input = "I'm ready to help you code. What would you like to work on?\n"
-
-            process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE if stdin_input else None,
-                text=True
-            )
-
-            # Send initial input if provided
-            if stdin_input and process.stdin:
-                process.stdin.write(stdin_input)
-                process.stdin.close()
+            # Launch Claude Code with direct TTY access (no stdin pipe)
+            # This allows interactive prompt editing in the buffer
+            process = subprocess.Popen(cmd)
 
             print("   ✓ Claude Code launched")
             return process
         except Exception as e:
             print(f"   ⚠️  Failed to launch Claude: {e}")
             return None
+
+    def _ensure_project_prompt(self, project: str):
+        """Ensure project has a prompt, create one if needed"""
+        import sqlite3
+        from db_utils import DB_PATH
+
+        conn = sqlite3.connect(os.path.expanduser(DB_PATH))
+        cursor = conn.cursor()
+
+        try:
+            # Get project
+            cursor.execute("SELECT id, slug, name FROM projects WHERE slug = ? OR name = ?",
+                          (project, project))
+            proj = cursor.fetchone()
+            if not proj:
+                return
+
+            project_id, slug, name = proj
+
+            # Check if project has an active prompt
+            cursor.execute("""
+                SELECT COUNT(*) FROM active_project_prompts_view
+                WHERE project_id = ?
+            """, (project_id,))
+
+            if cursor.fetchone()[0] > 0:
+                # Project already has a prompt
+                return
+
+            # Generate a basic project-specific prompt
+            cursor.execute("""
+                SELECT COUNT(*) FROM project_files WHERE project_id = ?
+            """, (project_id,))
+            file_count = cursor.fetchone()[0]
+
+            # Get primary languages/file types
+            cursor.execute("""
+                SELECT file_path FROM project_files
+                WHERE project_id = ?
+                LIMIT 20
+            """, (project_id,))
+            sample_files = [row[0] for row in cursor.fetchall()]
+
+            # Infer project type from files
+            extensions = set()
+            for f in sample_files:
+                ext = Path(f).suffix
+                if ext:
+                    extensions.add(ext)
+
+            prompt_text = f"""# {name or slug} - Project Context
+
+You are working on the **{name or slug}** project.
+
+## Project Information
+- Project slug: {slug}
+- Total files: {file_count}
+
+## Primary file types
+{', '.join(sorted(extensions)[:10]) if extensions else 'Unknown'}
+
+## Instructions
+- Focus all assistance on this project ({slug})
+- When asked about files, refer to files in this project
+- Use project-specific context when answering questions
+- This is NOT the TempleDB project itself - this is a separate project tracked by TempleDB
+
+## Getting Started
+You can help with:
+- Understanding the codebase structure
+- Writing new features
+- Fixing bugs
+- Refactoring code
+- Reviewing changes
+
+What would you like to work on?
+"""
+
+            # Insert the prompt
+            cursor.execute("""
+                INSERT INTO project_prompts
+                    (project_id, name, prompt_text, format, scope, priority, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                project_id,
+                f"{slug}-vibe-autogen",
+                prompt_text,
+                'markdown',
+                'vibe-session',
+                50,
+                1
+            ))
+
+            conn.commit()
+            print(f"   ℹ️  Generated project-specific prompt for {slug}")
+
+        finally:
+            conn.close()
 
     def _start_file_watcher(self, project: str, session_id: int, port: int) -> subprocess.Popen:
         """Start file watcher for auto-question generation"""
@@ -341,28 +471,6 @@ class VibeRealtimeCommands(Command):
         print("✓ Cleanup complete")
 
 
-def register_realtime_commands(cli):
-    """Register real-time vibe commands"""
-    cmd = VibeRealtimeCommands()
-
-    # Get existing vibe parser
-    # Note: This assumes vibe command group already exists from vibe.py
-    # We're adding a new subcommand to it
-
-    # This is a bit tricky - we need to add to existing parser
-    # For now, let's create a standalone command
-
-    start_parser = cli.register_command(
-        'vibe-start',
-        cmd.start_vibe_session,
-        help_text='Start real-time vibe coding session (Claude + Quiz UI)'
-    )
-
-    start_parser.add_argument('project', nargs='?', help='Project name or slug')
-    start_parser.add_argument('--ui', default='browser',
-                             choices=['browser', 'emacs', 'terminal'],
-                             help='Quiz UI mode')
-    start_parser.add_argument('--port', type=int, default=8765,
-                             help='Vibe server port')
-    start_parser.add_argument('claude_args', nargs='*',
-                             help='Additional arguments for Claude')
+# Note: This module is now integrated into vibe.py
+# The register function in vibe.py imports VibeRealtimeCommands
+# and adds it as the 'start' subcommand

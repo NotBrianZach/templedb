@@ -11,19 +11,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
 from db_utils import DB_PATH
 
-def get_db_connection():
-    """Get database connection"""
-    import sqlite3
-    import os
-    return sqlite3.connect(os.path.expanduser(DB_PATH))
-
 
 class PromptCommands(Command):
     """Prompt management command handlers"""
 
     def list_templates(self, args) -> int:
         """List all prompt templates"""
-        conn = get_db_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
 
         query = """
@@ -66,7 +60,7 @@ class PromptCommands(Command):
 
     def show_template(self, args) -> int:
         """Show a specific prompt template"""
-        conn = get_db_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -106,7 +100,7 @@ class PromptCommands(Command):
 
     def list_project_prompts(self, args) -> int:
         """List prompts for a project"""
-        conn = get_db_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
 
         # Get project ID
@@ -148,7 +142,7 @@ class PromptCommands(Command):
 
     def create_project_prompt(self, args) -> int:
         """Create a project-specific prompt"""
-        conn = get_db_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
 
         # Get project ID
@@ -207,7 +201,7 @@ class PromptCommands(Command):
 
     def render_prompt(self, args) -> int:
         """Render a prompt with variable substitution"""
-        conn = get_db_connection()
+        conn = self.get_connection()
         cursor = conn.cursor()
 
         # Determine if this is a template or project prompt

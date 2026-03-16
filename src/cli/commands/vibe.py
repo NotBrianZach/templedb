@@ -490,7 +490,7 @@ def register(cli):
     vibe_parser = cli.register_command(
         'vibe',
         None,
-        help_text='Vibe coding quiz system'
+        help_text='Vibe coding - interactive learning from AI-generated code changes'
     )
     subparsers = vibe_parser.add_subparsers(dest='vibe_subcommand', required=True)
 
@@ -507,7 +507,7 @@ def register(cli):
     gen_parser.add_argument('--generated-by', help='Generator identifier')
     gen_parser.add_argument('--show-answers', action='store_true',
                            help='Show answers immediately after each question')
-    gen_parser.set_defaults(func=cmd.generate_quiz)
+    cli.commands['vibe.generate'] = cmd.generate_quiz
 
     # Add question
     add_parser = subparsers.add_parser('add-question', help='Add question to quiz')
@@ -525,7 +525,7 @@ def register(cli):
     add_parser.add_argument('--category', help='Question category')
     add_parser.add_argument('--learning-objective', help='What should developer learn?')
     add_parser.add_argument('--points', type=int, default=1, help='Points for question')
-    add_parser.set_defaults(func=cmd.add_question)
+    cli.commands['vibe.add-question'] = cmd.add_question
 
     # Take quiz
     take_parser = subparsers.add_parser('take', help='Take a quiz interactively')
@@ -533,13 +533,13 @@ def register(cli):
     take_parser.add_argument('--developer-id', help='Your developer ID')
     take_parser.add_argument('--auto-answer', action='store_true',
                             help='Auto mode (show questions and answers)')
-    take_parser.set_defaults(func=cmd.take_quiz)
+    cli.commands['vibe.take'] = cmd.take_quiz
 
     # List quizzes
     list_parser = subparsers.add_parser('list', help='List quiz sessions')
     list_parser.add_argument('--project', help='Filter by project')
     list_parser.add_argument('--status', choices=['pending', 'in_progress', 'completed', 'abandoned'])
-    list_parser.set_defaults(func=cmd.list_quizzes)
+    cli.commands['vibe.list'] = cmd.list_quizzes
 
     # Show results
     results_parser = subparsers.add_parser('results', help='Show quiz results')
@@ -548,9 +548,26 @@ def register(cli):
                                help='Show detailed question breakdown')
     results_parser.add_argument('--show-explanations', action='store_true',
                                help='Show answer explanations')
-    results_parser.set_defaults(func=cmd.show_results)
+    cli.commands['vibe.results'] = cmd.show_results
 
     # Show progress
     progress_parser = subparsers.add_parser('progress', help='Show learning progress')
     progress_parser.add_argument('--developer-id', help='Developer ID')
-    progress_parser.set_defaults(func=cmd.show_progress)
+    cli.commands['vibe.progress'] = cmd.show_progress
+
+    # Import realtime commands and add 'start' subcommand
+    from . import vibe_realtime
+    realtime_cmd = vibe_realtime.VibeRealtimeCommands()
+
+    # Add 'start' subcommand for real-time sessions
+    start_parser = subparsers.add_parser('start',
+        help='Start real-time vibe coding session (launches Claude + Quiz UI)')
+    start_parser.add_argument('project', nargs='?', help='Project name or slug')
+    start_parser.add_argument('--ui', default='browser',
+                             choices=['browser', 'emacs', 'terminal'],
+                             help='Quiz UI mode (default: browser)')
+    start_parser.add_argument('--port', type=int, default=None,
+                             help='Vibe server port (default: auto-assign 8765-8800)')
+    start_parser.add_argument('claude_args', nargs='*',
+                             help='Additional arguments for Claude')
+    cli.commands['vibe.start'] = realtime_cmd.start_vibe_session

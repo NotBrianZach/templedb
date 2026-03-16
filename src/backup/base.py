@@ -119,7 +119,9 @@ class CloudBackupProvider(ABC):
             return 0
 
         deleted_count = 0
-        cutoff_date = datetime.now() - timedelta(days=self.retention_days)
+        # Use timezone-aware datetime to match Google Drive timestamps
+        from datetime import timezone
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
 
         # Sort by creation time (oldest first)
         def get_created_time(backup):

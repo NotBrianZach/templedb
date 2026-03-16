@@ -4,6 +4,7 @@ Deployment management commands for TempleDB
 """
 import sys
 import subprocess
+import re
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
@@ -692,6 +693,187 @@ class DeployCommands(Command):
             days = int(seconds / 86400)
             return f"{days} day{'s' if days != 1 else ''} ago"
 
+    def nixos_install(self, args) -> int:
+        """Install project as NixOS/home-manager package"""
+        try:
+            project_slug = args.slug
+            project = self.get_project_or_exit(project_slug)
+
+            system_config_slug = args.system_config if hasattr(args, 'system_config') else 'system_config'
+            dry_run = hasattr(args, 'dry_run') and args.dry_run
+
+            print(f"\n📦 Installing {project_slug} to NixOS config\n")
+
+            # 1. Verify project has a flake
+            project_path = Path(project['repo_url'])
+            flake_path = project_path / 'flake.nix'
+
+            if not flake_path.exists():
+                print(f"❌ Project {project_slug} doesn't have a flake.nix")
+                print(f"\n💡 Create a flake for this project first:")
+                print(f"   cd {project_path}")
+                print(f"   nix flake init")
+                return 1
+
+            # 2. Get system_config project
+            system_config = self.query_one("""
+                SELECT id, slug, repo_url FROM projects WHERE slug = ?
+            """, (system_config_slug,))
+
+            if not system_config:
+                print(f"❌ System config project '{system_config_slug}' not found")
+                print(f"\n💡 Import your system config:")
+                print(f"   ./templedb project import ~/.config/templedb/checkouts/system_config")
+                return 1
+
+            system_config_path = Path(system_config['repo_url'])
+            system_flake = system_config_path / 'flake.nix'
+            system_home = system_config_path / 'home.nix'
+
+            if not system_flake.exists():
+                print(f"❌ System config doesn't have flake.nix at {system_flake}")
+                return 1
+
+            print(f"✅ Found flake.nix in {project_slug}")
+            print(f"✅ Found system config at {system_config_path}")
+            print()
+
+            if dry_run:
+                print("🔍 DRY RUN - Would make these changes:\n")
+                print(f"1. Add to {system_flake}:")
+                print(f"   inputs.{project_slug}.url = \"path:{project_path}\"")
+                print()
+                print(f"2. Add to {system_home}:")
+                print(f"   {project_slug}.packages.${{pkgs.system}}.default")
+                print()
+                print("3. Commit changes to git")
+                print("4. Run: nixos-rebuild switch with home-manager")
+                print()
+                return 0
+
+            # 3. Update flake.nix inputs
+            print(f"📝 Updating {system_flake}...")
+            with open(system_flake, 'r') as f:
+                flake_content = f.read()
+
+            # Check if already exists
+            if f'{project_slug}.url' in flake_content:
+                print(f"⚠️  {project_slug} already in flake.nix inputs")
+            else:
+                # Add input after last input (before closing brace of inputs)
+                # Find the inputs section and add before the closing };
+                inputs_match = re.search(r'(inputs = \{.*?)(  \};)', flake_content, re.DOTALL)
+                if inputs_match:
+                    before_close = inputs_match.group(1)
+                    close_brace = inputs_match.group(2)
+
+                    # Add new input
+                    new_input = f'\n    # {project["name"] or project_slug}\n    {project_slug}.url = "path:{project_path}";\n'
+                    updated_inputs = before_close + new_input + '\n' + close_brace
+                    flake_content = flake_content.replace(inputs_match.group(0), updated_inputs)
+
+                    # Also need to add to outputs parameters
+                    outputs_match = re.search(r'outputs = \{ ([^}]+) \}@inputs:', flake_content)
+                    if outputs_match:
+                        params = outputs_match.group(1)
+                        if project_slug not in params:
+                            # Add to parameters
+                            new_params = params.rstrip() + f', {project_slug}'
+                            flake_content = flake_content.replace(
+                                f'outputs = {{ {params} }}@inputs:',
+                                f'outputs = {{ {new_params} }}@inputs:'
+                            )
+
+                    # Also add to extraSpecialArgs
+                    special_args_match = re.search(r'extraSpecialArgs = \{ inherit ([^}]+) \};', flake_content)
+                    if special_args_match:
+                        args_list = special_args_match.group(1)
+                        if project_slug not in args_list:
+                            new_args = args_list.rstrip() + f' {project_slug}'
+                            flake_content = flake_content.replace(
+                                f'extraSpecialArgs = {{ inherit {args_list} }};',
+                                f'extraSpecialArgs = {{ inherit {new_args} }};'
+                            )
+
+                    with open(system_flake, 'w') as f:
+                        f.write(flake_content)
+                    print(f"✅ Added {project_slug} to flake inputs")
+                else:
+                    print(f"⚠️  Could not parse flake.nix inputs section")
+                    return 1
+
+            # 4. Update home.nix
+            print(f"📝 Updating {system_home}...")
+            with open(system_home, 'r') as f:
+                home_content = f.read()
+
+            # Check if already in home.nix arguments
+            # Look for the pattern more robustly
+            args_pattern = r'\{ ([^}]+) \}:'
+            args_match = re.search(args_pattern, home_content)
+            if args_match:
+                current_args = args_match.group(1)
+                # Check if project_slug already in arguments (as whole word)
+                if not re.search(rf'\b{project_slug}\b', current_args):
+                    # Add to function arguments (insert before ...)
+                    new_args = current_args.replace(', ...', f', {project_slug}, ...')
+                    home_content = home_content.replace(
+                        f'{{ {current_args} }}:',
+                        f'{{ {new_args} }}:'
+                    )
+
+            # Check if already in packages
+            package_ref = f'{project_slug}.packages.${{pkgs.system}}.default'
+            if package_ref not in home_content:
+                # Add to home.packages
+                packages_match = re.search(r'(home\.packages = with pkgs; \[)', home_content)
+                if packages_match:
+                    # Add comment and package after the opening bracket
+                    insert_pos = home_content.find('[', packages_match.start()) + 1
+                    new_package = f'\n    # {project["name"] or project_slug}\n    {package_ref}\n'
+                    home_content = home_content[:insert_pos] + new_package + home_content[insert_pos:]
+
+                    with open(system_home, 'w') as f:
+                        f.write(home_content)
+                    print(f"✅ Added {project_slug} to home.packages")
+                else:
+                    print(f"⚠️  Could not find home.packages in home.nix")
+            else:
+                print(f"⚠️  {project_slug} already in home.packages")
+
+            # 5. Commit changes
+            print(f"\n📦 Committing changes...")
+            subprocess.run(['git', '-C', str(system_config_path), 'add', 'flake.nix', 'home.nix'], check=True)
+            commit_msg = f"Add {project_slug} to NixOS installation\n\n🤖 Generated with TempleDB"
+            subprocess.run(['git', '-C', str(system_config_path), 'commit', '-m', commit_msg], check=True)
+            print(f"✅ Changes committed")
+
+            # 6. Rebuild system
+            print(f"\n🚀 Deploying to NixOS with home-manager...")
+            print(f"   (You may be prompted for sudo password and confirmation)")
+            print()
+
+            from services.system_service import SystemService
+            service = SystemService()
+            result = service.switch_system(system_config_slug, with_home_manager=True)
+
+            if result['success']:
+                print(f"\n✅ {project_slug} installed successfully!")
+                print(f"\n📍 Verify installation:")
+                print(f"   which {project_slug}")
+                print(f"   {project_slug} --help")
+                return 0
+            else:
+                print(f"\n❌ Deployment failed")
+                print(f"   Error: {result.get('stderr', 'Unknown error')}")
+                return 1
+
+        except Exception as e:
+            print(f"✗ Failed to install to NixOS: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            return 1
+
 
 def register(cli):
     """Register deployment commands with CLI"""
@@ -759,3 +941,10 @@ def register(cli):
     path_parser = subparsers.add_parser('path', help='Get path to deployed project (use with: cd $(tdb deploy path <project>))')
     path_parser.add_argument('slug', help='Project slug')
     cli.commands['deploy.path'] = deploy_handler.get_deployed_path
+
+    # deploy nixos-install command
+    nixos_install_parser = subparsers.add_parser('nixos-install', help='Install project as NixOS/home-manager package')
+    nixos_install_parser.add_argument('slug', help='Project slug (must have flake.nix)')
+    nixos_install_parser.add_argument('--system-config', default='system_config', help='System config project slug (default: system_config)')
+    nixos_install_parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
+    cli.commands['deploy.nixos-install'] = deploy_handler.nixos_install

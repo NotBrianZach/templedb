@@ -136,14 +136,12 @@ def migrate(conn: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS secret_blobs (
           id INTEGER PRIMARY KEY,
-          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
           profile TEXT NOT NULL DEFAULT 'default',
           secret_name TEXT NOT NULL,
           secret_blob BLOB NOT NULL,
           content_type TEXT NOT NULL DEFAULT 'application/text',
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-          UNIQUE(project_id, profile)
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         CREATE TABLE IF NOT EXISTS project_secret_blobs (
@@ -887,8 +885,8 @@ def cmd_direnv(conn: sqlite3.Connection, slug: Optional[str], profile: str, load
             slug = ctx.slug
             emit(f"# Auto-detected project: {slug}", to_stderr=True)
         else:
-            # Fallback to directory name
-            slug = cwd.name
+            # Fallback to directory name (normalize to lowercase for matching)
+            slug = cwd.name.lower()
             emit(f"# Inferring project slug from directory: {slug}", to_stderr=True)
 
     # Get git info (can be overridden by command-line args)

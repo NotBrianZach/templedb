@@ -405,6 +405,77 @@ class NixOSCommand(Command):
             logger.error(f"Failed to list configs: {e}", exc_info=True)
             return 1
 
+    def config_get(self, args) -> int:
+        """Get system configuration value"""
+        try:
+            from services.system_service import SystemService
+
+            service = SystemService()
+            value = service.get_system_config(args.key)
+
+            if value is None:
+                print(f"⚠️  Configuration key '{args.key}' not set (will auto-detect)")
+                return 0
+
+            print(f"{args.key} = {value}")
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to get config: {e}", exc_info=True)
+            return 1
+
+    def config_set(self, args) -> int:
+        """Set system configuration value"""
+        try:
+            from services.system_service import SystemService
+
+            service = SystemService()
+            service.set_system_config(args.key, args.value)
+
+            print(f"✅ Set {args.key} = {args.value}")
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to set config: {e}", exc_info=True)
+            return 1
+
+    def config_list(self, args) -> int:
+        """List all system configuration"""
+        try:
+            from services.system_service import SystemService
+
+            service = SystemService()
+            configs = service.list_system_config()
+
+            if not configs:
+                print("⚠️  No system configuration found")
+                return 0
+
+            print("\n╔══════════════════════════════════════════════════════════════════════╗")
+            print("║                    System Configuration                              ║")
+            print("╚══════════════════════════════════════════════════════════════════════╝")
+            print()
+
+            for cfg in configs:
+                value = cfg['value'] if cfg['value'] else '(auto-detect)'
+                print(f"  {cfg['key']:25} = {value}")
+                if cfg['description']:
+                    print(f"    └─ {cfg['description']}")
+                print()
+
+            print("\n💡 To set a value:")
+            print("   ./templedb nixos config-set <key> <value>")
+            print("\n💡 Common keys:")
+            print("   nixos.flake_output  - Flake output name (e.g., zMothership2)")
+            print("   nixos.hostname      - System hostname")
+            print("   nixos.username      - Username for home-manager")
+            print()
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to list config: {e}", exc_info=True)
+            return 1
+
 
 def register(cli):
     """Register NixOS commands with CLI"""
@@ -474,3 +545,18 @@ def register(cli):
     # nixos list-configs command
     list_parser = subparsers.add_parser('list-configs', help='List all nixos-config projects')
     cli.commands['nixos.list-configs'] = cmd.list_configs
+
+    # nixos config-get command
+    config_get_parser = subparsers.add_parser('config-get', help='Get system configuration value')
+    config_get_parser.add_argument('key', help='Configuration key (e.g., nixos.flake_output)')
+    cli.commands['nixos.config-get'] = cmd.config_get
+
+    # nixos config-set command
+    config_set_parser = subparsers.add_parser('config-set', help='Set system configuration value')
+    config_set_parser.add_argument('key', help='Configuration key')
+    config_set_parser.add_argument('value', help='Configuration value')
+    cli.commands['nixos.config-set'] = cmd.config_set
+
+    # nixos config-list command
+    config_list_parser = subparsers.add_parser('config-list', help='List all system configuration')
+    cli.commands['nixos.config-list'] = cmd.config_list

@@ -4,8 +4,12 @@ Vibe coding integration helpers
 Hooks into commit/VCS workflow to auto-generate quizzes
 """
 import json
-import sqlite3
+import sys
+from pathlib import Path
 from typing import Optional, List, Dict
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from db_utils import get_connection
 
 
 def auto_generate_quiz_for_commit(db_path: str, project_id: int, commit_id: int,
@@ -14,7 +18,7 @@ def auto_generate_quiz_for_commit(db_path: str, project_id: int, commit_id: int,
     Auto-generate a quiz session for a commit
     Returns session_id if successful, None otherwise
     """
-    conn = sqlite3.connect(db_path)
+    conn = get_connection()
     cursor = conn.cursor()
 
     try:
@@ -71,7 +75,7 @@ Or enable auto-quiz generation:
 
 def get_quiz_stats(db_path: str, project_id: int) -> Dict:
     """Get quiz statistics for a project"""
-    conn = sqlite3.connect(db_path)
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -104,7 +108,7 @@ def format_quiz_prompt_for_commit(db_path: str, project_id: int, commit_id: int)
     """
     Generate a formatted prompt for Claude to create quiz questions
     """
-    conn = sqlite3.connect(db_path)
+    conn = get_connection()
     cursor = conn.cursor()
 
     # Get commit info

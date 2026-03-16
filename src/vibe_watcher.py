@@ -180,9 +180,6 @@ class VibeWatcher(FileSystemEventHandler):
                 change_id = response.json().get('change_id')
                 print(f"📝 Change detected: {rel_path} ({change_type}) -> {change_id}")
 
-                # Trigger question generation
-                self._generate_questions(change_id, rel_path, diff)
-
             except Exception as e:
                 print(f"⚠️  Failed to notify change: {e}")
 
@@ -210,76 +207,6 @@ class VibeWatcher(FileSystemEventHandler):
                 return f.read()
         except:
             return ""
-
-    def _generate_questions(self, change_id: int, file_path: str, diff: str):
-        """
-        Generate quiz questions for change
-        This would call Claude API or use local model
-        """
-        # TODO: Implement actual question generation
-        # For now, create a simple template question
-
-        conn = sqlite3.connect(os.path.expanduser(self.db_path))
-        cursor = conn.cursor()
-
-        try:
-            # Get project ID
-            cursor.execute("""
-                SELECT id FROM projects WHERE slug = ? OR name = ?
-            """, (self.project, self.project))
-            project_id = cursor.fetchone()[0]
-
-            # Get next sequence order
-            cursor.execute("""
-                SELECT COALESCE(MAX(sequence_order), 0) + 1
-                FROM quiz_questions
-                WHERE session_id = ?
-            """, (self.session_id,))
-            sequence = cursor.fetchone()[0]
-
-            # Create simple question (placeholder)
-            question_text = f"What was changed in {file_path}?"
-            question_type = 'short_answer'
-            correct_answer = json.dumps("Code was modified")
-
-            # Insert question
-            cursor.execute("""
-                INSERT INTO quiz_questions
-                    (session_id, question_text, question_type, sequence_order,
-                     related_file_path, code_snippet, correct_answer,
-                     explanation, difficulty, category)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (self.session_id, question_text, question_type, sequence,
-                  file_path, diff[:500], correct_answer,
-                  "This question tests understanding of the code change",
-                  'easy', 'logic'))
-
-            question_id = cursor.lastrowid
-
-            # Add to question queue
-            cursor.execute("""
-                INSERT INTO vibe_question_queue
-                    (session_id, question_id, queue_position, trigger_type, related_change_id)
-                VALUES (?, ?, ?, 'on_change', ?)
-            """, (self.session_id, question_id, sequence, change_id))
-
-            # Log event
-            cursor.execute("""
-                INSERT INTO vibe_session_events (session_id, event_type, event_data)
-                VALUES (?, 'question_generated', ?)
-            """, (self.session_id, json.dumps({
-                'question_id': question_id,
-                'file': file_path,
-                'change_id': change_id
-            })))
-
-            conn.commit()
-
-            print(f"❓ Generated question #{sequence} for {file_path}")
-
-        finally:
-            conn.close()
-
 
 def main():
     parser = argparse.ArgumentParser(description='TempleDB Vibe Watcher')

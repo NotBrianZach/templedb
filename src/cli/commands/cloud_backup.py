@@ -238,7 +238,10 @@ class CloudBackupCommands(Command):
 
     def do_backup(self, args) -> int:
         """Perform cloud backup"""
-        manager = self._create_manager(args.provider, args.config, db_path=args.db_path)
+        db_path = Path(args.db_path) if args.db_path else self.default_db_path
+        config_path = Path(args.config) if args.config else None
+
+        manager = self._create_manager(args.provider, config_path, db_path=db_path)
 
         if not manager:
             return 1
@@ -254,7 +257,8 @@ class CloudBackupCommands(Command):
 
     def list_backups(self, args) -> int:
         """List cloud backups"""
-        manager = self._create_manager(args.provider, args.config)
+        config_path = Path(args.config) if args.config else None
+        manager = self._create_manager(args.provider, config_path)
 
         if not manager:
             return 1
@@ -283,7 +287,9 @@ class CloudBackupCommands(Command):
 
     def restore_backup(self, args) -> int:
         """Restore from cloud backup"""
-        manager = self._create_manager(args.provider, args.config, db_path=args.db_path)
+        db_path = Path(args.db_path) if args.db_path else self.default_db_path
+        config_path = Path(args.config) if args.config else None
+        manager = self._create_manager(args.provider, config_path, db_path=db_path)
 
         if not manager:
             return 1
@@ -292,7 +298,7 @@ class CloudBackupCommands(Command):
 
         if manager.restore(
             args.backup_id,
-            args.db_path,
+            db_path,
             create_backup=not args.no_safety_backup
         ):
             print(f"✓ Restore completed successfully")
@@ -303,7 +309,8 @@ class CloudBackupCommands(Command):
 
     def cleanup_backups(self, args) -> int:
         """Cleanup old backups"""
-        manager = self._create_manager(args.provider, args.config)
+        config_path = Path(args.config) if args.config else None
+        manager = self._create_manager(args.provider, config_path)
 
         if not manager:
             return 1
@@ -317,7 +324,8 @@ class CloudBackupCommands(Command):
 
     def test_connection(self, args) -> int:
         """Test connection to backup provider"""
-        manager = self._create_manager(args.provider, args.config)
+        config_path = Path(args.config) if args.config else None
+        manager = self._create_manager(args.provider, config_path)
 
         if not manager:
             return 1

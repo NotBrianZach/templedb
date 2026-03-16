@@ -11,7 +11,7 @@ from pathlib import Path
 # Ensure parent directory is in path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from cli.commands import project, vcs, env, search, system, cathedral, deploy, migration, target, secret, tui_launcher, config, workitem, mcp, direnv, merge, blob, domain, cloud_backup, claude, prompt, vibe, vibe_realtime, nixos, key, secret_multikey, key_revocation
+from cli.commands import project, vcs, env, search, system, cathedral, deploy, migration, target, secret, tui_launcher, config, workitem, mcp, direnv, merge, blob, domain, backup, claude, prompt, vibe, nixos, key
 from cli.core import cli
 
 
@@ -22,7 +22,7 @@ def main():
     vcs.register(cli)
     env.register(cli)
     search.register(cli)
-    system.register(cli)
+    system.register(cli)  # Only registers 'status' now
     cathedral.register(cli)
     deploy.register(cli)
     migration.register(cli)
@@ -36,17 +36,14 @@ def main():
     merge.register(cli)
     blob.register(cli)
     domain.register(cli)
-    cloud_backup.register(cli)
+    backup.register(cli)  # Unified backup command (replaces old backup/restore/cloud-backup)
     claude.register(cli)
     prompt.register(cli)
-    vibe.register(cli)
-    vibe_realtime.register_realtime_commands(cli)
+    vibe.register(cli)  # Now includes 'start' subcommand from vibe_realtime
     nixos.register(cli)
 
     # Register key management commands
     key.register(cli)
-    secret_multikey.register(cli)
-    key_revocation.register(cli)
 
     # TODO: Register llm commands as needed
     # from cli.commands import llm

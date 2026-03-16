@@ -4,7 +4,6 @@ Claude Code launcher command
 """
 import os
 import sys
-import sqlite3
 import subprocess
 import shutil
 import tempfile
@@ -21,50 +20,38 @@ class ClaudeCommands(Command):
 
     def _get_prompt_from_db(self, project: str = None, template: str = None) -> str:
         """Get prompt from database"""
-        import sqlite3
-        conn = sqlite3.connect(os.path.expanduser(DB_PATH))
-        cursor = conn.cursor()
-
         if project:
             # Get project-specific prompt
-            cursor.execute("SELECT id FROM projects WHERE slug = ? OR name = ?",
-                          (project, project))
-            proj = cursor.fetchone()
+            proj = self.query_one("SELECT id FROM projects WHERE slug = ? OR name = ?",
+                                 (project, project))
             if not proj:
-                conn.close()
                 return None
 
-            cursor.execute("""
+            result = self.query_one("""
                 SELECT prompt_text FROM active_project_prompts_view
                 WHERE project_id = ?
                 ORDER BY priority DESC, created_at DESC
                 LIMIT 1
-            """, (proj[0],))
-
-            result = cursor.fetchone()
+            """, (proj['id'],))
 
             # If no project-specific prompt found, fall back to template
             if not result:
                 template = template or 'templedb-project-context'
-                cursor.execute("""
+                result = self.query_one("""
                     SELECT prompt_text FROM prompt_templates
                     WHERE name = ? AND is_active = 1
                     ORDER BY version DESC LIMIT 1
                 """, (template,))
-                result = cursor.fetchone()
         else:
             # Get template (default to 'templedb-project-context')
             template = template or 'templedb-project-context'
-            cursor.execute("""
+            result = self.query_one("""
                 SELECT prompt_text FROM prompt_templates
                 WHERE name = ? AND is_active = 1
                 ORDER BY version DESC LIMIT 1
             """, (template,))
-            result = cursor.fetchone()
 
-        conn.close()
-
-        return result[0] if result else None
+        return result['prompt_text'] if result else None
 
     def launch_claude(self, args) -> int:
         """Launch Claude Code with TempleDB project context"""

@@ -12,6 +12,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
 from repositories import ProjectRepository, FileRepository, ConfigLinkRepository
 from logger import get_logger
+from cli.error_handling_utils import (
+    handle_errors,
+    require_project,
+    ResourceNotFoundError,
+    ConfigurationError,
+    print_success,
+    print_warning
+)
 
 logger = get_logger(__name__)
 
@@ -26,17 +34,22 @@ class ConfigCommands(Command):
         self.file_repo = FileRepository()
         self.config_repo = ConfigLinkRepository()
 
+    @handle_errors("config link")
     def link_config(self, args) -> int:
         """Link project files to target directory"""
         project = self.project_repo.get_by_slug(args.project_slug)
         if not project:
-            logger.error(f"Project '{args.project_slug}' not found")
-            return 1
+            raise ResourceNotFoundError(
+                f"Project '{args.project_slug}' not found.\n"
+                f"Use './templedb project list' to see available projects"
+            )
 
         repo_path = project.get('repo_url')
         if not repo_path or not Path(repo_path).exists():
-            logger.error(f"Project path not found: {repo_path}")
-            return 1
+            raise ConfigurationError(
+                f"Project path not found: {repo_path}\n"
+                f"The project repository directory is missing or inaccessible"
+            )
 
         # Determine checkout directory
         if args.checkout_dir:
@@ -54,31 +67,27 @@ class ConfigCommands(Command):
         existing_checkout = self.config_repo.get_checkout_by_project(project['id'])
 
         if existing_checkout and not args.force:
-            logger.error(f"Config checkout already exists at {existing_checkout['checkout_dir']}")
-            logger.error(f"Use --force to replace")
-            return 1
+            raise ConfigurationError(
+                f"Config checkout already exists at {existing_checkout['checkout_dir']}\n"
+                f"Use --force flag to replace: ./templedb config link {args.project_slug} --force"
+            )
 
         # Create checkout directory
         checkout_dir.mkdir(parents=True, exist_ok=True)
 
         # Copy project files to checkout directory
         logger.info(f"Checking out project to {checkout_dir}")
-        try:
-            # Use rsync or cp -r to copy files
-            import subprocess
-            result = subprocess.run(
-                ['rsync', '-av', '--delete', f'{repo_path}/', f'{checkout_dir}/'],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode != 0:
-                # Fallback to shutil if rsync not available
-                if checkout_dir.exists():
-                    shutil.rmtree(checkout_dir)
-                shutil.copytree(repo_path, checkout_dir, symlinks=True)
-        except Exception as e:
-            logger.error(f"Failed to checkout project: {e}")
-            return 1
+        import subprocess
+        result = subprocess.run(
+            ['rsync', '-av', '--delete', f'{repo_path}/', f'{checkout_dir}/'],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            # Fallback to shutil if rsync not available
+            if checkout_dir.exists():
+                shutil.rmtree(checkout_dir)
+            shutil.copytree(repo_path, checkout_dir, symlinks=True)
 
         # Create or update checkout record
         if existing_checkout:
@@ -93,7 +102,7 @@ class ConfigCommands(Command):
         files_to_link = self._get_files_to_link(checkout_dir, args.files)
 
         if not files_to_link:
-            logger.warning("No files found to link")
+            print_warning("No files found to link")
             return 0
 
         # Create symlinks
@@ -106,7 +115,7 @@ class ConfigCommands(Command):
             backup_path = None
             if target.exists() or target.is_symlink():
                 if not args.force:
-                    logger.warning(f"Target already exists: {target}, use --force to replace")
+                    print_warning(f"Target already exists: {target}, use --force to replace")
                     continue
 
                 # Backup existing file
@@ -137,7 +146,7 @@ class ConfigCommands(Command):
             except Exception as e:
                 logger.error(f"Failed to create symlink {target}: {e}")
 
-        logger.info(f"\n✅ Created {links_created} config links")
+        print_success(f"Created {links_created} config links")
         return 0
 
     def _get_files_to_link(self, checkout_dir: Path, pattern: Optional[str]) -> List[str]:
@@ -168,28 +177,34 @@ class ConfigCommands(Command):
                     files.append(item.name)
             return files
 
+    @handle_errors("config unlink")
     def unlink_config(self, args) -> int:
         """Unlink project config files"""
+        from cli.error_handling_utils import confirm_action
+
         project = self.project_repo.get_by_slug(args.project_slug)
         if not project:
-            logger.error(f"Project '{args.project_slug}' not found")
-            return 1
+            raise ResourceNotFoundError(
+                f"Project '{args.project_slug}' not found.\n"
+                f"Use './templedb project list' to see available projects"
+            )
 
         checkout = self.config_repo.get_checkout_by_project(project['id'])
         if not checkout:
-            logger.error(f"No config checkout found for {args.project_slug}")
-            return 1
+            raise ResourceNotFoundError(
+                f"No config checkout found for {args.project_slug}.\n"
+                f"Use './templedb config list' to see configured projects"
+            )
 
         links = self.config_repo.get_links_for_checkout(checkout['id'])
 
         if not links:
-            logger.warning("No links found to remove")
+            print_warning("No links found to remove")
             return 0
 
         # Confirm deletion
         if not args.force:
-            response = input(f"Remove {len(links)} config link(s)? (yes/no): ")
-            if response.lower() != 'yes':
+            if not confirm_action(f"Remove {len(links)} config link(s)?", default=False):
                 print("Cancelled")
                 return 0
 
@@ -203,7 +218,7 @@ class ConfigCommands(Command):
                 logger.info(f"✓ Removed symlink: {target}")
                 removed += 1
             elif target.exists():
-                logger.warning(f"Target is not a symlink: {target}")
+                print_warning(f"Target is not a symlink: {target}")
 
             # Restore backup if it exists
             if link['backup_path'] and Path(link['backup_path']).exists():
@@ -223,9 +238,10 @@ class ConfigCommands(Command):
             # Delete checkout record
             self.config_repo.delete_checkout(checkout['id'])
 
-        logger.info(f"\n✅ Removed {removed} config links")
+        print_success(f"Removed {removed} config links")
         return 0
 
+    @handle_errors("config list")
     def list_configs(self, args) -> int:
         """List all config links"""
         links = self.config_repo.get_all_links()
@@ -254,6 +270,7 @@ class ConfigCommands(Command):
         print(f"\nTotal: {len(links)} config links")
         return 0
 
+    @handle_errors("config verify")
     def verify_configs(self, args) -> int:
         """Verify config link status"""
         logger.info("Verifying config links...")

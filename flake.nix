@@ -52,10 +52,14 @@
             python311Packages.google-auth-oauthlib
             python311Packages.google-auth-httplib2
 
+            # Google Cloud Storage backup dependencies
+            python311Packages.google-cloud-storage
+
             # Vibe coding real-time dependencies
             python311Packages.aiohttp  # Async web server
             python311Packages.watchdog  # File system monitoring
             python311Packages.websockets  # WebSocket support
+            python311Packages.anthropic  # Claude API for AI question generation
 
             # Runtime tools your CLI shells out to
             sops
@@ -65,6 +69,7 @@
             # Nice-to-haves
             git
             just
+            google-cloud-sdk  # gcloud CLI for GCS management
           ];
 
           # Environment variables useful for dev

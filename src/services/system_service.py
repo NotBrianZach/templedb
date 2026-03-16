@@ -110,20 +110,23 @@ class SystemService:
         """Run nixos-rebuild command
 
         Args:
-            command: One of 'test', 'switch', 'boot', 'build'
+            command: One of 'test', 'switch', 'boot', 'build', 'dry-build', 'dry-activate'
             flake_path: Path to flake directory (for flake-based configs)
-            dry_run: If True, add --dry-run flag
+            dry_run: If True, use 'dry-activate' command instead
 
         Returns:
             Dict with exit_code, stdout, stderr, and nixos_generation (if applicable)
         """
+        # If dry_run is True, use dry-activate command
+        if dry_run and command in ['test', 'switch']:
+            command = 'dry-activate'
+        elif dry_run and command in ['build', 'boot']:
+            command = 'dry-build'
+
         cmd = ["sudo", "nixos-rebuild", command]
 
         if flake_path:
             cmd.extend(["--flake", str(flake_path)])
-
-        if dry_run:
-            cmd.append("--dry-run")
 
         logger.info(f"Running: {' '.join(cmd)}")
         print(f"Running: {' '.join(cmd)}")
@@ -418,15 +421,20 @@ class SystemService:
             Dict with home-manager rebuild results
         """
         try:
-            # Detect hostname for flake configuration
-            import socket
-            hostname = socket.gethostname()
+            # Get configuration from database or auto-detect
+            flake_output = self.get_system_config('nixos.flake_output')
+            if not flake_output:
+                import socket
+                flake_output = socket.gethostname()
+                logger.info(f"Auto-detected flake output from hostname: {flake_output}")
 
-            # Try to get username from flake or use current user
-            username = getpass.getuser()
+            username = self.get_system_config('nixos.username')
+            if not username:
+                username = getpass.getuser()
+                logger.info(f"Auto-detected username: {username}")
 
             # Build activation package
-            build_path = f"{flake_path}#nixosConfigurations.{hostname}.config.home-manager.users.{username}.home.activationPackage"
+            build_path = f"{flake_path}#nixosConfigurations.{flake_output}.config.home-manager.users.{username}.home.activationPackage"
 
             print(f"  Building home-manager activation package...")
             build_result = subprocess.run(
@@ -523,3 +531,38 @@ class SystemService:
         """, (project_type, project_slug))
 
         logger.info(f"Set project {project_slug} type to {project_type}")
+
+    def get_system_config(self, key: str) -> Optional[str]:
+        """Get system configuration value from database
+
+        Args:
+            key: Configuration key (e.g., 'nixos.flake_output')
+
+        Returns:
+            Configuration value or None if not set/empty
+        """
+        result = query_one("SELECT value FROM system_config WHERE key = ?", (key,))
+        if result and result['value']:
+            return result['value']
+        return None
+
+    def set_system_config(self, key: str, value: str) -> None:
+        """Set system configuration value in database
+
+        Args:
+            key: Configuration key
+            value: Configuration value
+        """
+        execute("""
+            INSERT OR REPLACE INTO system_config (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        """, (key, value))
+        logger.info(f"Set system config {key} = {value}")
+
+    def list_system_config(self) -> List[Dict[str, Any]]:
+        """List all system configuration values"""
+        return query_all("""
+            SELECT key, value, description, updated_at
+            FROM system_config
+            ORDER BY key
+        """)

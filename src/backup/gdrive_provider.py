@@ -5,6 +5,10 @@ Google Drive backup provider for TempleDB
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import sqlite3
+import subprocess
+import json
+import tempfile
 
 try:
     from google.oauth2.credentials import Credentials
@@ -61,6 +65,82 @@ class GDriveBackupProvider(CloudBackupProvider):
         """Get default token path"""
         return Path.home() / '.config' / 'templedb' / 'gdrive_token.json'
 
+    def _load_credentials_from_secrets(self) -> Optional[Path]:
+        """
+        Load OAuth credentials from TempleDB secrets.
+        Returns path to temporary credentials file, or None if not found.
+        """
+        try:
+            db_path = Path.home() / '.local' / 'share' / 'templedb' / 'templedb.sqlite'
+            if not db_path.exists():
+                return None
+
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+
+            # Get secret blob from system_config project
+            cursor = conn.execute("""
+                SELECT sb.secret_blob
+                FROM secret_blobs sb
+                JOIN projects p ON p.id = sb.project_id
+                WHERE p.slug = 'system_config'
+                AND sb.profile = 'default'
+                AND sb.secret_name = 'gdrive_oauth'
+            """)
+
+            row = cursor.fetchone()
+            conn.close()
+
+            if not row:
+                logger.debug("No Google OAuth credentials found in TempleDB secrets")
+                return None
+
+            # Decrypt using age
+            import os
+            key_file_str = os.environ.get("TEMPLEDB_AGE_KEY_FILE") or \
+                          os.environ.get("SOPS_AGE_KEY_FILE")
+
+            if key_file_str:
+                key_file = Path(key_file_str)
+            else:
+                key_file = Path.home() / ".config" / "sops" / "age" / "keys.txt"
+
+            if not key_file.exists():
+                logger.warning(f"Age key file not found: {key_file}")
+                return None
+
+            proc = subprocess.run(
+                ["age", "-d", "-i", str(key_file)],
+                input=row['secret_blob'],
+                capture_output=True
+            )
+
+            if proc.returncode != 0:
+                logger.error(f"Failed to decrypt credentials: {proc.stderr.decode('utf-8')}")
+                return None
+
+            # Parse YAML and convert to Google OAuth JSON format
+            decrypted_yaml = proc.stdout.decode('utf-8')
+
+            try:
+                import yaml
+                creds_data = yaml.safe_load(decrypted_yaml)
+            except ImportError:
+                logger.error("PyYAML not installed, cannot load credentials from secrets")
+                return None
+
+            # Write to temporary file
+            temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+            json.dump(creds_data, temp_file, indent=2)
+            temp_file.close()
+
+            logger.info("Loaded Google OAuth credentials from TempleDB secrets")
+            return Path(temp_file.name)
+
+        except Exception as e:
+            logger.error(f"Failed to load credentials from secrets: {e}")
+            return None
+
     def authenticate(self) -> bool:
         """Authenticate with Google Drive API"""
         if self.authenticated and self.service:
@@ -87,20 +167,38 @@ class GDriveBackupProvider(CloudBackupProvider):
                     creds = None
 
             if not creds:
-                if not self.credentials_path.exists():
-                    logger.error(f"Credentials file not found: {self.credentials_path}")
-                    logger.error("Run: templedb backup setup gdrive")
-                    return False
+                # Try to load from file first
+                creds_file = self.credentials_path
+
+                # If file doesn't exist, try loading from TempleDB secrets
+                if not creds_file.exists():
+                    logger.info("Credentials file not found, checking TempleDB secrets...")
+                    secret_creds = self._load_credentials_from_secrets()
+                    if secret_creds:
+                        creds_file = secret_creds
+                    else:
+                        logger.error(f"Credentials not found in file or TempleDB secrets")
+                        logger.error("Either:")
+                        logger.error(f"  1. Place credentials at: {self.credentials_path}")
+                        logger.error("  2. Store in TempleDB secrets (see docs)")
+                        return False
 
                 try:
                     flow = InstalledAppFlow.from_client_secrets_file(
-                        str(self.credentials_path), SCOPES
+                        str(creds_file), SCOPES
                     )
                     creds = flow.run_local_server(port=0)
                     logger.info("Obtained new credentials via OAuth2 flow")
                 except Exception as e:
                     logger.error(f"Failed to authenticate: {e}")
                     return False
+                finally:
+                    # Clean up temporary credentials file if we created one
+                    if 'secret_creds' in locals() and secret_creds and secret_creds.exists():
+                        try:
+                            secret_creds.unlink()
+                        except:
+                            pass
 
             # Save credentials
             try:

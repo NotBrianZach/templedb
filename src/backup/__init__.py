@@ -36,6 +36,13 @@ from backup.local_provider import LocalBackupProvider
 BackupProviderRegistry.register('local', LocalBackupProvider)
 BackupProviderRegistry.register('filesystem', LocalBackupProvider)
 
+try:
+    from backup.gcs_provider import GCSBackupProvider
+    BackupProviderRegistry.register('gcs', GCSBackupProvider)
+    BackupProviderRegistry.register('google-cloud-storage', GCSBackupProvider)
+except ImportError:
+    pass
+
 __all__ = [
     'CloudBackupProvider',
     'BackupProviderRegistry',
