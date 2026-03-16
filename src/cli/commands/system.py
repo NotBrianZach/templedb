@@ -15,6 +15,12 @@ from db_utils import DB_PATH
 from repositories import BaseRepository
 from cli.core import Command
 from logger import get_logger
+from cli.error_handling_utils import (
+    handle_errors,
+    ResourceNotFoundError,
+    confirm_action,
+    print_success
+)
 
 logger = get_logger(__name__)
 
@@ -27,6 +33,7 @@ class SystemCommands(Command):
         """Initialize with repositories"""
         self.system_repo = BaseRepository()  # Generic repository for system queries
 
+    @handle_errors("system backup")
     def backup(self, args) -> int:
         """Backup database"""
         if args.path:
@@ -40,62 +47,61 @@ class SystemCommands(Command):
 
         print(f"💾 Backing up database to {backup_path}...")
 
-        try:
-            # Use SQLite backup API for safe backup
-            source = sqlite3.connect(str(DB_PATH))
-            dest = sqlite3.connect(str(backup_path))
-            source.backup(dest)
-            source.close()
-            dest.close()
+        # Use SQLite backup API for safe backup
+        source = sqlite3.connect(str(DB_PATH))
+        dest = sqlite3.connect(str(backup_path))
+        source.backup(dest)
+        source.close()
+        dest.close()
 
-            # Get size
-            size_mb = backup_path.stat().st_size / (1024 * 1024)
-            print(f"✓ Backup complete: {backup_path} ({size_mb:.2f} MB)")
-            return 0
-        except Exception as e:
-            logger.error(f"Backup failed: {e}")
-            return 1
+        # Get size
+        size_mb = backup_path.stat().st_size / (1024 * 1024)
+        print_success(f"Backup complete: {backup_path} ({size_mb:.2f} MB)")
+        return 0
 
+    @handle_errors("system restore")
     def restore(self, args) -> int:
         """Restore database from backup"""
         backup_path = Path(args.path).resolve()
 
         if not backup_path.exists():
-            logger.error(f"Backup file not found: {backup_path}")
-            return 1
+            raise ResourceNotFoundError(
+                f"Backup file not found: {backup_path}\n"
+                f"Verify the path and try again"
+            )
 
         # Confirm
-        print(f"⚠️  WARNING: This will replace your current database!")
-        print(f"   Current: {DB_PATH}")
-        print(f"   Backup:  {backup_path}")
-        response = input("Continue? (yes/no): ")
-
-        if response.lower() != 'yes':
+        if not confirm_action(
+            f"⚠️  WARNING: This will replace your current database!\n"
+            f"   Current: {DB_PATH}\n"
+            f"   Backup:  {backup_path}\n"
+            f"Continue?",
+            default=False
+        ):
             print("Restore cancelled")
             return 0
 
-        try:
-            # Backup current database first
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safety_backup = f"{DB_PATH}.before_restore_{timestamp}"
-            shutil.copy2(DB_PATH, safety_backup)
-            print(f"📦 Created safety backup: {safety_backup}")
+        # Backup current database first
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safety_backup = f"{DB_PATH}.before_restore_{timestamp}"
+        shutil.copy2(DB_PATH, safety_backup)
+        print(f"📦 Created safety backup: {safety_backup}")
 
-            # Restore
-            shutil.copy2(backup_path, DB_PATH)
-            print(f"✓ Database restored from {backup_path}")
-            return 0
-        except Exception as e:
-            logger.error(f"Restore failed: {e}")
-            return 1
+        # Restore
+        shutil.copy2(backup_path, DB_PATH)
+        print_success(f"Database restored from {backup_path}")
+        return 0
 
+    @handle_errors("system status")
     def status(self, args) -> int:
         """Show database status"""
         # Database info
         db_path = Path(DB_PATH)
         if not db_path.exists():
-            print(f"Database not found: {DB_PATH}")
-            return 1
+            raise ResourceNotFoundError(
+                f"Database not found: {DB_PATH}\n"
+                f"Run './templedb project import <repo>' to create the database"
+            )
 
         size_mb = db_path.stat().st_size / (1024 * 1024)
 
@@ -234,13 +240,5 @@ def register(cli):
     """Register system commands"""
     cmd = SystemCommands()
 
-    # backup
-    backup_parser = cli.register_command('backup', cmd.backup, help_text='Backup database')
-    backup_parser.add_argument('path', nargs='?', help='Backup file path (default: auto-generated)')
-
-    # restore
-    restore_parser = cli.register_command('restore', cmd.restore, help_text='Restore database')
-    restore_parser.add_argument('path', help='Backup file path')
-
-    # status
+    # status - only command still registered here (backup/restore moved to backup.py)
     cli.register_command('status', cmd.status, help_text='Show database status')

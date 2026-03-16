@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from repositories import FileRepository
 from cli.core import Command
 from logger import get_logger
+from cli.error_handling_utils import handle_errors
 
 logger = get_logger(__name__)
 
@@ -21,6 +22,7 @@ class SearchCommands(Command):
         """Initialize with repositories"""
         self.file_repo = FileRepository()
 
+    @handle_errors("search content")
     def search_content(self, args) -> int:
         """Search file contents using FTS5"""
         pattern = args.pattern
@@ -122,6 +124,7 @@ class SearchCommands(Command):
 
         return 0
 
+    @handle_errors("search files")
     def search_files(self, args) -> int:
         """Search file names"""
         pattern = args.pattern
