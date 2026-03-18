@@ -9,6 +9,8 @@ Uses stdio transport for local integration.
 import sys
 import json
 import logging
+import os
+import sqlite3
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
@@ -17,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from repositories import ProjectRepository
 from llm_context import TempleDBContext
-from config import DB_PATH
+from config import DB_PATH, PROJECT_ROOT
 from logger import get_logger
 
 # Configure logging to stderr so stdout is clean for MCP protocol
@@ -27,6 +29,52 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stderr)]
 )
 logger = get_logger(__name__)
+
+
+# MCP Error Codes (following JSON-RPC 2.0 conventions)
+# Standard JSON-RPC errors: -32768 to -32000 (reserved)
+# Application-specific errors: -32000 to -32099
+class ErrorCode:
+    """MCP Error codes for TempleDB operations"""
+    # Project errors (-32010 to -32019)
+    PROJECT_NOT_FOUND = -32010
+    PROJECT_ALREADY_EXISTS = -32011
+    PROJECT_IMPORT_FAILED = -32012
+    PROJECT_SYNC_FAILED = -32013
+
+    # Query errors (-32020 to -32029)
+    QUERY_FAILED = -32020
+    QUERY_INVALID = -32021
+
+    # VCS errors (-32030 to -32039)
+    VCS_OPERATION_FAILED = -32030
+    VCS_NO_CHANGES = -32031
+    VCS_CONFLICT = -32032
+
+    # Secret errors (-32040 to -32049)
+    SECRET_NOT_FOUND = -32040
+    SECRET_DECRYPT_FAILED = -32041
+    SECRET_ENCRYPT_FAILED = -32042
+    SECRET_KEY_NOT_FOUND = -32043
+
+    # Cathedral errors (-32050 to -32059)
+    CATHEDRAL_EXPORT_FAILED = -32050
+    CATHEDRAL_IMPORT_FAILED = -32051
+    CATHEDRAL_INVALID_PACKAGE = -32052
+
+    # Deployment errors (-32060 to -32069)
+    DEPLOYMENT_FAILED = -32060
+    DEPLOYMENT_TARGET_NOT_FOUND = -32061
+
+    # Environment errors (-32070 to -32079)
+    ENV_VAR_NOT_FOUND = -32070
+    ENV_VAR_INVALID = -32071
+
+    # Generic application errors
+    INTERNAL_ERROR = -32000
+    VALIDATION_ERROR = -32001
+    NOT_FOUND = -32002
+    PERMISSION_DENIED = -32003
 
 
 class MCPServer:
@@ -39,6 +87,13 @@ class MCPServer:
 
         # MCP protocol version
         self.protocol_version = "2024-11-05"
+
+        # Get TempleDB root directory (where ./templedb script lives)
+        # PROJECT_ROOT is already the templeDB directory (not src/)
+        self.templedb_root = PROJECT_ROOT
+
+        # SQLite connection for reuse (with thread check)
+        self._db_conn = None
 
         # Register available tools
         self.tools = {
@@ -65,6 +120,102 @@ class MCPServer:
             "templedb_env_get": self.tool_env_get,
             "templedb_env_set": self.tool_env_set,
             "templedb_env_list": self.tool_env_list,
+            # Secret management operations
+            "templedb_secret_list": self.tool_secret_list,
+            "templedb_secret_export": self.tool_secret_export,
+            "templedb_secret_show_keys": self.tool_secret_show_keys,
+            # Cathedral package operations
+            "templedb_cathedral_export": self.tool_cathedral_export,
+            "templedb_cathedral_import": self.tool_cathedral_import,
+            "templedb_cathedral_inspect": self.tool_cathedral_inspect,
+        }
+
+    def _get_db_connection(self):
+        """Get or create database connection (reusable for queries)"""
+        if self._db_conn is None:
+            self._db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            self._db_conn.row_factory = sqlite3.Row
+        return self._db_conn
+
+    def _run_templedb_cli(self, args: List[str]) -> Dict[str, Any]:
+        """Run templedb CLI command and return result.
+
+        Args:
+            args: Command arguments (e.g., ["project", "list"])
+
+        Returns:
+            Dict with stdout, stderr, returncode
+        """
+        import subprocess
+
+        cmd = [str(self.templedb_root / "templedb")] + args
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(self.templedb_root)
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "returncode": result.returncode
+            }
+        except Exception as e:
+            return {
+                "stdout": "",
+                "stderr": str(e),
+                "returncode": 1
+            }
+
+    def _error_response(self, message: str, error_code: int = None, details: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Create a standardized error response.
+
+        Args:
+            message: Error message
+            error_code: Optional error code from ErrorCode class
+            details: Optional additional error details
+
+        Returns:
+            MCP error response dict
+        """
+        error_data = {
+            "type": "text",
+            "text": message
+        }
+
+        if error_code is not None:
+            error_data["error_code"] = error_code
+
+        if details:
+            error_data["details"] = details
+
+        return {
+            "content": [error_data],
+            "isError": True
+        }
+
+    def _success_response(self, data: Any, format_json: bool = True) -> Dict[str, Any]:
+        """Create a standardized success response.
+
+        Args:
+            data: Response data (will be JSON-encoded if format_json=True)
+            format_json: Whether to JSON-encode the data
+
+        Returns:
+            MCP success response dict
+        """
+        if format_json and not isinstance(data, str):
+            text = json.dumps(data, indent=2)
+        else:
+            text = str(data)
+
+        return {
+            "content": [{
+                "type": "text",
+                "text": text
+            }]
         }
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
@@ -469,6 +620,131 @@ class MCPServer:
                     },
                     "required": ["project"]
                 }
+            },
+            {
+                "name": "templedb_secret_list",
+                "description": "List secrets for a project. Shows which secrets exist and their encryption status. Does not decrypt secret values.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": "Secret profile (default: 'default')"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_secret_export",
+                "description": "Export and decrypt secrets for a project in various formats (shell, yaml, json, dotenv). Requires decryption keys to be available.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": "Secret profile (default: 'default')"
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": ["shell", "yaml", "json", "dotenv"],
+                            "description": "Output format (default: shell)"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_secret_show_keys",
+                "description": "Show which encryption keys protect a secret. Lists key names, types, and status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": "Secret profile (default: 'default')"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_cathedral_export",
+                "description": "Export a project as a .cathedral package (portable bundle with files, VCS history, and metadata).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug to export"
+                        },
+                        "output_dir": {
+                            "type": "string",
+                            "description": "Output directory for package (default: current directory)"
+                        },
+                        "compress": {
+                            "type": "boolean",
+                            "description": "Compress the package (default: true)"
+                        },
+                        "include_files": {
+                            "type": "boolean",
+                            "description": "Include file contents (default: true)"
+                        },
+                        "include_vcs": {
+                            "type": "boolean",
+                            "description": "Include VCS history (default: true)"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_cathedral_import",
+                "description": "Import a .cathedral package into TempleDB. Restores project with files, history, and metadata.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "package_path": {
+                            "type": "string",
+                            "description": "Path to .cathedral package file"
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Overwrite if project already exists (default: false)"
+                        },
+                        "new_slug": {
+                            "type": "string",
+                            "description": "Import with a different project slug (optional)"
+                        }
+                    },
+                    "required": ["package_path"]
+                }
+            },
+            {
+                "name": "templedb_cathedral_inspect",
+                "description": "Inspect a .cathedral package without importing it. Shows package metadata, file count, and structure.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "package_path": {
+                            "type": "string",
+                            "description": "Path to .cathedral package file"
+                        }
+                    },
+                    "required": ["package_path"]
+                }
             }
         ]
 
@@ -506,27 +782,25 @@ class MCPServer:
                     pass
 
             if not project:
-                return {
-                    "content": [{"type": "text", "text": f"Project '{project_name}' not found"}],
-                    "isError": True
-                }
+                return self._error_response(
+                    f"Project '{project_name}' not found",
+                    error_code=ErrorCode.PROJECT_NOT_FOUND,
+                    details={"project": project_name}
+                )
 
             # Get additional details
             stats = self.project_repo.get_statistics(project['id'])
             if stats:
                 project['stats'] = stats
 
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": json.dumps(project, indent=2)
-                    }
-                ]
-            }
+            return self._success_response(project)
+
         except Exception as e:
-            logger.error(f"Error showing project: {e}")
-            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+            logger.error(f"Error showing project: {e}", exc_info=True)
+            return self._error_response(
+                f"Internal error: {str(e)}",
+                error_code=ErrorCode.INTERNAL_ERROR
+            )
 
     def tool_project_import(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Import a repository into TempleDB"""
@@ -535,21 +809,20 @@ class MCPServer:
             name = args.get("name")
 
             # Import via CLI command
-            import subprocess
-            cmd = ["./templedb", "project", "import", repo_url]
+            cmd = ["project", "import", repo_url]
             if name:
                 cmd.extend(["--name", name])
 
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = self._run_templedb_cli(cmd)
 
-            if result.returncode != 0:
+            if result["returncode"] != 0:
                 return {
-                    "content": [{"type": "text", "text": f"Import failed: {result.stderr}"}],
+                    "content": [{"type": "text", "text": f"Import failed: {result['stderr']}"}],
                     "isError": True
                 }
 
             return {
-                "content": [{"type": "text", "text": result.stdout}]
+                "content": [{"type": "text", "text": result["stdout"]}]
             }
         except Exception as e:
             logger.error(f"Error importing project: {e}")
@@ -560,21 +833,16 @@ class MCPServer:
         try:
             project_name = args["project"]
 
-            # Sync via CLI command
-            import subprocess
-            result = subprocess.run(
-                ["./templedb", "project", "sync", project_name],
-                capture_output=True, text=True, cwd="/home/zach/templeDB"
-            )
+            result = self._run_templedb_cli(["project", "sync", project_name])
 
-            if result.returncode != 0:
+            if result["returncode"] != 0:
                 return {
-                    "content": [{"type": "text", "text": f"Sync failed: {result.stderr}"}],
+                    "content": [{"type": "text", "text": f"Sync failed: {result['stderr']}"}],
                     "isError": True
                 }
 
             return {
-                "content": [{"type": "text", "text": result.stdout}]
+                "content": [{"type": "text", "text": result["stdout"]}]
             }
         except Exception as e:
             logger.error(f"Error syncing project: {e}")
@@ -586,14 +854,12 @@ class MCPServer:
             query = args["query"]
             format_type = args.get("format", "json")
 
-            import sqlite3
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute(query)
-                rows = cursor.fetchall()
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
 
-                results = [dict(row) for row in rows]
+            results = [dict(row) for row in rows]
 
             if format_type == "json":
                 output = json.dumps(results, indent=2)
@@ -698,7 +964,7 @@ class MCPServer:
             if session_id:
                 cmd.extend(["--session-id", str(session_id)])
 
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
                 return {
@@ -778,7 +1044,7 @@ class MCPServer:
                 cmd.extend(["--pattern", file_pattern])
             cmd.extend(["--limit", str(limit)])
 
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
                 return {
@@ -801,7 +1067,7 @@ class MCPServer:
             import subprocess
             result = subprocess.run(
                 ["./templedb", "vcs", "status", project_name],
-                capture_output=True, text=True, cwd="/home/zach/templeDB"
+                capture_output=True, text=True, cwd=str(self.templedb_root)
             )
 
             if result.returncode != 0:
@@ -825,7 +1091,7 @@ class MCPServer:
 
             import subprocess
             cmd = ["./templedb", "vcs", "add", "-p", project_name] + files
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
                 return {
@@ -848,7 +1114,7 @@ class MCPServer:
 
             import subprocess
             cmd = ["./templedb", "vcs", "reset", "-p", project_name] + files
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
                 return {
@@ -876,7 +1142,7 @@ class MCPServer:
             if commit_all:
                 cmd.append("--all")
 
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
                 return {
@@ -899,7 +1165,7 @@ class MCPServer:
 
             import subprocess
             cmd = ["./templedb", "vcs", "log", project_name, "--limit", str(limit)]
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
                 return {
@@ -925,7 +1191,7 @@ class MCPServer:
             if file_path:
                 cmd.append(file_path)
 
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
                 return {
@@ -951,7 +1217,7 @@ class MCPServer:
             if branch_name:
                 cmd.append(branch_name)
 
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
                 return {
@@ -980,7 +1246,7 @@ class MCPServer:
             if dry_run:
                 cmd.append("--dry-run")
 
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
                 return {
@@ -1004,7 +1270,7 @@ class MCPServer:
             import subprocess
             result = subprocess.run(
                 ["./templedb", "env", "get", "-p", project_name, "-k", key],
-                capture_output=True, text=True, cwd="/home/zach/templeDB"
+                capture_output=True, text=True, cwd=str(self.templedb_root)
             )
 
             if result.returncode != 0:
@@ -1033,7 +1299,7 @@ class MCPServer:
             if target:
                 cmd.extend(["--target", target])
 
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
                 return {
@@ -1054,24 +1320,192 @@ class MCPServer:
             project_name = args["project"]
             target = args.get("target")
 
-            import subprocess
-            cmd = ["./templedb", "env", "vars", "-p", project_name]
+            cmd = ["env", "vars", "-p", project_name]
             if target:
                 cmd.extend(["--target", target])
 
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/home/zach/templeDB")
+            result = self._run_templedb_cli(cmd)
 
-            if result.returncode != 0:
+            if result["returncode"] != 0:
                 return {
-                    "content": [{"type": "text", "text": f"Failed to list variables: {result.stderr}"}],
+                    "content": [{"type": "text", "text": f"Failed to list variables: {result['stderr']}"}],
                     "isError": True
                 }
 
             return {
-                "content": [{"type": "text", "text": result.stdout}]
+                "content": [{"type": "text", "text": result["stdout"]}]
             }
         except Exception as e:
             logger.error(f"Error listing env variables: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_secret_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List secrets for a project"""
+        try:
+            project_name = args["project"]
+            profile = args.get("profile", "default")
+
+            # Get project
+            project = self.project_repo.get_by_slug(project_name)
+            if not project:
+                return {
+                    "content": [{"type": "text", "text": f"Project '{project_name}' not found"}],
+                    "isError": True
+                }
+
+            # Query secrets from database
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT psb.profile, sb.secret_name, sb.content_type,
+                       sb.created_at, sb.updated_at,
+                       COUNT(ska.key_id) as key_count
+                FROM project_secret_blobs psb
+                JOIN secret_blobs sb ON psb.secret_blob_id = sb.id
+                LEFT JOIN secret_key_assignments ska ON sb.id = ska.secret_blob_id
+                WHERE psb.project_id = ? AND psb.profile = ?
+                GROUP BY psb.profile, sb.secret_name
+            """, (project['id'], profile))
+
+            rows = cursor.fetchall()
+            results = [dict(row) for row in rows]
+
+            if not results:
+                return {
+                    "content": [{"type": "text", "text": f"No secrets found for {project_name} (profile: {profile})"}]
+                }
+
+            return {
+                "content": [{"type": "text", "text": json.dumps(results, indent=2)}]
+            }
+        except Exception as e:
+            logger.error(f"Error listing secrets: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_secret_export(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Export and decrypt secrets for a project"""
+        try:
+            project_name = args["project"]
+            profile = args.get("profile", "default")
+            format_type = args.get("format", "shell")
+
+            cmd = ["secret", "export", project_name, "--profile", profile, "--format", format_type]
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Export failed: {result['stderr']}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result["stdout"]}]
+            }
+        except Exception as e:
+            logger.error(f"Error exporting secrets: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_secret_show_keys(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show which encryption keys protect a secret"""
+        try:
+            project_name = args["project"]
+            profile = args.get("profile", "default")
+
+            cmd = ["secret", "show-keys", project_name, "--profile", profile]
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Failed to show keys: {result['stderr']}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result["stdout"]}]
+            }
+        except Exception as e:
+            logger.error(f"Error showing secret keys: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_cathedral_export(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Export a project as a .cathedral package"""
+        try:
+            project_name = args["project"]
+            output_dir = args.get("output_dir", ".")
+            compress = args.get("compress", True)
+            include_files = args.get("include_files", True)
+            include_vcs = args.get("include_vcs", True)
+
+            cmd = ["cathedral", "export", project_name, "--output", output_dir]
+            if not compress:
+                cmd.append("--no-compress")
+            if not include_files:
+                cmd.append("--no-files")
+            if not include_vcs:
+                cmd.append("--no-vcs")
+
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Export failed: {result['stderr']}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result["stdout"]}]
+            }
+        except Exception as e:
+            logger.error(f"Error exporting cathedral package: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_cathedral_import(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Import a .cathedral package into TempleDB"""
+        try:
+            package_path = args["package_path"]
+            overwrite = args.get("overwrite", False)
+            new_slug = args.get("new_slug")
+
+            cmd = ["cathedral", "import", package_path]
+            if overwrite:
+                cmd.append("--overwrite")
+            if new_slug:
+                cmd.extend(["--as-slug", new_slug])
+
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Import failed: {result['stderr']}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result["stdout"]}]
+            }
+        except Exception as e:
+            logger.error(f"Error importing cathedral package: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_cathedral_inspect(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Inspect a .cathedral package without importing"""
+        try:
+            package_path = args["package_path"]
+
+            cmd = ["cathedral", "inspect", package_path]
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Inspect failed: {result['stderr']}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result["stdout"]}]
+            }
+        except Exception as e:
+            logger.error(f"Error inspecting cathedral package: {e}")
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def handle_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
