@@ -128,25 +128,108 @@ class DeploymentOrchestrator:
 
     def load_environment_variables(self) -> None:
         """Load environment variables for this project/target"""
+        import re
+        import os
+
         rows = self.db_utils.query_all("""
-            SELECT var_name, var_value
+            SELECT var_name, var_value, value_type, template
             FROM environment_variables
             WHERE scope_type = 'project'
               AND scope_id = ?
         """, (self.project['id'],))
 
+        # First pass: Load all static values and templates
+        templates = {}
         for row in rows:
             var_name = row['var_name']
-            var_value = row['var_value']
+            value_type = row.get('value_type', 'static')
 
             # Parse target from var_name (target:varname format)
+            actual_name = var_name
             if ':' in var_name:
                 target, actual_name = var_name.split(':', 1)
                 # Only load vars for this target or default
-                if target == self.target_name or target == 'default':
-                    self.env_vars[actual_name] = var_value
-            else:
-                self.env_vars[var_name] = var_value
+                if target != self.target_name and target != 'default':
+                    continue
+
+            if value_type == 'compound' and row.get('template'):
+                # Store template for second pass resolution
+                templates[actual_name] = row['template']
+            elif value_type == 'static' and row.get('var_value'):
+                self.env_vars[actual_name] = row['var_value']
+
+        # Second pass: Resolve compound values with secrets
+        for var_name, template in templates.items():
+            resolved_value = self._resolve_template(template)
+            self.env_vars[var_name] = resolved_value
+
+    def _resolve_template(self, template: str) -> str:
+        """Resolve a template string with secret and environment variable substitutions"""
+        import re
+        import os
+
+        def resolve_var(match):
+            var_name = match.group(1)
+
+            # First check if it's already in env_vars
+            if var_name in self.env_vars:
+                return self.env_vars[var_name]
+
+            # Try to resolve from secrets database
+            try:
+                secret_value = self._get_secret_value(var_name)
+                if secret_value:
+                    return secret_value
+            except Exception:
+                pass
+
+            # Fall back to environment variable
+            return os.environ.get(var_name, match.group(0))
+
+        # Resolve ${VAR} style references
+        resolved = re.sub(r'\$\{([^}]+)\}', resolve_var, template)
+        return resolved
+
+    def _get_secret_value(self, secret_name: str) -> Optional[str]:
+        """Get decrypted secret value from database"""
+        import subprocess
+        import os
+
+        # Query for the encrypted secret
+        secret_row = self.db_utils.query_one("""
+            SELECT encrypted_value
+            FROM secrets
+            WHERE project_id = ? AND secret_name = ? AND profile = ?
+        """, (self.project['id'], secret_name, self.target_name))
+
+        if not secret_row or not secret_row['encrypted_value']:
+            return None
+
+        # Decrypt using age
+        encrypted_bytes = secret_row['encrypted_value']
+
+        # Find age key file
+        key_file_candidates = [
+            os.environ.get("TEMPLEDB_AGE_KEY_FILE"),
+            os.environ.get("SOPS_AGE_KEY_FILE"),
+            os.path.expanduser("~/.config/sops/age/keys.txt"),
+            os.path.expanduser("~/.age/key.txt"),
+        ]
+
+        for key_file in key_file_candidates:
+            if key_file and os.path.exists(key_file):
+                try:
+                    result = subprocess.run(
+                        ["age", "-d", "-i", key_file],
+                        input=encrypted_bytes,
+                        capture_output=True,
+                        check=True
+                    )
+                    return result.stdout.decode('utf-8').strip()
+                except subprocess.CalledProcessError:
+                    continue
+
+        return None
 
     def validate_environment(self) -> List[str]:
         """Validate all required environment variables are set"""

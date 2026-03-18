@@ -97,6 +97,21 @@ LOG_LEVEL = os.environ.get('TEMPLEDB_LOG_LEVEL', 'INFO')
 LOG_FILE = os.path.join(DB_DIR, "templedb.log")
 LOG_TO_FILE = os.environ.get('TEMPLEDB_LOG_TO_FILE', 'false').lower() in ('true', '1', 'yes')
 
+# Deployment Configuration
+DEPLOYMENT_USE_FHS = os.environ.get('TEMPLEDB_DEPLOYMENT_USE_FHS', 'true').lower() in ('true', '1', 'yes')
+
+# Full FHS integration (default: TRUE - deployments run in isolated FHS environments)
+DEPLOYMENT_USE_FULL_FHS = os.environ.get('TEMPLEDB_DEPLOYMENT_USE_FULL_FHS', 'true').lower() in ('true', '1', 'yes')
+
+DEPLOYMENT_FHS_DIR = Path(os.environ.get(
+    'TEMPLEDB_DEPLOYMENT_FHS_DIR',
+    os.path.join(DB_DIR, "fhs-deployments")
+))
+DEPLOYMENT_FALLBACK_DIR = Path(os.environ.get(
+    'TEMPLEDB_DEPLOYMENT_FALLBACK_DIR',
+    "/tmp"
+))
+
 # Initialize logging system on import
 # This ensures all modules get the configured logger
 import logger as _logger

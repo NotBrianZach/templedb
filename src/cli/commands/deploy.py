@@ -38,6 +38,20 @@ class DeployCommands(Command):
             target = args.target if hasattr(args, 'target') and args.target else 'production'
             dry_run = args.dry_run if hasattr(args, 'dry_run') and args.dry_run else False
             skip_validation = hasattr(args, 'skip_validation') and args.skip_validation
+            mutable = hasattr(args, 'mutable') and args.mutable
+            no_fhs = hasattr(args, 'no_fhs') and args.no_fhs
+
+            # Show warnings for non-default modes
+            if mutable:
+                print("⚠️  MUTABLE MODE: Files can be edited directly")
+                print("   Note: Deployment will not be isolated or reproducible")
+                print()
+
+            if no_fhs:
+                print("⚠️  WARNING: FHS isolation disabled (--no-fhs)")
+                print("   This uses system packages and may not be reproducible")
+                print("   Remove --no-fhs to use FHS (recommended)")
+                print()
 
             print(f"🚀 Deploying {project_slug} to {target}...")
 
@@ -49,7 +63,9 @@ class DeployCommands(Command):
                 project_slug=project_slug,
                 target=target,
                 dry_run=dry_run,
-                skip_validation=skip_validation
+                skip_validation=skip_validation,
+                mutable=mutable or no_fhs,  # Both disable FHS
+                use_full_fhs=not no_fhs if not mutable else False
             )
 
             # Present results
@@ -71,6 +87,20 @@ class DeployCommands(Command):
                     print(f"\n✅ Deployment complete!")
                     if dry_run:
                         print("✓ Dry run complete - no actual deployment performed")
+
+                    # Show FHS info if available
+                    from config import DEPLOYMENT_USE_FHS, DEPLOYMENT_FHS_DIR
+                    if DEPLOYMENT_USE_FHS:
+                        fhs_nix = DEPLOYMENT_FHS_DIR / project_slug / "fhs-env.nix"
+                        if fhs_nix.exists():
+                            print(f"\n🔧 FHS environment available")
+                            print(f"   Enter shell:  ./templedb deploy shell {project_slug}")
+                            print(f"   Run command:  ./templedb deploy exec {project_slug} '<command>'")
+                        else:
+                            print(f"\n📁 Deployed to: {result.work_dir}")
+                            print(f"   💡 Deploy with --use-fhs for FHS environment")
+                    else:
+                        print(f"\n📁 Deployed to: {result.work_dir}")
 
                 return 0
             else:
@@ -591,11 +621,39 @@ class DeployCommands(Command):
             from pathlib import Path
             import os
             from datetime import datetime
+            from config import DEPLOYMENT_USE_FHS, DEPLOYMENT_FHS_DIR, DEPLOYMENT_FALLBACK_DIR
 
-            deploy_base = Path("/tmp")
             deployed_projects = []
 
-            # Find all deployed project directories
+            # Check both locations (FHS and /tmp)
+            if DEPLOYMENT_USE_FHS and DEPLOYMENT_FHS_DIR.exists():
+                deploy_base = DEPLOYMENT_FHS_DIR
+                # FHS: direct project directories
+                for project_dir in deploy_base.iterdir():
+                    if not project_dir.is_dir():
+                        continue
+
+                    working_dir = project_dir / "working"
+                    if working_dir.exists():
+                        project_slug = project_dir.name
+
+                        # Get modification time
+                        mtime = working_dir.stat().st_mtime
+                        modified = datetime.fromtimestamp(mtime)
+
+                        # Check if .envrc exists
+                        has_envrc = (working_dir / ".envrc").exists()
+
+                        deployed_projects.append({
+                            'slug': project_slug,
+                            'path': str(working_dir),
+                            'modified': modified,
+                            'has_envrc': has_envrc,
+                            'location': 'FHS'
+                        })
+
+            # Also check /tmp for legacy deployments
+            deploy_base = Path("/tmp")
             for item in deploy_base.glob("templedb_deploy_*"):
                 if item.is_dir():
                     working_dir = item / "working"
@@ -614,11 +672,15 @@ class DeployCommands(Command):
                             'slug': project_slug,
                             'path': str(working_dir),
                             'modified': modified,
-                            'has_envrc': has_envrc
+                            'has_envrc': has_envrc,
+                            'location': '/tmp'
                         })
 
             if not deployed_projects:
-                print("No deployed projects found in /tmp/")
+                print("No deployed projects found")
+                if DEPLOYMENT_USE_FHS:
+                    print(f"  Checked: {DEPLOYMENT_FHS_DIR}")
+                print("  Checked: /tmp/templedb_deploy_*")
                 print("\nDeploy a project with:")
                 print("  ./templedb deploy run <project>")
                 return 0
@@ -631,15 +693,28 @@ class DeployCommands(Command):
             for proj in deployed_projects:
                 envrc_indicator = "✓" if proj['has_envrc'] else "✗"
                 age = self._format_time_ago(proj['modified'])
+                location_badge = f"[{proj['location']}]" if 'location' in proj else ""
 
-                print(f"  {envrc_indicator} {proj['slug']}")
+                # Check if FHS environment exists
+                fhs_indicator = ""
+                if 'location' in proj and proj['location'] == 'FHS':
+                    fhs_nix = Path(proj['path']).parent / "fhs-env.nix"
+                    if fhs_nix.exists():
+                        fhs_indicator = " 🔧"
+
+                print(f"  {envrc_indicator} {proj['slug']}{fhs_indicator} {location_badge}")
                 print(f"     Path: {proj['path']}")
                 print(f"     Updated: {age}")
+                if fhs_indicator:
+                    print(f"     Shell: ./templedb deploy shell {proj['slug']}")
                 print()
 
             print("💡 Tips:")
+            print(f"   Enter shell:      ./templedb deploy shell <project>")
+            print(f"   Run command:      ./templedb deploy exec <project> '<command>'")
             print(f"   Jump to project:  cd $(./templedb deploy path <project>)")
-            print(f"   Or use tdb:       cd $(tdb deploy path <project>)")
+            if DEPLOYMENT_USE_FHS:
+                print(f"   FHS deployments:  {DEPLOYMENT_FHS_DIR}")
             print()
 
             return 0
@@ -654,14 +729,30 @@ class DeployCommands(Command):
         """Get the path to a deployed project"""
         try:
             from pathlib import Path
+            from config import DEPLOYMENT_USE_FHS, DEPLOYMENT_FHS_DIR
 
             project_slug = args.slug
-            deploy_dir = Path(f"/tmp/templedb_deploy_{project_slug}")
-            working_dir = deploy_dir / "working"
+            working_dir = None
 
-            if not working_dir.exists():
+            # Check FHS location first if enabled
+            if DEPLOYMENT_USE_FHS:
+                fhs_working_dir = DEPLOYMENT_FHS_DIR / project_slug / "working"
+                if fhs_working_dir.exists():
+                    working_dir = fhs_working_dir
+
+            # Fall back to /tmp location
+            if not working_dir:
+                tmp_deploy_dir = Path(f"/tmp/templedb_deploy_{project_slug}")
+                tmp_working_dir = tmp_deploy_dir / "working"
+                if tmp_working_dir.exists():
+                    working_dir = tmp_working_dir
+
+            if not working_dir:
                 print(f"✗ No deployment found for '{project_slug}'", file=sys.stderr)
                 print(f"\nDeploy with: ./templedb deploy run {project_slug}", file=sys.stderr)
+                if DEPLOYMENT_USE_FHS:
+                    print(f"  FHS location: {DEPLOYMENT_FHS_DIR / project_slug}", file=sys.stderr)
+                print(f"  /tmp location: /tmp/templedb_deploy_{project_slug}", file=sys.stderr)
                 return 1
 
             # Just print the path (for scripting/piping)
@@ -670,6 +761,124 @@ class DeployCommands(Command):
 
         except Exception as e:
             print(f"✗ Failed to get deployment path: {e}", file=sys.stderr)
+            return 1
+
+    def shell(self, args) -> int:
+        """Enter FHS shell for a deployed project"""
+        try:
+            from pathlib import Path
+            from config import DEPLOYMENT_USE_FHS, DEPLOYMENT_FHS_DIR
+            import os
+
+            project_slug = args.slug
+
+            # Find deployment
+            working_dir = None
+            fhs_env_file = None
+
+            # Check FHS location first
+            if DEPLOYMENT_USE_FHS:
+                fhs_working_dir = DEPLOYMENT_FHS_DIR / project_slug / "working"
+                fhs_nix_file = DEPLOYMENT_FHS_DIR / project_slug / "fhs-env.nix"
+
+                if fhs_working_dir.exists():
+                    working_dir = fhs_working_dir
+                    if fhs_nix_file.exists():
+                        fhs_env_file = fhs_nix_file
+
+            # Fall back to /tmp location
+            if not working_dir:
+                tmp_working_dir = Path(f"/tmp/templedb_deploy_{project_slug}/working")
+                if tmp_working_dir.exists():
+                    working_dir = tmp_working_dir
+
+            if not working_dir:
+                print(f"✗ No deployment found for '{project_slug}'", file=sys.stderr)
+                print(f"\nDeploy first with: ./templedb deploy run {project_slug}", file=sys.stderr)
+                return 1
+
+            # If FHS environment exists, enter it
+            if fhs_env_file:
+                print(f"🔧 Entering FHS environment for {project_slug}")
+                print(f"📁 Project: {working_dir}")
+                print(f"📦 FHS: {fhs_env_file}")
+                print()
+                print("💡 Type 'exit' to leave the FHS environment")
+                print()
+
+                # Enter Nix FHS shell
+                os.chdir(str(working_dir))
+                os.execvp("nix-shell", ["nix-shell", str(fhs_env_file)])
+            else:
+                # No FHS environment, just enter regular shell
+                print(f"📁 Entering shell for {project_slug}")
+                print(f"   Location: {working_dir}")
+                print()
+                print("💡 No FHS environment (deployed without --use-fhs)")
+                print("💡 Type 'exit' to leave")
+                print()
+
+                os.chdir(str(working_dir))
+                shell = os.environ.get("SHELL", "/bin/bash")
+                os.execvp(shell, [shell])
+
+        except Exception as e:
+            print(f"✗ Failed to enter shell: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            return 1
+
+    def exec_command(self, args) -> int:
+        """Execute a command in the deployment environment (optionally in FHS)"""
+        try:
+            from pathlib import Path
+            from config import DEPLOYMENT_USE_FHS, DEPLOYMENT_FHS_DIR
+            import shlex
+
+            project_slug = args.slug
+            command = args.command
+
+            # Find deployment
+            working_dir = None
+            fhs_env_file = None
+
+            if DEPLOYMENT_USE_FHS:
+                fhs_working_dir = DEPLOYMENT_FHS_DIR / project_slug / "working"
+                fhs_nix_file = DEPLOYMENT_FHS_DIR / project_slug / "fhs-env.nix"
+
+                if fhs_working_dir.exists():
+                    working_dir = fhs_working_dir
+                    if fhs_nix_file.exists():
+                        fhs_env_file = fhs_nix_file
+
+            if not working_dir:
+                tmp_working_dir = Path(f"/tmp/templedb_deploy_{project_slug}/working")
+                if tmp_working_dir.exists():
+                    working_dir = tmp_working_dir
+
+            if not working_dir:
+                print(f"✗ No deployment found for '{project_slug}'", file=sys.stderr)
+                return 1
+
+            # Execute command
+            if fhs_env_file:
+                # Execute in FHS environment
+                result = subprocess.run(
+                    ["nix-shell", str(fhs_env_file), "--run", command],
+                    cwd=str(working_dir)
+                )
+                return result.returncode
+            else:
+                # Execute in regular shell
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    cwd=str(working_dir)
+                )
+                return result.returncode
+
+        except Exception as e:
+            print(f"✗ Failed to execute command: {e}", file=sys.stderr)
             return 1
 
     def _format_time_ago(self, dt: datetime) -> str:
@@ -884,11 +1093,15 @@ def register(cli):
     subparsers = deploy_parser.add_subparsers(dest='deploy_subcommand', required=True)
 
     # deploy run command
-    run_parser = subparsers.add_parser('run', help='Deploy project')
+    run_parser = subparsers.add_parser('run', help='Deploy project (uses FHS isolation by default)')
     run_parser.add_argument('slug', help='Project slug')
     run_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
     run_parser.add_argument('--dry-run', action='store_true', help='Show what would be deployed without deploying')
     run_parser.add_argument('--skip-validation', action='store_true', help='Skip environment variable validation')
+    run_parser.add_argument('--mutable', action='store_true',
+                           help='Mutable mode: allow direct file editing (disables FHS isolation)')
+    run_parser.add_argument('--no-fhs', action='store_true',
+                           help='Disable FHS isolation completely (not recommended, uses system packages)')
     cli.commands['deploy.run'] = deploy_handler.deploy
 
     # deploy status command
@@ -948,3 +1161,14 @@ def register(cli):
     nixos_install_parser.add_argument('--system-config', default='system_config', help='System config project slug (default: system_config)')
     nixos_install_parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
     cli.commands['deploy.nixos-install'] = deploy_handler.nixos_install
+
+    # deploy shell command
+    shell_parser = subparsers.add_parser('shell', help='Enter interactive shell in deployment environment (FHS if available)')
+    shell_parser.add_argument('slug', help='Project slug')
+    cli.commands['deploy.shell'] = deploy_handler.shell
+
+    # deploy exec command
+    exec_parser = subparsers.add_parser('exec', help='Execute command in deployment environment')
+    exec_parser.add_argument('slug', help='Project slug')
+    exec_parser.add_argument('command', help='Command to execute (quote if multiple words)')
+    cli.commands['deploy.exec'] = deploy_handler.exec_command

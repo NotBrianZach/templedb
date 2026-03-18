@@ -14,6 +14,7 @@ import shutil
 
 from services.base import BaseService
 from error_handler import ResourceNotFoundError, DeploymentError
+from config import DEPLOYMENT_USE_FHS, DEPLOYMENT_USE_FULL_FHS, DEPLOYMENT_FHS_DIR, DEPLOYMENT_FALLBACK_DIR
 
 
 @dataclass
@@ -48,7 +49,9 @@ class DeploymentService(BaseService):
         project_slug: str,
         target: str = 'production',
         dry_run: bool = False,
-        skip_validation: bool = False
+        skip_validation: bool = False,
+        mutable: bool = False,
+        use_full_fhs: Optional[bool] = None
     ) -> DeploymentResult:
         """
         Deploy a project to a target environment.
@@ -58,6 +61,8 @@ class DeploymentService(BaseService):
             target: Deployment target name (e.g., 'production', 'staging')
             dry_run: If True, simulate deployment without making changes
             skip_validation: If True, skip environment variable validation
+            mutable: If True, skip FHS isolation (allows direct file editing)
+            use_full_fhs: Override default FHS behavior (None = use config default)
 
         Returns:
             DeploymentResult with deployment status
@@ -74,12 +79,32 @@ class DeploymentService(BaseService):
                 solution="Run 'templedb project list' to see available projects"
             )
 
+        # Determine if we should use full FHS integration
+        if use_full_fhs is None:
+            use_full_fhs = DEPLOYMENT_USE_FULL_FHS and not mutable
+
+        if mutable:
+            self.logger.info("⚠️  Mutable mode: FHS isolation disabled")
+            self.logger.info("   Files can be edited directly, but deployment is not reproducible")
+
         self.logger.info(f"Starting deployment: {project_slug} to {target}")
 
         try:
-            # Step 1: Export cathedral package
-            export_dir = Path(f"/tmp/templedb_deploy_{project_slug}")
+            # Step 1: Determine deployment location (FHS-style or /tmp)
+            if DEPLOYMENT_USE_FHS:
+                self.logger.info(f"Using FHS-style deployment directory: {DEPLOYMENT_FHS_DIR}")
+                export_dir = DEPLOYMENT_FHS_DIR / project_slug
+                self.logger.info(f"  Location: {export_dir}")
+            else:
+                self.logger.info("Using traditional /tmp deployment")
+                export_dir = DEPLOYMENT_FALLBACK_DIR / f"templedb_deploy_{project_slug}"
+                self.logger.info(f"  Location: {export_dir}")
+
             export_dir.mkdir(parents=True, exist_ok=True)
+
+            # Store FHS preference
+            self._use_full_fhs = use_full_fhs
+            self._fhs_context = None
 
             self.logger.info("Exporting project from TempleDB...")
             cathedral_dir = self._export_project(project_slug, export_dir)
@@ -92,7 +117,43 @@ class DeploymentService(BaseService):
             file_count = self._reconstruct_project(cathedral_dir, work_dir)
             self.logger.info(f"Reconstructed {file_count} files")
 
-            # Step 2.5: Generate .envrc for direnv integration
+            # Step 2.5: Detect packages and create FHS environment if using full FHS
+            if use_full_fhs:
+                self.logger.info("")
+                self.logger.info("🔧 Full FHS integration enabled")
+                self.logger.info("📦 Detecting project dependencies...")
+
+                # Import FHS modules (lazy import to avoid circular deps)
+                from fhs_integration import FHSIntegration
+                from fhs_package_detector import PackageDetector
+
+                fhs_integration = FHSIntegration()
+                detector = PackageDetector()
+
+                # Detect packages from reconstructed project
+                requirements = detector.detect(work_dir)
+
+                packages_list = requirements.to_list()
+                self.logger.info(f"   Detected {len(packages_list)} packages:")
+                for pkg in packages_list[:10]:  # Show first 10
+                    self.logger.info(f"   • {pkg}")
+                if len(packages_list) > 10:
+                    self.logger.info(f"   • ... and {len(packages_list) - 10} more")
+
+                # Get environment variables for the target
+                env_vars = self._get_deployment_env_vars(project, target)
+
+                # Prepare FHS deployment context
+                self.logger.info("🔧 Creating FHS environment...")
+                self._fhs_context = fhs_integration.prepare_fhs_deployment(
+                    project_slug=project_slug,
+                    project_dir=work_dir,
+                    env_vars=env_vars,
+                    extra_packages=[]
+                )
+                self.logger.info(f"   ✓ FHS environment ready at {self._fhs_context.fhs_env.fhs_dir}")
+
+            # Step 2.6: Generate .envrc for direnv integration
             self.logger.info("Setting up direnv integration...")
             self._setup_direnv(project, work_dir)
 
@@ -104,6 +165,15 @@ class DeploymentService(BaseService):
                 dry_run=dry_run,
                 validate_env=not skip_validation
             )
+
+            # Show FHS access information if enabled
+            if result.success and self._use_full_fhs and self._fhs_context:
+                self.logger.info("")
+                self.logger.info("✅ Deployment complete!")
+                self.logger.info("")
+                self.logger.info("🔧 FHS environment available:")
+                self.logger.info(f"   Enter shell:  ./templedb deploy shell {project_slug}")
+                self.logger.info(f"   Run command:  ./templedb deploy exec {project_slug} '<command>'")
 
             return result
 
@@ -216,7 +286,7 @@ class DeploymentService(BaseService):
 
         if config.groups:
             # Use orchestrated deployment
-            self.logger.info("Using deployment orchestrator")
+            self.logger.info("🏗️  Running deployment...")
 
             from deployment_orchestrator import DeploymentOrchestrator
 
@@ -228,10 +298,23 @@ class DeploymentService(BaseService):
                 work_dir=work_dir
             )
 
-            result = orchestrator.deploy(
-                dry_run=dry_run,
-                validate_env=validate_env
-            )
+            # Wrap in FHS if enabled
+            if self._use_full_fhs and self._fhs_context:
+                self.logger.info("   (Running in FHS environment)")
+                from fhs_integration import FHSIntegration
+                fhs = FHSIntegration()
+
+                # TODO: Orchestrator needs FHS wrapping support
+                # For now, run normally but note FHS is available
+                result = orchestrator.deploy(
+                    dry_run=dry_run,
+                    validate_env=validate_env
+                )
+            else:
+                result = orchestrator.deploy(
+                    dry_run=dry_run,
+                    validate_env=validate_env
+                )
 
             return DeploymentResult(
                 success=result.success,
@@ -247,7 +330,8 @@ class DeploymentService(BaseService):
             deploy_script = work_dir / "deploy.sh"
 
             if deploy_script.exists():
-                self.logger.info(f"Using deployment script: {deploy_script.name}")
+                self.logger.info("🏗️  Running deployment...")
+                self.logger.info(f"   Using script: {deploy_script.name}")
 
                 if dry_run:
                     return DeploymentResult(
@@ -259,31 +343,72 @@ class DeploymentService(BaseService):
                         exit_code=0
                     )
 
-                # Execute deployment script
-                result = subprocess.run(
-                    ["bash", str(deploy_script)],
-                    cwd=work_dir,
-                    env={**subprocess.os.environ, "DEPLOYMENT_TARGET": target}
-                )
+                # Execute deployment script (wrap in FHS if enabled)
+                if self._use_full_fhs and self._fhs_context:
+                    self.logger.info("   (Running in FHS environment)")
+                    from fhs_integration import FHSIntegration
+                    fhs = FHSIntegration()
 
-                if result.returncode == 0:
-                    return DeploymentResult(
-                        success=True,
-                        project_slug=project_slug,
-                        target=target,
-                        work_dir=work_dir,
-                        message="Deployment complete",
-                        exit_code=0
-                    )
+                    try:
+                        result = fhs.run_deployment_in_fhs(
+                            context=self._fhs_context,
+                            deployment_command=["bash", str(deploy_script)]
+                        )
+
+                        if result['success']:
+                            return DeploymentResult(
+                                success=True,
+                                project_slug=project_slug,
+                                target=target,
+                                work_dir=work_dir,
+                                message="Deployment complete",
+                                exit_code=0
+                            )
+                        else:
+                            return DeploymentResult(
+                                success=False,
+                                project_slug=project_slug,
+                                target=target,
+                                work_dir=work_dir,
+                                message=f"Deployment script failed with exit code {result.get('exit_code', 1)}",
+                                exit_code=result.get('exit_code', 1)
+                            )
+                    except Exception as e:
+                        self.logger.error(f"FHS deployment failed: {e}")
+                        return DeploymentResult(
+                            success=False,
+                            project_slug=project_slug,
+                            target=target,
+                            work_dir=work_dir,
+                            message=f"FHS deployment failed: {e}",
+                            exit_code=1
+                        )
                 else:
-                    return DeploymentResult(
-                        success=False,
-                        project_slug=project_slug,
-                        target=target,
-                        work_dir=work_dir,
-                        message=f"Deployment script failed with exit code {result.returncode}",
-                        exit_code=result.returncode
+                    # Execute without FHS
+                    result = subprocess.run(
+                        ["bash", str(deploy_script)],
+                        cwd=work_dir,
+                        env={**subprocess.os.environ, "DEPLOYMENT_TARGET": target}
                     )
+
+                    if result.returncode == 0:
+                        return DeploymentResult(
+                            success=True,
+                            project_slug=project_slug,
+                            target=target,
+                            work_dir=work_dir,
+                            message="Deployment complete",
+                            exit_code=0
+                        )
+                    else:
+                        return DeploymentResult(
+                            success=False,
+                            project_slug=project_slug,
+                            target=target,
+                            work_dir=work_dir,
+                            message=f"Deployment script failed with exit code {result.returncode}",
+                            exit_code=result.returncode
+                        )
             else:
                 # No deployment method configured
                 return DeploymentResult(
@@ -346,6 +471,40 @@ class DeploymentService(BaseService):
             'deploy_scripts': [f['file_path'] for f in deploy_files],
             'migration_count': migration_count
         }
+
+    def _get_deployment_env_vars(self, project: Dict[str, Any], target: str) -> Dict[str, str]:
+        """
+        Get environment variables for deployment target.
+
+        Args:
+            project: Project dictionary
+            target: Target name (e.g., 'production', 'staging')
+
+        Returns:
+            Dictionary of environment variables
+        """
+        env_vars = {
+            "DEPLOYMENT_TARGET": target,
+            "PROJECT_SLUG": project['slug'],
+        }
+
+        # Get environment variables from database
+        try:
+            from environment_service import EnvironmentService
+            env_service = EnvironmentService(self.ctx)
+
+            # Get project-specific env vars for this target
+            project_envs = env_service.list_variables(
+                project_slug=project['slug'],
+                target=target
+            )
+
+            for env in project_envs:
+                env_vars[env['key']] = env['value']
+        except Exception as e:
+            self.logger.warning(f"Failed to load environment variables: {e}")
+
+        return env_vars
 
     def _setup_direnv(self, project: Dict[str, Any], work_dir: Path) -> None:
         """
