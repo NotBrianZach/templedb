@@ -21,3 +21,9 @@ google-api-python-client>=2.0.0  # Google Drive API
 google-auth-httplib2>=0.1.0
 google-auth-oauthlib>=0.5.0
 google-cloud-storage>=2.0.0  # Google Cloud Storage (GCS buckets)
+
+# Code intelligence dependencies (for symbol extraction and dependency analysis)
+tree-sitter>=0.20.0  # AST parsing engine
+tree-sitter-python>=0.20.0  # Python grammar
+tree-sitter-javascript>=0.20.0  # JavaScript grammar
+tree-sitter-typescript>=0.20.0  # TypeScript grammar

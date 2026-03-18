@@ -61,6 +61,12 @@
             python311Packages.websockets  # WebSocket support
             python311Packages.anthropic  # Claude API for AI question generation
 
+            # Code intelligence dependencies (symbol extraction, dependency analysis)
+            python311Packages.tree-sitter  # AST parsing engine
+            python311Packages.tree-sitter-grammars.tree-sitter-python
+            python311Packages.tree-sitter-grammars.tree-sitter-javascript
+            python311Packages.tree-sitter-grammars.tree-sitter-typescript
+
             # Runtime tools your CLI shells out to
             sops
             age
