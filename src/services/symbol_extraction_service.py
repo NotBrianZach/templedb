@@ -471,12 +471,14 @@ class SymbolExtractionService:
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT pf.id, pf.file_path, fc.content, ft.type_name
+            SELECT pf.id, pf.file_path, cb.content_text, ft.type_name
             FROM project_files pf
             JOIN file_contents fc ON pf.id = fc.file_id
+            JOIN content_blobs cb ON fc.content_hash = cb.hash_sha256
             JOIN file_types ft ON pf.file_type_id = ft.id
             WHERE pf.project_id = ?
             AND ft.type_name IN ('python', 'javascript', 'typescript')
+            AND cb.content_type = 'text'
         """, (project_id,))
 
         files = cursor.fetchall()
