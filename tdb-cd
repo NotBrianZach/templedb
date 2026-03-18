@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Wrapper to cd to a project directory and optionally run a command
+# Usage: tdb-cd <project> [command...]
+
+set -e
+
+PROJECT="$1"
+shift
+
+# Get repository URL (which is actually a path for local projects)
+REPO_URL=$(sqlite3 ~/.local/share/templedb/templedb.sqlite \
+  "SELECT repo_url FROM projects WHERE slug = '$PROJECT'" 2>/dev/null)
+
+if [ -z "$REPO_URL" ]; then
+  echo "❌ Project '$PROJECT' not found in database"
+  echo "💡 Try: ./templedb project list"
+  exit 1
+fi
+
+# Use repo_url as the path
+CHECKOUT_PATH="$REPO_URL"
+
+if [ ! -d "$CHECKOUT_PATH" ]; then
+  echo "❌ Path not found: $CHECKOUT_PATH"
+  exit 1
+fi
+
+echo "📂 $PROJECT → $CHECKOUT_PATH"
+
+if [ $# -eq 0 ]; then
+  # No command provided, just cd
+  cd "$CHECKOUT_PATH" && exec bash
+else
+  # Run command in project directory
+  cd "$CHECKOUT_PATH" && exec "$@"
+fi
