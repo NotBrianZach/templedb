@@ -67,6 +67,11 @@
             python311Packages.tree-sitter-grammars.tree-sitter-javascript
             python311Packages.tree-sitter-grammars.tree-sitter-typescript
 
+            # Graph analysis dependencies (community detection, clustering)
+            python311Packages.networkx  # Graph data structures
+            python311Packages.igraph  # Fast graph library
+            python311Packages.leidenalg  # Leiden algorithm
+
             # Runtime tools your CLI shells out to
             sops
             age

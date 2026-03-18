@@ -27,3 +27,8 @@ tree-sitter>=0.20.0  # AST parsing engine
 tree-sitter-python>=0.20.0  # Python grammar
 tree-sitter-javascript>=0.20.0  # JavaScript grammar
 tree-sitter-typescript>=0.20.0  # TypeScript grammar
+
+# Graph analysis dependencies (for community detection and clustering)
+networkx>=3.0  # Graph data structure and algorithms
+python-igraph>=0.11.0  # Fast graph library (for Leiden algorithm)
+leidenalg>=0.10.0  # Leiden community detection algorithm

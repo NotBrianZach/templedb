@@ -42,10 +42,17 @@ class SystemService:
 
         Looks in standard TempleDB checkout locations.
         """
+        # Get real user's home (works with sudo)
+        real_home = Path(os.environ.get('SUDO_USER', os.environ.get('USER', 'root')))
+        if real_home.name != 'root':
+            real_home = Path('/home') / real_home.name
+        else:
+            real_home = Path.home()
+
         # Standard checkout locations
         checkout_paths = [
-            Path.home() / ".config" / "templedb" / "checkouts" / project_slug,
-            Path.home() / "projects" / project_slug,
+            real_home / ".config" / "templedb" / "checkouts" / project_slug,
+            real_home / "projects" / project_slug,
             Path("/tmp") / f"templedb_checkout_{project_slug}",
         ]
 
