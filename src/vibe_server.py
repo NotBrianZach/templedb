@@ -56,7 +56,8 @@ class VibeServer:
         project = data.get('project')
         developer_id = data.get('developer_id', 'anonymous')
 
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
         cursor = conn.cursor()
 
         try:
@@ -113,7 +114,8 @@ class VibeServer:
         auth = request.headers.get('Authorization', '')
         token = auth.replace('Bearer ', '')
 
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
         cursor = conn.cursor()
 
         try:
@@ -156,7 +158,8 @@ class VibeServer:
         change_type = data.get('change_type', 'edit')
         diff_content = data.get('diff', '')
 
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
         cursor = conn.cursor()
 
         try:
@@ -206,7 +209,8 @@ class VibeServer:
         active_connections[session_id].add(ws)
 
         # Create browser session record
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
         cursor = conn.cursor()
         try:
             token = secrets.token_urlsafe(16)
@@ -250,7 +254,8 @@ class VibeServer:
 
         if msg_type == 'heartbeat':
             # Update last heartbeat
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
             cursor = conn.cursor()
             try:
                 cursor.execute("""
