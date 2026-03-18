@@ -335,12 +335,40 @@ class SystemService:
 
         return result
 
+    def _render_templates(self, project_slug: str) -> int:
+        """Render all configuration templates for a project
+
+        Args:
+            project_slug: Project slug
+
+        Returns:
+            Number of templates rendered
+        """
+        from template_renderer import TemplateRenderer
+
+        checkout_path = self.get_project_checkout_path(project_slug)
+        if not checkout_path:
+            logger.warning(f"No checkout found for {project_slug}, skipping template rendering")
+            return 0
+
+        renderer = TemplateRenderer()
+        count = renderer.render_project_templates(project_slug, checkout_path)
+
+        if count > 0:
+            logger.info(f"Rendered {count} template(s) for {project_slug}")
+            print(f"📝 Rendered {count} configuration template(s)")
+
+        return count
+
     def test_system(self, project_slug: str, dry_run: bool = False) -> Dict[str, Any]:
         """Test system configuration without activating
 
         This is the safe way to test changes before committing to them.
         Uses 'nixos-rebuild test' which applies but doesn't add to boot.
         """
+        # Render templates before testing
+        self._render_templates(project_slug)
+
         checkout_path = self.get_project_checkout_path(project_slug)
         if not checkout_path:
             raise SystemServiceError(
@@ -380,6 +408,9 @@ class SystemService:
         Returns:
             Dict with rebuild results including home-manager if applicable
         """
+        # Render templates before switching
+        self._render_templates(project_slug)
+
         checkout_path = self.get_project_checkout_path(project_slug)
         if not checkout_path:
             raise SystemServiceError(
