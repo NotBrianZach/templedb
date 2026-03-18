@@ -11,7 +11,7 @@ from pathlib import Path
 # Ensure parent directory is in path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from cli.commands import project, vcs, env, search, system, cathedral, deploy, migration, target, secret, tui_launcher, config, workitem, mcp, direnv, merge, blob, domain, backup, claude, prompt, vibe, nixos, key
+from cli.commands import project, vcs, env, search, system, cathedral, deploy, migration, target, secret, tui_launcher, config, workitem, mcp, direnv, merge, blob, domain, backup, claude, prompt, vibe, nixos, key, cache
 from cli.core import cli
 
 
@@ -44,6 +44,9 @@ def main():
 
     # Register key management commands
     key.register(cli)
+
+    # Register cache management commands
+    cache.CacheCommands.register(cli.subparsers)
 
     # TODO: Register llm commands as needed
     # from cli.commands import llm
