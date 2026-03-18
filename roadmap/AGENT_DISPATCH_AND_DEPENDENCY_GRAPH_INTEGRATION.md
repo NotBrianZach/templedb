@@ -1925,20 +1925,30 @@ Query: "Which symbols affect production deployment?"
 
 ### 5.3 Embeddings: Cloud vs. Local
 
-**Decision**: Support both, default to local (Nomic Embed).
+**Decision**: Support both, default to cloud (OpenAI).
 
 **Rationale**:
-- ✅ Local models (Nomic Embed, all-MiniLM) avoid API costs and latency
-- ✅ Privacy-friendly (no code sent to external APIs)
-- ✅ Configurable: users can opt into OpenAI/Cohere if they want higher quality
-- ✅ TempleDB philosophy: local-first, cloud-optional
+- ✅ Cloud models (OpenAI, Anthropic, Cohere) offer superior quality for semantic search
+- ✅ Better retrieval accuracy = better developer experience (worth the API cost)
+- ✅ No local model installation/setup complexity
+- ✅ Faster initial implementation (proven APIs vs. local model integration)
+- ✅ Configurable: users can opt into local models (Nomic, all-MiniLM) to save costs
+- ⚠️ Privacy consideration: code snippets sent to API (mitigated by using only public symbols + docstrings)
 
 **Implementation**:
 ```python
 # Config option:
-TEMPLEDB_EMBEDDING_PROVIDER=local  # or 'openai', 'cohere'
-TEMPLEDB_EMBEDDING_MODEL=nomic-embed-text  # or 'text-embedding-ada-002'
+TEMPLEDB_EMBEDDING_PROVIDER=openai  # default, or 'anthropic', 'cohere', 'local'
+TEMPLEDB_EMBEDDING_MODEL=text-embedding-3-small  # or 'nomic-embed-text' for local
+
+# Privacy mode (opt-in local):
+TEMPLEDB_EMBEDDING_PROVIDER=local
+TEMPLEDB_EMBEDDING_MODEL=nomic-embed-text
 ```
+
+**Trade-off**:
+- Cloud default: Better quality, faster setup, API costs (~$0.10-0.50 per 10K symbols)
+- Local option: Free, private, requires model download + setup
 
 ### 5.4 Agent Orchestration: In-Process vs. External
 
