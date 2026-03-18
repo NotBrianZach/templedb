@@ -28,6 +28,11 @@ class ProjectCapabilities:
     project_type: str = "Unknown"
     framework: Optional[str] = None
     has_package_json: bool = False
+    has_package_lock: bool = False
+    has_yarn_lock: bool = False
+    has_requirements_txt: bool = False
+    has_poetry_lock: bool = False
+    has_pipfile_lock: bool = False
     has_dockerfile: bool = False
     has_makefile: bool = False
     npm_scripts: Dict[str, str] = field(default_factory=dict)
@@ -168,16 +173,27 @@ class DeploymentInstructionsGenerator:
         issues = []
 
         if self.capabilities.has_package_json:
-            # Check if package-lock.json or yarn.lock exists
-            has_lock = (self.work_dir / "package-lock.json").exists()
-            has_yarn_lock = (self.work_dir / "yarn.lock").exists()
-
-            if not has_lock and not has_yarn_lock:
+            if not self.capabilities.has_package_lock and not self.capabilities.has_yarn_lock:
                 issues.append(ValidationIssue(
                     severity='warning',
                     category='dependencies',
                     message='No lock file found (package-lock.json or yarn.lock)',
                     recommendation='Run npm install locally and commit lock file for reproducible builds'
+                ))
+
+        # Validate Python lock files
+        if self.capabilities.project_type == "Python":
+            has_python_lock = (
+                self.capabilities.has_poetry_lock or
+                self.capabilities.has_pipfile_lock
+            )
+
+            if not has_python_lock and self.capabilities.has_requirements_txt:
+                issues.append(ValidationIssue(
+                    severity='info',
+                    category='dependencies',
+                    message='No Python lock file found (poetry.lock or Pipfile.lock)',
+                    recommendation='Consider using poetry or pipenv for reproducible Python builds'
                 ))
 
             # Check for node_modules (should not be deployed)
@@ -318,8 +334,25 @@ class DeploymentInstructionsGenerator:
         if (self.work_dir / "Makefile").exists():
             caps.has_makefile = True
 
+        # Detect lock files for npm/yarn
+        if (self.work_dir / "package-lock.json").exists():
+            caps.has_package_lock = True
+        if (self.work_dir / "yarn.lock").exists():
+            caps.has_yarn_lock = True
+
         # Python project detection
         if (self.work_dir / "requirements.txt").exists() or (self.work_dir / "setup.py").exists():
+            if caps.project_type == "Unknown":
+                caps.project_type = "Python"
+            caps.has_requirements_txt = (self.work_dir / "requirements.txt").exists()
+
+        # Detect Python lock files
+        if (self.work_dir / "poetry.lock").exists():
+            caps.has_poetry_lock = True
+            if caps.project_type == "Unknown":
+                caps.project_type = "Python"
+        if (self.work_dir / "Pipfile.lock").exists():
+            caps.has_pipfile_lock = True
             if caps.project_type == "Unknown":
                 caps.project_type = "Python"
 
@@ -479,11 +512,37 @@ class DeploymentInstructionsGenerator:
 
         # Install dependencies
         if self.capabilities.has_package_json:
+            # Use npm ci if package-lock.json exists, yarn if yarn.lock exists
+            if self.capabilities.has_package_lock:
+                install_cmd = "npm ci"
+            elif self.capabilities.has_yarn_lock:
+                install_cmd = "yarn install --frozen-lockfile"
+            else:
+                install_cmd = "npm install"
+
             lines.extend([
                 "# 3. Install dependencies (if needed)",
-                "npm install",
+                install_cmd,
                 "",
             ])
+
+        # Install Python dependencies
+        if self.capabilities.project_type == "Python":
+            if self.capabilities.has_poetry_lock:
+                install_cmd = "poetry install --no-dev"
+            elif self.capabilities.has_pipfile_lock:
+                install_cmd = "pipenv install --deploy"
+            elif self.capabilities.has_requirements_txt:
+                install_cmd = "pip install -r requirements.txt"
+            else:
+                install_cmd = None
+
+            if install_cmd:
+                lines.extend([
+                    "# 3. Install Python dependencies",
+                    install_cmd,
+                    "",
+                ])
 
         # Build if available
         if 'build' in self.capabilities.run_modes:
@@ -670,8 +729,18 @@ class DeploymentInstructionsGenerator:
             "```bash",
             "# Step 1: Clean install dependencies",
             "cd " + str(self.work_dir),
-            "rm -rf node_modules package-lock.json",
-            "npm install",
+            "rm -rf node_modules",
+        ])
+
+        # Add appropriate install command based on lock file
+        if self.capabilities.has_package_lock:
+            lines.append("npm ci")
+        elif self.capabilities.has_yarn_lock:
+            lines.append("yarn install --frozen-lockfile")
+        else:
+            lines.append("npm install")
+
+        lines.extend([
             "",
             "# Step 2: Verify installation",
             "npm list --depth=0",
@@ -680,9 +749,9 @@ class DeploymentInstructionsGenerator:
             "```",
             "",
             "**Prevention**:",
-            "- Always run `npm install` after deployment",
-            "- Commit `package-lock.json` for reproducible builds",
-            "- Use `npm ci` instead of `npm install` in production",
+            "- Always commit lock files (package-lock.json or yarn.lock)",
+            "- Use `npm ci` or `yarn install --frozen-lockfile` in production",
+            "- Never delete lock files during deployment",
             "",
         ])
 
