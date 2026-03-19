@@ -159,3 +159,4 @@ dev*.sqlite
 # Other
 .cache/
 projdb.db
+__pycache__/
