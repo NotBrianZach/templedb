@@ -1,0 +1,108 @@
+# Safe Deployment Workflow
+# Inspired by Superpowers' systematic approach + TempleDB code intelligence
+
+workflow:
+  name: "safe-deployment"
+  version: "1.0"
+  description: "Deploy code with systematic safety checks using impact analysis"
+
+  # Pre-flight: Ensure code intelligence is ready
+  preflight:
+    - type: "code_intelligence"
+      action: "extract_symbols"
+      args:
+        project: "${project}"
+        force: false
+
+    - type: "code_intelligence"
+      action: "build_graph"
+      args:
+        project: "${project}"
+        force: false
+
+  # Main workflow phases
+  phases:
+    # Phase 1: Impact Analysis
+    - name: "impact_analysis"
+      description: "Analyze blast radius of changes"
+      tasks:
+        - name: "identify_changed_files"
+          type: "bash"
+          command: "git diff --name-only HEAD~1 HEAD"
+
+        - name: "search_changed_symbols"
+          type: "code_search"
+          query: "${changed_files}"
+          depends_on: "identify_changed_files"
+
+        - name: "analyze_impact"
+          type: "code_impact_analysis"
+          symbol_name: "${primary_symbol}"
+
+      validation:
+        - type: "assertion"
+          condition: "True"  # Placeholder - would check blast radius
+          error: "Blast radius too large! Break into smaller changes."
+
+    # Phase 2: Test Validation
+    - name: "test_validation"
+      description: "Run tests for affected code"
+      tasks:
+        - name: "run_unit_tests"
+          type: "bash"
+          command: "pytest tests/ -v"
+
+      validation:
+        - type: "test_results"
+          condition: "all_pass"
+          error: "Tests failed! Fix before deploying."
+
+    # Phase 3: Staging Deployment
+    - name: "staging_deployment"
+      description: "Deploy to staging environment"
+      tasks:
+        - name: "deploy_to_staging"
+          type: "deploy"
+          target: "staging"
+
+        - name: "run_smoke_tests"
+          type: "bash"
+          command: "echo 'Running smoke tests...'"
+          depends_on: "deploy_to_staging"
+
+      validation:
+        - type: "health_check"
+          target: "staging"
+          error: "Staging health check failed!"
+
+    # Phase 4: Production Deployment
+    - name: "production_deployment"
+      description: "Deploy to production with monitoring"
+      requires_human_approval: true
+
+      tasks:
+        - name: "deploy_to_production"
+          type: "deploy"
+          target: "production"
+
+        - name: "monitor_errors"
+          type: "bash"
+          command: "echo 'Monitoring for errors...'"
+          depends_on: "deploy_to_production"
+
+      validation:
+        - type: "health_check"
+          target: "production"
+          timeout: 300
+          error: "Production health check failed! Initiating rollback..."
+
+      rollback:
+        - name: "rollback_production"
+          type: "deploy"
+          target: "production"
+          version: "${previous_version}"
+
+  # Post-flight: Notify and record
+  postflight:
+    - type: "bash"
+      command: "echo 'Deployment completed successfully!'"

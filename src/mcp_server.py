@@ -70,6 +70,12 @@ class ErrorCode:
     ENV_VAR_NOT_FOUND = -32070
     ENV_VAR_INVALID = -32071
 
+    # Workflow errors (-32080 to -32089)
+    WORKFLOW_NOT_FOUND = -32080
+    WORKFLOW_INVALID = -32081
+    WORKFLOW_EXECUTION_FAILED = -32082
+    WORKFLOW_VALIDATION_FAILED = -32083
+
     # Generic application errors
     INTERNAL_ERROR = -32000
     VALIDATION_ERROR = -32001
@@ -120,6 +126,11 @@ class MCPServer:
             "templedb_env_get": self.tool_env_get,
             "templedb_env_set": self.tool_env_set,
             "templedb_env_list": self.tool_env_list,
+            # System configuration management
+            "templedb_config_get": self.tool_config_get,
+            "templedb_config_set": self.tool_config_set,
+            "templedb_config_list": self.tool_config_list,
+            "templedb_config_delete": self.tool_config_delete,
             # Secret management operations
             "templedb_secret_list": self.tool_secret_list,
             "templedb_secret_export": self.tool_secret_export,
@@ -128,6 +139,28 @@ class MCPServer:
             "templedb_cathedral_export": self.tool_cathedral_export,
             "templedb_cathedral_import": self.tool_cathedral_import,
             "templedb_cathedral_inspect": self.tool_cathedral_inspect,
+            # NixOps4 deployment orchestration
+            "templedb_nixops4_network_create": self.tool_nixops4_network_create,
+            "templedb_nixops4_network_list": self.tool_nixops4_network_list,
+            "templedb_nixops4_network_info": self.tool_nixops4_network_info,
+            "templedb_nixops4_machine_add": self.tool_nixops4_machine_add,
+            "templedb_nixops4_machine_list": self.tool_nixops4_machine_list,
+            "templedb_nixops4_deploy": self.tool_nixops4_deploy,
+            "templedb_nixops4_status": self.tool_nixops4_status,
+            # Code Intelligence (Phase 1.7)
+            "templedb_code_search": self.tool_code_search,
+            "templedb_code_show_symbol": self.tool_code_show_symbol,
+            "templedb_code_show_clusters": self.tool_code_show_clusters,
+            "templedb_code_impact_analysis": self.tool_code_impact_analysis,
+            "templedb_code_extract_symbols": self.tool_code_extract_symbols,
+            "templedb_code_build_graph": self.tool_code_build_graph,
+            "templedb_code_detect_clusters": self.tool_code_detect_clusters,
+            "templedb_code_index_search": self.tool_code_index_search,
+            # Workflow Orchestration (Phase 2.2)
+            "templedb_workflow_execute": self.tool_workflow_execute,
+            "templedb_workflow_status": self.tool_workflow_status,
+            "templedb_workflow_list": self.tool_workflow_list,
+            "templedb_workflow_validate": self.tool_workflow_validate,
         }
 
     def _get_db_connection(self):
@@ -622,6 +655,106 @@ class MCPServer:
                 }
             },
             {
+                "name": "templedb_config_get",
+                "description": "Get a system configuration value with hierarchical scope resolution (machine > network > project > system)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Configuration key (e.g., 'nginx.workers', 'woofs.enable')"
+                        },
+                        "scope_type": {
+                            "type": "string",
+                            "enum": ["system", "project", "network", "machine"],
+                            "description": "Scope type (default: 'system')"
+                        },
+                        "scope_id": {
+                            "type": "integer",
+                            "description": "Scope ID (required for non-system scopes). References project.id, nixops4_networks.id, or nixops4_machines.id"
+                        }
+                    },
+                    "required": ["key"]
+                }
+            },
+            {
+                "name": "templedb_config_set",
+                "description": "Set a system configuration value with scope. Supports hierarchical configuration: machine > network > project > system",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Configuration key (e.g., 'nginx.workers', 'woofs.enable')"
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "Configuration value"
+                        },
+                        "scope_type": {
+                            "type": "string",
+                            "enum": ["system", "project", "network", "machine"],
+                            "description": "Scope type (default: 'system')"
+                        },
+                        "scope_id": {
+                            "type": "integer",
+                            "description": "Scope ID (required for non-system scopes)"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional description of this config value"
+                        }
+                    },
+                    "required": ["key", "value"]
+                }
+            },
+            {
+                "name": "templedb_config_list",
+                "description": "List system configuration values with optional scope filter",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scope_type": {
+                            "type": "string",
+                            "enum": ["system", "project", "network", "machine"],
+                            "description": "Filter by scope type"
+                        },
+                        "scope_id": {
+                            "type": "integer",
+                            "description": "Filter by scope ID"
+                        },
+                        "key_pattern": {
+                            "type": "string",
+                            "description": "Filter by key pattern (SQL LIKE syntax, e.g., 'nginx%')"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_config_delete",
+                "description": "Delete a system configuration value",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Configuration key to delete"
+                        },
+                        "scope_type": {
+                            "type": "string",
+                            "enum": ["system", "project", "network", "machine"],
+                            "description": "Scope type (default: 'system')"
+                        },
+                        "scope_id": {
+                            "type": "integer",
+                            "description": "Scope ID (required for non-system scopes)"
+                        }
+                    },
+                    "required": ["key"]
+                }
+            },
+            {
                 "name": "templedb_secret_list",
                 "description": "List secrets for a project. Shows which secrets exist and their encryption status. Does not decrypt secret values.",
                 "inputSchema": {
@@ -744,6 +877,399 @@ class MCPServer:
                         }
                     },
                     "required": ["package_path"]
+                }
+            },
+            {
+                "name": "templedb_nixops4_network_create",
+                "description": "Create a new NixOps4 deployment network for declarative infrastructure management.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "network_name": {
+                            "type": "string",
+                            "description": "Network name (e.g., 'production', 'staging')"
+                        },
+                        "config_file": {
+                            "type": "string",
+                            "description": "Path to network configuration file (optional)"
+                        },
+                        "flake_uri": {
+                            "type": "string",
+                            "description": "Flake URI for network configuration (optional)"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Network description (optional)"
+                        }
+                    },
+                    "required": ["project", "network_name"]
+                }
+            },
+            {
+                "name": "templedb_nixops4_network_list",
+                "description": "List all NixOps4 deployment networks, optionally filtered by project.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Filter by project slug (optional)"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_nixops4_network_info",
+                "description": "Show detailed information about a NixOps4 network including machines, resources, and deployment history.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "network": {
+                            "type": "string",
+                            "description": "Network name"
+                        }
+                    },
+                    "required": ["project", "network"]
+                }
+            },
+            {
+                "name": "templedb_nixops4_machine_add",
+                "description": "Add a machine to a NixOps4 network for deployment.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "network": {
+                            "type": "string",
+                            "description": "Network name"
+                        },
+                        "machine_name": {
+                            "type": "string",
+                            "description": "Machine name"
+                        },
+                        "target_host": {
+                            "type": "string",
+                            "description": "Target hostname or IP address"
+                        },
+                        "target_user": {
+                            "type": "string",
+                            "description": "SSH user (default: root)"
+                        },
+                        "system_type": {
+                            "type": "string",
+                            "description": "System type: nixos, linux, darwin (default: nixos)"
+                        }
+                    },
+                    "required": ["project", "network", "machine_name", "target_host"]
+                }
+            },
+            {
+                "name": "templedb_nixops4_machine_list",
+                "description": "List all machines in a NixOps4 network with their deployment status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "network": {
+                            "type": "string",
+                            "description": "Network name"
+                        }
+                    },
+                    "required": ["project", "network"]
+                }
+            },
+            {
+                "name": "templedb_nixops4_deploy",
+                "description": "Deploy a NixOps4 network to all machines or specific machines. Executes declarative NixOS deployment.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "network": {
+                            "type": "string",
+                            "description": "Network name"
+                        },
+                        "machines": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Specific machines to deploy (optional, default: all)"
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "Dry run mode (default: false)"
+                        },
+                        "build_only": {
+                            "type": "boolean",
+                            "description": "Only build, don't deploy (default: false)"
+                        }
+                    },
+                    "required": ["project", "network"]
+                }
+            },
+            {
+                "name": "templedb_nixops4_status",
+                "description": "Show deployment status for a NixOps4 network including recent deployments and machine status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "network": {
+                            "type": "string",
+                            "description": "Network name"
+                        },
+                        "deployment_uuid": {
+                            "type": "string",
+                            "description": "Show specific deployment by UUID (optional)"
+                        }
+                    },
+                    "required": ["project", "network"]
+                }
+            },
+            # Code Intelligence Tools (Phase 1.7)
+            {
+                "name": "templedb_code_search",
+                "description": "Search code using hybrid search (BM25 + graph ranking). Searches symbol names, docstrings, and signatures. Returns relevance-ranked results with scoring breakdown. Requires search index (run templedb_code_index_search first).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (keywords, phrases, or FTS5 expressions)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results (default: 10)",
+                            "default": 10
+                        },
+                        "symbol_type": {
+                            "type": "string",
+                            "description": "Filter by symbol type: function, class, method (optional)",
+                            "enum": ["function", "class", "method"]
+                        }
+                    },
+                    "required": ["project", "query"]
+                }
+            },
+            {
+                "name": "templedb_code_show_symbol",
+                "description": "Show detailed information about a code symbol including callers, callees, complexity, and cluster membership. Provides 360-degree view of a symbol's role in the codebase.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "symbol_name": {
+                            "type": "string",
+                            "description": "Symbol name or qualified name (e.g., 'get_connection' or 'MyClass.method')"
+                        }
+                    },
+                    "required": ["project", "symbol_name"]
+                }
+            },
+            {
+                "name": "templedb_code_show_clusters",
+                "description": "Show code clusters (architectural boundaries) discovered by community detection. Clusters represent tightly-coupled groups of symbols that form logical modules. High cohesion (>0.7) indicates strong module boundaries.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "include_members": {
+                            "type": "boolean",
+                            "description": "Include list of symbols in each cluster (default: false)",
+                            "default": False
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of clusters to return (default: 20)",
+                            "default": 20
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_code_impact_analysis",
+                "description": "Analyze blast radius (impact) of changing a symbol. Shows all symbols that would be affected by modifying this symbol (direct and transitive dependents). Use this before making changes to understand scope of impact.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "symbol_name": {
+                            "type": "string",
+                            "description": "Symbol to analyze"
+                        }
+                    },
+                    "required": ["project", "symbol_name"]
+                }
+            },
+            {
+                "name": "templedb_code_extract_symbols",
+                "description": "Extract public/exported symbols from project files (Phase 1.2). Uses tree-sitter to parse code and extract functions, classes, and methods. Run this first before other code intelligence operations.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Force re-extraction even if symbols exist (default: false)",
+                            "default": False
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_code_build_graph",
+                "description": "Build dependency graph for project (Phase 1.3). Analyzes function/method calls and builds cross-file dependency graph. Required for impact analysis and clustering.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Force rebuild even if graph exists (default: false)",
+                            "default": False
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_code_detect_clusters",
+                "description": "Detect code clusters using Leiden algorithm (Phase 1.5). Automatically discovers architectural boundaries and module structure. Use lower resolution (0.3-0.5) for fewer, larger clusters; higher (1.5-2.0) for more granular clustering.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        },
+                        "resolution": {
+                            "type": "number",
+                            "description": "Leiden resolution parameter (default: 1.0). Higher = more clusters.",
+                            "default": 1.0
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_code_index_search",
+                "description": "Index project for hybrid code search (Phase 1.6). Builds FTS5 full-text search index for fast keyword search. Run this after extracting symbols or when code changes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            # Workflow Orchestration Tools (Phase 2.2)
+            {
+                "name": "templedb_workflow_execute",
+                "description": "Execute a workflow with given variables. Workflows are multi-phase orchestration definitions that coordinate code intelligence, testing, deployment, and validation. Use dry_run=true to preview execution without making changes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workflow": {
+                            "type": "string",
+                            "description": "Workflow name (without .yaml extension, e.g., 'safe-deployment', 'code-intelligence-bootstrap')"
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug (optional, required by some workflows)"
+                        },
+                        "variables": {
+                            "type": "object",
+                            "description": "Workflow variables as key-value pairs (e.g., {'primary_symbol': 'authenticate_user', 'previous_version': 'v2.1.0'})",
+                            "additionalProperties": True
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "Preview workflow execution without making changes (default: false)",
+                            "default": False
+                        }
+                    },
+                    "required": ["workflow"]
+                }
+            },
+            {
+                "name": "templedb_workflow_status",
+                "description": "Get status of a running or completed workflow. Note: Async workflow execution tracking not yet implemented - workflows currently run synchronously.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {
+                            "type": "string",
+                            "description": "Workflow execution ID"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_workflow_list",
+                "description": "List all available workflow definitions. Workflows are stored in the workflows/ directory as YAML files.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_workflow_validate",
+                "description": "Validate a workflow definition. Checks YAML syntax and required workflow structure (name, version, phases, tasks).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workflow": {
+                            "type": "string",
+                            "description": "Workflow name (without .yaml extension)"
+                        }
+                    },
+                    "required": ["workflow"]
                 }
             }
         ]
@@ -1339,6 +1865,187 @@ class MCPServer:
             logger.error(f"Error listing env variables: {e}")
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
+    def tool_config_get(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get system config value with hierarchical scope resolution"""
+        try:
+            key = args["key"]
+            scope_type = args.get("scope_type", "system")
+            scope_id = args.get("scope_id")
+
+            # Validate scope_type
+            valid_scopes = ["system", "project", "network", "machine"]
+            if scope_type not in valid_scopes:
+                return {
+                    "content": [{"type": "text", "text": f"Invalid scope_type. Must be one of: {', '.join(valid_scopes)}"}],
+                    "isError": True
+                }
+
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+
+            if scope_type == "system":
+                cursor.execute("""
+                    SELECT key, value, description, updated_at
+                    FROM system_config
+                    WHERE key = ? AND scope_type = 'system' AND scope_id IS NULL
+                """, (key,))
+            else:
+                if not scope_id:
+                    return {
+                        "content": [{"type": "text", "text": f"scope_id required for scope_type='{scope_type}'"}],
+                        "isError": True
+                    }
+                cursor.execute("""
+                    SELECT key, value, description, updated_at
+                    FROM system_config
+                    WHERE key = ? AND scope_type = ? AND scope_id = ?
+                """, (key, scope_type, scope_id))
+
+            row = cursor.fetchone()
+            if not row:
+                return {
+                    "content": [{"type": "text", "text": f"Config key '{key}' not found"}],
+                    "isError": True
+                }
+
+            result = dict(row)
+            return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+
+        except Exception as e:
+            logger.error(f"Error getting config: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_config_set(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Set system config value with scope"""
+        try:
+            key = args["key"]
+            value = args["value"]
+            scope_type = args.get("scope_type", "system")
+            scope_id = args.get("scope_id")
+            description = args.get("description", "")
+
+            # Validate scope_type
+            valid_scopes = ["system", "project", "network", "machine"]
+            if scope_type not in valid_scopes:
+                return {
+                    "content": [{"type": "text", "text": f"Invalid scope_type. Must be one of: {', '.join(valid_scopes)}"}],
+                    "isError": True
+                }
+
+            # Validate scope_id requirements
+            if scope_type == "system" and scope_id is not None:
+                return {
+                    "content": [{"type": "text", "text": "System scope must have scope_id=NULL"}],
+                    "isError": True
+                }
+
+            if scope_type != "system" and not scope_id:
+                return {
+                    "content": [{"type": "text", "text": f"scope_id required for scope_type='{scope_type}'"}],
+                    "isError": True
+                }
+
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+
+            # Use INSERT OR REPLACE
+            cursor.execute("""
+                INSERT OR REPLACE INTO system_config
+                (key, value, description, scope_type, scope_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (key, value, description, scope_type, scope_id))
+
+            conn.commit()
+
+            return {
+                "content": [{"type": "text", "text": f"Set config {key}={value} (scope: {scope_type})"}]
+            }
+
+        except Exception as e:
+            logger.error(f"Error setting config: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_config_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List system config values with optional scope filter"""
+        try:
+            scope_type = args.get("scope_type")
+            scope_id = args.get("scope_id")
+            key_pattern = args.get("key_pattern")
+
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+
+            # Build query
+            query = "SELECT key, value, description, scope_type, scope_id, updated_at FROM system_config WHERE 1=1"
+            params = []
+
+            if scope_type:
+                query += " AND scope_type = ?"
+                params.append(scope_type)
+
+            if scope_id is not None:
+                query += " AND scope_id = ?"
+                params.append(scope_id)
+
+            if key_pattern:
+                query += " AND key LIKE ?"
+                params.append(f"%{key_pattern}%")
+
+            query += " ORDER BY scope_type, scope_id, key"
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            results = [dict(row) for row in rows]
+
+            if not results:
+                return {"content": [{"type": "text", "text": "No configs found"}]}
+
+            return {"content": [{"type": "text", "text": json.dumps(results, indent=2)}]}
+
+        except Exception as e:
+            logger.error(f"Error listing configs: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_config_delete(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Delete system config value"""
+        try:
+            key = args["key"]
+            scope_type = args.get("scope_type", "system")
+            scope_id = args.get("scope_id")
+
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+
+            if scope_type == "system":
+                cursor.execute("""
+                    DELETE FROM system_config
+                    WHERE key = ? AND scope_type = 'system' AND scope_id IS NULL
+                """, (key,))
+            else:
+                if not scope_id:
+                    return {
+                        "content": [{"type": "text", "text": f"scope_id required for scope_type='{scope_type}'"}],
+                        "isError": True
+                    }
+                cursor.execute("""
+                    DELETE FROM system_config
+                    WHERE key = ? AND scope_type = ? AND scope_id = ?
+                """, (key, scope_type, scope_id))
+
+            conn.commit()
+
+            if cursor.rowcount == 0:
+                return {
+                    "content": [{"type": "text", "text": f"Config key '{key}' not found"}],
+                    "isError": True
+                }
+
+            return {"content": [{"type": "text", "text": f"Deleted config key '{key}'"}]}
+
+        except Exception as e:
+            logger.error(f"Error deleting config: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
     def tool_secret_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List secrets for a project"""
         try:
@@ -1507,6 +2214,792 @@ class MCPServer:
         except Exception as e:
             logger.error(f"Error inspecting cathedral package: {e}")
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    # NixOps4 tools
+
+    def tool_nixops4_network_create(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a NixOps4 network"""
+        try:
+            project = args["project"]
+            network_name = args["network_name"]
+            config_file = args.get("config_file")
+            flake_uri = args.get("flake_uri")
+            description = args.get("description")
+
+            cmd = ["nixops4", "network", "create", project, network_name]
+            if config_file:
+                cmd.extend(["--config-file", config_file])
+            if flake_uri:
+                cmd.extend(["--flake-uri", flake_uri])
+            if description:
+                cmd.extend(["--description", description])
+
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Failed to create network: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error creating nixops4 network: {e}")
+            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+
+    def tool_nixops4_network_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List NixOps4 networks"""
+        try:
+            cmd = ["nixops4", "network", "list"]
+            if "project" in args and args["project"]:
+                cmd.extend(["--project", args["project"]])
+
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Failed to list networks: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error listing nixops4 networks: {e}")
+            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+
+    def tool_nixops4_network_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show NixOps4 network info"""
+        try:
+            project = args["project"]
+            network = args["network"]
+
+            result = self._run_templedb_cli(["nixops4", "network", "info", project, network])
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Failed to get network info: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error getting nixops4 network info: {e}")
+            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+
+    def tool_nixops4_machine_add(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Add machine to NixOps4 network"""
+        try:
+            project = args["project"]
+            network = args["network"]
+            machine_name = args["machine_name"]
+            target_host = args["target_host"]
+            target_user = args.get("target_user", "root")
+            system_type = args.get("system_type", "nixos")
+
+            cmd = ["nixops4", "machine", "add", project, network, machine_name,
+                   "--host", target_host, "--user", target_user, "--system-type", system_type]
+
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Failed to add machine: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error adding nixops4 machine: {e}")
+            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+
+    def tool_nixops4_machine_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List machines in NixOps4 network"""
+        try:
+            project = args["project"]
+            network = args["network"]
+
+            result = self._run_templedb_cli(["nixops4", "machine", "list", project, network])
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Failed to list machines: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error listing nixops4 machines: {e}")
+            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+
+    def tool_nixops4_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy NixOps4 network"""
+        try:
+            project = args["project"]
+            network = args["network"]
+            machines = args.get("machines", [])
+            dry_run = args.get("dry_run", False)
+            build_only = args.get("build_only", False)
+
+            cmd = ["nixops4", "deploy", project, network]
+            if machines:
+                cmd.extend(["--machines"] + machines)
+            if dry_run:
+                cmd.append("--dry-run")
+            if build_only:
+                cmd.append("--build-only")
+
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.DEPLOYMENT_FAILED,
+                    f"Deployment failed: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error deploying nixops4 network: {e}")
+            return self._error_response(ErrorCode.DEPLOYMENT_FAILED, str(e))
+
+    def tool_nixops4_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show NixOps4 deployment status"""
+        try:
+            project = args["project"]
+            network = args["network"]
+            deployment_uuid = args.get("deployment_uuid")
+
+            cmd = ["nixops4", "status", project, network]
+            if deployment_uuid:
+                cmd.extend(["--deployment-uuid", deployment_uuid])
+
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Failed to get status: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error getting nixops4 status: {e}")
+            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+
+    # ========================================================================
+    # CODE INTELLIGENCE TOOLS (Phase 1.7)
+    # ========================================================================
+
+    def tool_code_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Search code using hybrid search (BM25 + graph ranking)"""
+        try:
+            from services.code_search_service import search_code
+            from db_utils import get_project_by_slug
+
+            project_slug = args["project"]
+            query = args["query"]
+            limit = args.get("limit", 10)
+            symbol_type = args.get("symbol_type")
+
+            # Get project
+            project = get_project_by_slug(project_slug)
+            if not project:
+                return self._error_response(
+                    f"Project '{project_slug}' not found",
+                    ErrorCode.PROJECT_NOT_FOUND
+                )
+
+            # Check if search index exists
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM code_search_index csi
+                JOIN code_symbols cs ON csi.symbol_id = cs.id
+                WHERE cs.project_id = ?
+            """, (project['id'],))
+
+            if cursor.fetchone()[0] == 0:
+                return self._error_response(
+                    f"Search index not found for project '{project_slug}'. Run: templedb code index-search {project_slug}",
+                    ErrorCode.NOT_FOUND
+                )
+
+            # Perform search
+            results = search_code(project['id'], query, limit, symbol_type)
+
+            # Format results
+            formatted_results = []
+            for r in results:
+                formatted_results.append({
+                    "qualified_name": r.qualified_name,
+                    "symbol_type": r.symbol_type,
+                    "file_path": r.file_path,
+                    "start_line": r.start_line,
+                    "docstring": r.docstring[:200] if r.docstring else None,
+                    "score": round(r.final_score, 3),
+                    "score_breakdown": {
+                        "bm25": round(r.bm25_score, 3),
+                        "graph": round(r.graph_score, 3),
+                        "semantic": round(r.semantic_score, 3)
+                    },
+                    "num_dependents": r.num_dependents,
+                    "cluster_name": r.cluster_name
+                })
+
+            return self._success_response({
+                "query": query,
+                "results_count": len(formatted_results),
+                "results": formatted_results
+            })
+
+        except Exception as e:
+            logger.error(f"Error in code search: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_code_show_symbol(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show detailed information about a code symbol"""
+        try:
+            from db_utils import get_project_by_slug
+
+            project_slug = args["project"]
+            symbol_name = args["symbol_name"]
+
+            # Get project
+            project = get_project_by_slug(project_slug)
+            if not project:
+                return self._error_response(
+                    f"Project '{project_slug}' not found",
+                    ErrorCode.PROJECT_NOT_FOUND
+                )
+
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+
+            # Find symbol
+            cursor.execute("""
+                SELECT
+                    cs.id, cs.symbol_type, cs.qualified_name,
+                    cs.docstring, cs.start_line, cs.end_line,
+                    cs.cyclomatic_complexity, cs.num_dependents,
+                    pf.file_path
+                FROM code_symbols cs
+                JOIN project_files pf ON cs.file_id = pf.id
+                WHERE cs.project_id = ?
+                AND (cs.symbol_name = ? OR cs.qualified_name = ?)
+                LIMIT 1
+            """, (project['id'], symbol_name, symbol_name))
+
+            symbol = cursor.fetchone()
+            if not symbol:
+                return self._error_response(
+                    f"Symbol '{symbol_name}' not found in project",
+                    ErrorCode.NOT_FOUND
+                )
+
+            symbol_id = symbol[0]
+
+            # Get callers (who calls this symbol)
+            cursor.execute("""
+                SELECT cs.qualified_name, d.call_line, d.confidence_score
+                FROM code_symbol_dependencies d
+                JOIN code_symbols cs ON d.caller_symbol_id = cs.id
+                WHERE d.called_symbol_id = ?
+                ORDER BY cs.qualified_name
+                LIMIT 20
+            """, (symbol_id,))
+            callers = [{"name": row[0], "line": row[1], "confidence": round(row[2], 2)}
+                      for row in cursor.fetchall()]
+
+            # Get callees (what this symbol calls)
+            cursor.execute("""
+                SELECT cs.qualified_name, d.call_line, d.confidence_score
+                FROM code_symbol_dependencies d
+                JOIN code_symbols cs ON d.called_symbol_id = cs.id
+                WHERE d.caller_symbol_id = ?
+                ORDER BY cs.qualified_name
+                LIMIT 20
+            """, (symbol_id,))
+            callees = [{"name": row[0], "line": row[1], "confidence": round(row[2], 2)}
+                      for row in cursor.fetchall()]
+
+            # Get cluster membership
+            cursor.execute("""
+                SELECT cc.cluster_name, cc.cluster_type, ccm.membership_strength
+                FROM code_cluster_members ccm
+                JOIN code_clusters cc ON ccm.cluster_id = cc.id
+                WHERE ccm.symbol_id = ?
+            """, (symbol_id,))
+            cluster_row = cursor.fetchone()
+            cluster = None
+            if cluster_row:
+                cluster = {
+                    "name": cluster_row[0],
+                    "type": cluster_row[1],
+                    "strength": round(cluster_row[2], 2)
+                }
+
+            return self._success_response({
+                "qualified_name": symbol[2],
+                "symbol_type": symbol[1],
+                "file": f"{symbol[8]}:{symbol[4]}-{symbol[5]}",
+                "docstring": symbol[3],
+                "complexity": symbol[6],
+                "num_dependents": symbol[7],
+                "cluster": cluster,
+                "called_by": callers,
+                "calls": callees
+            })
+
+        except Exception as e:
+            logger.error(f"Error showing symbol: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_code_show_clusters(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show code clusters (architectural boundaries) for a project"""
+        try:
+            from services.community_detection_service import get_clusters_for_project
+            from db_utils import get_project_by_slug
+
+            project_slug = args["project"]
+            include_members = args.get("include_members", False)
+            limit = args.get("limit", 20)
+
+            # Get project
+            project = get_project_by_slug(project_slug)
+            if not project:
+                return self._error_response(
+                    f"Project '{project_slug}' not found",
+                    ErrorCode.PROJECT_NOT_FOUND
+                )
+
+            # Get clusters
+            clusters = get_clusters_for_project(project['id'])
+
+            if not clusters:
+                return self._error_response(
+                    f"No clusters found. Run: templedb code detect-clusters {project_slug}",
+                    ErrorCode.NOT_FOUND
+                )
+
+            # Format clusters
+            formatted_clusters = []
+            for cluster in clusters[:limit]:
+                cluster_data = {
+                    "cluster_name": cluster['cluster_name'],
+                    "cluster_type": cluster['cluster_type'],
+                    "member_count": cluster['member_count'],
+                    "cohesion_score": round(cluster['cohesion_score'], 3) if cluster['cohesion_score'] else None
+                }
+
+                # Optionally include member list
+                if include_members:
+                    conn = self._get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT cs.qualified_name, cs.symbol_type
+                        FROM code_cluster_members ccm
+                        JOIN code_symbols cs ON ccm.symbol_id = cs.id
+                        WHERE ccm.cluster_id = ?
+                        ORDER BY cs.qualified_name
+                        LIMIT 50
+                    """, (cluster['cluster_id'],))
+
+                    members = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
+                    cluster_data["members"] = members
+
+                formatted_clusters.append(cluster_data)
+
+            return self._success_response({
+                "total_clusters": len(clusters),
+                "showing": len(formatted_clusters),
+                "clusters": formatted_clusters
+            })
+
+        except Exception as e:
+            logger.error(f"Error showing clusters: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_code_impact_analysis(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze blast radius (impact) of changing a symbol"""
+        try:
+            from services.impact_analysis_service import analyze_symbol_impact
+            from db_utils import get_project_by_slug
+
+            project_slug = args["project"]
+            symbol_name = args["symbol_name"]
+
+            # Get project
+            project = get_project_by_slug(project_slug)
+            if not project:
+                return self._error_response(
+                    f"Project '{project_slug}' not found",
+                    ErrorCode.PROJECT_NOT_FOUND
+                )
+
+            # Find symbol
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id FROM code_symbols
+                WHERE project_id = ?
+                AND (symbol_name = ? OR qualified_name = ?)
+                LIMIT 1
+            """, (project['id'], symbol_name, symbol_name))
+
+            symbol_row = cursor.fetchone()
+            if not symbol_row:
+                return self._error_response(
+                    f"Symbol '{symbol_name}' not found",
+                    ErrorCode.NOT_FOUND
+                )
+
+            # Analyze impact
+            analysis = analyze_symbol_impact(symbol_row[0])
+
+            # Format critical paths
+            critical_paths_formatted = []
+            for path in analysis.critical_paths[:5]:
+                critical_paths_formatted.append(" → ".join(path))
+
+            return self._success_response({
+                "symbol": {
+                    "qualified_name": analysis.qualified_name,
+                    "symbol_type": analysis.symbol_name
+                },
+                "blast_radius": {
+                    "total_affected_symbols": analysis.blast_radius_count,
+                    "max_depth": analysis.max_depth,
+                    "avg_confidence": round(analysis.avg_confidence, 2),
+                    "affected_files": len(analysis.affected_files)
+                },
+                "warnings": {
+                    "is_entry_point": analysis.is_entry_point,
+                    "is_widely_used": analysis.is_widely_used
+                },
+                "direct_dependents": [
+                    {
+                        "name": d['qualified_name'],
+                        "confidence": round(d['confidence'], 2)
+                    }
+                    for d in analysis.direct_dependents[:10]
+                ],
+                "critical_paths": critical_paths_formatted,
+                "affected_files_sample": analysis.affected_files[:10]
+            })
+
+        except Exception as e:
+            logger.error(f"Error in impact analysis: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_code_extract_symbols(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract public symbols from project files (Phase 1.2)"""
+        try:
+            from services.symbol_extraction_service import extract_symbols_for_project
+            from db_utils import get_project_by_slug
+
+            project_slug = args["project"]
+            force = args.get("force", False)
+
+            # Get project
+            project = get_project_by_slug(project_slug)
+            if not project:
+                return self._error_response(
+                    f"Project '{project_slug}' not found",
+                    ErrorCode.PROJECT_NOT_FOUND
+                )
+
+            # Extract symbols
+            stats = extract_symbols_for_project(project['id'], force=force)
+
+            return self._success_response({
+                "project": project_slug,
+                "stats": stats
+            })
+
+        except Exception as e:
+            logger.error(f"Error extracting symbols: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_code_build_graph(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Build dependency graph for project (Phase 1.3)"""
+        try:
+            from services.dependency_graph_service import build_dependency_graph_for_project
+            from db_utils import get_project_by_slug
+
+            project_slug = args["project"]
+            force = args.get("force", False)
+
+            # Get project
+            project = get_project_by_slug(project_slug)
+            if not project:
+                return self._error_response(
+                    f"Project '{project_slug}' not found",
+                    ErrorCode.PROJECT_NOT_FOUND
+                )
+
+            # Build graph
+            stats = build_dependency_graph_for_project(project['id'], force=force)
+
+            return self._success_response({
+                "project": project_slug,
+                "stats": stats
+            })
+
+        except Exception as e:
+            logger.error(f"Error building graph: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_code_detect_clusters(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Detect code clusters using Leiden algorithm (Phase 1.5)"""
+        try:
+            from services.community_detection_service import detect_communities_for_project
+            from db_utils import get_project_by_slug
+
+            project_slug = args["project"]
+            resolution = args.get("resolution", 1.0)
+
+            # Get project
+            project = get_project_by_slug(project_slug)
+            if not project:
+                return self._error_response(
+                    f"Project '{project_slug}' not found",
+                    ErrorCode.PROJECT_NOT_FOUND
+                )
+
+            # Detect clusters
+            stats = detect_communities_for_project(project['id'], resolution=resolution)
+
+            return self._success_response({
+                "project": project_slug,
+                "resolution": resolution,
+                "stats": stats
+            })
+
+        except Exception as e:
+            logger.error(f"Error detecting clusters: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_code_index_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Index project for hybrid search (Phase 1.6)"""
+        try:
+            from services.code_search_service import index_project_for_search
+            from db_utils import get_project_by_slug
+
+            project_slug = args["project"]
+
+            # Get project
+            project = get_project_by_slug(project_slug)
+            if not project:
+                return self._error_response(
+                    f"Project '{project_slug}' not found",
+                    ErrorCode.PROJECT_NOT_FOUND
+                )
+
+            # Index for search
+            stats = index_project_for_search(project['id'])
+
+            return self._success_response({
+                "project": project_slug,
+                "stats": stats
+            })
+
+        except Exception as e:
+            logger.error(f"Error indexing for search: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    # ========================================================================
+    # WORKFLOW ORCHESTRATION TOOLS (Phase 2.2)
+    # ========================================================================
+
+    def tool_workflow_execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a workflow with the given variables"""
+        try:
+            from services.workflow_orchestrator import execute_workflow
+            from db_utils import get_project_by_slug
+
+            workflow_name = args["workflow"]
+            project_slug = args.get("project")
+            variables = args.get("variables", {})
+            dry_run = args.get("dry_run", False)
+
+            # Construct workflow path
+            workflow_path = self.templedb_root / "workflows" / f"{workflow_name}.yaml"
+
+            if not workflow_path.exists():
+                return self._error_response(
+                    f"Workflow '{workflow_name}' not found. Available workflows: {self._list_available_workflows()}",
+                    ErrorCode.WORKFLOW_NOT_FOUND
+                )
+
+            # If project is specified, validate it exists
+            if project_slug:
+                project = get_project_by_slug(project_slug)
+                if not project:
+                    return self._error_response(
+                        f"Project '{project_slug}' not found",
+                        ErrorCode.PROJECT_NOT_FOUND
+                    )
+                variables['project'] = project_slug
+
+            # Execute workflow
+            result = execute_workflow(
+                workflow_path=str(workflow_path),
+                project_slug=project_slug,
+                variables=variables,
+                dry_run=dry_run
+            )
+
+            # Format duration if present
+            duration = result.get('duration')
+            duration_str = f"{duration:.2f}s" if duration is not None else "N/A"
+
+            return self._success_response({
+                "workflow": workflow_name,
+                "project": project_slug,
+                "dry_run": dry_run,
+                "status": result['status'],
+                "duration": duration_str,
+                "phases": result.get('phases', {}),
+                "error": result.get('error'),
+                "details": result.get('details')
+            })
+
+        except Exception as e:
+            logger.error(f"Error executing workflow: {e}")
+            return self._error_response(str(e), ErrorCode.WORKFLOW_EXECUTION_FAILED)
+
+    def tool_workflow_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get status of a running or completed workflow (placeholder for future execution tracking)"""
+        try:
+            workflow_id = args.get("workflow_id")
+
+            # For now, return a message that this requires execution tracking
+            return self._success_response({
+                "message": "Workflow execution tracking not yet implemented. Use templedb_workflow_execute with dry_run=false to execute workflows synchronously.",
+                "workflow_id": workflow_id
+            })
+
+        except Exception as e:
+            logger.error(f"Error getting workflow status: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_workflow_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List available workflows"""
+        try:
+            workflows_dir = self.templedb_root / "workflows"
+
+            if not workflows_dir.exists():
+                return self._success_response({
+                    "workflows": [],
+                    "count": 0
+                })
+
+            # Find all .yaml workflow files
+            workflow_files = list(workflows_dir.glob("*.yaml"))
+
+            workflows = []
+            for workflow_file in workflow_files:
+                try:
+                    import yaml
+                    with open(workflow_file, 'r') as f:
+                        workflow_def = yaml.safe_load(f)
+
+                    workflow_info = {
+                        "name": workflow_file.stem,
+                        "version": workflow_def.get('workflow', {}).get('version', 'unknown'),
+                        "description": workflow_def.get('workflow', {}).get('description', ''),
+                        "phases": len(workflow_def.get('workflow', {}).get('phases', [])),
+                        "file": str(workflow_file.relative_to(self.templedb_root))
+                    }
+                    workflows.append(workflow_info)
+                except Exception as e:
+                    logger.warning(f"Error loading workflow {workflow_file}: {e}")
+                    continue
+
+            return self._success_response({
+                "workflows": workflows,
+                "count": len(workflows)
+            })
+
+        except Exception as e:
+            logger.error(f"Error listing workflows: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_workflow_validate(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate a workflow definition"""
+        try:
+            workflow_name = args["workflow"]
+
+            # Construct workflow path
+            workflow_path = self.templedb_root / "workflows" / f"{workflow_name}.yaml"
+
+            if not workflow_path.exists():
+                return self._error_response(
+                    f"Workflow '{workflow_name}' not found",
+                    ErrorCode.WORKFLOW_NOT_FOUND
+                )
+
+            # Try to load and validate the workflow
+            import yaml
+
+            try:
+                with open(workflow_path, 'r') as f:
+                    workflow_def = yaml.safe_load(f)
+            except yaml.YAMLError as e:
+                return self._error_response(
+                    f"Invalid YAML syntax: {str(e)}",
+                    ErrorCode.WORKFLOW_INVALID
+                )
+
+            # Validate workflow structure
+            errors = []
+
+            if 'workflow' not in workflow_def:
+                errors.append("Missing 'workflow' key at root")
+            else:
+                workflow = workflow_def['workflow']
+
+                if 'name' not in workflow:
+                    errors.append("Missing 'workflow.name'")
+                if 'version' not in workflow:
+                    errors.append("Missing 'workflow.version'")
+                if 'phases' not in workflow:
+                    errors.append("Missing 'workflow.phases'")
+                elif not isinstance(workflow['phases'], list):
+                    errors.append("'workflow.phases' must be a list")
+                else:
+                    # Validate each phase
+                    for i, phase in enumerate(workflow['phases']):
+                        if 'name' not in phase:
+                            errors.append(f"Phase {i}: missing 'name'")
+                        if 'tasks' not in phase:
+                            errors.append(f"Phase {i} ({phase.get('name', 'unnamed')}): missing 'tasks'")
+
+            if errors:
+                return self._error_response(
+                    f"Workflow validation failed",
+                    ErrorCode.WORKFLOW_VALIDATION_FAILED,
+                    {"errors": errors}
+                )
+
+            return self._success_response({
+                "workflow": workflow_name,
+                "valid": True,
+                "name": workflow_def['workflow'].get('name'),
+                "version": workflow_def['workflow'].get('version'),
+                "phases": len(workflow_def['workflow'].get('phases', []))
+            })
+
+        except Exception as e:
+            logger.error(f"Error validating workflow: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def _list_available_workflows(self) -> str:
+        """Helper to list available workflow names"""
+        workflows_dir = self.templedb_root / "workflows"
+        if not workflows_dir.exists():
+            return "none"
+        workflow_files = list(workflows_dir.glob("*.yaml"))
+        return ", ".join([f.stem for f in workflow_files]) if workflow_files else "none"
 
     def handle_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Handle incoming MCP message"""

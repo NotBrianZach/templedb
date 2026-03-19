@@ -3,11 +3,13 @@
 Template rendering for TempleDB configuration files
 
 Renders Nix configuration templates by substituting values from system_config table.
+Supports hierarchical configuration with scope precedence:
+  Machine > Network > Project > System
 """
 
 import re
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from db_utils import query_one, query_all
 
 
@@ -25,26 +27,30 @@ class TemplateRenderer:
         )
         return result['value'] if result else default
 
-    def get_template_vars(self, template_name: str) -> Dict[str, str]:
+    def get_template_vars(self, template_name: str, machine_name: str = None) -> Dict[str, str]:
         """Get all template variables for a given template
 
         Args:
             template_name: Name of the template (e.g., 'woofs')
+            machine_name: Optional machine name for machine-specific config
 
         Returns:
             Dict of variable name to value
-        """
-        # Get all config keys for this template
-        prefix = f"{template_name}."
-        configs = query_all(
-            "SELECT key, value FROM system_config WHERE key LIKE ?",
-            (f"{prefix}%",)
-        )
 
-        # Build variable map
+        Naming convention:
+            - machine_name.template.var: Machine-specific value (highest priority)
+            - template.var: System-wide default value
+        """
         vars_map = {}
 
-        for config in configs:
+        # First, get system-wide defaults for this template
+        prefix = f"{template_name}."
+        system_configs = query_all(
+            "SELECT key, value FROM system_config WHERE key LIKE ? AND key NOT LIKE ?",
+            (f"{prefix}%", "%.%.%")  # Exclude machine-specific (has 2+ dots)
+        )
+
+        for config in system_configs:
             key = config['key']
             value = config['value']
 
@@ -53,16 +59,170 @@ class TemplateRenderer:
             var_name = key.replace('.', '_').upper()
             vars_map[var_name] = value
 
+        # If machine_name provided, override with machine-specific values
+        if machine_name:
+            machine_prefix = f"{machine_name}.{template_name}."
+            machine_configs = query_all(
+                "SELECT key, value FROM system_config WHERE key LIKE ?",
+                (f"{machine_prefix}%",)
+            )
+
+            for config in machine_configs:
+                key = config['key']
+                value = config['value']
+
+                # Strip machine name from key for variable name
+                # e.g., "web1.woofs.enable" -> "WOOFS_ENABLE"
+                var_key = key[len(machine_name) + 1:]  # Remove "machine_name."
+                var_name = var_key.replace('.', '_').upper()
+                vars_map[var_name] = value  # Override system-wide default
+
         return vars_map
 
-    def render_template(self, template_path: Path, output_path: Path,
-                       extra_vars: Dict[str, str] = None) -> bool:
+    def get_template_vars_scoped(
+        self,
+        template_name: str,
+        machine_id: int = None,
+        network_id: int = None,
+        project_id: int = None
+    ) -> Dict[str, str]:
+        """Get template variables using hierarchical scope resolution
+
+        Resolution order (highest to lowest priority):
+          1. Machine-specific (scope_type='machine', scope_id=machine_id)
+          2. Network-specific (scope_type='network', scope_id=network_id)
+          3. Project-specific (scope_type='project', scope_id=project_id)
+          4. System-wide (scope_type='system')
+
+        Args:
+            template_name: Name of the template (e.g., 'woofs')
+            machine_id: Machine ID for machine-specific config
+            network_id: Network ID for network-specific config
+            project_id: Project ID for project-specific config
+
+        Returns:
+            Dict of variable name to value with proper scope precedence
+        """
+        vars_map = {}
+        prefix = f"{template_name}."
+
+        # Build hierarchical query
+        # Start with system-wide, then override with more specific scopes
+        scopes = []
+
+        # System-wide (lowest priority)
+        scopes.append(("system", None))
+
+        # Project-specific
+        if project_id:
+            scopes.append(("project", project_id))
+
+        # Network-specific
+        if network_id:
+            scopes.append(("network", network_id))
+
+        # Machine-specific (highest priority)
+        if machine_id:
+            scopes.append(("machine", machine_id))
+
+        # Query each scope in order, overriding as we go
+        for scope_type, scope_id in scopes:
+            if scope_id is None:
+                configs = query_all("""
+                    SELECT key, value
+                    FROM system_config
+                    WHERE key LIKE ? AND scope_type = ? AND scope_id IS NULL
+                """, (f"{prefix}%", scope_type))
+            else:
+                configs = query_all("""
+                    SELECT key, value
+                    FROM system_config
+                    WHERE key LIKE ? AND scope_type = ? AND scope_id = ?
+                """, (f"{prefix}%", scope_type, scope_id))
+
+            for config in configs:
+                key = config['key']
+                value = config['value']
+
+                # Convert key to template variable name
+                # e.g., "woofs.enable" -> "WOOFS_ENABLE"
+                var_name = key.replace('.', '_').upper()
+                vars_map[var_name] = value  # Override previous values
+
+        return vars_map
+
+    def resolve_config_value(
+        self,
+        key: str,
+        machine_id: int = None,
+        network_id: int = None,
+        project_id: int = None,
+        default: str = ""
+    ) -> str:
+        """Resolve a single config value using hierarchical scope
+
+        Args:
+            key: Config key to resolve
+            machine_id: Machine ID for machine-specific config
+            network_id: Network ID for network-specific config
+            project_id: Project ID for project-specific config
+            default: Default value if not found
+
+        Returns:
+            Resolved value or default
+        """
+        # Check in priority order: machine > network > project > system
+        scopes = []
+
+        if machine_id:
+            scopes.append(("machine", machine_id))
+        if network_id:
+            scopes.append(("network", network_id))
+        if project_id:
+            scopes.append(("project", project_id))
+        scopes.append(("system", None))
+
+        for scope_type, scope_id in scopes:
+            if scope_id is None:
+                result = query_one("""
+                    SELECT value FROM system_config
+                    WHERE key = ? AND scope_type = ? AND scope_id IS NULL
+                """, (key, scope_type))
+            else:
+                result = query_one("""
+                    SELECT value FROM system_config
+                    WHERE key = ? AND scope_type = ? AND scope_id = ?
+                """, (key, scope_type, scope_id))
+
+            if result:
+                return result['value']
+
+        return default
+
+    def render_template(
+        self,
+        template_path: Path,
+        output_path: Path,
+        extra_vars: Dict[str, str] = None,
+        machine_name: str = None,
+        machine_id: int = None,
+        network_id: int = None,
+        project_id: int = None
+    ) -> bool:
         """Render a template file with values from database
+
+        Supports two config resolution methods:
+          1. Naming convention (legacy): machine_name.template.var
+          2. Scoped queries (new): machine_id, network_id, project_id
 
         Args:
             template_path: Path to template file (*.template)
             output_path: Path to write rendered output
             extra_vars: Additional variables to substitute
+            machine_name: Optional machine name for naming convention lookups
+            machine_id: Optional machine ID for scoped lookups
+            network_id: Optional network ID for scoped lookups
+            project_id: Optional project ID for scoped lookups
 
         Returns:
             True if successful
@@ -75,7 +235,17 @@ class TemplateRenderer:
         template_name = template_path.parent.name
 
         # Get variables from database
-        vars_map = self.get_template_vars(template_name)
+        # Prefer scoped lookups if machine_id provided, otherwise use naming convention
+        if machine_id or network_id or project_id:
+            vars_map = self.get_template_vars_scoped(
+                template_name,
+                machine_id=machine_id,
+                network_id=network_id,
+                project_id=project_id
+            )
+        else:
+            # Fall back to naming convention
+            vars_map = self.get_template_vars(template_name, machine_name=machine_name)
 
         # Add extra variables
         if extra_vars:
@@ -127,12 +297,24 @@ class TemplateRenderer:
         # Replace {{VAR_NAME}} patterns
         return re.sub(r'\{\{([A-Z_]+)\}\}', replace_var, content)
 
-    def render_project_templates(self, project_slug: str, checkout_path: Path) -> int:
+    def render_project_templates(
+        self,
+        project_slug: str,
+        checkout_path: Path,
+        machine_name: str = None,
+        machine_id: int = None,
+        network_id: int = None,
+        project_id: int = None
+    ) -> int:
         """Render all templates for a project
 
         Args:
             project_slug: Project slug (e.g., 'system_config')
             checkout_path: Path to project checkout
+            machine_name: Optional machine name for naming convention lookups
+            machine_id: Optional machine ID for scoped lookups
+            network_id: Optional network ID for scoped lookups
+            project_id: Optional project ID for scoped lookups
 
         Returns:
             Number of templates rendered
@@ -146,10 +328,30 @@ class TemplateRenderer:
             # Determine output path (remove .template extension)
             output_path = template_path.parent / template_path.stem
 
-            print(f"  Rendering: {template_path.relative_to(checkout_path)}")
+            # Build context string for logging
+            context_parts = []
+            if machine_name:
+                context_parts.append(f"machine: {machine_name}")
+            if machine_id:
+                context_parts.append(f"machine_id: {machine_id}")
+            if network_id:
+                context_parts.append(f"network_id: {network_id}")
+            if project_id:
+                context_parts.append(f"project_id: {project_id}")
+
+            context_str = f" ({', '.join(context_parts)})" if context_parts else ""
+
+            print(f"  Rendering: {template_path.relative_to(checkout_path)}{context_str}")
             print(f"         to: {output_path.relative_to(checkout_path)}")
 
-            self.render_template(template_path, output_path)
+            self.render_template(
+                template_path,
+                output_path,
+                machine_name=machine_name,
+                machine_id=machine_id,
+                network_id=network_id,
+                project_id=project_id
+            )
             count += 1
 
         return count

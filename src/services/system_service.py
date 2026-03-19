@@ -43,9 +43,10 @@ class SystemService:
         Looks in standard TempleDB checkout locations.
         """
         # Get real user's home (works with sudo)
-        real_home = Path(os.environ.get('SUDO_USER', os.environ.get('USER', 'root')))
-        if real_home.name != 'root':
-            real_home = Path('/home') / real_home.name
+        # When run with sudo, SUDO_USER contains the original user
+        sudo_user = os.environ.get('SUDO_USER')
+        if sudo_user:
+            real_home = Path(f'/home/{sudo_user}')
         else:
             real_home = Path.home()
 
@@ -365,6 +366,28 @@ class SystemService:
             logger.info(f"Rendered {count} template(s) for {project_slug}")
             print(f"📝 Rendered {count} configuration template(s)")
 
+            # Auto-commit generated files for Nix flakes
+            # Nix flakes only see files tracked in git
+            try:
+                # Add only generated config files in modules/*/config.nix
+                subprocess.run(
+                    ["git", "add", "modules/*/config.nix"],
+                    cwd=checkout_path,
+                    check=False,
+                    capture_output=True
+                )
+                # Commit if there are changes
+                result = subprocess.run(
+                    ["git", "commit", "-m", "Auto-update generated config from TempleDB templates"],
+                    cwd=checkout_path,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    logger.info("Auto-committed generated config files")
+            except Exception as e:
+                logger.warning(f"Could not auto-commit generated files: {e}")
+
         return count
 
     def test_system(self, project_slug: str, dry_run: bool = False) -> Dict[str, Any]:
@@ -388,6 +411,17 @@ class SystemService:
             raise SystemServiceError(
                 f"No flake.nix or configuration.nix found in {checkout_path}"
             )
+
+        # Configure git safe directory when running with sudo
+        if os.environ.get('SUDO_USER'):
+            try:
+                subprocess.run(
+                    ["git", "config", "--global", "--add", "safe.directory", str(checkout_path)],
+                    check=False,  # Don't fail if already configured
+                    capture_output=True
+                )
+            except Exception:
+                pass  # Ignore errors, not critical
 
         # Update symlink
         self.update_system_symlink(config_path, dry_run=dry_run)
@@ -430,6 +464,17 @@ class SystemService:
             raise SystemServiceError(
                 f"No flake.nix or configuration.nix found in {checkout_path}"
             )
+
+        # Configure git safe directory when running with sudo
+        if os.environ.get('SUDO_USER'):
+            try:
+                subprocess.run(
+                    ["git", "config", "--global", "--add", "safe.directory", str(checkout_path)],
+                    check=False,  # Don't fail if already configured
+                    capture_output=True
+                )
+            except Exception:
+                pass  # Ignore errors, not critical
 
         # Update symlink
         self.update_system_symlink(config_path, dry_run=dry_run)

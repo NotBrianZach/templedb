@@ -4,13 +4,80 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    nixops4.url = "github:nixops4/nixops4";
+    nixops4.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, nixops4 }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
+          config = {
+            # Allow unfree packages if needed
+            allowUnfree = true;
+          };
+          overlays = [
+            # Fix broken Python packages and reduce dependency bloat
+            (final: prev: {
+              python311Packages = prev.python311Packages.overrideScope (pyFinal: pyPrev: {
+                # Skip tests for pytest-doctestplus which is failing due to numpy incompatibility
+                pytest-doctestplus = pyPrev.pytest-doctestplus.overridePythonAttrs (old: {
+                  doCheck = false;
+                });
+                # Skip tests for astropy which depends on pytest-doctestplus
+                astropy = pyPrev.astropy.overridePythonAttrs (old: {
+                  doCheck = false;
+                });
+                # Remove optional plotly dependency from igraph to avoid massive opencv build chain
+                # (igraph → plotly → scikit-image → imageio → pillow-heif → opencv)
+                igraph = pyPrev.igraph.overridePythonAttrs (old: {
+                  # Remove plotly and other optional heavy dependencies
+                  propagatedBuildInputs = prev.lib.filter
+                    (dep:
+                      let name = dep.pname or (builtins.parseDrvName dep.name).name or "";
+                      in !(builtins.elem name ["plotly"]))
+                    (old.propagatedBuildInputs or []);
+                  # Skip tests since we're modifying dependencies
+                  doCheck = false;
+                });
+                # Fix Sphinx - use older version compatible with Python 3.11
+                sphinx = pyPrev.buildPythonPackage rec {
+                  pname = "sphinx";
+                  version = "7.4.7";
+                  format = "pyproject";
+
+                  src = prev.fetchPypi {
+                    inherit pname version;
+                    sha256 = "sha256-bsImMH+V/hNkaHGu8OKr/+xmKdIDDJkvN8MONNLQaMc=";
+                  };
+
+                  nativeBuildInputs = with pyPrev; [ flit-core ];
+                  propagatedBuildInputs = with pyPrev; [
+                    sphinxcontrib-applehelp
+                    sphinxcontrib-devhelp
+                    sphinxcontrib-jsmath
+                    sphinxcontrib-htmlhelp
+                    sphinxcontrib-serializinghtml
+                    sphinxcontrib-qthelp
+                    jinja2
+                    pygments
+                    docutils
+                    snowballstemmer
+                    babel
+                    alabaster
+                    imagesize
+                    requests
+                    packaging
+                    importlib-metadata
+                  ];
+
+                  doCheck = false;
+                  pythonImportsCheck = [ "sphinx" ];
+                };
+              });
+            })
+          ];
         };
 
         # Rust toolchain
@@ -39,38 +106,38 @@
             pkg-config
 
             # Python for TUI and CLI
-            python311
-            python311Packages.textual
-            python311Packages.rich
-            python311Packages.pyyaml  # For secret management
-            python311Packages.cryptography  # For RSA encryption
-            python311Packages.requests  # For DNS provider APIs
+            python312
+            python312Packages.textual
+            python312Packages.rich
+            python312Packages.pyyaml  # For secret management
+            python312Packages.cryptography  # For RSA encryption
+            python312Packages.requests  # For DNS provider APIs
 
             # Google Drive backup dependencies
-            python311Packages.google-api-python-client
-            python311Packages.google-auth
-            python311Packages.google-auth-oauthlib
-            python311Packages.google-auth-httplib2
+            python312Packages.google-api-python-client
+            python312Packages.google-auth
+            python312Packages.google-auth-oauthlib
+            python312Packages.google-auth-httplib2
 
             # Google Cloud Storage backup dependencies
-            python311Packages.google-cloud-storage
+            python312Packages.google-cloud-storage
 
             # Vibe coding real-time dependencies
-            python311Packages.aiohttp  # Async web server
-            python311Packages.watchdog  # File system monitoring
-            python311Packages.websockets  # WebSocket support
-            python311Packages.anthropic  # Claude API for AI question generation
+            python312Packages.aiohttp  # Async web server
+            python312Packages.watchdog  # File system monitoring
+            python312Packages.websockets  # WebSocket support
+            python312Packages.anthropic  # Claude API for AI question generation
 
             # Code intelligence dependencies (symbol extraction, dependency analysis)
-            python311Packages.tree-sitter  # AST parsing engine
-            python311Packages.tree-sitter-grammars.tree-sitter-python
-            python311Packages.tree-sitter-grammars.tree-sitter-javascript
-            python311Packages.tree-sitter-grammars.tree-sitter-typescript
+            python312Packages.tree-sitter  # AST parsing engine
+            python312Packages.tree-sitter-grammars.tree-sitter-python
+            python312Packages.tree-sitter-grammars.tree-sitter-javascript
+            python312Packages.tree-sitter-grammars.tree-sitter-typescript
 
             # Graph analysis dependencies (community detection, clustering)
-            python311Packages.networkx  # Graph data structures
-            python311Packages.igraph  # Fast graph library
-            python311Packages.leidenalg  # Leiden algorithm
+            python312Packages.networkx  # Graph data structures
+            python312Packages.igraph  # Fast graph library
+            python312Packages.leidenalg  # Leiden algorithm
 
             # Runtime tools your CLI shells out to
             sops
@@ -81,6 +148,9 @@
             git
             just
             google-cloud-sdk  # gcloud CLI for GCS management
+
+            # NixOps4 for deployment orchestration
+            nixops4.packages.${system}.default
           ];
 
           # Environment variables useful for dev
@@ -152,7 +222,10 @@
 
             users.groups.${cfg.group} = {};
 
-            environment.systemPackages = [ cfg.package ];
+            environment.systemPackages = [
+              cfg.package
+              nixops4.packages.${pkgs.system}.default
+            ];
 
             # Make templedb available system-wide
             environment.variables = {

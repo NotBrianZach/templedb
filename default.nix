@@ -19,7 +19,9 @@ pkgs.stdenv.mkDerivation {
   pname = "templedb-tui";
   version = "1.0.0";
 
-  src = ./.;
+  # Filter source to only include Python files
+  # This prevents unnecessary rebuilds when non-source files change
+  src = pkgs.lib.sourceFilesBySuffices (pkgs.lib.cleanSource ./.) [ ".py" ];
 
   nativeBuildInputs = [ pkgs.makeWrapper ];
 

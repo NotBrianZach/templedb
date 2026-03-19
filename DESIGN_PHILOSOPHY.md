@@ -2,53 +2,69 @@
 
 > *"Normalization is not just a database principle - it's the key to maintaining truth in complex systems."*
 
-**Date**: 2026-02-23
-**Status**: Core Design Document
+**Date**: 2026-03-19
+**Status**: Core Design Document - Updated for Content Storage Consolidation v2
 
 ---
 
-## The Fundamental Problem: State Duplication at Scale
+## Core Thesis
 
-### The 5-Developer Team Example
+**TempleDB is a project management and version control system focused on simplifying and unifying underlying abstractions to create a clean and introspectable environment for AI-assisted development and deployment.**
 
-Your team has 5 developers working on a React app:
+By moving from files and environment variables to SQLite tables, your codebase becomes a **temple** - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
+
+Or, it's like a normalized version of:
+- **Fossil-SCM** (SQLite, relational version of git)
+- **Claude MCP** (API tuned for AI agent interactions)
+- **Superpowers** (hierarchical agent dispatch & contextualization)
+- **GitNexus** (dependency graph/clustering for AI contextualization)
+- **NixOps4** (deployment tool)
+- **SOPS** (secret management)
+
+We throw out of the temple those that would lend us technical debt in the form of **state duplication**, namely filesystem-centric tools like git, sops, CI/CD like Jenkins, and deployment tools like Docker. (Though in the case of git, it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for NixOS to tide us over until the day we can make some much more radical changes to operating systems).
+
+---
+
+## The Fundamental Problem: State Duplication
+
+### The Example: React Components Scattered Across Projects
+
+Your team has 5 projects using React:
 
 ```
-Developer A's Machine:
-├── main branch checkout      (50K LOC, 500MB node_modules)
-├── feature-auth checkout     (50K LOC, 500MB node_modules)
-└── bugfix-api checkout       (50K LOC, 500MB node_modules)
+webapp/
+├── src/components/Button.jsx       (500 lines)
+├── src/components/Modal.jsx        (300 lines)
+└── src/components/Form.jsx         (400 lines)
 
-Developer B's Machine:
-├── main branch checkout      (50K LOC, 500MB node_modules)
-├── feature-ui checkout       (50K LOC, 500MB node_modules)
-└── feature-payments checkout (50K LOC, 500MB node_modules)
+mobile-app/
+├── src/components/Button.jsx       (500 lines - DUPLICATE!)
+├── src/components/Modal.jsx        (300 lines - DUPLICATE!)
+└── src/components/Card.jsx         (250 lines)
 
-Developers C, D, E:
-└── 3 checkouts each × 3 devs = 9 more full copies
+admin-panel/
+├── components/Button.jsx           (500 lines - DUPLICATE!)
+├── components/Dashboard.jsx        (600 lines)
+└── node_modules/                   (500MB)
 
-CI/CD Server:
-├── 10 concurrent builds      (10 × 50K LOC, 10 × 500MB node_modules)
-└── Build artifacts cached    (5 versions × 100MB each)
+marketing-site/
+├── components/Button.jsx           (480 lines - SLIGHTLY DIFFERENT)
+└── .env.production                 (secrets scattered)
 
-Total State:
-- Source code: 50K LOC × 25 checkouts = 1.25M LOC duplicated
-- Dependencies: 500MB × 25 = 12.5GB of node_modules
-- Build artifacts: 500MB cached across all branches
+backend/
+├── .env.production                 (MORE secrets scattered)
+└── config/secrets.json             (YET MORE secrets)
 ```
 
-**Result**: Your 50,000 line codebase exists as 1.25 million lines across machines.
-
-**The Real Cost:**
-- Developer A updates `auth.js` on their branch
-- Developer B copies `auth.js` to their branch (doesn't know about A's fix)
-- CI builds both versions independently
-- Production has version C (from last week)
+**Result:**
+- `Button.jsx` exists in 4 places (2,000 lines total for a 500-line component)
+- Secrets scattered across 5 different `.env` files
+- Developer updates Button in webapp, mobile-app has stale version
 - **Which version is truth?**
 
-**Every git checkout, every branch, every node_modules is redundant state.**
+**Every duplicated React component, every scattered .env file is redundant state.**
 
-This isn't a tool problem - it's a **coordination problem that scales with team size.**
+This isn't a tool problem - it's a **normalization problem that creates technical debt.**
 
 ---
 
@@ -65,94 +81,104 @@ In database theory, normalization eliminates redundant data by:
 ### Why It Matters for Code
 
 Traditional code management tools (git, filesystems) treat code as text files:
-- **Files are duplicated** across branches, forks, local copies
-- **State is replicated** in .git metadata, node_modules, build artifacts
+- **Files are duplicated** across projects, branches, copies
+- **Components copied** instead of shared
+- **Secrets scattered** in `.env` files across filesystem
 - **Truth is fragmented** across filesystem, git, package managers
-- **Tracking overhead** grows with number of copies and coordination points
+- **Tracking overhead** grows with duplication
 
 **TempleDB inverts this**: The database is the source of truth.
 
 ---
 
-## The Friction of Duplication
+## The Pain of Duplication
 
-### Duplication Leads to Tracking Errors
+### 1. Duplicated Components
 
-When state exists in multiple places:
+**Traditional Approach:**
+```bash
+# Copy Button component to new project
+cp ../webapp/src/components/Button.jsx ./components/
 
+# Developer A updates Button in webapp
+vim webapp/src/components/Button.jsx
+
+# Developer B doesn't know, uses old Button in mobile-app
+# Result: 2 versions of Button diverge over time
 ```
-Traditional Filesystem:
-├── src/config.js              (version 1)
-├── dist/config.js             (version 1, built)
-├── .git/objects/abc123        (version 1, git)
-├── node_modules/dep/config.js (version 0.9, dependency)
-└── backup/config.js.bak       (version unknown)
 
-Which is truth?
-```
+**The Problem:**
+- Button exists in 4 places
+- Update one → must update all manually
+- Easy to forget, hard to track
+- No way to see "who uses Button?"
 
-**Tracking errors:**
-- Did you update all copies?
-- Which version is deployed?
-- What changed between versions?
-- Is the build in sync with source?
+**TempleDB Approach:**
+```bash
+# Register Button once as shared component
+templedb component add Button src/components/Button.jsx \
+  --type react_component --shared
 
-### Friction Scales with Codebase Size
+# Link to multiple projects (no duplication!)
+templedb component link webapp Button
+templedb component link mobile-app Button
+templedb component link admin-panel Button
 
-| Codebase Size | Duplication Sites | Tracking Cost |
-|---------------|-------------------|---------------|
-| Small (1K LOC) | 3-5 copies | Low |
-| Medium (10K LOC) | 10-20 copies | Medium |
-| Large (100K LOC) | 50-100 copies | **High** |
-| Enterprise (1M+ LOC) | 500+ copies | **Exponential** |
+# Update Button once
+templedb component update Button src/components/Button.jsx
+# → All 3 projects automatically get update
 
-**Examples:**
-- Git branches: O(n) copies of entire codebase
-- node_modules: Duplicate dependencies across projects
-- Build artifacts: Multiple versions in CI/CD
-- Documentation: Syncing docs with code
-- Configurations: Dev, staging, prod configs drift
-
-### The Real Cost
-
-1. **Mental Overhead**: Developer must track which version is where
-2. **Merge Conflicts**: Reconciling divergent copies
-3. **Testing Complexity**: Which version are you testing?
-4. **Deployment Risk**: Did you deploy the right version?
-5. **Onboarding Friction**: New developers lost in duplicates
-
-**This friction grows with the number of duplicate copies and coordination points.**
-
----
-
-## TempleDB Solution: Normalized State in SQLite
-
-### Single Source of Truth
-
-```sql
--- File exists once per project in database
-SELECT * FROM project_files WHERE project_id = 1 AND file_path = 'src/config.js';
-
--- id | project_id | file_path      | file_type_id | ...
--- 42 | 1          | src/config.js  | 12           | ...
-
--- NOTE: File paths are only unique within a project, not globally!
--- Multiple projects can have 'src/config.js' - always filter by project_id
-
--- All references point to this record
-SELECT * FROM file_versions WHERE file_id = 42;
-SELECT * FROM file_contents WHERE file_id = 42;
-SELECT * FROM vcs_file_changes WHERE file_id = 42;
+# See who uses it
+templedb component usage Button
+# → Shows: webapp, mobile-app, admin-panel
 ```
 
 **Benefits:**
-1. File metadata stored once (path, type, LOC)
-2. Content versioned in `file_versions` (history)
-3. Changes tracked in `vcs_file_changes` (audit)
-4. No duplication between projects
-5. Cross-project queries instant
+- Button stored **once** in database
+- 3 projects reference it (no copies)
+- Update once → affects all users
+- Query usage instantly
 
-### Normalization Eliminates Duplication
+### 2. Scattered Secrets
+
+**Traditional Approach:**
+```bash
+webapp/.env.production          # Database password
+mobile-app/.env.production      # Same password copied
+backend/.env.production         # Same password again
+marketing-site/config/.env      # DIFFERENT password (staging?)
+admin-panel/secrets.json        # JSON format, same secrets
+```
+
+**The Problem:**
+- Same secret in 5 places
+- Update password → must update 5 files
+- Easy to miss one → production breaks
+- No encryption → secrets in git history
+- No audit trail → who accessed what?
+
+**TempleDB Approach:**
+```bash
+# Store secret once, encrypted with age
+templedb secret edit myproject --profile production
+# Opens editor, saves encrypted to database
+
+# All projects query database for secrets
+templedb secret export myproject --format shell
+# → Decrypts and outputs to environment
+
+# Audit trail built-in
+SELECT * FROM secret_history WHERE project_id = 1;
+```
+
+**Benefits:**
+- Secrets stored **once**, encrypted
+- All projects query database
+- Update once → all environments get it
+- Age-encrypted (Yubikey support)
+- Full audit trail
+
+### 3. Version Control Overhead
 
 **Traditional Git:**
 ```bash
@@ -168,7 +194,6 @@ git branch bugfix-3   # Full copy
 ```sql
 -- Branches reference same files
 INSERT INTO vcs_branches (name, project_id) VALUES ('feature-1', 1);
-INSERT INTO vcs_branches (name, project_id) VALUES ('feature-2', 1);
 
 -- Only changes stored, not full copies
 INSERT INTO vcs_file_changes (branch_id, file_id, change_type)
@@ -177,84 +202,331 @@ VALUES (1, 42, 'modified');
 -- Result: 1x storage, single source of truth
 ```
 
-### Relationships, Not Copies
+---
 
+## TempleDB Solution: Unified Normalization
+
+### Architecture After Content Storage Consolidation (v2)
+
+**Before (7 overlapping tables):**
 ```
-Database-Normalized Structure:
-┌────────────┐      ┌──────────────┐      ┌─────────────┐
-│  projects  │──┐   │ project_files│──┬──│file_versions│
-└────────────┘  │   └──────────────┘  │  └─────────────┘
-                │                     │
-                ├───│file_contents│◄──┘
-                │   └─────────────┘
-                │
-                └───│vcs_branches│───│vcs_file_changes│
-                    └────────────┘   └────────────────┘
-
-Single file record = source of truth
-All other tables reference it (foreign keys)
+content_blobs (base storage)
+├── file_versions (duplicate content - DELETED)
+├── file_snapshots (duplicate content - DELETED)
+├── vcs_working_state (inline content - DELETED)
+├── vcs_staging (inline content - DELETED)
+└── components (duplicate metadata - DELETED)
 ```
 
-**Update propagation:**
+**After (2 core tables + mapping):**
+```
+content_blobs (content-addressable storage + compression)
+├── project_files (enhanced with is_shared flag)
+├── shared_file_references (cross-project mapping)
+└── file_contents (lightweight reference)
+```
+
+### Single Source of Truth
+
 ```sql
--- Update file once
-UPDATE project_files SET lines_of_code = 100 WHERE id = 42;
+-- Component exists once in database
+SELECT * FROM project_files
+WHERE component_name = 'Button' AND is_shared = 1;
 
--- All references automatically updated (joins)
-SELECT * FROM files_with_types_view WHERE id = 42;  -- Shows new LOC
-SELECT * FROM file_version_history_view WHERE file_id = 42;  -- History intact
+-- id | project_id | file_path              | component_name | is_shared
+-- 42 | 1          | src/components/Button  | Button         | 1
+
+-- Content stored once (content-addressable)
+SELECT * FROM file_contents WHERE file_id = 42;
+-- file_id | content_hash                              | file_size
+-- 42      | sha256:abc123...                          | 15234
+
+SELECT * FROM content_blobs WHERE hash_sha256 = 'sha256:abc123...';
+-- hash    | content_text | compression | original_size | file_size
+-- abc123  | [compressed] | zlib        | 50000         | 15234
+
+-- All projects reference it (no copies!)
+SELECT * FROM shared_file_references WHERE source_file_id = 42;
+-- source_file_id | using_project_id | alias
+-- 42             | 2                | Button
+-- 42             | 3                | PrimaryButton
+-- 42             | 4                | Button
 ```
+
+**Benefits:**
+1. Button stored **once** (50KB original → 15KB compressed = 70% savings)
+2. 3 projects reference it (zero duplication)
+3. Update propagates automatically
+4. Query usage instantly
+5. Compression transparent
+
+### Compression: 60-80% Storage Savings
+
+**Content-Addressable Storage with Compression:**
+```sql
+CREATE TABLE content_blobs (
+    hash_sha256 TEXT PRIMARY KEY,              -- Content-addressable
+    content_blob BLOB,                         -- Compressed content
+    content_type TEXT NOT NULL,                -- 'text' or 'binary'
+
+    -- Size tracking
+    file_size_bytes INTEGER NOT NULL,          -- Stored size (compressed)
+    original_size_bytes INTEGER NOT NULL,      -- Uncompressed size
+
+    -- Compression
+    compression TEXT DEFAULT 'none'            -- 'none', 'zlib', 'delta'
+        CHECK(compression IN ('none', 'zlib', 'delta')),
+    delta_base_hash TEXT REFERENCES content_blobs(hash_sha256),
+
+    -- Statistics
+    reference_count INTEGER DEFAULT 0,
+
+    -- Immutability
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    is_deleted BOOLEAN DEFAULT 0               -- Soft delete
+);
+```
+
+**Results:**
+- **zlib compression**: 3-5x reduction (Button.jsx: 50KB → 15KB)
+- **Delta compression**: 5-10x for similar files
+- **Deduplication**: Same content = same hash (stored once)
+- **Total savings**: 60-80% storage reduction
+
+**Example:**
+```sql
+-- Before consolidation: 7 tables storing content
+SELECT SUM(file_size_bytes) FROM file_versions;        -- 100MB
+SELECT SUM(file_size_bytes) FROM file_snapshots;       -- 100MB
+SELECT SUM(content_size) FROM vcs_working_state;       -- 100MB
+-- Total: 300MB
+
+-- After consolidation: 1 table with compression
+SELECT SUM(file_size_bytes) FROM content_blobs;        -- 50MB
+SELECT SUM(original_size_bytes) FROM content_blobs;    -- 300MB
+-- Savings: 250MB (83%)
+```
+
+### Cross-Project Component Sharing
+
+**Schema:**
+```sql
+-- Shared component in special "shared-components" project
+INSERT INTO project_files (
+    project_id,      -- shared-components project
+    component_name,  -- 'Button'
+    is_shared,       -- true
+    file_path
+) VALUES (1, 'Button', 1, 'src/components/Button.jsx');
+
+-- Cross-project references
+CREATE TABLE shared_file_references (
+    source_file_id INTEGER REFERENCES project_files(id),
+    using_project_id INTEGER REFERENCES projects(id),
+    alias TEXT,  -- Import as different name
+    UNIQUE(source_file_id, using_project_id)
+);
+
+-- Link Button to 3 projects
+INSERT INTO shared_file_references VALUES
+    (42, 2, 'Button'),           -- webapp
+    (42, 3, 'PrimaryButton'),    -- mobile-app (aliased)
+    (42, 4, 'Button');           -- admin-panel
+```
+
+**Benefits:**
+- **No duplication**: Button stored once, referenced 3 times
+- **Atomic updates**: Update Button once, all projects see it
+- **Impact analysis**: Query who uses Button before updating
+- **Aliasing**: Import as different name per project
+- **Version control**: Full history of Button changes
 
 ---
 
-## ACID Properties for Multi-Agent Orchestration
+## Simplifying Abstractions
 
-### Why ACID Matters
+### What We Unified
 
-When multiple agents (human developers, AI assistants, CI/CD pipelines) work on the same codebase:
+**Before (Scattered):**
+```
+Files:
+- Git repositories (version control)
+- Filesystem checkouts (duplicated)
+- node_modules (dependencies)
+- dist/ (build artifacts)
 
-**Without ACID (traditional filesystem):**
-- Agent 1 modifies `config.js`
-- Agent 2 modifies `config.js` simultaneously
-- Both write to filesystem
-- **Race condition**: Last writer wins, changes lost
+Secrets:
+- .env files (scattered)
+- secrets.json (different format)
+- config/production.yml (yet another format)
 
-**With ACID (TempleDB):**
-- **Atomicity**: Entire change succeeds or fails
-- **Consistency**: Database constraints enforced
-- **Isolation**: Agents don't interfere
-- **Durability**: Changes persisted reliably
+Components:
+- Copied across projects (duplicated)
+- No tracking of usage
+- Manual synchronization
+```
 
-### Multi-Agent Workflow Example
+**After (Unified in Database):**
+```sql
+-- Everything in normalized tables
+SELECT * FROM content_blobs;           -- All content (compressed)
+SELECT * FROM project_files;           -- All files (with component names)
+SELECT * FROM shared_file_references;  -- Cross-project sharing
+SELECT * FROM secret_blobs;            -- All secrets (encrypted)
+SELECT * FROM nix_environments;        -- All dependencies
+SELECT * FROM deployment_targets;      -- All deployment config
+```
+
+**Result:**
+- **One abstraction**: SQLite tables
+- **One query language**: SQL
+- **One source of truth**: Database
+- **One tool**: templedb CLI
+
+### Clean and Introspectable
+
+**Traditional (Opaque):**
+```bash
+# Where is Button used?
+grep -r "import.*Button" .  # Misses dynamic imports
+find . -name "*Button*"     # Misses renamed imports
+# Manual, error-prone, incomplete
+
+# What secrets exist?
+find . -name ".env*"        # Maybe finds them?
+cat .env.production         # Unencrypted!
+# No audit trail
+
+# Who changed config.js?
+git log config.js           # Only git history
+# Doesn't show: who deployed it, when, why
+```
+
+**TempleDB (Transparent):**
+```sql
+-- Where is Button used?
+SELECT p.slug, sfr.alias
+FROM shared_file_references sfr
+JOIN projects p ON sfr.using_project_id = p.id
+JOIN project_files pf ON sfr.source_file_id = pf.id
+WHERE pf.component_name = 'Button';
+-- Exact, instant, complete
+
+-- What secrets exist?
+SELECT profile, array_length(string_to_array(decrypted_content, '\n'), 1) as line_count
+FROM secret_blobs WHERE project_id = 1;
+-- Encrypted at rest, queryable metadata
+
+-- Who changed config.js?
+SELECT c.author, c.commit_message, c.commit_timestamp
+FROM vcs_commits c
+JOIN vcs_file_changes fc ON fc.commit_id = c.id
+JOIN project_files pf ON fc.file_id = pf.id
+WHERE pf.file_path = 'config.js'
+ORDER BY c.commit_timestamp DESC;
+-- Full audit trail
+```
+
+**Benefits:**
+- **SQL queries**: Fast, precise, composable
+- **Introspectable**: See everything in database
+- **Queryable**: Cross-project analysis
+- **Auditable**: Full history preserved
+
+---
+
+## AI-Assisted Development
+
+### Why This Matters for AI Agents
+
+**Traditional Filesystem (Opaque):**
+- AI must `find` and `grep` to discover code
+- No structured knowledge of dependencies
+- Can't query "show me all React hooks"
+- Secrets hidden in scattered files
+- No coordination between agents
+
+**TempleDB (Transparent):**
+- AI queries database directly via MCP
+- Structured schema with relationships
+- SQL queries answer complex questions
+- ACID transactions prevent conflicts
+- Full audit trail of AI actions
+
+### Example: AI Agent Using TempleDB MCP
+
+```bash
+# User asks: "Find all unused React components"
+
+# AI agent queries database via MCP:
+mcp_templedb_query(query="""
+  SELECT pf.component_name, pf.file_path
+  FROM project_files pf
+  JOIN file_types ft ON pf.file_type_id = ft.id
+  WHERE ft.type_name = 'react_component'
+    AND pf.id NOT IN (
+      SELECT DISTINCT dependency_file_id
+      FROM file_dependencies
+      WHERE dependency_type = 'imports'
+    )
+""")
+
+# Returns:
+# - UnusedButton (src/components/UnusedButton.jsx)
+# - OldModal (src/components/OldModal.jsx)
+
+# AI: "Found 2 unused components. Delete them?"
+# User: "Yes"
+
+# AI commits deletion atomically:
+mcp_templedb_vcs_add(project="webapp", files=[
+  "src/components/UnusedButton.jsx",
+  "src/components/OldModal.jsx"
+])
+mcp_templedb_vcs_commit(
+  project="webapp",
+  message="Remove unused components: UnusedButton, OldModal",
+  author="Claude <noreply@anthropic.com>"
+)
+```
+
+**This is only possible with normalized database storage.**
+
+### Multi-Agent Coordination
+
+**ACID Transactions Prevent Conflicts:**
 
 ```python
-# Agent 1: Refactoring files
+# Agent 1: Refactoring Button component
 with transaction():
-    update_file(file_id=42, new_content="refactored")
-    update_file(file_id=43, new_content="refactored")
-    create_commit(message="Refactor complete")
+    update_component("Button", new_content)
+    update_all_references("Button")
+    commit("Refactor Button to use hooks")
 # Atomic: All succeed or all fail
 
-# Agent 2: Running tests simultaneously
+# Agent 2: Adding new feature using Button (simultaneously)
 with transaction():
-    results = run_tests_on_file(file_id=42)
-    record_test_results(results)
-# Isolated: Sees consistent snapshot of data
+    component = get_component("Button")  # Gets consistent snapshot
+    create_new_component("LoginButton", uses=component)
+    commit("Add LoginButton using Button")
+# Isolated: Doesn't see Agent 1's in-progress changes
+
+# Agent 3: Querying Button usage (simultaneously)
+usage = query_component_usage("Button")
+# Consistent: Sees either before or after, never partial state
 ```
 
-### Coordination Benefits
+**Benefits:**
+- **Atomicity**: Multi-step operations all-or-nothing
+- **Isolation**: Agents don't interfere
+- **Consistency**: Database enforces constraints
+- **Durability**: Changes reliably persisted
 
-1. **Atomic Commits**: Multi-file changes are all-or-nothing
-2. **Isolation Levels**: Agents see consistent views
-3. **Conflict Detection**: Database enforces constraints
-4. **Audit Trail**: Every change logged with transaction ID
-5. **Rollback Safety**: Undo without losing other work
-
-**This is impossible with filesystem-based tools.**
+**This enables safe multi-agent development.**
 
 ---
 
-## The Nix FHS Denormalization Workflow
+## The Workflow: Temporary Denormalization
 
 ### The Problem with Pure Normalization
 
@@ -270,27 +542,28 @@ with transaction():
 - Using existing tools (expect files)
 - Developer ergonomics (prefer familiar workflows)
 
-### The Solution: Temporary Denormalization
+### The Solution: Checkout/Commit Workflow
 
-TempleDB uses **Nix FHS environments** to temporarily denormalize:
+TempleDB uses **temporary denormalization** to preserve developer ergonomics:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  NORMALIZED STATE (Database)                            │
 │  ┌────────────────────────────────────────────────┐    │
-│  │  projects, files, versions all normalized      │    │
+│  │  Files, components, secrets all normalized     │    │
 │  │  Single source of truth, ACID guarantees       │    │
+│  │  Compressed content (60-80% savings)           │    │
 │  └────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
                         ↓ checkout
                         ↓
 ┌─────────────────────────────────────────────────────────┐
-│  DENORMALIZED WORKSPACE (FHS Environment)               │
+│  DENORMALIZED WORKSPACE (Filesystem)                    │
 │  ┌────────────────────────────────────────────────┐    │
-│  │  nix-shell with buildFHSUserEnv                │    │
-│  │  Files checked out to /tmp/workspace           │    │
-│  │  All dependencies available (node, python)     │    │
-│  │  Developer can edit, build, test normally      │    │
+│  │  Files extracted to /tmp/workspace             │    │
+│  │  Developer edits with vim, vscode, etc         │    │
+│  │  Build tools work normally                     │    │
+│  │  Temporary state (ephemeral)                   │    │
 │  └────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
                         ↓ commit
@@ -299,247 +572,126 @@ TempleDB uses **Nix FHS environments** to temporarily denormalize:
 │  NORMALIZED STATE (Database)                            │
 │  ┌────────────────────────────────────────────────┐    │
 │  │  Changes re-normalized back to database        │    │
+│  │  Content re-compressed                         │    │
 │  │  Workspace discarded (ephemeral)               │    │
 │  └────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### The Workflow
+### Example Workflow
 
-1. **Start Normalized** (Database)
-   - All files in SQLite
-   - Single source of truth
-   - Zero duplication
+```bash
+# 1. Start: Everything normalized in database
+templedb component list --shared-only
+# Button, Modal, Form (all compressed in database)
 
-2. **Temporarily Denormalize** (FHS Environment)
-   ```bash
-   templedb env enter myproject dev
-   # Creates isolated FHS environment with:
-   # - Files checked out to temporary directory
-   # - All dependencies from Nix packages
-   # - Shell with familiar tools (vim, git, node)
-   ```
+# 2. Checkout: Temporary denormalization
+templedb project checkout webapp /tmp/workspace
+cd /tmp/workspace
+# Files extracted, decompressed to filesystem
 
-3. **Edit Efficiently** (Familiar Tools)
-   ```bash
-   # In FHS environment, use normal tools
-   vim src/config.js
-   npm run build
-   pytest tests/
-   git status  # Works on checked-out files
-   ```
+# 3. Edit: Familiar tools
+vim src/components/Button.jsx  # Make changes
+npm run build                  # Test build
+git status                     # Works on files
 
-4. **Re-normalize** (Back to Database)
-   ```bash
-   # Commit changes back to database
-   templedb vcs commit -m "Updated config"
-   # Files: Temporary workspace → Normalized database
-   # Exit FHS environment (ephemeral workspace discarded)
-   ```
+# 4. Commit: Re-normalize
+templedb project commit webapp /tmp/workspace -m "Update Button"
+# Changes: Filesystem → Database (compressed, normalized)
 
-### Why This Works
-
-**Efficiency:**
-- Edit with fast, familiar tools (vim, emacs, VSCode)
-- Build with existing toolchains (npm, make, cargo)
-- Test with native runners (jest, pytest, cargo test)
-- No learning curve for developers
-
-**Normalization:**
-- Database remains source of truth
-- Workspace is ephemeral (can be recreated)
-- Commits atomically update database
-- No persistent duplication
-
-**Reproducibility (Nix):**
-- FHS environment is reproducible
-- Same dependencies every time
-- Defined in database (`nix_environments` table)
-- Generated on-demand from database state
-
-### Example: Multi-Developer Workflow
-
-A 5-person team working on a React app:
-
-1. **Normalized** in TempleDB:
-   ```bash
-   templedb project import webapp
-   # 1,247 files tracked once in database
-   # All 5 devs query same source of truth
-   ```
-
-2. **Developer A** creates feature branch:
-   ```bash
-   templedb env enter webapp dev
-   # Temporary checkout to /tmp/workspace-abc123
-   vim src/auth.js  # Make changes
-   npm run build    # Test locally
-   ```
-
-3. **Developer B** works simultaneously on different feature:
-   ```bash
-   templedb env enter webapp dev
-   # Different temporary workspace: /tmp/workspace-xyz789
-   vim src/payments.js  # No conflicts with A
-   npm test            # Isolated environment
-   ```
-
-4. **Both commit** back to normalized database:
-   ```bash
-   # Developer A
-   templedb vcs commit -m "Add OAuth support"
-   # Files: Temp workspace → Database (atomic)
-
-   # Developer B (seconds later)
-   templedb vcs commit -m "Add Stripe integration"
-   # ACID ensures no conflicts, both commits tracked
-   ```
-
-**Benefits:**
-- Single source of truth (1 copy, not 25)
-- Atomic commits (multi-file changes safe)
-- Isolated workspaces (no stepping on each other)
-- Instant sync (database query, not git pull)
-- Zero node_modules duplication (defined in DB, materialized on-demand)
-
----
-
-## Comparison: Traditional vs TempleDB
-
-### Traditional Filesystem + Git
-
-```
-Duplication:
-- Source files in working directory
-- Source files in .git/objects
-- Source files in stash
-- Source files in each branch
-- Build artifacts in dist/
-- Dependencies in node_modules/
-- Docs duplicate code examples
-
-Tracking:
-- Git tracks files as blobs
-- Filesystem has no knowledge of versions
-- node_modules duplicated per project
-- No cross-project queries
-- Merge conflicts manual resolution
-
-Multi-Agent:
-- No atomicity (partial commits possible)
-- No isolation (race conditions)
-- Limited concurrency (file locks)
-```
-
-**Friction scales with:**
-- Number of branches: O(n) duplication
-- Number of projects: O(m) duplication
-- Number of agents: O(k) conflicts
-- **Total: O(n × m × k) complexity**
-
-### TempleDB
-
-```
-Normalization:
-- Files stored once in database
-- Versions reference files (not duplicate)
-- Branches reference versions (not copy)
-- Projects share file type definitions
-- Content deduplicated (same content = same hash)
-- Dependencies tracked in db (not copied)
-
-Tracking:
-- Database tracks everything
-- SQL queries instant
-- Cross-project analysis built-in
-- Automatic consistency checks
-- ACID guarantees
-
-Multi-Agent:
-- Atomic transactions
-- Isolation levels
-- Concurrent reads
-- Serialized writes
-- Automatic conflict detection
-
-Ergonomics:
-- Nix FHS for editing
-- Temporary denormalization
-- Familiar tools work
-- Re-normalize on commit
+# 5. Workspace discarded
+rm -rf /tmp/workspace
+# Database remains source of truth
 ```
 
 **Benefits:**
-- Database normalization: Single copy per file (no duplication)
-- FHS environments: Fast checkout to temporary workspace
-- ACID transactions: Safe concurrent operations
-- **Storage: Constant factor improvement** (k× fewer copies)
+- **Normalized storage**: Single source of truth, compressed
+- **Familiar editing**: vim, vscode, emacs all work
+- **Ephemeral workspaces**: No persistent duplication
+- **ACID commits**: Atomic, safe updates
 
 ---
 
 ## Real-World Impact
 
-### Team Development Results
+### Storage Savings Example
 
-**Before** (Traditional Git + Filesystem):
-- 5 developers × 3 branches each = 15 full checkouts
-- 50K LOC × 15 = 750K lines of code on disk
-- 500MB node_modules × 15 = 7.5GB dependencies
-- 10 CI builds running = +5GB more duplication
-- Mental overhead: "Did I merge the latest? Which branch am I on?"
-- Merge conflicts: Manual 3-way merges, lost work, blocking
+**Before (Scattered, Duplicated):**
+```
+webapp/
+├── src/components/Button.jsx       (50KB × 1)
+├── node_modules/                   (500MB)
 
-**After** (Normalized in TempleDB):
-- 50K LOC stored once = 50K lines in database
-- Dependencies defined once, materialized on-demand
-- Zero merge conflicts (ACID transactions)
-- Instant sync (SQL query, not git pull/push)
-- Single source of truth: "What's in main?" → Database query, 10ms
+mobile-app/
+├── src/components/Button.jsx       (50KB × 1)  # Duplicate!
+├── node_modules/                   (500MB)     # Duplicate!
+
+admin-panel/
+├── components/Button.jsx           (50KB × 1)  # Duplicate!
+├── node_modules/                   (500MB)     # Duplicate!
+
+Total:
+- Button: 150KB (3 copies of 50KB)
+- node_modules: 1.5GB (3 copies of 500MB)
+```
+
+**After (Normalized, Compressed):**
+```sql
+-- Button stored once, compressed
+SELECT * FROM content_blobs WHERE hash_sha256 = 'abc123...';
+-- file_size: 15KB (compressed from 50KB)
+-- reference_count: 3 (webapp, mobile-app, admin-panel)
+
+-- Dependencies defined once
+SELECT * FROM nix_environments WHERE project_id = 1;
+-- Generated on-demand, not duplicated
+
+Total:
+- Button: 15KB (1 copy, compressed)
+- node_modules: 0KB (defined in DB, materialized on-demand)
+```
+
+**Savings:**
+- Button: 150KB → 15KB = **90% reduction**
+- Dependencies: 1.5GB → ~0 = **~100% reduction**
+
+### Multi-Project Component Updates
+
+**Before:**
+```bash
+# Update Button in webapp
+vim webapp/src/components/Button.jsx
+git commit -m "Update Button"
+
+# Must manually update mobile-app
+cp webapp/src/components/Button.jsx mobile-app/src/components/
+cd mobile-app && git commit -m "Update Button"
+
+# Must manually update admin-panel
+cp webapp/src/components/Button.jsx admin-panel/components/
+cd admin-panel && git commit -m "Update Button"
+
+# Easy to forget, hard to track
+```
+
+**After:**
+```bash
+# Update Button once
+templedb component update Button src/components/Button.jsx
+
+# Query shows impact
+templedb component usage Button
+# → webapp, mobile-app, admin-panel
+
+# All projects automatically get update
+# Single source of truth, atomic update
+```
 
 **Benefits:**
-- Storage: 15× reduction (750K LOC → 50K LOC)
-- Dependencies: 15× reduction (7.5GB → isolated Nix envs)
-- Coordination: O(n) vs O(n²) (no pairwise comparisons)
-- Merge conflicts: Zero (database handles it)
-- CI/CD: Query database instead of checkout → 100× faster
-- Multi-agent safe: ACID transactions, isolated workspaces
-
-### Honest Performance Comparison
-
-See [SYNCHRONIZATION_COST_ANALYSIS.md](SYNCHRONIZATION_COST_ANALYSIS.md) for detailed analysis.
-
-**Storage:**
-- Traditional: k checkouts × n files = **O(k × n) storage**
-- TempleDB: 1 copy per unique file = **O(n) storage**
-- **Improvement: 10-50× storage savings** (O(k) factor)
-
-**Coordination Costs (The Real Win):**
-- **Verify consistency:**
-  - Traditional: O(k²) pairwise comparisons → O(k² × n) total
-  - TempleDB: O(k) comparisons vs source → O(k × n) total
-  - **Improvement: O(k) factor** (e.g., 10 checkouts: 45 comparisons → 10)
-
-- **Detect merge conflicts:**
-  - Traditional: O(n × m²) worst-case for three-way merge
-  - TempleDB: O(n) with version-based detection
-  - **Improvement: O(m²) factor per file**
-
-- **Dependency queries:**
-  - Traditional: O(n × m) sequential scan
-  - TempleDB: O(log n + k) indexed lookup
-  - **Improvement: O(n) factor when k << n**
-
-**When This Matters:**
-- As teams grow → more checkouts (k increases)
-- As codebase grows → more files (n increases)
-- If k scales with n (e.g., one branch per feature) → **O(n²) vs O(n)**
-
-**Real Benefits:**
-1. **Coordination efficiency:** O(k) factor in verification (quadratic → linear)
-2. **Storage efficiency:** 10-50× fewer file copies
-3. **ACID transactions:** Safe concurrent operations
-4. **SQL queries:** O(log n) indexed lookups vs O(n) scans
-5. **Single source of truth:** Simplified mental model
+- Update once → affects all users
+- Impact analysis before updating
+- No manual copying
+- Audit trail of changes
 
 ---
 
@@ -549,25 +701,61 @@ See [SYNCHRONIZATION_COST_ANALYSIS.md](SYNCHRONIZATION_COST_ANALYSIS.md) for det
 
 Every piece of state stored once in SQLite. References, not copies.
 
-### 2. Duplication Causes Tracking Errors
+**Results:**
+- Components stored once, referenced many times
+- Secrets stored once, encrypted
+- Content compressed (60-80% savings)
 
-Multiple versions of truth → conflicts, inconsistency, mental overhead.
+### 2. Unify Underlying Abstractions
 
-### 3. Storage Overhead Scales with Checkouts
+Replace scattered tools with unified database:
+- Files → SQLite tables
+- Git → VCS tables
+- .env → secret_blobs
+- Components → project_files + shared_file_references
 
-Multiple checkouts multiply storage: O(k × n) where k = number of active checkouts. TempleDB stores each file once: O(n). This is a constant-factor improvement (k×), not asymptotic.
+**Results:**
+- One abstraction: database tables
+- One query language: SQL
+- One source of truth: database
 
-### 4. ACID Enables Multi-Agent Orchestration
+### 3. Create Clean and Introspectable Environment
 
-Transactions, isolation, consistency for concurrent work.
+Everything queryable via SQL:
+- Cross-project analysis
+- Impact queries
+- Audit trails
+- Component usage
+
+**Results:**
+- AI agents can query structured data
+- Developers can introspect state
+- No hidden state
+
+### 4. Optimize for AI-Assisted Development
+
+Structured schema enables:
+- MCP tools for direct database access
+- ACID transactions for multi-agent safety
+- SQL queries for complex analysis
+- Audit trails for AI actions
+
+**Results:**
+- AI agents work safely together
+- Atomic operations prevent conflicts
+- Full history preserved
 
 ### 5. Temporary Denormalization for Efficiency
 
-Nix FHS environments provide familiar editing workflows.
+Checkout/commit workflow:
+- Normalize in database (storage)
+- Denormalize to filesystem (editing)
+- Re-normalize after editing (commit)
 
-### 6. Re-normalize to Preserve Truth
-
-Commit changes back to normalized database state.
+**Results:**
+- Familiar tools work (vim, vscode)
+- No persistent duplication
+- Developer ergonomics preserved
 
 ---
 
@@ -576,6 +764,7 @@ Commit changes back to normalized database state.
 ### From Terry Davis (TempleOS)
 
 > *"An operating system is a temple."*
+> *"God's temple is everything."*
 
 Everything has its place. No duplication. Transparent design.
 
@@ -588,39 +777,45 @@ Your codebase is a temple:
 - **No waste** (zero duplication)
 - **Sacred space** (ACID guarantees)
 
-### The Cathedral Metaphor
+### The Temple Metaphor
 
-Like a cathedral:
+By moving from files and environment variables to SQLite tables, your codebase becomes a **temple**:
+
 - **Foundation** = Database schema (unchanging)
 - **Structure** = Normalized relationships (solid)
+- **Sacred artifacts** = Your code (preserved, compressed)
 - **Worship space** = Query interface (accessible)
-- **Artifacts** = Your code (preserved)
-- **Congregation** = Developers/agents (coordinated)
+- **Congregation** = Developers + AI agents (coordinated)
 
 ---
 
 ## Conclusion
 
-TempleDB's design philosophy is simple:
+TempleDB's design philosophy:
 
+**Simplify and unify underlying abstractions.**
 **Normalize state to eliminate duplication.**
-**Use ACID to coordinate agents.**
-**Temporarily denormalize (Nix FHS) for efficiency.**
-**Re-normalize to preserve truth.**
+**Create clean, introspectable environment.**
+**Optimize for AI-assisted development.**
 
 This approach:
-- Eliminates tracking errors
-- Scales to massive codebases
-- Enables multi-agent workflows
-- Preserves developer ergonomics
-- Provides database superpowers
+- Eliminates duplicate components (60-80% storage savings)
+- Unifies scattered state (files, secrets, config → database)
+- Enables AI agent coordination (ACID, structured queries)
+- Preserves developer ergonomics (checkout/commit workflow)
+- Provides database superpowers (SQL queries, cross-project analysis)
 
-Duplication creates k× storage overhead and coordination complexity. Normalization eliminates redundancy and enables powerful queries.
+**By moving to normalized SQLite tables:**
+- Components stored once, shared across projects
+- Secrets encrypted once, queried everywhere
+- Content compressed transparently
+- AI agents query structured data
+- Developers work with familiar tools
 
-**Choose normalization. Eliminate waste.**
+**Choose normalization. Eliminate waste. Build a temple.**
 
 ---
 
 *"In the temple, there is only one truth, stored in one place, queryable by all."*
 
-**TempleDB - Normalized code management for the age of AI agents**
+**TempleDB - A sacred, organized space for AI-assisted development**

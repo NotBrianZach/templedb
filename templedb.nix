@@ -11,7 +11,15 @@ pkgs.python3Packages.buildPythonApplication rec {
   pyproject = true;
   build-system = with pkgs.python3Packages; [ setuptools ];
 
-  src = ./.;
+  # Filter source to only include files needed for build
+  # This prevents unnecessary rebuilds when non-source files change
+  src = lib.sourceFilesBySuffices (lib.cleanSource ./.) [
+    ".py"
+    ".toml"
+    ".md"
+    ".sql"
+    "tdb"  # Include the tdb wrapper script
+  ];
 
   propagatedBuildInputs = with pkgs.python3Packages; [
     # Core dependencies

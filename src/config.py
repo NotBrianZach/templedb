@@ -7,18 +7,27 @@ All configuration values defined in one place
 import os
 from pathlib import Path
 
-# Database
-DB_PATH = os.environ.get(
-    'TEMPLEDB_PATH',
-    os.path.expanduser("~/.local/share/templedb/templedb.sqlite")
-)
-DB_DIR = os.path.dirname(DB_PATH)
+# Database - handle sudo properly
+def _get_db_path():
+    """Get database path, using real user's home when run with sudo"""
+    if 'TEMPLEDB_PATH' in os.environ:
+        return os.environ['TEMPLEDB_PATH']
+
+    # When run with sudo, use SUDO_USER's home
+    sudo_user = os.environ.get('SUDO_USER')
+    if sudo_user:
+        return f'/home/{sudo_user}/.local/share/templedb/templedb.sqlite'
+    else:
+        return os.path.expanduser("~/.local/share/templedb/templedb.sqlite")
+
+DB_PATH = _get_db_path()
+DB_DIR = Path(DB_PATH).parent
 
 # Ensure database directory exists
 os.makedirs(DB_DIR, exist_ok=True)
 
 # Directories
-NIX_ENV_DIR = os.path.join(DB_DIR, "nix-envs")
+NIX_ENV_DIR = DB_DIR / "nix-envs"
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 
 # Editor
@@ -57,8 +66,8 @@ BLOB_CHUNK_SIZE = int(os.environ.get(
 ))
 
 # Blob storage directories
-BLOB_STORAGE_DIR = os.path.join(DB_DIR, "blobs")
-BLOB_CACHE_DIR = os.path.join(DB_DIR, "blob-cache")
+BLOB_STORAGE_DIR = DB_DIR / "blobs"
+BLOB_CACHE_DIR = DB_DIR / "blob-cache"
 
 # Compression settings
 BLOB_COMPRESSION_ENABLED = os.environ.get(

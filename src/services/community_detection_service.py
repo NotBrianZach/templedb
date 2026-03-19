@@ -299,7 +299,8 @@ class CommunityDetectionService:
         Strategy:
         1. Find most connected symbol (highest degree)
         2. Use its name as cluster name
-        3. Fallback: "cluster_N"
+        3. Add cluster index suffix to ensure uniqueness
+        4. Fallback: "cluster_N"
         """
         if not symbol_ids:
             return f"cluster_{cluster_idx}"
@@ -322,7 +323,8 @@ class CommunityDetectionService:
             # Extract base name (remove qualifiers)
             if '.' in name:
                 name = name.split('.')[-1]
-            return f"{name}_module"
+            # Add cluster index to ensure uniqueness
+            return f"{name}_module_{cluster_idx}"
         else:
             return f"cluster_{cluster_idx}"
 

@@ -12,20 +12,13 @@
 ## What is TempleDB?
 
 <img src="assets/logo.svg" align="right" width="150" alt="TempleDB Logo"/>
+  Templedb is a project management and version control system focused on simplifying and unifying underlying abstractions to create a clean and introspectable environment for ai assisted development and deployment.
 
-TempleDB is a new way to write and deploy software. By moving from files to sqlite tables  your codebase becomes a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
+By moving from files and environment variables to sqlite tables your codebase becomes a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
 
-We throw out of the temple those that would lend us technical debt in the form of state duplication, namely filesystem centric tools like git, sops, and potentially including ci/cd and deployment tools like docker. (though in the case of git it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for nixos to tide us over until the day we can make some much more radical changes to operating systems)
+Or, it's like a normalized version  of fossil-scm (sqlite, relational version of git) + claude mcp&stored procedures (api tuned for ai agent interactions) + superpowers (hierchical agent dispatch&contextualization) + gitnexus (dependency graph/clustering for ai contextualization) + nixops4 (deployment tool) + sops (secret management).
 
-### Philosophy
-
-As TempleOS showed us the power of simplicity and first principles, so TempleDB embraces:
-
-- **Database normalization**: Single source of truth, no redundant copies
-- **ACID transactions&Transparency**: Multi-agent coordination without conflicts
-- **Temporary denormalization&Re-normalization workflow**: Nix FHS environments for efficient editing
-
-**Key insight**: With k git worktree checkouts of n files, traditional agent swarm workflows require O(k²) pairwise comparisons to verify consistency—quadratic coordination cost. TempleDB maintains a single source of truth, reducing verification to O(k) comparisons. This asymptotic improvement (O(k) factor) becomes significant as teams and branches scale. Storage savings (10-50×) are a bonus.
+We throw out of the temple those that would lend us technical debt in the form of state duplication, namely filesystem centric tools like git, sops, ci/cd like jenkins and deployment tools like docker. (though in the case of git it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for nixos to tide us over until the day we can make some much more radical changes to operating systems).
 
 **Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) for the complete rationale.**
 

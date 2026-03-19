@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 from services.base import BaseService
 from logger import get_logger
+import db_utils
 
 logger = get_logger(__name__)
 
@@ -254,7 +255,7 @@ class DeploymentCacheService(BaseService):
         Returns:
             CacheEntry if found and valid, None otherwise
         """
-        row = self.db_utils.query_one("""
+        row = db_utils.query_one("""
             SELECT id, project_id, target, content_hash,
                    cathedral_path, fhs_env_path, work_dir_path,
                    use_count, last_used_at, total_size_bytes, file_count
@@ -325,7 +326,7 @@ class DeploymentCacheService(BaseService):
         Returns:
             Cache entry ID
         """
-        cache_id = self.db_utils.execute("""
+        cache_id = db_utils.execute("""
             INSERT INTO deployment_cache (
                 project_id, target,
                 content_hash, files_hash, deps_hash,
@@ -357,14 +358,14 @@ class DeploymentCacheService(BaseService):
     ):
         """Record successful cache hit and update stats"""
         # Update use count
-        self.db_utils.execute("""
+        db_utils.execute("""
             UPDATE deployment_cache
             SET use_count = use_count + 1
             WHERE id = ?
         """, (cache_entry.cache_id,))
 
         # Record stats
-        self.db_utils.execute("""
+        db_utils.execute("""
             INSERT INTO deployment_cache_stats (
                 project_id, target, cache_hit, content_hash,
                 build_time_seconds, total_time_seconds,
@@ -393,7 +394,7 @@ class DeploymentCacheService(BaseService):
         total_time_seconds: float
     ):
         """Record cache miss (full rebuild)"""
-        self.db_utils.execute("""
+        db_utils.execute("""
             INSERT INTO deployment_cache_stats (
                 project_id, target, cache_hit, content_hash,
                 build_time_seconds, export_time_seconds, total_time_seconds,
@@ -411,7 +412,7 @@ class DeploymentCacheService(BaseService):
 
     def _invalidate_cache_entry(self, cache_id: int, reason: str):
         """Mark cache entry as invalid"""
-        self.db_utils.execute("""
+        db_utils.execute("""
             UPDATE deployment_cache
             SET is_valid = 0, invalidated_at = datetime('now'), invalidation_reason = ?
             WHERE id = ?
@@ -419,7 +420,7 @@ class DeploymentCacheService(BaseService):
 
     def invalidate_project_cache(self, project_id: int, reason: str = "Manual invalidation"):
         """Invalidate all cache entries for a project"""
-        count = self.db_utils.execute("""
+        count = db_utils.execute("""
             UPDATE deployment_cache
             SET is_valid = 0, invalidated_at = datetime('now'), invalidation_reason = ?
             WHERE project_id = ? AND is_valid = 1
@@ -451,7 +452,7 @@ class DeploymentCacheService(BaseService):
             where_clause += " AND project_id = ?"
             params.append(project_id)
 
-        deleted = self.db_utils.execute(f"""
+        deleted = db_utils.execute(f"""
             DELETE FROM deployment_cache
             WHERE {where_clause}
         """, tuple(params))
@@ -465,14 +466,14 @@ class DeploymentCacheService(BaseService):
             self._cleanup_excess_entries(project_id, max_entries_per_project)
         else:
             # Get all projects
-            projects = self.db_utils.query_all("SELECT DISTINCT project_id FROM deployment_cache")
+            projects = db_utils.query_all("SELECT DISTINCT project_id FROM deployment_cache")
             for row in projects:
                 self._cleanup_excess_entries(row['project_id'], max_entries_per_project)
 
     def _cleanup_excess_entries(self, project_id: int, max_entries: int):
         """Keep only N most recent cache entries for a project"""
         # Get cache IDs to delete (older than Nth most recent)
-        rows = self.db_utils.query_all("""
+        rows = db_utils.query_all("""
             SELECT id FROM (
                 SELECT id, ROW_NUMBER() OVER (PARTITION BY target ORDER BY last_used_at DESC) AS rn
                 FROM deployment_cache
@@ -484,7 +485,7 @@ class DeploymentCacheService(BaseService):
         if rows:
             ids_to_delete = [row['id'] for row in rows]
             placeholders = ','.join('?' * len(ids_to_delete))
-            deleted = self.db_utils.execute(f"""
+            deleted = db_utils.execute(f"""
                 DELETE FROM deployment_cache WHERE id IN ({placeholders})
             """, tuple(ids_to_delete))
 
@@ -508,7 +509,7 @@ class DeploymentCacheService(BaseService):
             where_clause = "project_id = ?"
             params = [project_id]
 
-        stats = self.db_utils.query_one(f"""
+        stats = db_utils.query_one(f"""
             SELECT
                 COUNT(*) as total_deployments,
                 SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) as cache_hits,

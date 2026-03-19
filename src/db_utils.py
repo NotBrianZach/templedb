@@ -13,10 +13,20 @@ from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.environ.get(
-    'TEMPLEDB_PATH',
-    os.path.expanduser("~/.local/share/templedb/templedb.sqlite")
-)
+# Get database path, handling sudo properly
+def _get_db_path():
+    """Get database path, using real user's home when run with sudo"""
+    if 'TEMPLEDB_PATH' in os.environ:
+        return os.environ['TEMPLEDB_PATH']
+
+    # When run with sudo, use SUDO_USER's home
+    sudo_user = os.environ.get('SUDO_USER')
+    if sudo_user:
+        return f'/home/{sudo_user}/.local/share/templedb/templedb.sqlite'
+    else:
+        return os.path.expanduser("~/.local/share/templedb/templedb.sqlite")
+
+DB_PATH = _get_db_path()
 
 # Thread-local storage for connections
 _thread_local = threading.local()

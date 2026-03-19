@@ -134,7 +134,16 @@ class TempleDBCLI:
                         subcommand = getattr(args, subcommand_attr)
                         # Only use subcommand if it's not None (i.e., actually specified)
                         if subcommand is not None:
-                            handler = self.commands.get(f"{args.command}.{subcommand}")
+                            # Check for nested subcommands (e.g., nixops4 network create)
+                            nested_attr = f"{subcommand}_command"
+                            if hasattr(args, nested_attr):
+                                nested_command = getattr(args, nested_attr)
+                                if nested_command is not None:
+                                    handler = self.commands.get(f"{args.command}.{subcommand}.{nested_command}")
+                                else:
+                                    handler = self.commands.get(f"{args.command}.{subcommand}")
+                            else:
+                                handler = self.commands.get(f"{args.command}.{subcommand}")
                         else:
                             # No subcommand specified, use base command handler
                             handler = self.commands.get(args.command)

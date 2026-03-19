@@ -1,0 +1,46 @@
+# Code Intelligence Bootstrap Workflow
+# Sets up code intelligence for a project
+
+workflow:
+  name: "code-intelligence-bootstrap"
+  version: "1.0"
+  description: "Bootstrap code intelligence features for a project"
+
+  # Main workflow phases
+  phases:
+    # Phase 1: Symbol Extraction
+    - name: "symbol_extraction"
+      description: "Extract public symbols from code"
+      tasks:
+        - name: "extract_symbols"
+          type: "code_intelligence"
+          action: "extract_symbols"
+          args:
+            project: "${project}"
+            force: false
+
+      validation:
+        - type: "assertion"
+          condition: "context.task_results.get('extract_symbols') is not None"
+          error: "Symbol extraction failed!"
+
+    # Phase 2: Dependency Graph
+    - name: "dependency_graph"
+      description: "Build cross-file dependency graph"
+      tasks:
+        - name: "build_graph"
+          type: "code_intelligence"
+          action: "build_graph"
+          args:
+            project: "${project}"
+            force: false
+
+      validation:
+        - type: "assertion"
+          condition: "context.task_results.get('build_graph') is not None"
+          error: "Graph building failed!"
+
+  # Post-flight: Success message
+  postflight:
+    - type: "bash"
+      command: "echo 'Code intelligence bootstrap complete!'"
