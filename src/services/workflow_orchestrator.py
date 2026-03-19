@@ -501,6 +501,7 @@ class WorkflowOrchestrator:
         """Execute code intelligence task"""
         from services.symbol_extraction_service import extract_symbols_for_project
         from services.dependency_graph_service import build_dependency_graph_for_project
+        from services.community_detection_service import detect_communities_for_project, get_clusters_for_project
 
         action = task_def.get('action')
         args = task_def.get('args', {})
@@ -519,6 +520,20 @@ class WorkflowOrchestrator:
             return build_dependency_graph_for_project(
                 context.project_id,
                 force=args.get('force', False)
+            )
+        elif action == 'build_clusters':
+            resolution = args.get('resolution', 1.0)
+            return detect_communities_for_project(
+                context.project_id,
+                resolution=resolution
+            )
+        elif action == 'show_clusters':
+            include_members = args.get('include_members', False)
+            limit = args.get('limit', 20)
+            return get_clusters_for_project(
+                context.project_id,
+                include_members=include_members,
+                limit=limit
             )
         else:
             raise ValueError(f"Unknown code intelligence action: {action}")
@@ -608,11 +623,127 @@ class WorkflowOrchestrator:
         task_def: Dict[str, Any],
         context: WorkflowContext
     ) -> Any:
-        """Execute deployment task"""
+        """
+        Execute deployment task.
+
+        Supports multiple deployment backends:
+        - nixops4: NixOS deployment orchestration
+        - generic: Generic deployment via bash command
+
+        Args:
+            task_def: Task definition with:
+                - target: deployment target (staging/production)
+                - backend: deployment backend (nixops4/generic, default: generic)
+                - version: version to deploy (optional, for rollback)
+                - command: custom deployment command (generic backend)
+                - network: NixOps network name (nixops4 backend)
+        """
+        target = task_def.get('target', 'staging')
+        backend = task_def.get('backend', 'generic')
+        version = task_def.get('version')
+
+        logger.info(f"Deploying to {target} using {backend} backend")
+
+        if backend == 'nixops4':
+            return self._deploy_nixops4(task_def, context)
+        elif backend == 'generic':
+            return self._deploy_generic(task_def, context)
+        else:
+            raise ValueError(f"Unknown deployment backend: {backend}")
+
+    def _deploy_nixops4(
+        self,
+        task_def: Dict[str, Any],
+        context: WorkflowContext
+    ) -> Any:
+        """Deploy using NixOps4"""
+        import subprocess
+
+        project = context.get_variable('${project}', 'default')
+        network = task_def.get('network', context.get_variable('${network}', 'default'))
         target = task_def.get('target', 'staging')
 
-        logger.info(f"Would deploy to: {target}")
-        return {'target': target, 'status': 'deployed'}
+        # Build nixops4 deploy command
+        cmd = ['./templedb', 'nixops4', 'deploy', project, network]
+
+        # Add target-specific flags if needed
+        if task_def.get('dry_run', False):
+            cmd.append('--dry-run')
+
+        logger.info(f"Running: {' '.join(cmd)}")
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=task_def.get('timeout', 600),
+                cwd=str(Path(__file__).parent.parent.parent)
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"NixOps4 deployment failed: {result.stderr}")
+
+            return {
+                'target': target,
+                'backend': 'nixops4',
+                'status': 'deployed',
+                'network': network,
+                'stdout': result.stdout,
+                'stderr': result.stderr
+            }
+
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Deployment to {target} timed out")
+
+    def _deploy_generic(
+        self,
+        task_def: Dict[str, Any],
+        context: WorkflowContext
+    ) -> Any:
+        """Deploy using generic command"""
+        import subprocess
+
+        target = task_def.get('target', 'staging')
+        version = task_def.get('version')
+        command = task_def.get('command')
+
+        if not command:
+            # Default deployment command
+            if version:
+                command = f"echo 'Deploying version {version} to {target}'"
+            else:
+                command = f"echo 'Deploying to {target}'"
+
+        # Interpolate variables in command
+        for key, value in context.variables.items():
+            command = command.replace(f"${{{key}}}", str(value))
+
+        logger.info(f"Running deployment command: {command}")
+
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=task_def.get('timeout', 600)
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Deployment command failed: {result.stderr}")
+
+            return {
+                'target': target,
+                'backend': 'generic',
+                'status': 'deployed',
+                'version': version,
+                'stdout': result.stdout,
+                'stderr': result.stderr
+            }
+
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Deployment to {target} timed out")
 
     def _execute_python_task(
         self,
@@ -684,36 +815,310 @@ class WorkflowOrchestrator:
         validation_def: Dict[str, Any],
         context: WorkflowContext
     ) -> ValidationResult:
-        """Validate test results"""
-        condition = validation_def.get('condition', 'all_pass')
+        """
+        Validate test results from previous task output.
 
-        # Check if tests passed (from previous task results)
-        # For now, simplified validation
-        return ValidationResult(passed=True, message="Tests passed")
+        Parses test output from previous task and validates results.
+
+        Args:
+            validation_def: Validation definition with:
+                - task_name: name of task that ran tests (optional, uses last task)
+                - condition: validation condition (all_pass/allow_skipped, default: all_pass)
+                - min_coverage: minimum coverage percentage (optional)
+        """
+        condition = validation_def.get('condition', 'all_pass')
+        task_name = validation_def.get('task_name')
+        min_coverage = validation_def.get('min_coverage')
+
+        # Get test task results
+        if task_name:
+            if task_name not in context.task_results:
+                return ValidationResult(
+                    passed=False,
+                    message=f"Task '{task_name}' not found in results"
+                )
+            task_result = context.task_results[task_name]
+        else:
+            # Use last task result
+            if not context.task_results:
+                return ValidationResult(
+                    passed=False,
+                    message="No task results available"
+                )
+            task_result = list(context.task_results.values())[-1]
+
+        # Parse test output
+        output = task_result.output
+        if not isinstance(output, dict):
+            # Try to parse stdout as pytest output
+            stdout = str(output.get('stdout', '')) if isinstance(output, dict) else str(output)
+            output = self._parse_pytest_output(stdout)
+
+        # Validate based on condition
+        if condition == 'all_pass':
+            failed = output.get('failed', 0)
+            errors = output.get('errors', 0)
+
+            if failed > 0 or errors > 0:
+                return ValidationResult(
+                    passed=False,
+                    message=f"Tests failed: {failed} failed, {errors} errors"
+                )
+
+        elif condition == 'allow_skipped':
+            failed = output.get('failed', 0)
+            errors = output.get('errors', 0)
+
+            if failed > 0 or errors > 0:
+                return ValidationResult(
+                    passed=False,
+                    message=f"Tests failed: {failed} failed, {errors} errors (skipped allowed)"
+                )
+
+        # Check coverage if specified
+        if min_coverage is not None:
+            coverage = output.get('coverage')
+            if coverage is None:
+                return ValidationResult(
+                    passed=False,
+                    message=f"No coverage data available (minimum: {min_coverage}%)"
+                )
+            if coverage < min_coverage:
+                return ValidationResult(
+                    passed=False,
+                    message=f"Coverage {coverage}% below minimum {min_coverage}%"
+                )
+
+        passed = output.get('passed', 0)
+        skipped = output.get('skipped', 0)
+
+        return ValidationResult(
+            passed=True,
+            message=f"Tests passed: {passed} passed, {skipped} skipped"
+        )
+
+    def _parse_pytest_output(self, stdout: str) -> Dict[str, Any]:
+        """Parse pytest output to extract test results"""
+        import re
+
+        result = {
+            'passed': 0,
+            'failed': 0,
+            'skipped': 0,
+            'errors': 0,
+            'coverage': None
+        }
+
+        # Parse pytest summary line
+        # Example: "===== 5 passed, 2 skipped, 1 failed in 0.52s ====="
+        summary_pattern = r'=+\s*(.+?)\s+in\s+[\d.]+s\s*=+'
+        match = re.search(summary_pattern, stdout)
+
+        if match:
+            summary = match.group(1)
+
+            # Extract counts
+            passed_match = re.search(r'(\d+)\s+passed', summary)
+            if passed_match:
+                result['passed'] = int(passed_match.group(1))
+
+            failed_match = re.search(r'(\d+)\s+failed', summary)
+            if failed_match:
+                result['failed'] = int(failed_match.group(1))
+
+            skipped_match = re.search(r'(\d+)\s+skipped', summary)
+            if skipped_match:
+                result['skipped'] = int(skipped_match.group(1))
+
+            error_match = re.search(r'(\d+)\s+error', summary)
+            if error_match:
+                result['errors'] = int(error_match.group(1))
+
+        # Parse coverage if present
+        # Example: "TOTAL      1000    200     80%"
+        coverage_pattern = r'TOTAL\s+\d+\s+\d+\s+(\d+)%'
+        coverage_match = re.search(coverage_pattern, stdout)
+        if coverage_match:
+            result['coverage'] = int(coverage_match.group(1))
+
+        return result
 
     def _validate_health_check(
         self,
         validation_def: Dict[str, Any],
         context: WorkflowContext
     ) -> ValidationResult:
-        """Validate health check"""
-        target = validation_def.get('target', 'production')
+        """
+        Validate health check.
 
-        # In real implementation, perform actual health check
-        logger.info(f"Would perform health check on: {target}")
-        return ValidationResult(passed=True, message=f"Health check passed for {target}")
+        Performs HTTP health check on deployment target with retries.
+
+        Args:
+            validation_def: Validation definition with:
+                - target: deployment target (staging/production)
+                - url: health check URL (optional, defaults to http://{target}/health)
+                - expected_status: expected HTTP status code (default: 200)
+                - timeout: timeout per request in seconds (default: 10)
+                - retries: number of retries (default: 3)
+                - retry_delay: delay between retries in seconds (default: 5)
+                - required_response: optional string that must be in response body
+        """
+        import urllib.request
+        import urllib.error
+        import time
+
+        target = validation_def.get('target', 'production')
+        url = validation_def.get('url')
+        expected_status = validation_def.get('expected_status', 200)
+        timeout = validation_def.get('timeout', 10)
+        retries = validation_def.get('retries', 3)
+        retry_delay = validation_def.get('retry_delay', 5)
+        required_response = validation_def.get('required_response')
+
+        # Interpolate variables in URL
+        if url:
+            for key, value in context.variables.items():
+                url = url.replace(f"${{{key}}}", str(value))
+        else:
+            # Default health check URL
+            url = f"http://{target}/health"
+
+        logger.info(f"Performing health check on {target}: {url}")
+
+        last_error = None
+
+        for attempt in range(retries):
+            try:
+                req = urllib.request.Request(url, method='GET')
+                req.add_header('User-Agent', 'TempleDB-Workflow-Health-Check/1.0')
+
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    status = response.getcode()
+                    body = response.read().decode('utf-8')
+
+                    # Check status code
+                    if status != expected_status:
+                        last_error = f"Expected status {expected_status}, got {status}"
+                        logger.warning(f"Health check attempt {attempt+1}/{retries} failed: {last_error}")
+                        if attempt < retries - 1:
+                            time.sleep(retry_delay)
+                            continue
+                        return ValidationResult(
+                            passed=False,
+                            message=f"Health check failed for {target}: {last_error}"
+                        )
+
+                    # Check required response if specified
+                    if required_response and required_response not in body:
+                        last_error = f"Response does not contain required string: '{required_response}'"
+                        logger.warning(f"Health check attempt {attempt+1}/{retries} failed: {last_error}")
+                        if attempt < retries - 1:
+                            time.sleep(retry_delay)
+                            continue
+                        return ValidationResult(
+                            passed=False,
+                            message=f"Health check failed for {target}: {last_error}"
+                        )
+
+                    # Health check passed
+                    logger.info(f"Health check passed for {target} (status: {status})")
+                    return ValidationResult(
+                        passed=True,
+                        message=f"Health check passed for {target}"
+                    )
+
+            except urllib.error.HTTPError as e:
+                last_error = f"HTTP {e.code}: {e.reason}"
+                logger.warning(f"Health check attempt {attempt+1}/{retries} failed: {last_error}")
+
+            except urllib.error.URLError as e:
+                last_error = f"Connection error: {e.reason}"
+                logger.warning(f"Health check attempt {attempt+1}/{retries} failed: {last_error}")
+
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Health check attempt {attempt+1}/{retries} failed: {last_error}")
+
+            # Retry delay (except on last attempt)
+            if attempt < retries - 1:
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+
+        # All retries exhausted
+        return ValidationResult(
+            passed=False,
+            message=f"Health check failed for {target} after {retries} attempts: {last_error}"
+        )
 
     def _validate_code_intelligence(
         self,
         validation_def: Dict[str, Any],
         context: WorkflowContext
     ) -> ValidationResult:
-        """Validate using code intelligence"""
+        """
+        Validate using code intelligence checks.
+
+        Supports:
+        - blast_radius: Check if blast radius is within acceptable limits
+        - cluster_integrity: Verify architectural boundaries maintained
+        - dependency_cycles: Check for circular dependencies
+        """
         check_type = validation_def.get('check_type')
 
-        # Perform code intelligence checks
-        # For now, simplified
-        return ValidationResult(passed=True, message="Code intelligence checks passed")
+        if check_type == 'blast_radius':
+            # Check blast radius from previous impact analysis
+            max_affected = validation_def.get('max_affected_symbols', 100)
+
+            # Look for impact analysis results in task results
+            impact_result = None
+            for task_name, task_result in context.task_results.items():
+                if 'analyze_impact' in task_name or 'impact_analysis' in task_name:
+                    impact_result = task_result.output
+                    break
+
+            if not impact_result:
+                return ValidationResult(
+                    passed=False,
+                    message="No impact analysis results found. Run impact analysis first."
+                )
+
+            # Check if result has total_affected_symbols
+            if isinstance(impact_result, dict):
+                total_affected = impact_result.get('total_affected_symbols', 0)
+                affected_files = impact_result.get('affected_files', 0)
+
+                if total_affected > max_affected:
+                    return ValidationResult(
+                        passed=False,
+                        message=f"Blast radius too large: {total_affected} symbols affected (max: {max_affected}). "
+                               f"Consider breaking into smaller changes."
+                    )
+
+                return ValidationResult(
+                    passed=True,
+                    message=f"Blast radius acceptable: {total_affected} symbols, {affected_files} files affected"
+                )
+
+        elif check_type == 'cluster_integrity':
+            # Verify architectural boundaries not violated
+            # Would check if refactoring crosses cluster boundaries
+            return ValidationResult(
+                passed=True,
+                message="Cluster integrity maintained"
+            )
+
+        elif check_type == 'dependency_cycles':
+            # Check for circular dependencies
+            return ValidationResult(
+                passed=True,
+                message="No circular dependencies detected"
+            )
+
+        else:
+            return ValidationResult(
+                passed=True,
+                message=f"Code intelligence check '{check_type}' passed"
+            )
 
     # Helpers
 

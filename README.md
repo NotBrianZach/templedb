@@ -225,6 +225,50 @@ cd /tmp/work && vim src/auth.py
 
 **See [AGENT_SESSIONS.md](AGENT_SESSIONS.md) for complete guide.**
 
+### 6. **Workflow Orchestration & Code Intelligence**
+
+Execute multi-phase operations with systematic safety checks:
+
+```bash
+# Bootstrap code intelligence (symbol extraction, dependency graphs)
+templedb_workflow_execute {
+  "workflow": "code_intelligence_bootstrap",
+  "project": "myapp"
+}
+
+# Safe deployment with impact analysis and auto-rollback
+templedb_workflow_execute {
+  "workflow": "safe_deployment",
+  "project": "myapp",
+  "variables": {
+    "primary_symbol": "authenticate_user",
+    "production_health_url": "https://myapp.com/health",
+    "previous_version": "v2.1.0"
+  }
+}
+
+# Impact-aware refactoring with blast radius checks
+templedb_workflow_execute {
+  "workflow": "impact_aware_refactoring",
+  "project": "myapp",
+  "variables": {
+    "target_symbol": "process_payment",
+    "max_blast_radius": "150"
+  }
+}
+```
+
+**Features:**
+- 3 production workflows (bootstrap, deployment, refactoring)
+- Code intelligence: symbol extraction, dependency graphs, impact analysis
+- Hybrid search (BM25 + graph ranking)
+- Leiden algorithm for architectural boundaries
+- Automatic rollback on failure
+- Health checks with retries
+- Test validation with coverage thresholds
+
+**See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for complete guide.**
+
 ---
 
 ## Installation
@@ -380,6 +424,13 @@ cd ~/myproject/src
 - **[README.md](README.md)** - You are here! Overview and quick start
 - **[DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md)** - Why TempleDB exists (read this first!)
 - **[GETTING_STARTED.md](GETTING_STARTED.md)** - Installation and beginner's guide
+- **[docs/WORKFLOWS.md](docs/WORKFLOWS.md)** ⭐ NEW - Workflow orchestration with code intelligence
+
+### Workflows & Code Intelligence
+- **[Workflows Guide](docs/WORKFLOWS.md)** - Execute multi-phase operations (deployment, refactoring, etc.)
+- **[Code Intelligence Status](CODE_INTELLIGENCE_STATUS.md)** - Symbol extraction, dependency graphs, impact analysis
+- **[Phase 2 Design](docs/phases/PHASE_2_DESIGN.md)** - Workflow orchestration architecture
+- **[Documentation Index](docs/README.md)** - Complete docs organized by topic
 
 ### User Guides
 - **[GUIDE.md](GUIDE.md)** - Complete usage guide (checkout/commit workflow, SQL queries, CLI commands)

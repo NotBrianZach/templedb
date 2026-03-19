@@ -586,17 +586,40 @@ class DeploymentService(BaseService):
 
         # Get environment variables from database
         try:
-            from environment_service import EnvironmentService
-            env_service = EnvironmentService(self.ctx)
+            import db_utils
 
             # Get project-specific env vars for this target
-            project_envs = env_service.list_variables(
-                project_slug=project['slug'],
-                target=target
-            )
+            # Variables are stored with format "target:VAR_NAME"
+            var_name_prefix = f"{target}:%"
+            project_envs = db_utils.query_all("""
+                SELECT
+                    SUBSTR(var_name, LENGTH(?) + 1) as key,
+                    var_value as value
+                FROM environment_variables
+                WHERE scope_type = 'project'
+                  AND scope_id = ?
+                  AND var_name LIKE ?
+            """, (target + ':', project['id'], var_name_prefix))
 
             for env in project_envs:
                 env_vars[env['key']] = env['value']
+
+            self.logger.info(f"Loaded {len(project_envs)} environment variables for target '{target}'")
+
+            # Resolve variable templates (e.g. ${VAR_NAME})
+            import re
+            for key, value in list(env_vars.items()):
+                if isinstance(value, str) and '${' in value:
+                    # Simple template resolution: replace ${VAR} with env_vars[VAR]
+                    def replacer(match):
+                        var_name = match.group(1)
+                        if var_name in env_vars:
+                            return env_vars[var_name]
+                        self.logger.warning(f"Template variable ${{{var_name}}} not found")
+                        return match.group(0)  # Keep original if not found
+
+                    env_vars[key] = re.sub(r'\$\{([^}]+)\}', replacer, value)
+
         except Exception as e:
             self.logger.warning(f"Failed to load environment variables: {e}")
 
