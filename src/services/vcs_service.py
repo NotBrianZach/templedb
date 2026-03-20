@@ -293,7 +293,7 @@ class VCSService(BaseService):
         staged = [f['file_path'] for f in working_state if f['staged']]
         modified = [f['file_path'] for f in working_state
                    if not f['staged'] and f['state'] == 'modified']
-        untracked = [f['file_path'] for f in working_state if f['state'] == 'new']
+        untracked = [f['file_path'] for f in working_state if f['state'] == 'added']
 
         return {
             'has_branch': True,

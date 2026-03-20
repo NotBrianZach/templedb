@@ -516,6 +516,27 @@ class WorkingStateDetector:
 
         self.project_id = self.project['id']
 
+    def _get_file_type_id(self, file_path: str) -> Optional[int]:
+        """Get file type ID for a file path"""
+        extension = Path(file_path).suffix.lstrip('.')
+
+        extension_map = {
+            'py': 'python',
+            'js': 'javascript',
+            'ts': 'typescript',
+            'sql': 'sql',
+            'md': 'markdown',
+            'txt': 'text',
+            'json': 'json',
+            'yaml': 'yaml',
+            'yml': 'yaml',
+        }
+
+        type_name = extension_map.get(extension, 'unknown')
+
+        file_type = query_one("SELECT id FROM file_types WHERE type_name = ?", (type_name,))
+        return file_type['id'] if file_type else None
+
     def detect_changes(self) -> Dict[str, int]:
         """Detect file changes and update vcs_working_state table"""
         print(f"\n🔍 Detecting changes in {self.project_slug}...")
@@ -564,9 +585,50 @@ class WorkingStateDetector:
         # Check for added and modified files
         for rel_path, scanned_file in current_by_path.items():
             if rel_path not in tracked_by_path:
-                # New file
+                # New file - create project_files entry first
                 state = 'added'
                 changes['added'] += 1
+
+                # Read file content
+                file_path = self.project_root / rel_path
+                file_content = ContentStore.read_file_content(file_path)
+
+                if not file_content:
+                    continue
+
+                # Get file type
+                file_type_id = self._get_file_type_id(rel_path)
+                if not file_type_id:
+                    # Skip files with unknown type
+                    continue
+
+                # Extract file name
+                file_name = Path(rel_path).name
+
+                # Create project_files entry
+                execute("""
+                    INSERT INTO project_files (project_id, file_type_id, file_path, file_name)
+                    VALUES (?, ?, ?, ?)
+                """, (self.project_id, file_type_id, rel_path, file_name), commit=False)
+
+                # Get the new file_id
+                new_file = query_one("""
+                    SELECT id FROM project_files
+                    WHERE project_id = ? AND file_path = ?
+                """, (self.project_id, rel_path))
+
+                if new_file:
+                    file_id = new_file['id']
+                    tracked_by_path[rel_path] = file_id
+
+                    records.append((
+                        self.project_id,
+                        branch_id,
+                        file_id,
+                        state,
+                        0,  # staged
+                        file_content.hash_sha256
+                    ))
             else:
                 # Check if modified
                 file_id = tracked_by_path[rel_path]
@@ -621,7 +683,7 @@ class WorkingStateDetector:
                 INSERT INTO vcs_working_state
                 (project_id, branch_id, file_id, state, staged, content_hash)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, records, commit=False)
+            """, records, commit=True)
 
         print(f"   Added: {changes['added']}")
         print(f"   Modified: {changes['modified']}")
