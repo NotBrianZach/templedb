@@ -656,22 +656,13 @@ class MCPServer:
             },
             {
                 "name": "templedb_config_get",
-                "description": "Get a system configuration value with hierarchical scope resolution (machine > network > project > system)",
+                "description": "Get a system configuration value (simple key-value store)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "key": {
                             "type": "string",
-                            "description": "Configuration key (e.g., 'nginx.workers', 'woofs.enable')"
-                        },
-                        "scope_type": {
-                            "type": "string",
-                            "enum": ["system", "project", "network", "machine"],
-                            "description": "Scope type (default: 'system')"
-                        },
-                        "scope_id": {
-                            "type": "integer",
-                            "description": "Scope ID (required for non-system scopes). References project.id, nixops4_networks.id, or nixops4_machines.id"
+                            "description": "Configuration key (e.g., 'nginx.workers', 'woofs.enable', 'nixos.hostname')"
                         }
                     },
                     "required": ["key"]
@@ -679,26 +670,17 @@ class MCPServer:
             },
             {
                 "name": "templedb_config_set",
-                "description": "Set a system configuration value with scope. Supports hierarchical configuration: machine > network > project > system",
+                "description": "Set a system configuration value (simple key-value store)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "key": {
                             "type": "string",
-                            "description": "Configuration key (e.g., 'nginx.workers', 'woofs.enable')"
+                            "description": "Configuration key (e.g., 'nixos.hostname', 'nixos.username', 'templedb.executable_path')"
                         },
                         "value": {
                             "type": "string",
                             "description": "Configuration value"
-                        },
-                        "scope_type": {
-                            "type": "string",
-                            "enum": ["system", "project", "network", "machine"],
-                            "description": "Scope type (default: 'system')"
-                        },
-                        "scope_id": {
-                            "type": "integer",
-                            "description": "Scope ID (required for non-system scopes)"
                         },
                         "description": {
                             "type": "string",
@@ -710,22 +692,13 @@ class MCPServer:
             },
             {
                 "name": "templedb_config_list",
-                "description": "List system configuration values with optional scope filter",
+                "description": "List system configuration values with optional key pattern filter",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "scope_type": {
-                            "type": "string",
-                            "enum": ["system", "project", "network", "machine"],
-                            "description": "Filter by scope type"
-                        },
-                        "scope_id": {
-                            "type": "integer",
-                            "description": "Filter by scope ID"
-                        },
                         "key_pattern": {
                             "type": "string",
-                            "description": "Filter by key pattern (SQL LIKE syntax, e.g., 'nginx%')"
+                            "description": "Filter by key pattern (SQL LIKE syntax, e.g., 'nixos%' for all nixos keys)"
                         }
                     },
                     "required": []
@@ -733,22 +706,13 @@ class MCPServer:
             },
             {
                 "name": "templedb_config_delete",
-                "description": "Delete a system configuration value",
+                "description": "Delete a system configuration value (simple key-value store)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "key": {
                             "type": "string",
                             "description": "Configuration key to delete"
-                        },
-                        "scope_type": {
-                            "type": "string",
-                            "enum": ["system", "project", "network", "machine"],
-                            "description": "Scope type (default: 'system')"
-                        },
-                        "scope_id": {
-                            "type": "integer",
-                            "description": "Scope ID (required for non-system scopes)"
                         }
                     },
                     "required": ["key"]
@@ -1866,40 +1830,18 @@ class MCPServer:
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def tool_config_get(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Get system config value with hierarchical scope resolution"""
+        """Get system config value (simple key-value store)"""
         try:
             key = args["key"]
-            scope_type = args.get("scope_type", "system")
-            scope_id = args.get("scope_id")
-
-            # Validate scope_type
-            valid_scopes = ["system", "project", "network", "machine"]
-            if scope_type not in valid_scopes:
-                return {
-                    "content": [{"type": "text", "text": f"Invalid scope_type. Must be one of: {', '.join(valid_scopes)}"}],
-                    "isError": True
-                }
 
             conn = self._get_db_connection()
             cursor = conn.cursor()
 
-            if scope_type == "system":
-                cursor.execute("""
-                    SELECT key, value, description, updated_at
-                    FROM system_config
-                    WHERE key = ? AND scope_type = 'system' AND scope_id IS NULL
-                """, (key,))
-            else:
-                if not scope_id:
-                    return {
-                        "content": [{"type": "text", "text": f"scope_id required for scope_type='{scope_type}'"}],
-                        "isError": True
-                    }
-                cursor.execute("""
-                    SELECT key, value, description, updated_at
-                    FROM system_config
-                    WHERE key = ? AND scope_type = ? AND scope_id = ?
-                """, (key, scope_type, scope_id))
+            cursor.execute("""
+                SELECT key, value, description, updated_at
+                FROM system_config
+                WHERE key = ?
+            """, (key,))
 
             row = cursor.fetchone()
             if not row:
@@ -1916,34 +1858,11 @@ class MCPServer:
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def tool_config_set(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Set system config value with scope"""
+        """Set system config value (simple key-value store)"""
         try:
             key = args["key"]
             value = args["value"]
-            scope_type = args.get("scope_type", "system")
-            scope_id = args.get("scope_id")
             description = args.get("description", "")
-
-            # Validate scope_type
-            valid_scopes = ["system", "project", "network", "machine"]
-            if scope_type not in valid_scopes:
-                return {
-                    "content": [{"type": "text", "text": f"Invalid scope_type. Must be one of: {', '.join(valid_scopes)}"}],
-                    "isError": True
-                }
-
-            # Validate scope_id requirements
-            if scope_type == "system" and scope_id is not None:
-                return {
-                    "content": [{"type": "text", "text": "System scope must have scope_id=NULL"}],
-                    "isError": True
-                }
-
-            if scope_type != "system" and not scope_id:
-                return {
-                    "content": [{"type": "text", "text": f"scope_id required for scope_type='{scope_type}'"}],
-                    "isError": True
-                }
 
             conn = self._get_db_connection()
             cursor = conn.cursor()
@@ -1951,14 +1870,14 @@ class MCPServer:
             # Use INSERT OR REPLACE
             cursor.execute("""
                 INSERT OR REPLACE INTO system_config
-                (key, value, description, scope_type, scope_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, (key, value, description, scope_type, scope_id))
+                (key, value, description, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """, (key, value, description))
 
             conn.commit()
 
             return {
-                "content": [{"type": "text", "text": f"Set config {key}={value} (scope: {scope_type})"}]
+                "content": [{"type": "text", "text": f"Set config {key}={value}"}]
             }
 
         except Exception as e:
@@ -1966,32 +1885,22 @@ class MCPServer:
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def tool_config_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List system config values with optional scope filter"""
+        """List system config values with optional key pattern filter"""
         try:
-            scope_type = args.get("scope_type")
-            scope_id = args.get("scope_id")
             key_pattern = args.get("key_pattern")
 
             conn = self._get_db_connection()
             cursor = conn.cursor()
 
             # Build query
-            query = "SELECT key, value, description, scope_type, scope_id, updated_at FROM system_config WHERE 1=1"
+            query = "SELECT key, value, description, updated_at FROM system_config WHERE 1=1"
             params = []
-
-            if scope_type:
-                query += " AND scope_type = ?"
-                params.append(scope_type)
-
-            if scope_id is not None:
-                query += " AND scope_id = ?"
-                params.append(scope_id)
 
             if key_pattern:
                 query += " AND key LIKE ?"
                 params.append(f"%{key_pattern}%")
 
-            query += " ORDER BY scope_type, scope_id, key"
+            query += " ORDER BY key"
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
@@ -2007,30 +1916,17 @@ class MCPServer:
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def tool_config_delete(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Delete system config value"""
+        """Delete system config value (simple key-value store)"""
         try:
             key = args["key"]
-            scope_type = args.get("scope_type", "system")
-            scope_id = args.get("scope_id")
 
             conn = self._get_db_connection()
             cursor = conn.cursor()
 
-            if scope_type == "system":
-                cursor.execute("""
-                    DELETE FROM system_config
-                    WHERE key = ? AND scope_type = 'system' AND scope_id IS NULL
-                """, (key,))
-            else:
-                if not scope_id:
-                    return {
-                        "content": [{"type": "text", "text": f"scope_id required for scope_type='{scope_type}'"}],
-                        "isError": True
-                    }
-                cursor.execute("""
-                    DELETE FROM system_config
-                    WHERE key = ? AND scope_type = ? AND scope_id = ?
-                """, (key, scope_type, scope_id))
+            cursor.execute("""
+                DELETE FROM system_config
+                WHERE key = ?
+            """, (key,))
 
             conn.commit()
 
