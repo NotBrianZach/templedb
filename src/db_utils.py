@@ -37,6 +37,8 @@ def get_connection() -> sqlite3.Connection:
     if not hasattr(_thread_local, 'connection'):
         _thread_local.connection = sqlite3.connect(DB_PATH, timeout=30.0)
         _thread_local.connection.row_factory = sqlite3.Row
+        # Enable foreign keys (required for CASCADE deletes)
+        _thread_local.connection.execute("PRAGMA foreign_keys=ON")
         # Enable performance optimizations
         _thread_local.connection.execute("PRAGMA journal_mode=WAL")
         _thread_local.connection.execute("PRAGMA synchronous=NORMAL")
