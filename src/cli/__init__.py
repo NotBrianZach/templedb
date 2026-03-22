@@ -14,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from cli.commands import (
     project, vcs, env, search, system, cathedral, deploy, migration,
     target, secret, tui_launcher, config, workitem, mcp, direnv, merge,
-    blob, domain, backup, claude, prompt, vibe, nixos, key, cache, nixops4
+    blob, domain, backup, claude, prompt, vibe, nixos, key, cache, nixops4,
+    deploy_nix, deploy_appstore, deploy_steam
 )
 from cli.core import cli
 
@@ -54,6 +55,15 @@ def main():
 
     # Register cache management commands
     cache.CacheCommands.register(cli.subparsers)
+
+    # Register Nix deployment commands (Phase 1)
+    deploy_nix.register(cli)
+
+    # Register app store deployment commands (Phase 2)
+    deploy_appstore.register(cli)
+
+    # Register Steam deployment commands (Phase 3)
+    deploy_steam.register(cli)
 
     # TODO: Register llm commands as needed
     # from cli.commands import llm
