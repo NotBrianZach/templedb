@@ -40,7 +40,11 @@ TempleDB now integrates directly with Claude Code via MCP, exposing templedb ope
 
 ## Available Tools
 
-**Total: 27 tools** (10 original + 6 VCS + 4 deployment + 3 secret + 3 cathedral + 1 environment)
+**Total: 51 tools** (extensive coverage across all TempleDB features)
+
+## Available Resources
+
+**Total: 3+ resources** (read-only data sources for schema and configuration)
 
 ### Project Management
 
@@ -199,6 +203,57 @@ TempleDB now integrates directly with Claude Code via MCP, exposing templedb ope
 - Parameters: `project`, optional `target`
 - Returns: Array of variables
 
+### Context Management (NEW - v1.2)
+
+**`templedb_context_set_default`**
+- Set a default project context for the session
+- Parameters: optional `project` (name or slug, use null/empty to clear)
+- Returns: Success message with project details
+- Purpose: Reduces repetition by allowing tools to omit `project` parameter
+
+**`templedb_context_get_default`**
+- Get the current default project context
+- Parameters: none
+- Returns: Current default project info or none if not set
+- Purpose: Check which project is set as default
+
+### Schema Exploration (NEW - v1.2)
+
+**`templedb_schema_explore`**
+- Explore database schema with natural language queries
+- Parameters: `query` (natural language question), optional `project`
+- Returns: Structured response with relevant schema information
+- Supported queries:
+  - "What tables exist?" - Lists all tables and views
+  - "Show me projects" - Lists all tracked projects
+  - "What file types are tracked?" - Shows file extension distribution
+  - "How many commits?" - Shows commit statistics
+  - "Show database schema" - Returns full schema DDL
+
+### MCP Resources (NEW - v1.2)
+
+Resources are read-only data sources that clients can subscribe to:
+
+**`templedb://schema`**
+- Complete database schema overview
+- Returns: All tables, views, and indexes with DDL
+- MIME type: application/json
+
+**`templedb://projects`**
+- List of all tracked projects with metadata
+- Returns: Project list with file counts and commit counts
+- MIME type: application/json
+
+**`templedb://config`**
+- TempleDB system configuration settings
+- Returns: All system_config key-value pairs
+- MIME type: application/json
+
+**`templedb://project/{slug}/schema`** (Dynamic)
+- Project-specific schema information
+- Returns: File types, commit count, project details
+- MIME type: application/json
+
 ## Usage Examples
 
 ### With MCP Tools (Automatic)
@@ -217,6 +272,67 @@ User: "What files contain 'authentication'?"
 
 User: "Generate context for my-project"
 → Claude calls templedb_context_generate
+
+User: "Set templedb as my default project"
+→ Claude calls templedb_context_set_default
+
+User: "What file types are in the codebase?"
+→ Claude calls templedb_schema_explore
+
+User: "Show me the database schema"
+→ Claude reads templedb://schema resource
+```
+
+### Context Switching Workflow (NEW)
+
+Set a default project to reduce repetition:
+
+```bash
+# Set default
+→ templedb_context_set_default({"project": "my-project"})
+
+# Now other tools can omit project parameter (if implemented)
+→ templedb_vcs_status()  # Uses default project
+→ templedb_schema_explore({"query": "What file types?"})  # Uses default
+```
+
+### Schema Exploration Examples (NEW)
+
+Natural language schema queries:
+
+```bash
+# List all tables
+→ templedb_schema_explore({"query": "What tables exist?"})
+
+# Get project statistics
+→ templedb_schema_explore({"query": "Show me projects"})
+
+# Analyze file types
+→ templedb_schema_explore({"query": "What file types are tracked?", "project": "my-project"})
+
+# Commit statistics
+→ templedb_schema_explore({"query": "How many commits?", "project": "my-project"})
+```
+
+### Resource Reading Examples (NEW)
+
+Access read-only resources:
+
+```bash
+# List available resources
+→ resources/list
+
+# Read schema resource
+→ resources/read({"uri": "templedb://schema"})
+
+# Read projects list
+→ resources/read({"uri": "templedb://projects"})
+
+# Read project-specific schema
+→ resources/read({"uri": "templedb://project/my-project/schema"})
+
+# Read system config
+→ resources/read({"uri": "templedb://config"})
 ```
 
 ### Manual Testing
@@ -615,7 +731,18 @@ cd src && python3
 - [JSON-RPC 2.0 Spec](https://www.jsonrpc.org/specification)
 - [TempleDB Skills](.claude/skills/README.md)
 
-## Recent Enhancements (v1.1 - 2026-03-16)
+## Recent Enhancements
+
+### v1.2 - 2026-03-21
+
+**Completed:**
+- [x] Added MCP Resources support (3 core resources + dynamic project resources)
+- [x] Implemented context management (set/get default project)
+- [x] Added natural language schema exploration tool
+- [x] Updated protocol capabilities to include resources
+- [x] Enhanced documentation with new feature examples
+
+### v1.1 - 2026-03-16
 
 **Completed:**
 - [x] Fixed hardcoded paths - now portable across installations

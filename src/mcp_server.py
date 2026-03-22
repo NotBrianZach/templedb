@@ -101,6 +101,9 @@ class MCPServer:
         # SQLite connection for reuse (with thread check)
         self._db_conn = None
 
+        # Default project context (for context switching feature)
+        self._default_project = None
+
         # Register available tools
         self.tools = {
             "templedb_project_list": self.tool_project_list,
@@ -161,6 +164,11 @@ class MCPServer:
             "templedb_workflow_status": self.tool_workflow_status,
             "templedb_workflow_list": self.tool_workflow_list,
             "templedb_workflow_validate": self.tool_workflow_validate,
+            # Context management
+            "templedb_context_set_default": self.tool_context_set_default,
+            "templedb_context_get_default": self.tool_context_get_default,
+            # Schema exploration
+            "templedb_schema_explore": self.tool_schema_explore,
         }
 
     def _get_db_connection(self):
@@ -1235,8 +1243,212 @@ class MCPServer:
                     },
                     "required": ["workflow"]
                 }
+            },
+            {
+                "name": "templedb_context_set_default",
+                "description": "Set a default project context for the session. Once set, tools that require a 'project' parameter can omit it and use the default. Useful for reducing repetition when working with a single project.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug to set as default (use null or empty to clear)"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_context_get_default",
+                "description": "Get the current default project context (if any is set).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_schema_explore",
+                "description": "Explore database schema with natural language queries. Answers questions about database structure, table relationships, and statistics. Examples: 'What tables exist?', 'Show me the projects schema', 'What file types are tracked?', 'How many commits per project?'",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Natural language question about the database schema or statistics"
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Optional project to scope the query to (uses default if not specified)"
+                        }
+                    },
+                    "required": ["query"]
+                }
             }
         ]
+
+    def get_resource_definitions(self) -> List[Dict[str, Any]]:
+        """Return MCP resource definitions"""
+        return [
+            {
+                "uri": "templedb://schema",
+                "name": "TempleDB Schema",
+                "description": "Complete database schema overview including all tables and their structures",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "templedb://projects",
+                "name": "Projects List",
+                "description": "List of all tracked projects with metadata",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "templedb://config",
+                "name": "System Configuration",
+                "description": "TempleDB system configuration settings",
+                "mimeType": "application/json"
+            }
+        ]
+
+    def read_resource(self, uri: str) -> Dict[str, Any]:
+        """Read a resource by URI"""
+        try:
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+
+            if uri == "templedb://schema":
+                # Return complete schema
+                cursor.execute("""
+                    SELECT name, type, sql
+                    FROM sqlite_master
+                    WHERE type IN ('table', 'view', 'index')
+                    AND name NOT LIKE 'sqlite_%'
+                    ORDER BY type, name
+                """)
+                objects = cursor.fetchall()
+
+                schema_data = {
+                    "tables": [],
+                    "views": [],
+                    "indexes": []
+                }
+
+                for row in objects:
+                    obj = {
+                        "name": row["name"],
+                        "sql": row["sql"]
+                    }
+                    if row["type"] == "table":
+                        schema_data["tables"].append(obj)
+                    elif row["type"] == "view":
+                        schema_data["views"].append(obj)
+                    elif row["type"] == "index":
+                        schema_data["indexes"].append(obj)
+
+                return self._success_response(schema_data)
+
+            elif uri == "templedb://projects":
+                # Return all projects
+                cursor.execute("""
+                    SELECT
+                        p.id,
+                        p.name,
+                        p.slug,
+                        p.repo_url,
+                        p.created_at,
+                        COUNT(DISTINCT f.id) as file_count,
+                        COUNT(DISTINCT c.id) as commit_count
+                    FROM projects p
+                    LEFT JOIN project_files f ON f.project_id = p.id
+                    LEFT JOIN vcs_commits c ON c.project_id = p.id
+                    GROUP BY p.id
+                    ORDER BY p.created_at DESC
+                """)
+                projects = cursor.fetchall()
+
+                projects_data = {
+                    "total": len(projects),
+                    "projects": [dict(row) for row in projects]
+                }
+
+                return self._success_response(projects_data)
+
+            elif uri == "templedb://config":
+                # Return system config
+                cursor.execute("""
+                    SELECT key, value, description, updated_at
+                    FROM system_config
+                    ORDER BY key
+                """)
+                configs = cursor.fetchall()
+
+                config_data = {
+                    "total": len(configs),
+                    "settings": [dict(row) for row in configs]
+                }
+
+                return self._success_response(config_data)
+
+            elif uri.startswith("templedb://project/"):
+                # Project-specific resource: templedb://project/{slug}/schema
+                parts = uri.split("/")
+                if len(parts) >= 4:
+                    project_slug = parts[3]
+
+                    cursor.execute("""
+                        SELECT id, name, slug FROM projects
+                        WHERE slug = ?
+                    """, (project_slug,))
+                    project = cursor.fetchone()
+
+                    if not project:
+                        return self._error_response(
+                            f"Project '{project_slug}' not found",
+                            ErrorCode.PROJECT_NOT_FOUND,
+                            {"project": project_slug}
+                        )
+
+                    # If asking for schema
+                    if len(parts) >= 5 and parts[4] == "schema":
+                        cursor.execute("""
+                            SELECT
+                                CASE
+                                    WHEN INSTR(file_name, '.') > 0
+                                    THEN SUBSTR(file_name, INSTR(file_name, '.'))
+                                    ELSE '(no extension)'
+                                END as extension,
+                                COUNT(*) as count
+                            FROM project_files
+                            WHERE project_id = ?
+                            GROUP BY extension
+                            ORDER BY count DESC
+                        """, (project["id"],))
+                        file_types = cursor.fetchall()
+
+                        cursor.execute("""
+                            SELECT COUNT(*) as count FROM vcs_commits
+                            WHERE project_id = ?
+                        """, (project["id"],))
+                        commit_count = cursor.fetchone()["count"]
+
+                        project_data = {
+                            "project": dict(project),
+                            "file_types": [dict(row) for row in file_types],
+                            "total_commits": commit_count
+                        }
+
+                        return self._success_response(project_data)
+
+            # Unknown resource
+            return self._error_response(
+                f"Resource not found: {uri}",
+                ErrorCode.NOT_FOUND,
+                {"uri": uri}
+            )
+
+        except Exception as e:
+            logger.error(f"Error reading resource {uri}: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
     # Tool implementations
 
@@ -2897,6 +3109,293 @@ class MCPServer:
         workflow_files = list(workflows_dir.glob("*.yaml"))
         return ", ".join([f.stem for f in workflow_files]) if workflow_files else "none"
 
+    # Context Management Tools
+
+    def tool_context_set_default(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Set default project context for the session"""
+        try:
+            project = args.get("project")
+
+            # Handle clearing the context
+            if not project or project == "null":
+                self._default_project = None
+                return self._success_response({
+                    "status": "cleared",
+                    "message": "Default project context cleared"
+                })
+
+            # Validate project exists
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, name, slug FROM projects
+                WHERE name = ? OR slug = ?
+            """, (project, project))
+
+            row = cursor.fetchone()
+            if not row:
+                return self._error_response(
+                    f"Project '{project}' not found",
+                    ErrorCode.PROJECT_NOT_FOUND,
+                    {"project": project}
+                )
+
+            # Set the default
+            self._default_project = row["slug"]
+
+            return self._success_response({
+                "status": "set",
+                "project": row["slug"],
+                "name": row["name"],
+                "message": f"Default project set to '{row['name']}' (slug: {row['slug']})"
+            })
+
+        except Exception as e:
+            logger.error(f"Error setting default project: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_context_get_default(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get current default project context"""
+        try:
+            if not self._default_project:
+                return self._success_response({
+                    "status": "none",
+                    "project": None,
+                    "message": "No default project set"
+                })
+
+            # Get project details
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, name, slug FROM projects
+                WHERE slug = ?
+            """, (self._default_project,))
+
+            row = cursor.fetchone()
+            if not row:
+                # Project was deleted, clear the default
+                self._default_project = None
+                return self._success_response({
+                    "status": "none",
+                    "project": None,
+                    "message": "Default project was deleted"
+                })
+
+            return self._success_response({
+                "status": "set",
+                "project": row["slug"],
+                "name": row["name"],
+                "message": f"Default project is '{row['name']}' (slug: {row['slug']})"
+            })
+
+        except Exception as e:
+            logger.error(f"Error getting default project: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_schema_explore(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Explore database schema with natural language queries"""
+        try:
+            query = args.get("query", "").lower()
+            project = args.get("project") or self._default_project
+
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+
+            # Pattern matching for common queries
+            response_data = {}
+
+            # "What tables exist?" or "List tables" or "Show tables"
+            if any(phrase in query for phrase in ["what tables", "list tables", "show tables", "available tables"]):
+                cursor.execute("""
+                    SELECT name, type FROM sqlite_master
+                    WHERE type IN ('table', 'view')
+                    ORDER BY type, name
+                """)
+                tables = cursor.fetchall()
+
+                response_data = {
+                    "query": query,
+                    "tables": [{"name": row["name"], "type": row["type"]} for row in tables],
+                    "count": len(tables),
+                    "summary": f"Found {len(tables)} tables/views in TempleDB schema"
+                }
+
+            # "Show me projects" or "List projects"
+            elif any(phrase in query for phrase in ["projects schema", "project table", "show projects", "list projects"]):
+                cursor.execute("SELECT COUNT(*) as count FROM projects")
+                count = cursor.fetchone()["count"]
+
+                cursor.execute("""
+                    SELECT name, slug, created_at
+                    FROM projects
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """)
+                projects = cursor.fetchall()
+
+                response_data = {
+                    "query": query,
+                    "total_projects": count,
+                    "recent_projects": [dict(row) for row in projects],
+                    "summary": f"Total of {count} projects tracked in TempleDB"
+                }
+
+            # "What file types?" or "File extensions"
+            elif any(phrase in query for phrase in ["file types", "file extensions", "what extensions"]):
+                if project:
+                    cursor.execute("""
+                        SELECT p.id FROM projects p
+                        WHERE p.name = ? OR p.slug = ?
+                    """, (project, project))
+                    project_row = cursor.fetchone()
+                    if not project_row:
+                        return self._error_response(
+                            f"Project '{project}' not found",
+                            ErrorCode.PROJECT_NOT_FOUND
+                        )
+                    project_id = project_row["id"]
+
+                    # Get file extensions - extract from last occurrence of '.'
+                    cursor.execute("""
+                        SELECT
+                            CASE
+                                WHEN INSTR(file_name, '.') > 0
+                                THEN SUBSTR(file_name, INSTR(file_name, '.'))
+                                ELSE '(no extension)'
+                            END as extension,
+                            COUNT(*) as count
+                        FROM project_files
+                        WHERE project_id = ?
+                        GROUP BY extension
+                        ORDER BY count DESC
+                        LIMIT 20
+                    """, (project_id,))
+                else:
+                    cursor.execute("""
+                        SELECT
+                            CASE
+                                WHEN INSTR(file_name, '.') > 0
+                                THEN SUBSTR(file_name, INSTR(file_name, '.'))
+                                ELSE '(no extension)'
+                            END as extension,
+                            COUNT(*) as count
+                        FROM project_files
+                        GROUP BY extension
+                        ORDER BY count DESC
+                        LIMIT 20
+                    """)
+
+                file_types = cursor.fetchall()
+                total_files = sum(row["count"] for row in file_types)
+
+                response_data = {
+                    "query": query,
+                    "project": project,
+                    "file_types": [{"extension": row["extension"], "count": row["count"]} for row in file_types],
+                    "total_files": total_files,
+                    "summary": f"Found {len(file_types)} file types across {total_files} files" + (f" in project '{project}'" if project else "")
+                }
+
+            # "How many commits?" or "Commit statistics"
+            elif any(phrase in query for phrase in ["commits", "commit statistics", "how many commits"]):
+                if project:
+                    cursor.execute("""
+                        SELECT p.id FROM projects p
+                        WHERE p.name = ? OR p.slug = ?
+                    """, (project, project))
+                    project_row = cursor.fetchone()
+                    if not project_row:
+                        return self._error_response(
+                            f"Project '{project}' not found",
+                            ErrorCode.PROJECT_NOT_FOUND
+                        )
+                    project_id = project_row["id"]
+
+                    cursor.execute("""
+                        SELECT COUNT(*) as count
+                        FROM vcs_commits
+                        WHERE project_id = ?
+                    """, (project_id,))
+                    count = cursor.fetchone()["count"]
+
+                    cursor.execute("""
+                        SELECT message, created_at
+                        FROM vcs_commits
+                        WHERE project_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT 5
+                    """, (project_id,))
+                    recent = cursor.fetchall()
+
+                    response_data = {
+                        "query": query,
+                        "project": project,
+                        "total_commits": count,
+                        "recent_commits": [dict(row) for row in recent],
+                        "summary": f"Project '{project}' has {count} commits"
+                    }
+                else:
+                    cursor.execute("""
+                        SELECT
+                            p.name,
+                            p.slug,
+                            COUNT(c.id) as commit_count
+                        FROM projects p
+                        LEFT JOIN vcs_commits c ON c.project_id = p.id
+                        GROUP BY p.id
+                        ORDER BY commit_count DESC
+                    """)
+                    stats = cursor.fetchall()
+
+                    total_commits = sum(row["commit_count"] for row in stats)
+
+                    response_data = {
+                        "query": query,
+                        "commit_statistics": [dict(row) for row in stats],
+                        "total_commits": total_commits,
+                        "summary": f"Total of {total_commits} commits across all projects"
+                    }
+
+            # Generic schema info
+            elif any(phrase in query for phrase in ["schema", "database structure"]):
+                cursor.execute("""
+                    SELECT name, sql
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    AND name NOT LIKE 'sqlite_%'
+                    ORDER BY name
+                """)
+                tables = cursor.fetchall()
+
+                response_data = {
+                    "query": query,
+                    "tables": [{"name": row["name"], "schema": row["sql"]} for row in tables],
+                    "count": len(tables),
+                    "summary": f"Database contains {len(tables)} tables"
+                }
+
+            else:
+                # Unknown query - provide helpful suggestions
+                response_data = {
+                    "query": query,
+                    "error": "Query not understood",
+                    "suggestions": [
+                        "What tables exist?",
+                        "Show me projects",
+                        "What file types are tracked?",
+                        "How many commits?",
+                        "Show database schema"
+                    ],
+                    "summary": "Try one of the suggested queries or be more specific"
+                }
+
+            return self._success_response(response_data)
+
+        except Exception as e:
+            logger.error(f"Error exploring schema: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
     def handle_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Handle incoming MCP message"""
         msg_type = message.get("method")
@@ -2911,11 +3410,12 @@ class MCPServer:
                     "result": {
                         "protocolVersion": self.protocol_version,
                         "capabilities": {
-                            "tools": {}
+                            "tools": {},
+                            "resources": {}
                         },
                         "serverInfo": {
                             "name": "templedb",
-                            "version": "1.0.0"
+                            "version": "1.1.0"
                         }
                     }
                 }
@@ -2927,6 +3427,34 @@ class MCPServer:
                     "result": {
                         "tools": self.get_tool_definitions()
                     }
+                }
+
+            elif msg_type == "resources/list":
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "resources": self.get_resource_definitions()
+                    }
+                }
+
+            elif msg_type == "resources/read":
+                uri = params.get("uri")
+                if not uri:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "Missing required parameter: uri"
+                        }
+                    }
+
+                result = self.read_resource(uri)
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": result
                 }
 
             elif msg_type == "tools/call":

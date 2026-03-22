@@ -1,7 +1,8 @@
 # TempleDB MCP Tools - Quick Reference
 
-**Total Tools:** 27
-**Version:** 1.1 (2026-03-16)
+**Total Tools:** 51
+**Total Resources:** 3+
+**Version:** 1.2 (2026-03-21)
 
 ## Tool Categories
 
@@ -43,6 +44,19 @@
 - `templedb_env_get` - Get environment variable
 - `templedb_env_set` - Set environment variable
 - `templedb_env_list` - List environment variables
+
+### 🎯 Context Management (2 tools) *NEW*
+- `templedb_context_set_default` - Set default project context
+- `templedb_context_get_default` - Get current default project
+
+### 🔎 Schema Exploration (1 tool) *NEW*
+- `templedb_schema_explore` - Natural language schema queries
+
+### 📖 MCP Resources (3+ resources) *NEW*
+- `templedb://schema` - Complete database schema
+- `templedb://projects` - All tracked projects
+- `templedb://config` - System configuration
+- `templedb://project/{slug}/schema` - Project-specific schema
 
 ## Common Use Cases
 
@@ -193,6 +207,69 @@ templedb_env_set({
 })
 ```
 
+### Context Management (NEW)
+```javascript
+// Set default project
+templedb_context_set_default({
+  "project": "my-project"
+})
+
+// Get current default
+templedb_context_get_default({})
+
+// Clear default
+templedb_context_set_default({
+  "project": null
+})
+```
+
+### Schema Exploration (NEW)
+```javascript
+// Natural language queries
+templedb_schema_explore({
+  "query": "What tables exist?"
+})
+
+templedb_schema_explore({
+  "query": "What file types are tracked?",
+  "project": "my-project"  // optional, uses default if not specified
+})
+
+templedb_schema_explore({
+  "query": "How many commits?",
+  "project": "my-project"
+})
+
+templedb_schema_explore({
+  "query": "Show me projects"
+})
+```
+
+### Resources (NEW)
+```javascript
+// MCP protocol for reading resources
+
+// List available resources
+resources/list
+
+// Read specific resource
+resources/read({
+  "uri": "templedb://schema"
+})
+
+resources/read({
+  "uri": "templedb://projects"
+})
+
+resources/read({
+  "uri": "templedb://config"
+})
+
+resources/read({
+  "uri": "templedb://project/my-project/schema"
+})
+```
+
 ## Error Codes
 
 All tools return structured errors with codes:
@@ -242,6 +319,9 @@ All tools return structured errors with codes:
 3. **Secrets**: `secret_export` requires Age decryption keys to be available
 4. **Packages**: Cathedral packages are portable - can move between TempleDB instances
 5. **Path Patterns**: Use SQL LIKE syntax (%, _) for file searches
+6. **Context Switching** (NEW): Set a default project to avoid repeating project parameter
+7. **Natural Language** (NEW): Use `schema_explore` for human-friendly database queries
+8. **Resources** (NEW): Resources are read-only and can be subscribed to by MCP clients
 
 ## Configuration
 
@@ -273,5 +353,6 @@ python3 -c "from src.mcp_server import MCPServer; print(len(MCPServer().tools))"
 
 ---
 
-**Quick Reference Version:** 1.1
-**Last Updated:** 2026-03-16
+**Quick Reference Version:** 1.2
+**Last Updated:** 2026-03-21
+**New Features:** Context management, schema exploration, MCP resources
