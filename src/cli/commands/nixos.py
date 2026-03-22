@@ -24,11 +24,27 @@ class NixOSCommand(Command):
             from nixos_generator import NixOSGenerator
 
             project_slug = args.slug
-            output_dir = Path(args.output) if args.output else Path('/tmp/nixos-gen')
-            output_dir.mkdir(parents=True, exist_ok=True)
 
-            print(f"\n🔧 Generating NixOS configuration for {project_slug}...")
-            print(f"   Output: {output_dir}\n")
+            # Auto-detect output directory for nixos-config projects
+            if args.output:
+                output_dir = Path(args.output)
+            else:
+                # Check if this is a nixos-config project
+                project = self.get_project_or_exit(project_slug)
+                if project['project_type'] == 'nixos-config' and project['repo_url']:
+                    # Use the project's repo path + modules directory
+                    config_path = Path(project['repo_url'])
+                    modules_dir = config_path / 'modules'
+                    modules_dir.mkdir(exist_ok=True)
+                    output_dir = modules_dir
+                    print(f"\n🔧 Generating NixOS configuration for {project_slug}...")
+                    print(f"   Auto-detected nixos-config project")
+                    print(f"   Output: {output_dir}\n")
+                else:
+                    output_dir = Path('/tmp/nixos-gen')
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    print(f"\n🔧 Generating NixOS configuration for {project_slug}...")
+                    print(f"   Output: {output_dir}\n")
 
             with NixOSGenerator() as gen:
                 config = gen.generate_config(
@@ -38,15 +54,22 @@ class NixOSCommand(Command):
                     include_templedb=args.include_templedb
                 )
 
+                # For nixos-config projects, write to templedb-managed.nix
+                # For other projects, use project-specific names
+                if project['project_type'] == 'nixos-config':
+                    nixos_path = output_dir / "templedb-managed-system.nix"
+                    hm_path = output_dir / "templedb-managed.nix"
+                else:
+                    nixos_path = output_dir / f"{project_slug}-nixos.nix"
+                    hm_path = output_dir / f"{project_slug}-home.nix"
+
                 # Write NixOS module
-                nixos_path = output_dir / f"{project_slug}-nixos.nix"
                 nixos_module = gen.generate_nix_module(config)
                 nixos_path.write_text(nixos_module)
                 print(f"✓ NixOS module: {nixos_path}")
 
                 # Write Home Manager module
                 if not args.no_home_manager:
-                    hm_path = output_dir / f"{project_slug}-home.nix"
                     hm_module = gen.generate_home_manager_module(config)
                     hm_path.write_text(hm_module)
                     print(f"✓ Home Manager module: {hm_path}")
@@ -58,11 +81,19 @@ class NixOSCommand(Command):
                 print(f"   Environment vars: {len(config.environment_vars)}")
                 print(f"   Secrets: {len(config.secrets)}")
 
-                print(f"\n💡 Next steps:")
-                print(f"   1. Review generated modules in {output_dir}")
-                print(f"   2. Copy to /etc/nixos/")
-                print(f"   3. Import in your flake.nix")
-                print(f"   4. Run: sudo nixos-rebuild test")
+                # Project-specific next steps
+                if project['project_type'] == 'nixos-config':
+                    print(f"\n💡 Next steps:")
+                    print(f"   1. Module already installed at {output_dir}")
+                    print(f"   2. Make sure flake.nix imports ./modules/templedb-managed.nix")
+                    print(f"   3. Run: sudo nixos-rebuild test")
+                    print(f"   4. If successful: sudo nixos-rebuild switch")
+                else:
+                    print(f"\n💡 Next steps:")
+                    print(f"   1. Review generated modules in {output_dir}")
+                    print(f"   2. Copy to /etc/nixos/")
+                    print(f"   3. Import in your flake.nix")
+                    print(f"   4. Run: sudo nixos-rebuild test")
 
             return 0
 
@@ -476,6 +507,147 @@ class NixOSCommand(Command):
             logger.error(f"Failed to list config: {e}", exc_info=True)
             return 1
 
+    # ========================================================================
+    # Package Management Commands
+    # ========================================================================
+
+    def add_package(self, args) -> int:
+        """Add CLI tool to NixOS managed packages"""
+        project_slug = args.slug
+
+        # Get project
+        project = self.get_project_or_exit(project_slug)
+        project_id = project['id']
+
+        # Check if flake.nix exists
+        git_path = Path(project['git_path'])
+        flake_path = git_path / "flake.nix"
+        if not flake_path.exists():
+            logger.error(f"No flake.nix found in {git_path}")
+            logger.info(f"Generate one first: ./templedb deploy-nix generate-flake {project_slug}")
+            return 1
+
+        # Args
+        scope = args.scope if hasattr(args, 'scope') and args.scope else 'user'
+        flake_uri = args.flake_uri if hasattr(args, 'flake_uri') and args.flake_uri else None
+        version = args.version if hasattr(args, 'version') and args.version else None
+        package_name = args.name if hasattr(args, 'name') and args.name else project_slug
+
+        print(f"📦 Adding {package_name} to NixOS managed packages...")
+        print(f"   Scope: {scope}")
+        print(f"   Flake URI: {flake_uri or f'path:{git_path}'}\n")
+
+        # Insert or update managed package
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO nixos_managed_packages
+                (project_id, package_type, install_scope, flake_uri, package_name, version)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, install_scope) DO UPDATE SET
+                    flake_uri = excluded.flake_uri,
+                    package_name = excluded.package_name,
+                    version = excluded.version,
+                    enabled = 1,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (project_id, 'home' if scope == 'user' else 'system', scope, flake_uri, package_name, version))
+            self.conn.commit()
+
+            print(f"✅ {package_name} added to managed packages")
+            print(f"\n💡 Next steps:")
+            print(f"   1. Generate config: ./templedb nixos generate myconfig")
+            print(f"   2. Test: ./templedb nixos system-test myconfig")
+            print(f"   3. Apply: ./templedb nixos system-switch myconfig")
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to add package: {e}", exc_info=True)
+            return 1
+
+    def remove_package(self, args) -> int:
+        """Remove CLI tool from NixOS managed packages"""
+        project_slug = args.slug
+
+        # Get project
+        project = self.get_project_or_exit(project_slug)
+        project_id = project['id']
+
+        print(f"🗑️  Removing {project_slug} from managed packages...")
+
+        # Mark as disabled (soft delete)
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE nixos_managed_packages
+                SET enabled = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE project_id = ?
+            """, (project_id,))
+
+            if cursor.rowcount == 0:
+                print(f"⚠️  {project_slug} is not in managed packages")
+                return 1
+
+            self.conn.commit()
+
+            print(f"✅ {project_slug} removed from managed packages")
+            print(f"\n💡 Regenerate your NixOS config to apply changes:")
+            print(f"   ./templedb nixos generate myconfig")
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to remove package: {e}", exc_info=True)
+            return 1
+
+    def list_packages(self, args) -> int:
+        """List all NixOS managed packages"""
+        scope = args.scope if hasattr(args, 'scope') and args.scope else None
+
+        cursor = self.conn.cursor()
+        try:
+            if scope:
+                rows = cursor.execute("""
+                    SELECT * FROM nixos_managed_packages_view
+                    WHERE enabled = 1 AND install_scope = ?
+                    ORDER BY package_name
+                """, (scope,)).fetchall()
+            else:
+                rows = cursor.execute("""
+                    SELECT * FROM nixos_managed_packages_view
+                    WHERE enabled = 1
+                    ORDER BY install_scope, package_name
+                """).fetchall()
+
+            if not rows:
+                print("⚠️  No managed packages found")
+                print("\n💡 To add a package:")
+                print("   ./templedb nixos add-package <project-slug>")
+                return 0
+
+            print("\n╔════════════════════════════════════════════════════════════════════╗")
+            print("║              NixOS Managed Packages                                ║")
+            print("╚════════════════════════════════════════════════════════════════════╝")
+            print()
+
+            for row in rows:
+                scope_icon = "🖥️ " if row['install_scope'] == 'system' else "👤"
+                print(f"{scope_icon} {row['package_name']:20} | {row['install_scope']:8} | {row['project_slug']}")
+                if row['version']:
+                    print(f"   └─ Version: {row['version']}")
+                flake_uri = row['flake_uri'] or f"path:{row['git_path']}"
+                print(f"   └─ {flake_uri}")
+                print()
+
+            print(f"Total: {len(rows)} package(s)")
+            print("\n💡 To remove a package:")
+            print("   ./templedb nixos remove-package <project-slug>")
+            print()
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to list packages: {e}", exc_info=True)
+            return 1
+
 
 def register(cli):
     """Register NixOS commands with CLI"""
@@ -560,3 +732,24 @@ def register(cli):
     # nixos config-list command
     config_list_parser = subparsers.add_parser('config-list', help='List all system configuration')
     cli.commands['nixos.config-list'] = cmd.config_list
+
+    # Package management commands
+    # nixos add-package command
+    add_pkg_parser = subparsers.add_parser('add-package', help='Add CLI tool to managed packages')
+    add_pkg_parser.add_argument('slug', help='Project slug')
+    add_pkg_parser.add_argument('--scope', choices=['system', 'user'], default='user',
+                                help='Installation scope (default: user)')
+    add_pkg_parser.add_argument('--flake-uri', help='Flake URI (default: path to git repo)')
+    add_pkg_parser.add_argument('--name', help='Package name (default: project slug)')
+    add_pkg_parser.add_argument('--version', help='Version constraint')
+    cli.commands['nixos.add-package'] = cmd.add_package
+
+    # nixos remove-package command
+    remove_pkg_parser = subparsers.add_parser('remove-package', help='Remove CLI tool from managed packages')
+    remove_pkg_parser.add_argument('slug', help='Project slug')
+    cli.commands['nixos.remove-package'] = cmd.remove_package
+
+    # nixos list-packages command
+    list_pkg_parser = subparsers.add_parser('list-packages', help='List all managed packages')
+    list_pkg_parser.add_argument('--scope', choices=['system', 'user'], help='Filter by scope')
+    cli.commands['nixos.list-packages'] = cmd.list_packages
