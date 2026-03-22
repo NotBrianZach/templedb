@@ -372,6 +372,49 @@ templedb tui
 - Multi-session monitoring
 - Agent coordination panel
 
+### 11. Code Intelligence & Workflows
+
+**Automated symbol extraction, dependency graphs, and blast radius analysis:**
+
+```bash
+# Bootstrap code intelligence for a project
+templedb workflow execute code_intelligence_bootstrap --project myproject
+
+# Analyze impact of changing a symbol
+templedb code impact-analysis myproject authenticate_user
+
+# Search code with hybrid search (BM25 + graph ranking)
+templedb code search myproject "authentication"
+```
+
+**Three Production-Ready Workflows:**
+
+1. **code-intelligence-bootstrap** - Sets up code intelligence features
+   - Extracts public symbols from code (functions, classes, methods)
+   - Builds cross-file dependency graph
+   - Enables impact analysis and code search
+
+2. **safe-deployment** - Deploy with systematic safety checks
+   - Impact analysis of changed symbols
+   - Test validation for affected code
+   - Staging deployment with smoke tests
+   - Production deployment with health checks
+   - Automatic rollback on failure
+
+3. **impact-aware-refactoring** - Systematic refactoring with blast radius awareness
+   - Discover affected code and calculate blast radius
+   - Verify test coverage before refactoring
+   - Execute refactoring with continuous validation
+   - Check architectural boundary integrity
+   - Document changes and prepare for review
+
+**Key Features:**
+- Database-native code intelligence (no external indexers)
+- Hybrid search (BM25 full-text + graph ranking)
+- Blast radius analysis (know what breaks before you change it)
+- Cluster detection (discover architectural boundaries)
+- ACID-safe workflow execution with validation and rollback
+
 ---
 
 ## CLI Command Reference
@@ -425,6 +468,27 @@ templedb work mailbox <session-id>
 templedb work dispatch [-p <proj>] [--priority <pri>]
 templedb work agents [-p <proj>]
 templedb work metrics [-p <proj>]
+```
+
+### Code Intelligence & Workflows
+```bash
+# Extract symbols and build dependency graph
+templedb code extract-symbols <proj>
+templedb code build-graph <proj>
+templedb code detect-clusters <proj> [--resolution <num>]
+templedb code index-search <proj>
+
+# Search and analysis
+templedb code search <proj> <query> [--limit <n>]
+templedb code show-symbol <proj> <symbol-name>
+templedb code show-clusters <proj> [--include-members]
+templedb code impact-analysis <proj> <symbol-name>
+
+# Execute workflows
+templedb workflow execute <workflow-name> --project <proj> [--variables <json>] [--dry-run]
+templedb workflow list
+templedb workflow validate <workflow-name>
+templedb workflow status [<workflow-id>]
 ```
 
 ### Search
@@ -789,6 +853,16 @@ cd /tmp/work && vim src/file.py
 # Start agent session
 ./templedb agent start --project myproject --goal "Task description"
 export TEMPLEDB_SESSION_ID=1
+
+# Bootstrap code intelligence
+./templedb workflow execute code_intelligence_bootstrap --project myproject
+
+# Analyze code impact before making changes
+./templedb code impact-analysis myproject my_function_name
+
+# Safe deployment with automatic rollback
+./templedb workflow execute safe_deployment --project myproject \
+  --variables '{"primary_symbol":"deploy","previous_version":"v1.0.0"}'
 
 # Query database
 sqlite3 ~/.local/share/templedb/templedb.sqlite "SELECT * FROM projects"

@@ -40,7 +40,7 @@ TempleDB now integrates directly with Claude Code via MCP, exposing templedb ope
 
 ## Available Tools
 
-**Total: 51 tools** (extensive coverage across all TempleDB features)
+**Total: 60+ tools** (extensive coverage across all TempleDB features including code intelligence and workflows)
 
 ## Available Resources
 
@@ -217,6 +217,82 @@ TempleDB now integrates directly with Claude Code via MCP, exposing templedb ope
 - Returns: Current default project info or none if not set
 - Purpose: Check which project is set as default
 
+### Code Intelligence (NEW - v1.3)
+
+**`templedb_code_extract_symbols`**
+- Extract public/exported symbols from project files (Phase 1.2)
+- Parameters: `project`, optional `force` (default: false)
+- Returns: Symbol count and extraction statistics
+- Purpose: Enables code search and impact analysis
+
+**`templedb_code_build_graph`**
+- Build dependency graph for project (Phase 1.3)
+- Parameters: `project`, optional `force` (default: false)
+- Returns: Graph statistics (nodes, edges)
+- Purpose: Required for impact analysis and clustering
+
+**`templedb_code_detect_clusters`**
+- Detect code clusters using Leiden algorithm (Phase 1.5)
+- Parameters: `project`, optional `resolution` (default: 1.0)
+- Returns: Cluster count and cohesion metrics
+- Purpose: Discover architectural boundaries automatically
+
+**`templedb_code_index_search`**
+- Index project for hybrid code search (Phase 1.6)
+- Parameters: `project`
+- Returns: Search index statistics
+- Purpose: Enables fast keyword and semantic search
+
+**`templedb_code_search`**
+- Search code using hybrid search (BM25 + graph ranking)
+- Parameters: `project`, `query`, optional `limit`, `symbol_type`
+- Returns: Relevance-ranked results with scoring breakdown
+- Purpose: Find symbols by name, docstrings, and signatures
+
+**`templedb_code_show_symbol`**
+- Show detailed information about a code symbol
+- Parameters: `project`, `symbol_name`
+- Returns: Symbol details, callers, callees, complexity, cluster membership
+- Purpose: 360-degree view of a symbol's role
+
+**`templedb_code_show_clusters`**
+- Show code clusters (architectural boundaries)
+- Parameters: `project`, optional `include_members`, `limit`
+- Returns: Cluster list with cohesion scores
+- Purpose: Understand module structure
+
+**`templedb_code_impact_analysis`**
+- Analyze blast radius (impact) of changing a symbol
+- Parameters: `project`, `symbol_name`
+- Returns: All affected symbols (direct and transitive dependents)
+- Purpose: Know what breaks before you change it
+
+### Workflows (NEW - v1.3)
+
+**`templedb_workflow_execute`**
+- Execute a workflow with given variables
+- Parameters: `workflow`, optional `project`, `variables`, `dry_run`
+- Returns: Workflow execution result with phase outcomes
+- Purpose: Multi-phase orchestration of code intelligence, testing, deployment
+
+**`templedb_workflow_list`**
+- List all available workflow definitions
+- Parameters: none
+- Returns: Array of workflow names with descriptions
+- Purpose: Discover available workflows
+
+**`templedb_workflow_validate`**
+- Validate a workflow definition
+- Parameters: `workflow` (name without .yaml extension)
+- Returns: Validation result with any errors
+- Purpose: Check workflow syntax before execution
+
+**`templedb_workflow_status`**
+- Get status of a running or completed workflow
+- Parameters: optional `workflow_id`
+- Returns: Workflow execution status
+- Purpose: Monitor long-running workflows (async support coming)
+
 ### Schema Exploration (NEW - v1.2)
 
 **`templedb_schema_explore`**
@@ -281,6 +357,18 @@ User: "What file types are in the codebase?"
 
 User: "Show me the database schema"
 → Claude reads templedb://schema resource
+
+User: "Bootstrap code intelligence for my-project"
+→ Claude calls templedb_workflow_execute with workflow="code_intelligence_bootstrap"
+
+User: "What's the impact of changing the authenticate function?"
+→ Claude calls templedb_code_impact_analysis
+
+User: "Search for authentication code"
+→ Claude calls templedb_code_search
+
+User: "Deploy to production with safety checks"
+→ Claude calls templedb_workflow_execute with workflow="safe_deployment"
 ```
 
 ### Context Switching Workflow (NEW)
@@ -312,6 +400,78 @@ Natural language schema queries:
 
 # Commit statistics
 → templedb_schema_explore({"query": "How many commits?", "project": "my-project"})
+```
+
+### Code Intelligence Workflow (NEW - v1.3)
+
+Bootstrap code intelligence and analyze impact:
+
+```bash
+# Bootstrap code intelligence
+→ templedb_workflow_execute({
+    "workflow": "code_intelligence_bootstrap",
+    "project": "my-project"
+  })
+
+# Search for symbols
+→ templedb_code_search({
+    "project": "my-project",
+    "query": "authenticate user",
+    "limit": 10
+  })
+
+# Analyze impact before refactoring
+→ templedb_code_impact_analysis({
+    "project": "my-project",
+    "symbol_name": "authenticate_user"
+  })
+
+# Show architectural boundaries
+→ templedb_code_show_clusters({
+    "project": "my-project",
+    "include_members": true
+  })
+```
+
+### Deployment Workflow (NEW - v1.3)
+
+Safe deployment with automatic rollback:
+
+```bash
+# Deploy with full safety checks
+→ templedb_workflow_execute({
+    "workflow": "safe_deployment",
+    "project": "my-project",
+    "variables": {
+      "primary_symbol": "deploy",
+      "previous_version": "v2.0.0",
+      "staging_health_url": "https://staging.example.com/health",
+      "production_health_url": "https://production.example.com/health"
+    }
+  })
+
+# Dry run to preview
+→ templedb_workflow_execute({
+    "workflow": "safe_deployment",
+    "project": "my-project",
+    "dry_run": true
+  })
+```
+
+### Refactoring Workflow (NEW - v1.3)
+
+Impact-aware refactoring with blast radius checks:
+
+```bash
+# Refactor with safety checks
+→ templedb_workflow_execute({
+    "workflow": "impact_aware_refactoring",
+    "project": "my-project",
+    "variables": {
+      "target_symbol": "process_payment",
+      "max_blast_radius": "100"
+    }
+  })
 ```
 
 ### Resource Reading Examples (NEW)
@@ -732,6 +892,17 @@ cd src && python3
 - [TempleDB Skills](.claude/skills/README.md)
 
 ## Recent Enhancements
+
+### v1.3 - 2026-03-22
+
+**Completed:**
+- [x] Added Code Intelligence tools (8 tools for symbol extraction, dependency graphs, search, impact analysis)
+- [x] Implemented Workflow execution system with 3 production-ready workflows
+- [x] Added `code_intelligence_bootstrap` workflow for automatic setup
+- [x] Added `safe_deployment` workflow with staging, production, and rollback
+- [x] Added `impact_aware_refactoring` workflow with blast radius awareness
+- [x] Updated MCP documentation with workflow examples
+- [x] Updated project context with code intelligence and workflow information
 
 ### v1.2 - 2026-03-21
 
