@@ -3,10 +3,17 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Use venv Python if available (for development), otherwise system Python
+if [ -f "$SCRIPT_DIR/venv/bin/python3" ]; then
+    PYTHON="$SCRIPT_DIR/venv/bin/python3"
+else
+    PYTHON="python3"
+fi
+
 # Set PYTHONPATH to include src directory, but don't change CWD
 export PYTHONPATH="$SCRIPT_DIR/src:$PYTHONPATH"
 
 # Disable Python bytecode generation to avoid permission issues with sudo
 export PYTHONDONTWRITEBYTECODE=1
 
-exec python3 -m cli "$@"
+exec "$PYTHON" -m cli "$@"
