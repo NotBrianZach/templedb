@@ -656,19 +656,20 @@ class NixOps4Commands(Command):
                     print(f"      Error: {md['error_message']}")
 
 
-def register(cli):
-    """Register nixops4 commands"""
-    handler = NixOps4Commands()
+def _register_nixops4_commands(handler, subparsers, cli, prefix='nixops4'):
+    """Register nixops4 commands with customizable prefix
 
-    # Create nixops4 command group
-    nixops4_parser = cli.register_command('nixops4', None, help_text='NixOps4 declarative deployment orchestration')
-    nixops4_subparsers = nixops4_parser.add_subparsers(dest='nixops4_subcommand', required=True)
-
+    Args:
+        handler: NixOps4Commands instance
+        subparsers: Subparser to register under
+        cli: CLI instance
+        prefix: Command prefix (e.g., 'nixops4' or 'deploy.nixops4')
+    """
     # Network commands
-    network_parser = nixops4_subparsers.add_parser('network', help='Manage deployment networks')
+    network_parser = subparsers.add_parser('network', help='Manage deployment networks')
     network_subparsers = network_parser.add_subparsers(dest='network_command', required=True, help='Network operations')
 
-    # nixops4 network create
+    # network create
     create_parser = network_subparsers.add_parser('create', help='Create a new deployment network')
     create_parser.add_argument('project', help='Project slug')
     create_parser.add_argument('name', help='Network name')
@@ -676,24 +677,24 @@ def register(cli):
     create_parser.add_argument('--flake-uri', help='Flake URI for network configuration')
     create_parser.add_argument('--description', help='Network description')
     create_parser.add_argument('--created-by', help='Creator identifier')
-    cli.commands['nixops4.network.create'] = handler.network_create
+    cli.commands[f'{prefix}.network.create'] = handler.network_create
 
-    # nixops4 network list
+    # network list
     list_parser = network_subparsers.add_parser('list', help='List deployment networks')
     list_parser.add_argument('--project', help='Filter by project')
-    cli.commands['nixops4.network.list'] = handler.network_list
+    cli.commands[f'{prefix}.network.list'] = handler.network_list
 
-    # nixops4 network info
+    # network info
     info_parser = network_subparsers.add_parser('info', help='Show network details')
     info_parser.add_argument('project', help='Project slug')
     info_parser.add_argument('network', help='Network name')
-    cli.commands['nixops4.network.info'] = handler.network_info
+    cli.commands[f'{prefix}.network.info'] = handler.network_info
 
     # Machine commands
-    machine_parser = nixops4_subparsers.add_parser('machine', help='Manage machines in networks')
+    machine_parser = subparsers.add_parser('machine', help='Manage machines in networks')
     machine_subparsers = machine_parser.add_subparsers(dest='machine_command', required=True, help='Machine operations')
 
-    # nixops4 machine add
+    # machine add
     add_parser = machine_subparsers.add_parser('add', help='Add a machine to a network')
     add_parser.add_argument('project', help='Project slug')
     add_parser.add_argument('network', help='Network name')
@@ -703,24 +704,24 @@ def register(cli):
     add_parser.add_argument('--port', type=int, default=22, help='SSH port (default: 22)')
     add_parser.add_argument('--system-type', default='nixos', help='System type (default: nixos)')
     add_parser.add_argument('--target-env', default='none', help='Target environment (default: none)')
-    cli.commands['nixops4.machine.add'] = handler.machine_add
+    cli.commands[f'{prefix}.machine.add'] = handler.machine_add
 
-    # nixops4 machine list
+    # machine list
     mlist_parser = machine_subparsers.add_parser('list', help='List machines in a network')
     mlist_parser.add_argument('project', help='Project slug')
     mlist_parser.add_argument('network', help='Network name')
-    cli.commands['nixops4.machine.list'] = handler.machine_list
+    cli.commands[f'{prefix}.machine.list'] = handler.machine_list
 
-    # nixops4 machine remove
+    # machine remove
     remove_parser = machine_subparsers.add_parser('remove', help='Remove a machine from a network')
     remove_parser.add_argument('project', help='Project slug')
     remove_parser.add_argument('network', help='Network name')
     remove_parser.add_argument('machine', help='Machine name')
-    cli.commands['nixops4.machine.remove'] = handler.machine_remove
+    cli.commands[f'{prefix}.machine.remove'] = handler.machine_remove
 
     # Deployment commands
-    # nixops4 deploy
-    deploy_parser = nixops4_subparsers.add_parser('deploy', help='Deploy a network')
+    # deploy
+    deploy_parser = subparsers.add_parser('deploy', help='Deploy a network')
     deploy_parser.add_argument('project', help='Project slug')
     deploy_parser.add_argument('network', help='Network name')
     deploy_parser.add_argument('--machines', nargs='+', help='Specific machines to deploy (default: all)')
@@ -730,11 +731,26 @@ def register(cli):
     deploy_parser.add_argument('--config-revision', help='Config revision (git commit hash)')
     deploy_parser.add_argument('--triggered-by', help='Who triggered the deployment')
     deploy_parser.add_argument('--reason', help='Deployment reason')
-    cli.commands['nixops4.deploy'] = handler.deploy
+    cli.commands[f'{prefix}.deploy'] = handler.deploy
 
-    # nixops4 status
-    status_parser = nixops4_subparsers.add_parser('status', help='Show deployment status')
+    # status
+    status_parser = subparsers.add_parser('status', help='Show deployment status')
     status_parser.add_argument('project', help='Project slug')
     status_parser.add_argument('network', help='Network name')
     status_parser.add_argument('--deployment-uuid', help='Show specific deployment')
-    cli.commands['nixops4.status'] = handler.deploy_status
+    cli.commands[f'{prefix}.status'] = handler.deploy_status
+
+
+def register_under_deploy(deploy_subparsers, cli):
+    """Register nixops4 commands under deploy command (NEW: deploy nixops4 ...)"""
+    handler = NixOps4Commands()
+
+    # Create nixops4 subcommand under deploy
+    nixops4_parser = deploy_subparsers.add_parser(
+        'nixops4',
+        help='NixOps4 declarative deployment orchestration'
+    )
+    nixops4_subparsers = nixops4_parser.add_subparsers(dest='nixops4_subcommand', required=True)
+
+    # Register all commands with 'deploy.nixops4' prefix
+    _register_nixops4_commands(handler, nixops4_subparsers, cli, prefix='deploy.nixops4')

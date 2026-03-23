@@ -15,7 +15,7 @@ from cli.commands import (
     project, vcs, env, search, system, cathedral, deploy, migration,
     target, secret, tui_launcher, config, workitem, mcp, direnv, merge,
     blob, domain, backup, claude, prompt, vibe, nixos, key, cache, nixops4,
-    deploy_nix, deploy_appstore, deploy_steam
+    deploy_nix, deploy_appstore, deploy_steam, deploy_script
 )
 from cli.core import cli
 
@@ -50,14 +50,16 @@ def main():
     # Register key management commands
     key.register(cli)
 
-    # Register nixops4 orchestration commands
-    nixops4.register(cli)
-
     # Register cache management commands
     cache.CacheCommands.register(cli.subparsers)
 
-    # Register Nix deployment commands (Phase 1)
-    deploy_nix.register(cli)
+    # Register deployment script management
+    deploy_script.register(cli)
+
+    # Deployment backends are registered under 'deploy' command (see deploy.py)
+    # - deploy nix (from deploy_nix module)
+    # - deploy nixops4 (from nixops4 module)
+    # - deploy script (from deploy_script module) - also available as standalone 'deploy-script'
 
     # Register app store deployment commands (Phase 2)
     deploy_appstore.register(cli)

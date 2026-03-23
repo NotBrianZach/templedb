@@ -32,6 +32,7 @@ class DeployCommands(Command):
     def deploy(self, args) -> int:
         """Deploy project from TempleDB"""
         from error_handler import ResourceNotFoundError, DeploymentError
+        import os
 
         try:
             project_slug = args.slug
@@ -40,6 +41,43 @@ class DeployCommands(Command):
             skip_validation = hasattr(args, 'skip_validation') and args.skip_validation
             mutable = hasattr(args, 'mutable') and args.mutable
             no_fhs = hasattr(args, 'no_fhs') and args.no_fhs
+            no_script = hasattr(args, 'no_script') and args.no_script
+
+            # Check for registered deployment script (skip if --no-script flag)
+            deploy_script = None
+            if not no_script:
+                deploy_script = db_utils.query_one(
+                    "SELECT * FROM deployment_scripts WHERE project_slug = ? AND enabled = 1",
+                    (project_slug,)
+                )
+
+            if deploy_script:
+                script_path = deploy_script['script_path']
+
+                # Verify script exists
+                if not os.path.exists(script_path):
+                    print(f"⚠️  Warning: Registered deployment script not found: {script_path}")
+                    print(f"   Falling back to standard deployment...")
+                else:
+                    # Use custom deployment script
+                    print(f"📜 Using deployment script: {os.path.basename(script_path)}")
+                    if deploy_script['description']:
+                        print(f"   {deploy_script['description']}")
+                    print()
+
+                    # Build command arguments
+                    cmd = [script_path]
+                    if dry_run:
+                        cmd.append('--dry-run')
+
+                    # Run the deployment script
+                    try:
+                        result = subprocess.run(cmd, check=False)
+                        return result.returncode
+                    except Exception as e:
+                        print(f"❌ Deployment script execution failed: {e}")
+                        print(f"   Falling back to standard deployment...")
+                        # Continue with standard deployment on error
 
             # Show warnings for non-default modes
             if mutable:
@@ -1092,6 +1130,9 @@ def register(cli):
     deploy_parser = cli.register_command('deploy', None, help_text='Deploy project from TempleDB')
     subparsers = deploy_parser.add_subparsers(dest='deploy_subcommand', required=True)
 
+    # Import deployment backend modules
+    from cli.commands import deploy_nix, nixops4, deploy_script
+
     # deploy run command
     run_parser = subparsers.add_parser('run', help='Deploy project (uses FHS isolation by default)')
     run_parser.add_argument('slug', help='Project slug')
@@ -1102,6 +1143,8 @@ def register(cli):
                            help='Mutable mode: allow direct file editing (disables FHS isolation)')
     run_parser.add_argument('--no-fhs', action='store_true',
                            help='Disable FHS isolation completely (not recommended, uses system packages)')
+    run_parser.add_argument('--no-script', action='store_true',
+                           help='Skip custom deployment script and use standard deployment')
     cli.commands['deploy.run'] = deploy_handler.deploy
 
     # deploy status command
@@ -1172,3 +1215,14 @@ def register(cli):
     exec_parser.add_argument('slug', help='Project slug')
     exec_parser.add_argument('command', help='Command to execute (quote if multiple words)')
     cli.commands['deploy.exec'] = deploy_handler.exec_command
+
+    # === Nested deployment backend commands ===
+
+    # deploy nix - Nix closures backend (from deploy-nix)
+    deploy_nix.register_under_deploy(subparsers, cli)
+
+    # deploy nixops4 - NixOps4 declarative orchestration (from nixops4)
+    nixops4.register_under_deploy(subparsers, cli)
+
+    # deploy script - Custom deployment scripts (from deploy_script)
+    deploy_script.register_under_deploy(subparsers, cli)

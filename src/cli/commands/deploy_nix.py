@@ -374,74 +374,76 @@ class NixDeployCommands(Command):
             return 1
 
 
-def register(cli):
-    """Register Nix deployment commands with CLI"""
+def register_under_deploy(deploy_subparsers, cli):
+    """Register as nested subcommand under 'deploy nix'"""
     cmd = NixDeployCommands()
 
-    # deploy-nix command group
-    deploy_nix_parser = cli.register_command(
-        'deploy-nix',
-        None,
-        help_text='Deploy using Nix closures and systemd (Phase 1)'
-    )
-    subparsers = deploy_nix_parser.add_subparsers(dest='deploy_nix_subcommand', required=True)
+    # deploy nix command group
+    nix_parser = deploy_subparsers.add_parser('nix', help='Nix closure deployment backend')
+    subparsers = nix_parser.add_subparsers(dest='deploy_nix_subcommand', required=True)
 
-    # deploy-nix build
+    _register_nix_commands(cmd, subparsers, cli, prefix='deploy.nix')
+
+
+def _register_nix_commands(cmd, subparsers, cli, prefix='deploy.nix'):
+    """Register Nix deployment subcommands (reusable for both nested and top-level)"""
+
+    # build
     build_parser = subparsers.add_parser('build', help='Build Nix closure')
     build_parser.add_argument('slug', help='Project slug')
-    cli.commands['deploy-nix.build'] = cmd.build_closure
+    cli.commands[f'{prefix}.build'] = cmd.build_closure
 
-    # deploy-nix transfer
+    # transfer
     transfer_parser = subparsers.add_parser('transfer', help='Transfer closure to target')
     transfer_parser.add_argument('slug', help='Project slug')
     transfer_parser.add_argument('--host', required=True, help='Target hostname')
     transfer_parser.add_argument('--user', default='deploy', help='SSH user (default: deploy)')
-    cli.commands['deploy-nix.transfer'] = cmd.transfer
+    cli.commands[f'{prefix}.transfer'] = cmd.transfer
 
-    # deploy-nix import
+    # import
     import_parser = subparsers.add_parser('import', help='Import closure on target')
     import_parser.add_argument('slug', help='Project slug')
     import_parser.add_argument('--host', required=True, help='Target hostname')
     import_parser.add_argument('--user', default='deploy', help='SSH user (default: deploy)')
-    cli.commands['deploy-nix.import'] = cmd.import_closure
+    cli.commands[f'{prefix}.import'] = cmd.import_closure
 
-    # deploy-nix activate
+    # activate
     activate_parser = subparsers.add_parser('activate', help='Activate systemd service')
     activate_parser.add_argument('slug', help='Project slug')
     activate_parser.add_argument('--host', required=True, help='Target hostname')
     activate_parser.add_argument('--user', default='deploy', help='SSH user (default: deploy)')
     activate_parser.add_argument('--port', type=int, default=8000, help='Service port (default: 8000)')
-    cli.commands['deploy-nix.activate'] = cmd.activate
+    cli.commands[f'{prefix}.activate'] = cmd.activate
 
-    # deploy-nix run (full deployment)
+    # run (full deployment)
     run_parser = subparsers.add_parser('run', help='Full deployment (build + transfer + import + activate)')
     run_parser.add_argument('slug', help='Project slug')
     run_parser.add_argument('--host', required=True, help='Target hostname')
     run_parser.add_argument('--user', default='deploy', help='SSH user (default: deploy)')
     run_parser.add_argument('--port', type=int, default=8000, help='Service port (default: 8000)')
-    cli.commands['deploy-nix.run'] = cmd.deploy_full
+    cli.commands[f'{prefix}.run'] = cmd.deploy_full
 
-    # deploy-nix health
+    # health
     health_parser = subparsers.add_parser('health', help='Run health check')
     health_parser.add_argument('--host', required=True, help='Target hostname')
     health_parser.add_argument('--port', type=int, default=8000, help='Service port (default: 8000)')
     health_parser.add_argument('--endpoint', default='/health', help='Health check endpoint (default: /health)')
-    cli.commands['deploy-nix.health'] = cmd.health_check
+    cli.commands[f'{prefix}.health'] = cmd.health_check
 
     # CLI Tool Packaging Commands
-    # deploy-nix generate-flake
+    # generate-flake
     generate_flake_parser = subparsers.add_parser('generate-flake', help='Generate Nix flake for CLI tool')
     generate_flake_parser.add_argument('slug', help='Project slug')
     generate_flake_parser.add_argument('--description', help='Project description')
     generate_flake_parser.add_argument('--version', default='1.0.0', help='Version string (default: 1.0.0)')
-    cli.commands['deploy-nix.generate-flake'] = cmd.generate_flake
+    cli.commands[f'{prefix}.generate-flake'] = cmd.generate_flake
 
-    # deploy-nix install
+    # install
     install_parser = subparsers.add_parser('install', help='Install CLI tool to local Nix profile')
     install_parser.add_argument('slug', help='Project slug')
-    cli.commands['deploy-nix.install'] = cmd.install_local
+    cli.commands[f'{prefix}.install'] = cmd.install_local
 
-    # deploy-nix add-to-config
+    # add-to-config
     add_config_parser = subparsers.add_parser('add-to-config', help='Generate NixOS/home-manager config snippet')
     add_config_parser.add_argument('slug', help='Project slug')
-    cli.commands['deploy-nix.add-to-config'] = cmd.add_to_config
+    cli.commands[f'{prefix}.add-to-config'] = cmd.add_to_config
