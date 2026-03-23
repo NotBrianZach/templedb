@@ -34,6 +34,7 @@ class NixOSConfig:
     secrets: List[Dict[str, str]] = field(default_factory=list)
     cathedral_path: Optional[str] = None
     nix_env_name: Optional[str] = None
+    managed_packages: List[Dict[str, str]] = field(default_factory=list)
 
 
 class NixOSGenerator:
@@ -168,10 +169,60 @@ class NixOSGenerator:
             # Secrets table doesn't exist yet
             return []
 
+    def get_managed_packages(self, scope: Optional[str] = None) -> List[Dict[str, str]]:
+        """
+        Get managed packages that should be included in NixOS configuration.
+
+        Args:
+            scope: Filter by install_scope ('system' or 'user'). None returns all.
+
+        Returns:
+            List of package dictionaries
+        """
+        cursor = self.conn.cursor()
+
+        try:
+            if scope:
+                rows = cursor.execute("""
+                    SELECT
+                        project_slug,
+                        project_name,
+                        git_path,
+                        package_type,
+                        install_scope,
+                        flake_uri,
+                        package_name,
+                        version
+                    FROM nixos_managed_packages_view
+                    WHERE enabled = 1 AND install_scope = ?
+                    ORDER BY package_name
+                """, (scope,)).fetchall()
+            else:
+                rows = cursor.execute("""
+                    SELECT
+                        project_slug,
+                        project_name,
+                        git_path,
+                        package_type,
+                        install_scope,
+                        flake_uri,
+                        package_name,
+                        version
+                    FROM nixos_managed_packages_view
+                    WHERE enabled = 1
+                    ORDER BY install_scope, package_name
+                """).fetchall()
+
+            return [dict(row) for row in rows]
+        except sqlite3.OperationalError:
+            # Table doesn't exist yet
+            return []
+
     def generate_config(self, project_slug: str,
                        cathedral_path: Optional[str] = None,
                        include_home_manager: bool = True,
-                       include_templedb: bool = True) -> NixOSConfig:
+                       include_templedb: bool = True,
+                       include_managed_packages: bool = True) -> NixOSConfig:
         """Generate NixOS configuration for a project"""
 
         # Get file types for dependency detection
@@ -188,10 +239,24 @@ class NixOSGenerator:
         # User-level: development tools, language packages
         home_packages = sorted([p for p in all_packages if p not in system_packages])
 
-        # Add TempleDB itself if requested
-        # This creates a self-hosting capability
-        if include_templedb and 'templedb' not in home_packages:
-            home_packages.append('templedb')
+        # Note: TempleDB is added via managed packages if available, not here
+        # The old code that added 'templedb' as a regular package is removed
+        # because it should come from the flake input instead
+
+        # Add managed packages (CLI tools installed via deploy-nix)
+        if include_managed_packages:
+            managed_pkgs = self.get_managed_packages()
+            for pkg in managed_pkgs:
+                # Get flake URI (defaults to local path if not specified)
+                flake_uri = pkg.get('flake_uri') or f"path:{pkg['git_path']}"
+                pkg_ref = f"inputs.{pkg['package_name']}.packages.${{pkgs.system}}.default"
+
+                if pkg['install_scope'] == 'system':
+                    if pkg_ref not in system_packages:
+                        system_packages.append(pkg_ref)
+                else:  # user scope
+                    if pkg_ref not in home_packages:
+                        home_packages.append(pkg_ref)
 
         # Get environment variables
         env_vars = self.get_project_env_vars(project_slug)
@@ -203,7 +268,7 @@ class NixOSGenerator:
         nix_env = self.nix_env_gen.get_environment(project_slug, 'dev')
         nix_env_name = 'dev' if nix_env else None
 
-        return NixOSConfig(
+        config = NixOSConfig(
             project_slug=project_slug,
             system_packages=system_packages,
             home_packages=home_packages,
@@ -212,6 +277,11 @@ class NixOSGenerator:
             cathedral_path=cathedral_path,
             nix_env_name=nix_env_name
         )
+
+        # Store managed package metadata in the config for flake inputs generation
+        config.managed_packages = self.get_managed_packages() if include_managed_packages else []
+
+        return config
 
     def generate_nix_module(self, config: NixOSConfig) -> str:
         """Generate a NixOS module from configuration"""
@@ -290,35 +360,49 @@ class NixOSGenerator:
     def generate_home_manager_module(self, config: NixOSConfig) -> str:
         """Generate a Home Manager module from configuration"""
 
-        # Check if templedb is in the packages
-        has_templedb = 'templedb' in config.home_packages
+        # Separate regular nixpkgs packages from flake input packages
+        regular_packages = []
+        flake_packages = []
+        flake_inputs = set()
 
-        # If templedb is included, we need to use the flake input
-        if has_templedb:
-            templedb_comment = '''
-  # Note: To use TempleDB from its flake, add this to your flake.nix:
-  #   inputs.templedb.url = "github:yourusername/templedb";
-  # Then in this module:
-  #   home.packages = [ inputs.templedb.packages.${pkgs.system}.default ] ++ ...
-  #
-  # For now, 'templedb' assumes it's available in nixpkgs or overlays.
-'''
+        for pkg in config.home_packages:
+            if pkg.startswith('inputs.'):
+                flake_packages.append(pkg)
+                # Extract flake input name (e.g., 'bza' from 'inputs.bza.packages...')
+                input_name = pkg.split('.')[1]
+                flake_inputs.add(input_name)
+            else:
+                regular_packages.append(pkg)
+
+        # Build function arguments - include flake inputs
+        if flake_inputs:
+            args = f"{{ config, pkgs, lib, {', '.join(sorted(flake_inputs))}, ... }}:"
         else:
-            templedb_comment = ''
+            args = "{ config, pkgs, lib, ... }:"
 
         module = f'''# Home Manager module for {config.project_slug}
 # Generated by TempleDB
 # This module provides user-level packages and configurations
 
-{{ config, pkgs, lib, ... }}:
+{args}
 
-{{{templedb_comment}
+{{
   # User-level packages for {config.project_slug} development
   home.packages = with pkgs; [
-    {self._format_package_list(config.home_packages, indent=4)}
-  ];
+    {self._format_package_list(regular_packages, indent=4)}
+  ]'''
 
-'''
+        # Add flake packages separately (using the function arguments, not inputs.)
+        if flake_packages:
+            module += ' ++ [\n'
+            module += '    # TempleDB-managed flake packages\n'
+            for pkg in flake_packages:
+                # Convert inputs.foo.packages.${pkgs.system}.default to foo.packages.${pkgs.system}.default
+                pkg_without_inputs = pkg.replace('inputs.', '', 1)
+                module += f'    {pkg_without_inputs}\n'
+            module += '  ]'
+
+        module += ';\n\n'
 
         # Environment variables (user-level)
         if config.environment_vars:
