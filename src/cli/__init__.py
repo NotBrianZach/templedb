@@ -15,7 +15,7 @@ from cli.commands import (
     project, vcs, env, search, system, cathedral, deploy, migration,
     target, secret, tui_launcher, config, workitem, mcp, direnv, merge,
     blob, domain, backup, claude, prompt, vibe, nixos, key, cache, nixops4,
-    deploy_nix, deploy_appstore, deploy_steam, deploy_script
+    deploy_nix, deploy_appstore, deploy_steam, deploy_script, file
 )
 from cli.core import cli
 
@@ -25,6 +25,7 @@ def main():
     # Register all command modules
     project.register(cli)
     vcs.register(cli)
+    file.register(cli)
     env.register(cli)
     search.register(cli)
     system.register(cli)  # Only registers 'status' now

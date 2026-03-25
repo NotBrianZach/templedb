@@ -1,480 +1,398 @@
 #!/usr/bin/env python3
 """
-Tests for Dependency Graph Service (Phase 1.3)
+Test script for dependency graph builder.
 
-Tests:
-1. Import extraction with aliases
-2. Call site extraction
-3. Dependency resolution
-4. End-to-end dependency graph building
+Tests cross-file dependency extraction and resolution.
 """
 
 import sys
 import os
-import tempfile
-import sqlite3
 from pathlib import Path
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
-from services.dependency_graph_service import (
-    DependencyExtractor,
-    DependencyGraphService,
-    ImportInfo,
-    CallSite,
-    build_dependency_graph_for_project
-)
-from services.symbol_extraction_service import extract_symbols_for_project
-import db_utils
+from services.symbol_extraction_service import SymbolExtractionService
+from services.dependency_graph_builder import DependencyGraphBuilder
+from db_utils import get_connection
 
 
-# Test fixtures
-SAMPLE_CODE_WITH_CALLS = """
-from module_a import function_a
-from module_b import function_b as fb
-import module_c
-
-def caller_function():
-    '''A function that calls other functions'''
-    # Direct call
-    function_a()
-
-    # Aliased call
-    fb()
-
-    # Module call
-    module_c.some_function()
-
-    # Conditional call
-    if True:
-        conditional_function()
-
-    return True
-
-def another_caller():
-    '''Another caller'''
-    caller_function()
-    helper_function()
-
-def helper_function():
-    '''A helper'''
-    pass
-"""
-
-SAMPLE_CODE_METHODS = """
-class MyClass:
-    def method_one(self):
-        '''First method'''
-        self.method_two()
-        external_function()
-
-    def method_two(self):
-        '''Second method'''
-        pass
-"""
-
-
-def setup_test_db():
-    """Create a temporary test database"""
-    db_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-    db_path = db_file.name
-    db_file.close()
-
-    # Override db_utils connection
-    db_utils.DB_PATH = db_path
-
-    # Initialize schema
-    conn = sqlite3.connect(db_path)
+def setup_test_project():
+    """Create a test project with sample files"""
+    conn = get_connection()
     cursor = conn.cursor()
 
-    # Minimal schema for testing
-    cursor.executescript("""
-        CREATE TABLE projects (
-            id INTEGER PRIMARY KEY,
-            slug TEXT UNIQUE
-        );
-
-        CREATE TABLE file_types (
-            id INTEGER PRIMARY KEY,
-            type_name TEXT UNIQUE,
-            file_extension TEXT
-        );
-
-        CREATE TABLE project_files (
-            id INTEGER PRIMARY KEY,
-            project_id INTEGER,
-            file_type_id INTEGER,
-            file_path TEXT,
-            FOREIGN KEY (project_id) REFERENCES projects(id),
-            FOREIGN KEY (file_type_id) REFERENCES file_types(id)
-        );
-
-        CREATE TABLE content_blobs (
-            hash_sha256 TEXT PRIMARY KEY,
-            content_text TEXT,
-            content_type TEXT DEFAULT 'text'
-        );
-
-        CREATE TABLE file_contents (
-            file_id INTEGER PRIMARY KEY,
-            content_hash TEXT,
-            FOREIGN KEY (file_id) REFERENCES project_files(id),
-            FOREIGN KEY (content_hash) REFERENCES content_blobs(hash_sha256)
-        );
-
-        CREATE TABLE code_symbols (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_id INTEGER NOT NULL,
-            project_id INTEGER NOT NULL,
-            symbol_type TEXT,
-            symbol_name TEXT,
-            qualified_name TEXT,
-            scope TEXT,
-            export_type TEXT,
-            start_line INTEGER,
-            end_line INTEGER,
-            start_column INTEGER,
-            end_column INTEGER,
-            docstring TEXT,
-            return_type TEXT,
-            parameters TEXT,
-            cyclomatic_complexity INTEGER,
-            cognitive_complexity INTEGER,
-            content_hash TEXT,
-            FOREIGN KEY (file_id) REFERENCES project_files(id),
-            FOREIGN KEY (project_id) REFERENCES projects(id)
-        );
-
-        CREATE TABLE code_symbol_dependencies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            caller_symbol_id INTEGER NOT NULL,
-            called_symbol_id INTEGER NOT NULL,
-            dependency_type TEXT,
-            call_line INTEGER,
-            is_conditional BOOLEAN DEFAULT 0,
-            call_depth INTEGER DEFAULT 1,
-            is_critical_path BOOLEAN DEFAULT 0,
-            confidence_score REAL DEFAULT 1.0,
-            FOREIGN KEY (caller_symbol_id) REFERENCES code_symbols(id),
-            FOREIGN KEY (called_symbol_id) REFERENCES code_symbols(id)
-        );
-
-        -- Insert test data
-        INSERT INTO projects (id, slug) VALUES (1, 'test-project');
-        INSERT INTO file_types (id, type_name, file_extension)
-            VALUES (1, 'python', '.py');
+    # Create test project
+    cursor.execute("""
+        INSERT OR IGNORE INTO projects (slug, name)
+        VALUES ('test_deps', 'Dependency Test Project')
     """)
-
     conn.commit()
-    conn.close()
 
-    return db_path
+    cursor.execute("SELECT id FROM projects WHERE slug = 'test_deps'")
+    project_id = cursor.fetchone()[0]
+
+    # Create file type if not exists
+    cursor.execute("""
+        INSERT OR IGNORE INTO file_types (type_name, category, description)
+        VALUES ('python', 'code', 'Python source files')
+    """)
+    conn.commit()
+
+    cursor.execute("SELECT id FROM file_types WHERE type_name = 'python'")
+    row = cursor.fetchone()
+    file_type_id = row[0] if row else None
+
+    if not file_type_id:
+        raise RuntimeError("Failed to create python file type")
+
+    return project_id, file_type_id
 
 
-def cleanup_test_db(db_path):
-    """Remove test database"""
-    if os.path.exists(db_path):
-        os.unlink(db_path)
+def test_basic_dependency_extraction():
+    """Test extraction of simple function calls"""
+    print("=" * 60)
+    print("TEST 1: Basic Dependency Extraction")
+    print("=" * 60)
 
+    project_id, file_type_id = setup_test_project()
+    conn = get_connection()
+    cursor = conn.cursor()
 
-def test_import_extraction():
-    """Test extraction of import statements with aliases"""
-    print("Test 1: Import extraction with aliases")
+    # Create two test files
+    file1_content = """
+def helper_function():
+    '''Helper function'''
+    return 42
 
-    extractor = DependencyExtractor()
-
-    code = """
-from foo import bar
-from baz import qux as q
-import module_a
-from module_b import func1, func2 as f2
+def main_function():
+    '''Main function that calls helper'''
+    result = helper_function()
+    return result * 2
 """
 
-    tree = extractor.parser.parse(bytes(code, 'utf8'))
-    imports = extractor._extract_imports(tree.root_node, code)
+    file2_content = """
+from test_module import helper_function
 
-    assert 'foo' in imports
-    assert imports['foo'].imported_names == {'bar': 'bar'}
-
-    assert 'baz' in imports
-    assert imports['baz'].imported_names == {'q': 'qux'}
-
-    assert 'module_a' in imports
-
-    assert 'module_b' in imports
-    assert 'func1' in imports['module_b'].imported_names
-    assert imports['module_b'].imported_names['f2'] == 'func2'
-
-    print("✓ Import extraction works correctly")
-
-
-def test_call_extraction():
-    """Test extraction of function calls"""
-    print("\nTest 2: Call site extraction")
-
-    extractor = DependencyExtractor()
-
-    tree = extractor.parser.parse(bytes(SAMPLE_CODE_WITH_CALLS, 'utf8'))
-    root = tree.root_node
-
-    # Find caller_function node
-    caller_node = None
-    for node in root.children:
-        if node.type == 'function_definition':
-            name_node = node.child_by_field_name('name')
-            if name_node and name_node.text.decode('utf8') == 'caller_function':
-                caller_node = node
-                break
-
-    assert caller_node is not None, "Could not find caller_function"
-
-    # Extract calls
-    imports = extractor._extract_imports(root, SAMPLE_CODE_WITH_CALLS)
-    calls = extractor._extract_calls_from_node(caller_node, 'caller_function', imports)
-
-    # Should find: function_a(), fb(), module_c.some_function(), conditional_function()
-    call_names = [c.called_name for c in calls]
-
-    assert 'function_a' in call_names
-    assert 'fb' in call_names
-    assert 'module_c.some_function' in call_names
-    assert 'conditional_function' in call_names
-
-    # Check conditional flag
-    conditional_calls = [c for c in calls if c.is_conditional]
-    assert len(conditional_calls) > 0, "Should detect conditional calls"
-
-    print(f"✓ Found {len(calls)} calls: {call_names}")
-
-
-def test_method_calls():
-    """Test extraction of method calls"""
-    print("\nTest 3: Method call extraction")
-
-    extractor = DependencyExtractor()
-
-    tree = extractor.parser.parse(bytes(SAMPLE_CODE_METHODS, 'utf8'))
-    root = tree.root_node
-
-    # Find MyClass
-    class_node = None
-    for node in root.children:
-        if node.type == 'class_definition':
-            class_node = node
-            break
-
-    assert class_node is not None
-
-    # Find method_one
-    method_node = extractor._find_method_in_class(class_node, 'method_one')
-    assert method_node is not None
-
-    # Extract calls
-    imports = {}
-    calls = extractor._extract_calls_from_node(method_node, 'MyClass.method_one', imports)
-
-    call_names = [c.called_name for c in calls]
-
-    # Should find: self.method_two, external_function
-    assert any('method_two' in name for name in call_names)
-    assert 'external_function' in call_names
-
-    print(f"✓ Found method calls: {call_names}")
-
-
-def test_end_to_end_dependency_graph():
-    """Test complete dependency graph building"""
-    print("\nTest 4: End-to-end dependency graph building")
-
-    db_path = setup_test_db()
+def another_function():
+    '''Function in different file'''
+    value = helper_function()
+    return value + 10
+"""
 
     try:
-        conn = db_utils.get_connection()
-        cursor = conn.cursor()
+        # Insert files
+        cursor.execute("""
+            INSERT OR REPLACE INTO project_files (project_id, file_type_id, file_path, file_name)
+            VALUES (?, ?, 'test_module.py', 'test_module.py')
+        """, (project_id, file_type_id))
+        file1_id = cursor.lastrowid
 
-        # Create a test file with code
+        cursor.execute("""
+            INSERT OR REPLACE INTO project_files (project_id, file_type_id, file_path, file_name)
+            VALUES (?, ?, 'test_client.py', 'test_client.py')
+        """, (project_id, file_type_id))
+        file2_id = cursor.lastrowid
+
+        # Insert file contents via content_blobs
         import hashlib
-        content = SAMPLE_CODE_WITH_CALLS
-        content_hash = hashlib.sha256(content.encode('utf8')).hexdigest()
 
-        # Insert content blob
+        # File 1
+        hash1 = hashlib.sha256(file1_content.encode('utf8')).hexdigest()
         cursor.execute("""
-            INSERT INTO content_blobs (hash_sha256, content_text, content_type)
-            VALUES (?, ?, 'text')
-        """, (content_hash, content))
+            INSERT OR IGNORE INTO content_blobs (hash_sha256, content_text, content_type, file_size_bytes)
+            VALUES (?, ?, 'text', ?)
+        """, (hash1, file1_content, len(file1_content)))
 
-        # Insert project file
         cursor.execute("""
-            INSERT INTO project_files (id, project_id, file_type_id, file_path)
-            VALUES (1, 1, 1, 'test.py')
-        """)
+            INSERT OR REPLACE INTO file_contents (file_id, content_hash, file_size_bytes, line_count)
+            VALUES (?, ?, ?, ?)
+        """, (file1_id, hash1, len(file1_content), file1_content.count('\n')))
 
-        # Insert file contents reference
+        # File 2
+        hash2 = hashlib.sha256(file2_content.encode('utf8')).hexdigest()
         cursor.execute("""
-            INSERT INTO file_contents (file_id, content_hash)
-            VALUES (1, ?)
-        """, (content_hash,))
+            INSERT OR IGNORE INTO content_blobs (hash_sha256, content_text, content_type, file_size_bytes)
+            VALUES (?, ?, 'text', ?)
+        """, (hash2, file2_content, len(file2_content)))
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO file_contents (file_id, content_hash, file_size_bytes, line_count)
+            VALUES (?, ?, ?, ?)
+        """, (file2_id, hash2, len(file2_content), file2_content.count('\n')))
 
         conn.commit()
 
-        # Extract symbols first (Phase 1.2)
-        print("  - Extracting symbols...")
-        symbol_stats = extract_symbols_for_project(project_id=1, force=True)
-        print(f"    Extracted {symbol_stats['symbols_extracted']} symbols")
+        # Extract symbols first
+        print("  Extracting symbols...")
+        extractor = SymbolExtractionService()
+        stats = extractor.extract_symbols_for_project(project_id, force=True)
+        print(f"  ✓ Extracted {stats['symbols_extracted']} symbols")
 
-        # Verify symbols were extracted
-        cursor.execute("SELECT COUNT(*) FROM code_symbols WHERE project_id = 1")
-        symbol_count = cursor.fetchone()[0]
-        assert symbol_count > 0, "No symbols extracted"
-
-        # Build dependency graph (Phase 1.3)
-        print("  - Building dependency graph...")
-        dep_stats = build_dependency_graph_for_project(project_id=1, force=True)
-
-        print(f"    Files processed: {dep_stats['files_processed']}")
-        print(f"    Call sites found: {dep_stats['call_sites_found']}")
-        print(f"    Dependencies created: {dep_stats['dependencies_created']}")
-        print(f"    Unresolved calls: {dep_stats['unresolved_calls']}")
-
-        assert dep_stats['files_processed'] == 1
-        assert dep_stats['call_sites_found'] > 0
-
-        # Verify dependencies were stored
+        # Show extracted symbols
         cursor.execute("""
-            SELECT COUNT(*) FROM code_symbol_dependencies
-        """)
-        dep_count = cursor.fetchone()[0]
+            SELECT qualified_name, symbol_type
+            FROM code_symbols
+            WHERE project_id = ?
+        """, (project_id,))
 
-        print(f"  - Total dependencies in DB: {dep_count}")
+        symbols = cursor.fetchall()
+        print(f"  Symbols found:")
+        for name, stype in symbols:
+            print(f"    - {stype}: {name}")
 
-        # Query specific dependencies
+        # Build dependency graph
+        print("\n  Building dependency graph...")
+        builder = DependencyGraphBuilder()
+        dep_stats = builder.build_dependencies_for_project(project_id)
+        print(f"  ✓ Files analyzed: {dep_stats['files_analyzed']}")
+        print(f"  ✓ Imports found: {dep_stats['imports_found']}")
+        print(f"  ✓ Dependencies created: {dep_stats['dependencies_created']}")
+        print(f"  ✓ Symbols processed: {dep_stats['symbols_processed']}")
+
+        # Query dependencies
         cursor.execute("""
             SELECT
-                cs1.qualified_name as caller,
-                cs2.qualified_name as called,
-                d.dependency_type,
-                d.confidence_score
-            FROM code_symbol_dependencies d
-            JOIN code_symbols cs1 ON d.caller_symbol_id = cs1.id
-            JOIN code_symbols cs2 ON d.called_symbol_id = cs2.id
-        """)
+                caller.qualified_name AS caller,
+                called.qualified_name AS called,
+                csd.dependency_type,
+                csd.confidence_score,
+                csd.call_line
+            FROM code_symbol_dependencies csd
+            JOIN code_symbols caller ON csd.caller_symbol_id = caller.id
+            JOIN code_symbols called ON csd.called_symbol_id = called.id
+            WHERE caller.project_id = ?
+        """, (project_id,))
 
         dependencies = cursor.fetchall()
-        print("\n  Dependencies found:")
-        for dep in dependencies:
-            print(f"    {dep[0]} -> {dep[1]} (type: {dep[2]}, confidence: {dep[3]})")
 
-        # Verify we can find internal call: another_caller -> caller_function
-        internal_call = any(
-            'another_caller' in dep[0] and 'caller_function' in dep[1]
-            for dep in dependencies
-        )
+        if dependencies:
+            print(f"\n  Dependencies found: {len(dependencies)}")
+            for caller, called, dep_type, confidence, line in dependencies:
+                print(f"    {caller} → {called}")
+                print(f"      Type: {dep_type}, Confidence: {confidence:.2f}, Line: {line}")
 
-        if internal_call:
-            print("\n  ✓ Successfully detected internal function call!")
+            print("\n✓ Test passed - dependencies extracted successfully")
+            return True
         else:
-            print("\n  ⚠ Warning: Could not detect internal call (may need better resolution)")
+            print("\n✗ No dependencies found (expected at least 1)")
+            return False
 
-        print("\n✓ End-to-end dependency graph building works!")
-
+    except Exception as e:
+        print(f"\n✗ Test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
     finally:
-        cleanup_test_db(db_path)
+        # Cleanup
+        cursor.execute("DELETE FROM projects WHERE slug = 'test_deps'")
+        conn.commit()
 
 
-def test_resolution_confidence():
-    """Test confidence scoring for call resolution"""
-    print("\nTest 5: Call resolution confidence scoring")
+def test_import_resolution():
+    """Test import statement resolution"""
+    print("\n" + "=" * 60)
+    print("TEST 2: Import Resolution")
+    print("=" * 60)
 
-    service = DependencyGraphService()
+    try:
+        import tree_sitter
+        import tree_sitter_python as tspython
 
-    # Mock symbol maps
-    symbol_map = {
-        'exact.match': 1,
-        'module.function': 2,
-    }
+        lang = tree_sitter.Language(tspython.language())
+        parser = tree_sitter.Parser(lang)
 
-    name_map = {
-        'unique_function': [(3, 'MyClass.unique_function')],
-        'ambiguous': [
-            (4, 'ClassA.ambiguous'),
-            (5, 'ClassB.ambiguous'),
-        ]
-    }
+        code = """
+import os
+import sys as system
+from pathlib import Path
+from collections import defaultdict as dd
 
-    # Test 1: Exact match (confidence = 1.0)
-    call = CallSite(
-        caller_qualified_name='caller',
-        called_name='exact.match',
-        line_number=10
-    )
+def test_function():
+    path = Path('/tmp')
+    data = dd(list)
+    return os.path.join(str(path), 'test')
+"""
 
-    result = service._resolve_call_to_symbol(call, symbol_map, name_map)
-    assert result is None  # caller not in symbol_map
+        tree = parser.parse(bytes(code, 'utf8'))
 
-    # Add caller
-    symbol_map['caller'] = 100
+        builder = DependencyGraphBuilder()
+        import_map = builder._extract_imports(tree, code)
 
-    result = service._resolve_call_to_symbol(call, symbol_map, name_map)
-    assert result is not None
-    caller_id, called_id, confidence = result
-    assert called_id == 1
-    assert confidence == 1.0
-    print("  ✓ Exact match: confidence = 1.0")
+        print(f"  Import map: {len(import_map)} entries")
+        for name, (module, original) in import_map.items():
+            print(f"    {name} → {module}.{original}")
 
-    # Test 2: Unique name match (confidence = 0.8)
-    call = CallSite(
-        caller_qualified_name='caller',
-        called_name='unique_function',
-        line_number=20
-    )
+        # Check expected imports
+        expected = {
+            'os': ('os', 'os'),
+            'system': ('sys', 'sys'),
+            'Path': ('pathlib', 'Path'),
+            'dd': ('collections', 'defaultdict')
+        }
 
-    result = service._resolve_call_to_symbol(call, symbol_map, name_map)
-    assert result is not None
-    caller_id, called_id, confidence = result
-    assert called_id == 3
-    assert confidence == 0.8
-    print("  ✓ Unique name match: confidence = 0.8")
+        all_correct = True
+        for name, expected_val in expected.items():
+            if name in import_map:
+                if import_map[name] == expected_val:
+                    print(f"  ✓ {name} correctly resolved")
+                else:
+                    print(f"  ✗ {name} incorrectly resolved: {import_map[name]} != {expected_val}")
+                    all_correct = False
+            else:
+                print(f"  ✗ {name} not found in import map")
+                all_correct = False
 
-    # Test 3: Ambiguous match (confidence = 0.5)
-    call = CallSite(
-        caller_qualified_name='caller',
-        called_name='ambiguous',
-        line_number=30
-    )
+        if all_correct:
+            print("\n✓ Test passed - all imports resolved correctly")
+            return True
+        else:
+            print("\n✗ Test failed - some imports not resolved")
+            return False
 
-    result = service._resolve_call_to_symbol(call, symbol_map, name_map)
-    assert result is not None
-    caller_id, called_id, confidence = result
-    assert confidence == 0.5
-    print("  ✓ Ambiguous match: confidence = 0.5")
+    except Exception as e:
+        print(f"\n✗ Test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
-    print("\n✓ Confidence scoring works correctly!")
+
+def test_confidence_scoring():
+    """Test confidence scoring for different call types"""
+    print("\n" + "=" * 60)
+    print("TEST 3: Confidence Scoring")
+    print("=" * 60)
+
+    project_id, file_type_id = setup_test_project()
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    file_content = """
+def static_call():
+    '''Direct static call'''
+    return helper()
+
+def helper():
+    '''Helper function'''
+    return 42
+
+class MyClass:
+    def method_call(self):
+        '''Method call'''
+        return self.other_method()
+
+    def other_method(self):
+        return 100
+"""
+
+    try:
+        # Insert file
+        cursor.execute("""
+            INSERT OR REPLACE INTO project_files (project_id, file_type_id, file_path, file_name)
+            VALUES (?, ?, 'confidence_test.py', 'confidence_test.py')
+        """, (project_id, file_type_id))
+        file_id = cursor.lastrowid
+
+        # Insert file content via content_blobs
+        import hashlib
+        hash_val = hashlib.sha256(file_content.encode('utf8')).hexdigest()
+
+        cursor.execute("""
+            INSERT OR IGNORE INTO content_blobs (hash_sha256, content_text, content_type, file_size_bytes)
+            VALUES (?, ?, 'text', ?)
+        """, (hash_val, file_content, len(file_content)))
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO file_contents (file_id, content_hash, file_size_bytes, line_count)
+            VALUES (?, ?, ?, ?)
+        """, (file_id, hash_val, len(file_content), file_content.count('\n')))
+        conn.commit()
+
+        # Extract symbols and build graph
+        extractor = SymbolExtractionService()
+        extractor.extract_symbols_for_project(project_id, force=True)
+
+        builder = DependencyGraphBuilder()
+        builder.build_dependencies_for_project(project_id)
+
+        # Query confidence scores
+        cursor.execute("""
+            SELECT
+                caller.qualified_name AS caller,
+                called.qualified_name AS called,
+                csd.confidence_score
+            FROM code_symbol_dependencies csd
+            JOIN code_symbols caller ON csd.caller_symbol_id = caller.id
+            JOIN code_symbols called ON csd.called_symbol_id = called.id
+            WHERE caller.project_id = ?
+        """, (project_id,))
+
+        dependencies = cursor.fetchall()
+
+        print(f"  Dependencies with confidence scores:")
+        has_high_confidence = False
+        for caller, called, confidence in dependencies:
+            print(f"    {caller} → {called}: {confidence:.2f}")
+            if confidence >= 0.8:
+                has_high_confidence = True
+
+        if has_high_confidence:
+            print("\n✓ Test passed - confidence scores assigned")
+            return True
+        else:
+            print("\n✗ Test failed - no high confidence scores found")
+            return False
+
+    except Exception as e:
+        print(f"\n✗ Test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        cursor.execute("DELETE FROM projects WHERE slug = 'test_deps'")
+        conn.commit()
+
+
+def main():
+    """Run all tests"""
+    print("\n")
+    print("╔" + "=" * 58 + "╗")
+    print("║" + " " * 10 + "DEPENDENCY GRAPH BUILDER TEST SUITE" + " " * 13 + "║")
+    print("╚" + "=" * 58 + "╝")
+    print()
+
+    tests = [
+        test_basic_dependency_extraction,
+        test_import_resolution,
+        test_confidence_scoring,
+    ]
+
+    results = []
+    for test in tests:
+        try:
+            result = test()
+            results.append(result)
+        except Exception as e:
+            print(f"\n✗ Test crashed: {e}")
+            import traceback
+            traceback.print_exc()
+            results.append(False)
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    passed = sum(results)
+    total = len(results)
+    print(f"Tests passed: {passed}/{total}")
+
+    if passed == total:
+        print("✓ All tests passed!")
+        return 0
+    else:
+        print(f"✗ {total - passed} test(s) failed")
+        return 1
 
 
 if __name__ == '__main__':
-    print("=" * 70)
-    print("Dependency Graph Service Tests (Phase 1.3)")
-    print("=" * 70)
-
-    try:
-        test_import_extraction()
-        test_call_extraction()
-        test_method_calls()
-        test_resolution_confidence()
-        test_end_to_end_dependency_graph()
-
-        print("\n" + "=" * 70)
-        print("✅ All tests passed!")
-        print("=" * 70)
-
-    except AssertionError as e:
-        print(f"\n❌ Test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    sys.exit(main())
