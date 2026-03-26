@@ -21,8 +21,13 @@ class TempleDBRepo(BaseRepo):
     """
 
     def __init__(self, project_slug: str):
+        from dulwich.objects import DEFAULT_OBJECT_FORMAT_NAME
+
         self.project_slug = project_slug
         self.mapper = ObjectMapper(project_slug)
+
+        # Set object format (SHA1 for git compatibility)
+        self.object_format_name = DEFAULT_OBJECT_FORMAT_NAME
 
         # Initialize bare repo (no working directory)
         super().__init__(None, None)

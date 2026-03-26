@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
 Commit Command - Commit filesystem changes back to database
+
+INTERNAL MODULE - Not a standalone CLI command.
+Used by: vcs commit, project commit commands.
 """
 
 import os

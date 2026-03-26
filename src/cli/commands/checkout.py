@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
 Checkout Command - Extract project files from database to filesystem
+
+INTERNAL MODULE - Not a standalone CLI command.
+Used by: project checkout, vcs edit commands.
 """
 
 import os
