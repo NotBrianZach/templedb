@@ -15,7 +15,7 @@ from cli.commands import (
     project, vcs, env, search, system, cathedral, deploy, migration,
     target, secret, tui_launcher, config, workitem, mcp, direnv, merge,
     blob, domain, backup, claude, prompt, vibe, nixos, key, cache, nixops4,
-    deploy_nix, deploy_appstore, deploy_steam, deploy_script, file, tutorial
+    deploy_nix, file, tutorial
 )
 from cli.core import cli
 
@@ -55,19 +55,12 @@ def main():
     # Register cache management commands
     cache.CacheCommands.register(cli.subparsers)
 
-    # Register deployment script management
-    deploy_script.register(cli)
-
-    # Deployment backends are registered under 'deploy' command (see deploy.py)
+    # Deployment backends are all registered under 'deploy' command (see deploy.py)
     # - deploy nix (from deploy_nix module)
     # - deploy nixops4 (from nixops4 module)
-    # - deploy script (from deploy_script module) - also available as standalone 'deploy-script'
-
-    # Register app store deployment commands (Phase 2)
-    deploy_appstore.register(cli)
-
-    # Register Steam deployment commands (Phase 3)
-    deploy_steam.register(cli)
+    # - deploy hooks (from deploy_script module - renamed from plugin)
+    # - deploy appstore (from deploy_appstore module)
+    # - deploy steam (from deploy_steam module)
 
     # TODO: Register llm commands as needed
     # from cli.commands import llm

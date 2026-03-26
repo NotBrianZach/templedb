@@ -503,3 +503,23 @@ def register(cli):
     deploy_godot_parser.add_argument('--presets', default='Linux/X11',
                                      help='Comma-separated export presets')
     cli.commands['deploy-steam.deploy-godot'] = cmd.deploy_godot
+
+
+def register_under_deploy(deploy_subparsers, cli):
+    """Register Steam deployment under deploy command (deploy steam ...)"""
+    cmd = SteamDeployCommands()
+
+    # Create steam subcommand under deploy
+    steam_parser = deploy_subparsers.add_parser(
+        'steam',
+        help='Deploy games to Steam platform',
+        description='Build and upload game builds to Steam using SteamPipe.'
+    )
+    steam_subparsers = steam_parser.add_subparsers(dest='steam_action', required=True)
+
+    # TODO: Implement Steam deployment commands
+    # These are placeholders for Phase 3 implementation
+    # setup_parser = steam_subparsers.add_parser('setup', help='Configure Steam deployment')
+    # build_parser = steam_subparsers.add_parser('build', help='Build game for Steam')
+    # upload_parser = steam_subparsers.add_parser('upload', help='Upload build to Steam')
+    # status_parser = steam_subparsers.add_parser('status', help='Check Steam deployment status')

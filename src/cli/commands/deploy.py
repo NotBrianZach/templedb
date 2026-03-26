@@ -1131,7 +1131,7 @@ def register(cli):
     subparsers = deploy_parser.add_subparsers(dest='deploy_subcommand', required=True)
 
     # Import deployment backend modules
-    from cli.commands import deploy_nix, nixops4, deploy_script
+    from cli.commands import deploy_nix, nixops4, deploy_script, deploy_appstore, deploy_steam
 
     # deploy run command
     run_parser = subparsers.add_parser('run', help='Deploy project (uses FHS isolation by default)')
@@ -1224,5 +1224,11 @@ def register(cli):
     # deploy nixops4 - NixOps4 declarative orchestration (from nixops4)
     nixops4.register_under_deploy(subparsers, cli)
 
-    # deploy script - Custom deployment scripts (from deploy_script)
+    # deploy hooks - Custom deployment hooks (renamed from plugin/script)
     deploy_script.register_under_deploy(subparsers, cli)
+
+    # deploy appstore - App store and package manager deployment
+    deploy_appstore.register_under_deploy(subparsers, cli)
+
+    # deploy steam - Steam platform deployment
+    deploy_steam.register_under_deploy(subparsers, cli)

@@ -347,60 +347,60 @@ def register_under_deploy(deploy_subparsers, cli):
     """Register deploy-script commands under deploy command (NEW: deploy script ...)"""
     cmd = DeployScriptCommand()
 
-    # Create plugin subcommand under deploy
-    plugin_parser = deploy_subparsers.add_parser(
-        'plugin',
+    # Create hooks subcommand under deploy
+    hooks_parser = deploy_subparsers.add_parser(
+        'hooks',
         help='Customize deployment workflows with project-specific scripts',
         description='''
-Deployment plugins let you replace the standard deployment process with a custom script
+Deployment hooks let you replace the standard deployment process with a custom script
 that can add pre/post-deployment logic, manage services, or orchestrate complex workflows.
 
-When a plugin is registered for a project, running `./templedb deploy run PROJECT` will
+When a hook is registered for a project, running `./templedb deploy run PROJECT` will
 automatically execute your custom script instead of the standard deployment.
 
-Plugins are useful for:
+Hooks are useful for:
   - Integrating systemd service management
   - Running database migrations in a specific order
   - Coordinating multi-step deployment workflows
   - Adding project-specific validation or health checks
   - Deploying to custom infrastructure (Docker, Kubernetes, etc.)
 
-The plugin system makes custom deployment workflows discoverable through the standard
+The hook system makes custom deployment workflows discoverable through the standard
 deployment command while giving you complete control over the process.
         ''',
         epilog='''
 Examples:
   # Register a custom deployment script
-  ./templedb deploy plugin register my_project /path/to/deploy.sh \\
+  ./templedb deploy hooks register my_project /path/to/deploy.sh \\
     --description "Deploys app and updates systemd service"
 
-  # List all active plugins
-  ./templedb deploy plugin list
+  # List all active hooks
+  ./templedb deploy hooks list
 
-  # Show plugin details and status
-  ./templedb deploy plugin show my_project
+  # Show hook details and status
+  ./templedb deploy hooks show my_project
 
-  # Temporarily disable a plugin (use standard deployment)
-  ./templedb deploy plugin disable my_project
+  # Temporarily disable a hook (use standard deployment)
+  ./templedb deploy hooks disable my_project
 
-  # Deploy with plugin (automatic when registered)
+  # Deploy with hook (automatic when registered)
   ./templedb deploy run my_project
 
-  # Deploy without plugin (bypass custom script)
-  ./templedb deploy run my_project --no-plugin
+  # Deploy without hook (bypass custom script)
+  ./templedb deploy run my_project --no-script
 
-See DEPLOYMENT_PLUGINS.md for detailed documentation and examples.
+See DEPLOYMENT_HOOKS.md for detailed documentation and examples.
         '''
     )
 
-    plugin_subparsers = plugin_parser.add_subparsers(dest='plugin_action', help='Plugin action')
+    hooks_subparsers = hooks_parser.add_subparsers(dest='hooks_action', help='Hooks action')
 
-    # Register plugin
-    register_parser = plugin_subparsers.add_parser(
+    # Register hook
+    register_parser = hooks_subparsers.add_parser(
         'register',
         help='Register a custom deployment script for a project',
         description='''
-Register a deployment plugin that will run when you deploy this project.
+Register a deployment hook that will run when you deploy this project.
 Once registered, `./templedb deploy run PROJECT` will execute your script
 instead of the standard TempleDB deployment process.
 
@@ -408,58 +408,58 @@ Your script receives the same arguments (--dry-run, --target, etc.) and
 can wrap the standard deployment or completely replace it.
         '''
     )
-    register_parser.add_argument('project_slug', help='Project slug to attach plugin to')
+    register_parser.add_argument('project_slug', help='Project slug to attach hook to')
     register_parser.add_argument('script_path', help='Path to executable deployment script')
-    register_parser.add_argument('--description', help='Human-readable description of what this plugin does', default='')
+    register_parser.add_argument('--description', help='Human-readable description of what this hook does', default='')
 
-    # List plugins
-    list_parser = plugin_subparsers.add_parser(
+    # List hooks
+    list_parser = hooks_subparsers.add_parser(
         'list',
-        help='List registered deployment plugins',
+        help='List registered deployment hooks',
         description='Show which projects have custom deployment workflows registered.'
     )
-    list_parser.add_argument('--all', action='store_true', help='Show all plugins including disabled')
+    list_parser.add_argument('--all', action='store_true', help='Show all hooks including disabled')
 
-    # Show plugin
-    show_parser = plugin_subparsers.add_parser(
+    # Show hook
+    show_parser = hooks_subparsers.add_parser(
         'show',
-        help='Show detailed information about a deployment plugin',
-        description='Display plugin status, script path, and metadata.'
+        help='Show detailed information about a deployment hook',
+        description='Display hook status, script path, and metadata.'
     )
-    show_parser.add_argument('project_slug', help='Project slug to show plugin for')
+    show_parser.add_argument('project_slug', help='Project slug to show hook for')
 
-    # Enable plugin
-    enable_parser = plugin_subparsers.add_parser(
+    # Enable hook
+    enable_parser = hooks_subparsers.add_parser(
         'enable',
-        help='Enable a deployment plugin',
-        description='Re-enable a previously disabled plugin. The plugin will run on next deployment.'
+        help='Enable a deployment hook',
+        description='Re-enable a previously disabled hook. The hook will run on next deployment.'
     )
-    enable_parser.add_argument('project_slug', help='Project slug to enable plugin for')
+    enable_parser.add_argument('project_slug', help='Project slug to enable hook for')
 
-    # Disable plugin
-    disable_parser = plugin_subparsers.add_parser(
+    # Disable hook
+    disable_parser = hooks_subparsers.add_parser(
         'disable',
-        help='Temporarily disable a plugin without removing it',
+        help='Temporarily disable a hook without removing it',
         description='''
-Disable a plugin to use standard TempleDB deployment without unregistering the script.
-The plugin remains registered and can be re-enabled later.
+Disable a hook to use standard TempleDB deployment without unregistering the script.
+The hook remains registered and can be re-enabled later.
         '''
     )
-    disable_parser.add_argument('project_slug', help='Project slug to disable plugin for')
+    disable_parser.add_argument('project_slug', help='Project slug to disable hook for')
 
-    # Remove plugin
-    remove_parser = plugin_subparsers.add_parser(
+    # Remove hook
+    remove_parser = hooks_subparsers.add_parser(
         'remove',
-        help='Permanently remove a deployment plugin',
-        description='Unregister the plugin. Future deployments will use standard TempleDB workflow.'
+        help='Permanently remove a deployment hook',
+        description='Unregister the hook. Future deployments will use standard TempleDB workflow.'
     )
-    remove_parser.add_argument('project_slug', help='Project slug to remove plugin from')
+    remove_parser.add_argument('project_slug', help='Project slug to remove hook from')
     remove_parser.add_argument('--force', action='store_true', help='Skip confirmation prompt')
 
-    # Register all handlers with 'deploy.script' prefix
-    cli.commands['deploy.script.register'] = cmd.register_script
-    cli.commands['deploy.script.list'] = cmd.list_scripts
-    cli.commands['deploy.script.show'] = cmd.show_script
-    cli.commands['deploy.script.enable'] = cmd.enable_script
-    cli.commands['deploy.script.disable'] = cmd.disable_script
-    cli.commands['deploy.script.remove'] = cmd.remove_script
+    # Register all handlers with 'deploy.hooks' prefix
+    cli.commands['deploy.hooks.register'] = cmd.register_script
+    cli.commands['deploy.hooks.list'] = cmd.list_scripts
+    cli.commands['deploy.hooks.show'] = cmd.show_script
+    cli.commands['deploy.hooks.enable'] = cmd.enable_script
+    cli.commands['deploy.hooks.disable'] = cmd.disable_script
+    cli.commands['deploy.hooks.remove'] = cmd.remove_script

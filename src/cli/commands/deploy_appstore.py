@@ -323,3 +323,43 @@ def register(cli):
     macos_parser.add_argument('--team-id', help='Team ID')
     macos_parser.add_argument('--password', help='App-specific password')
     cli.commands['deploy-appstore.macos'] = cmd.macos_app
+
+
+def register_under_deploy(deploy_subparsers, cli):
+    """Register app store deployment under deploy command (deploy appstore ...)"""
+    cmd = AppStoreDeployCommands()
+
+    # Create appstore subcommand under deploy
+    appstore_parser = deploy_subparsers.add_parser(
+        'appstore',
+        help='Deploy CLI tools to app stores and package managers',
+        description='Generate and publish packages for Homebrew, Snap, macOS App Store, and Windows Store.'
+    )
+    appstore_subparsers = appstore_parser.add_subparsers(dest='appstore_action', required=True)
+
+    # deploy appstore homebrew
+    homebrew_parser = appstore_subparsers.add_parser('homebrew', help='Generate Homebrew formula')
+    homebrew_parser.add_argument('slug', help='Project slug')
+    homebrew_parser.add_argument('--version', default='1.0.0', help='Version string')
+    homebrew_parser.add_argument('--description', help='Project description')
+    homebrew_parser.add_argument('--homepage', help='Project homepage URL')
+    homebrew_parser.add_argument('--tarball-url', help='Source tarball URL')
+    homebrew_parser.add_argument('--sha256', help='Tarball SHA256 hash')
+    homebrew_parser.add_argument('--org', default='yourorg', help='GitHub organization')
+    homebrew_parser.add_argument('--tap', default='homebrew-tap', help='Tap repository name')
+    homebrew_parser.add_argument('--publish', action='store_true', help='Publish to GitHub')
+    cli.commands['deploy.appstore.homebrew'] = cmd.homebrew
+
+    # deploy appstore snap
+    snap_parser = appstore_subparsers.add_parser('snap', help='Build Snap package')
+    snap_parser.add_argument('slug', help='Project slug')
+    snap_parser.add_argument('--version', default='1.0.0', help='Version string')
+    snap_parser.add_argument('--summary', help='Short summary (max 79 chars)')
+    snap_parser.add_argument('--description', help='Long description')
+    snap_parser.add_argument('--publish', action='store_true', help='Publish to Snap Store')
+    snap_parser.add_argument('--channel', default='stable', help='Release channel')
+    cli.commands['deploy.appstore.snap'] = cmd.snap
+
+    # TODO: Add macOS and Windows deployment when implemented
+    # macos_parser = appstore_subparsers.add_parser('macos', help='Create macOS .app bundle')
+    # windows_parser = appstore_subparsers.add_parser('windows', help='Create Windows installer')
