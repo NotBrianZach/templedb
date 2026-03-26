@@ -2,7 +2,18 @@
 """
 Code Intelligence Commands
 
-Provides commands for:
+NOT REGISTERED - Functionality available via MCP tools.
+
+This Click-based CLI is kept for reference but not integrated into main CLI.
+Use MCP tools instead:
+- templedb_code_search
+- templedb_code_show_symbol
+- templedb_code_show_clusters
+- templedb_code_extract_symbols
+- templedb_code_impact_analysis
+- templedb_code_build_graph
+
+Original commands (deprecated):
 - Extracting symbols (Phase 1.2)
 - Building dependency graph (Phase 1.3)
 - Analyzing impact (Phase 1.4)
