@@ -15,7 +15,10 @@ logger = logging.getLogger(__name__)
 
 class TempleDBError(RuntimeError):
     """Base exception for all TempleDB application errors."""
-    pass
+    def __init__(self, message: str, solution: Optional[str] = None, **kwargs):
+        super().__init__(message)
+        self.message = message
+        self.solution = solution
 
 
 class ValidationError(TempleDBError):

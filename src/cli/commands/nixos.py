@@ -254,6 +254,84 @@ class NixOSCommand(Command):
             logger.error(f"Failed to test system: {e}", exc_info=True)
             return 1
 
+    def update_input(self, args) -> int:
+        """Update a flake input in a NixOS config project"""
+        try:
+            import subprocess
+            import os
+
+            project = self.get_project_or_exit(args.slug)
+
+            # Get checkout path using same logic as SystemService
+            sudo_user = os.environ.get('SUDO_USER')
+            if sudo_user:
+                real_home = Path(f'/home/{sudo_user}')
+            else:
+                real_home = Path.home()
+
+            # Standard checkout locations
+            checkout_paths = [
+                real_home / ".config" / "templedb" / "checkouts" / args.slug,
+                real_home / "projects" / args.slug,
+                Path("/tmp") / f"templedb_checkout_{args.slug}",
+            ]
+
+            checkout_path = None
+            for path in checkout_paths:
+                if path.exists():
+                    checkout_path = path
+                    break
+
+            if not checkout_path:
+                print(f"❌ No checkout found for {args.slug}")
+                print(f"   Run: tdb project checkout {args.slug}")
+                return 1
+
+            print(f"📦 Updating flake input '{args.input}' in {args.slug}")
+            print(f"   Location: {checkout_path}")
+
+            # Run nix flake update
+            cmd = ['nix', 'flake', 'update', args.input, '--flake', str(checkout_path)]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode == 0:
+                print(f"✓ Updated {args.input}")
+                print()
+                print("To apply changes:")
+                print(f"  tdb nixos rebuild {args.slug}")
+                return 0
+            else:
+                print(f"❌ Failed to update {args.input}")
+                if result.stderr:
+                    print(result.stderr)
+                return 1
+
+        except Exception as e:
+            logger.error(f"Failed to update input: {e}", exc_info=True)
+            print(f"❌ Error: {e}")
+            return 1
+
+    def rebuild(self, args) -> int:
+        """Rebuild NixOS system (convenience alias for system-switch)"""
+        # If --update-input is specified, update the input first
+        if hasattr(args, 'update_input') and args.update_input:
+            print(f"🔄 Updating flake input: {args.update_input}")
+            # Create a temporary args object for update_input
+            import argparse
+            update_args = argparse.Namespace(slug=args.slug, input=args.update_input)
+            result = self.update_input(update_args)
+            if result != 0:
+                print("❌ Failed to update input, aborting rebuild")
+                return result
+            print()
+
+        return self.system_switch(args)
+
     def system_switch(self, args) -> int:
         """Switch to system configuration (nixos-rebuild switch)"""
         try:
@@ -716,6 +794,20 @@ def register(cli):
     test_parser.add_argument('slug', help='Project slug (must be nixos-config type)')
     test_parser.add_argument('--dry-run', action='store_true', help='Show what would be done')
     cli.commands['nixos.system-test'] = cmd.system_test
+
+    # nixos update-input command
+    update_input_parser = subparsers.add_parser('update-input', help='Update a flake input')
+    update_input_parser.add_argument('slug', help='Project slug (nixos-config managed by TempleDB)')
+    update_input_parser.add_argument('input', help='Flake input name (e.g., templedb, nixpkgs)')
+    cli.commands['nixos.update-input'] = cmd.update_input
+
+    # nixos rebuild command (convenience alias)
+    rebuild_parser = subparsers.add_parser('rebuild', help='Rebuild NixOS system (nixos-rebuild switch)')
+    rebuild_parser.add_argument('slug', help='Project slug (must be nixos-config type)')
+    rebuild_parser.add_argument('--dry-run', action='store_true', help='Show what would be done')
+    rebuild_parser.add_argument('--with-home-manager', action='store_true', help='Also rebuild home-manager after NixOS')
+    rebuild_parser.add_argument('--update-input', metavar='INPUT', help='Update flake input before rebuilding')
+    cli.commands['nixos.rebuild'] = cmd.rebuild
 
     # nixos system-switch command
     switch_parser = subparsers.add_parser('system-switch', help='Switch to system configuration (nixos-rebuild switch)')

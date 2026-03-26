@@ -58,10 +58,14 @@ class VibeRealtimeCommands(Command):
             for module, description in missing:
                 print(f"   - {module} ({description})")
             print()
-            print("💡 Solution: Enter Nix environment first")
+            print("💡 Solutions:")
             print()
-            print("   nix develop")
-            print("   ./templedb vibe-start <project>")
+            print("   If installed via NixOS config:")
+            print("   1. Update templeDB flake input in your nixos-config")
+            print("   2. Rebuild: sudo nixos-rebuild switch")
+            print()
+            print("   If running from source:")
+            print("   nix develop ~/templeDB -c tdb vibe start <project>")
             print()
             print("📖 Documentation: docs/VIBE_GETTING_STARTED.md")
             return False
@@ -459,10 +463,10 @@ What would you like to work on?
                 print()
 
             print("Usage:")
-            print(f"  ./templedb vibe-start <project>")
+            print(f"  tdb vibe start <project>")
             print()
             print("Example:")
-            print(f"  ./templedb vibe-start {projects[0][0]}")
+            print(f"  tdb vibe start {projects[0][0]}")
             print()
 
         finally:

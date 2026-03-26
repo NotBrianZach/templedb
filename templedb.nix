@@ -27,6 +27,21 @@ pkgs.python3Packages.buildPythonApplication rec {
     textual
     rich
 
+    # Vibe coding dependencies
+    aiohttp      # Async web server for vibe server
+    watchdog     # File system monitoring
+    websockets   # WebSocket protocol support
+    requests     # HTTP client for API calls
+
+    # Secret management
+    cryptography # For RSA encryption
+
+    # Code intelligence dependencies
+    tree-sitter  # AST parsing
+    networkx     # Graph analysis
+    igraph       # Fast graph algorithms
+    leidenalg    # Community detection
+
     # Optional dependencies
     # tqdm  # Progress bars for large operations
   ];
