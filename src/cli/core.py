@@ -21,7 +21,14 @@ class TempleDBCLI:
         self.parser = argparse.ArgumentParser(
             prog="templedb",
             description="TempleDB - Database-native project management",
-            epilog="Use 'templedb <command> --help' for command-specific help"
+            epilog="""
+Use 'templedb <command> --help' for command-specific help
+
+New to TempleDB?
+  templedb tutorial        - Interactive tutorials and guides
+  templedb tutorial basics - Start here for an introduction
+            """,
+            formatter_class=argparse.RawDescriptionHelpFormatter
         )
         self.parser.add_argument('--version', action='version', version='TempleDB 0.7.0')
         self.parser.add_argument('-C', dest='project_dir', metavar='PATH',

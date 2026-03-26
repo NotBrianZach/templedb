@@ -15,7 +15,7 @@ from cli.commands import (
     project, vcs, env, search, system, cathedral, deploy, migration,
     target, secret, tui_launcher, config, workitem, mcp, direnv, merge,
     blob, domain, backup, claude, prompt, vibe, nixos, key, cache, nixops4,
-    deploy_nix, deploy_appstore, deploy_steam, deploy_script, file
+    deploy_nix, deploy_appstore, deploy_steam, deploy_script, file, tutorial
 )
 from cli.core import cli
 
@@ -46,6 +46,7 @@ def main():
     claude.register(cli)
     prompt.register(cli)
     vibe.register(cli)  # Now includes 'start' subcommand from vibe_realtime
+    tutorial.register(cli)  # Interactive tutorials and onboarding
     nixos.register(cli)
 
     # Register key management commands
