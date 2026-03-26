@@ -12,6 +12,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from repositories import ProjectRepository, FileRepository
 from cli.core import Command
+from cli.fuzzy_matcher import fuzzy_match_project, fuzzy_match_file
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -31,14 +32,14 @@ class FileCommands(Command):
     def show(self, args) -> int:
         """Show file content from TempleDB"""
         try:
-            # Get project
-            project = self.project_repo.get_project(args.project)
+            # Get project (always fuzzy - exact match tried first)
+            project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
                 logger.error(f"Project '{args.project}' not found")
                 return 1
 
-            # Get file content
-            file_record = self.file_repo.get_file_by_path(project['id'], args.file_path)
+            # Get file content (always fuzzy - exact match tried first)
+            file_record = fuzzy_match_file(project['id'], args.file_path, show_matched=True)
             if not file_record:
                 logger.error(f"File '{args.file_path}' not found in project '{args.project}'")
                 return 1
@@ -60,14 +61,14 @@ class FileCommands(Command):
     def edit(self, args) -> int:
         """Edit file from TempleDB in $EDITOR"""
         try:
-            # Get project
-            project = self.project_repo.get_project(args.project)
+            # Get project (always fuzzy - exact match tried first)
+            project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
                 logger.error(f"Project '{args.project}' not found")
                 return 1
 
-            # Get file content
-            file_record = self.file_repo.get_file_by_path(project['id'], args.file_path)
+            # Get file content (always fuzzy - exact match tried first)
+            file_record = fuzzy_match_file(project['id'], args.file_path, show_matched=True)
             if not file_record:
                 logger.error(f"File '{args.file_path}' not found in project '{args.project}'")
                 return 1
@@ -240,8 +241,8 @@ def register(cli):
         'show',
         help='Show file content'
     )
-    show_parser.add_argument('project', help='Project name or slug')
-    show_parser.add_argument('file_path', help='Path to file within project')
+    show_parser.add_argument('project', help='Project name or pattern')
+    show_parser.add_argument('file_path', help='File path or pattern (fuzzy matching enabled)')
     cli.commands['file.show'] = cmd.show
 
     # file edit
@@ -249,8 +250,8 @@ def register(cli):
         'edit',
         help='Edit file in $EDITOR'
     )
-    edit_parser.add_argument('project', help='Project name or slug')
-    edit_parser.add_argument('file_path', help='Path to file within project')
+    edit_parser.add_argument('project', help='Project name or pattern')
+    edit_parser.add_argument('file_path', help='File path or pattern (fuzzy matching enabled)')
     cli.commands['file.edit'] = cmd.edit
 
     # file checkout
@@ -268,8 +269,8 @@ def register(cli):
         'cat',
         help='Show file content (alias for show)'
     )
-    cat_parser.add_argument('project', help='Project name or slug')
-    cat_parser.add_argument('file_path', help='Path to file within project')
+    cat_parser.add_argument('project', help='Project name or pattern')
+    cat_parser.add_argument('file_path', help='File path or pattern (fuzzy matching enabled)')
     cli.commands['file.cat'] = cmd.cat
 
     # file get (programmatic alias for show)
@@ -277,8 +278,8 @@ def register(cli):
         'get',
         help='Get file content as string (for programmatic use)'
     )
-    get_parser.add_argument('project', help='Project name or slug')
-    get_parser.add_argument('file_path', help='Path to file within project')
+    get_parser.add_argument('project', help='Project name or pattern')
+    get_parser.add_argument('file_path', help='File path or pattern (fuzzy matching enabled)')
     cli.commands['file.get'] = cmd.get
 
     # file set (set content from string)

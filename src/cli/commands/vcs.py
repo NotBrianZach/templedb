@@ -12,6 +12,7 @@ from typing import Optional, List, Tuple
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from repositories import ProjectRepository, VCSRepository
 from cli.core import Command
+from cli.fuzzy_matcher import fuzzy_match_project, fuzzy_match_file
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -65,6 +66,12 @@ class VCSCommands(Command):
         from error_handler import ResourceNotFoundError, ValidationError
 
         try:
+            # Fuzzy match project
+            project = fuzzy_match_project(args.project, show_matched=False)
+            if not project:
+                logger.error(f"Project '{args.project}' not found")
+                return 1
+
             # Determine what to stage
             stage_all = hasattr(args, 'all') and args.all
             file_patterns = args.files if hasattr(args, 'files') and args.files else None
@@ -73,9 +80,25 @@ class VCSCommands(Command):
                 logger.error("Specify --all or provide file patterns")
                 return 1
 
+            # Fuzzy match file patterns if provided
+            if file_patterns and not stage_all:
+                resolved_files = []
+                for pattern in file_patterns:
+                    file_record = fuzzy_match_file(project['id'], pattern, show_matched=True)
+                    if file_record:
+                        resolved_files.append(file_record['file_path'])
+                    else:
+                        logger.warning(f"Skipping unmatched pattern: {pattern}")
+
+                if not resolved_files:
+                    logger.error("No files matched the patterns")
+                    return 1
+
+                file_patterns = resolved_files
+
             # Stage files via service
             count = self.service.stage_files(
-                project_slug=args.project,
+                project_slug=project['slug'],
                 file_patterns=file_patterns,
                 stage_all=stage_all
             )
@@ -105,6 +128,12 @@ class VCSCommands(Command):
         from error_handler import ResourceNotFoundError, ValidationError
 
         try:
+            # Fuzzy match project
+            project = fuzzy_match_project(args.project, show_matched=False)
+            if not project:
+                logger.error(f"Project '{args.project}' not found")
+                return 1
+
             # Determine what to unstage
             unstage_all = hasattr(args, 'all') and args.all
             file_patterns = args.files if hasattr(args, 'files') and args.files else None
@@ -113,9 +142,25 @@ class VCSCommands(Command):
                 logger.error("Specify --all or provide file patterns")
                 return 1
 
+            # Fuzzy match file patterns if provided
+            if file_patterns and not unstage_all:
+                resolved_files = []
+                for pattern in file_patterns:
+                    file_record = fuzzy_match_file(project['id'], pattern, show_matched=True)
+                    if file_record:
+                        resolved_files.append(file_record['file_path'])
+                    else:
+                        logger.warning(f"Skipping unmatched pattern: {pattern}")
+
+                if not resolved_files:
+                    logger.error("No files matched the patterns")
+                    return 1
+
+                file_patterns = resolved_files
+
             # Unstage files via service
             count = self.service.unstage_files(
-                project_slug=args.project,
+                project_slug=project['slug'],
                 file_patterns=file_patterns,
                 unstage_all=unstage_all
             )
@@ -140,9 +185,163 @@ class VCSCommands(Command):
             logger.debug("Full error:", exc_info=True)
             return 1
 
+    def edit(self, args) -> int:
+        """Enter edit mode (make checkout writable)"""
+        from sync import SyncManager, make_writable
+        from error_handler import ResourceNotFoundError
+
+        try:
+            # Fuzzy match project
+            project = fuzzy_match_project(args.project, show_matched=False)
+            if not project:
+                logger.error(f"Project '{args.project}' not found")
+                return 1
+
+            # Initialize sync manager
+            sync_mgr = SyncManager(project['slug'])
+
+            # Get checkout path
+            checkout_path = sync_mgr.get_checkout_path()
+            if not checkout_path.exists():
+                logger.error(f"No checkout found for {project['slug']}")
+                logger.info(f"💡 Run: templedb project checkout {project['slug']}")
+                return 1
+
+            # Check if already in edit mode
+            existing_session = sync_mgr.get_edit_session()
+            if existing_session:
+                logger.warning(f"Already in edit mode (started {existing_session['started_at']})")
+                return 0
+
+            # Make writable
+            make_writable(checkout_path)
+
+            # Start edit session
+            reason = args.reason if hasattr(args, 'reason') and args.reason else None
+            sync_mgr.start_edit_session(reason=reason)
+
+            print(f"✓ {project['slug']} is now editable")
+            print(f"  Path: {checkout_path}")
+            print(f"📝 Files are writable until you commit or discard")
+            print()
+            print("To save changes:")
+            print(f"  templedb vcs commit {project['slug']} -m 'message'")
+            print()
+            print("To discard changes:")
+            print(f"  templedb vcs discard {project['slug']}")
+
+            return 0
+
+        except ResourceNotFoundError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
+            return 1
+
+        except Exception as e:
+            logger.error(f"Failed to enter edit mode: {e}")
+            logger.debug("Full error:", exc_info=True)
+            return 1
+
+    def discard(self, args) -> int:
+        """Discard changes and return to read-only mode"""
+        from sync import SyncManager, make_readonly
+        from error_handler import ResourceNotFoundError
+
+        try:
+            # Fuzzy match project
+            project = fuzzy_match_project(args.project, show_matched=False)
+            if not project:
+                logger.error(f"Project '{args.project}' not found")
+                return 1
+
+            # Initialize sync manager
+            sync_mgr = SyncManager(project['slug'])
+
+            # Get checkout path
+            checkout_path = sync_mgr.get_checkout_path()
+            if not checkout_path.exists():
+                logger.error(f"No checkout found for {project['slug']}")
+                return 1
+
+            # Check if in edit mode
+            edit_session = sync_mgr.get_edit_session()
+            if not edit_session:
+                logger.warning(f"Not in edit mode")
+                return 0
+
+            # Detect changes
+            changes = sync_mgr.detect_changes()
+            has_changes = (changes['disk_changes'] or
+                          changes['added_to_disk'] or
+                          changes['deleted_from_disk'])
+
+            if has_changes and not (hasattr(args, 'force') and args.force):
+                print("⚠️  You have uncommitted changes:")
+                if changes['disk_changes']:
+                    print("\nModified files:")
+                    for f in changes['disk_changes'][:10]:
+                        print(f"  M {f}")
+                    if len(changes['disk_changes']) > 10:
+                        print(f"  ... and {len(changes['disk_changes']) - 10} more")
+
+                if changes['added_to_disk']:
+                    print("\nAdded files:")
+                    for f in changes['added_to_disk'][:10]:
+                        print(f"  A {f}")
+                    if len(changes['added_to_disk']) > 10:
+                        print(f"  ... and {len(changes['added_to_disk']) - 10} more")
+
+                if changes['deleted_from_disk']:
+                    print("\nDeleted files:")
+                    for f in changes['deleted_from_disk'][:10]:
+                        print(f"  D {f}")
+
+                print()
+                print("These changes will be PERMANENTLY LOST!")
+                print()
+                print("To discard anyway:")
+                print(f"  templedb vcs discard {project['slug']} --force")
+                print()
+                print("To save changes:")
+                print(f"  templedb vcs commit {project['slug']} -m 'message'")
+                return 1
+
+            # Re-export from database (discard changes)
+            logger.info("Re-exporting from database...")
+            from repositories import ProjectRepository
+            proj_repo = ProjectRepository()
+            proj_repo.checkout_project(project['slug'], force=True)
+
+            # Back to read-only
+            make_readonly(checkout_path)
+
+            # End edit session
+            sync_mgr.end_edit_session()
+
+            print(f"✓ Discarded all changes")
+            print(f"✓ {project['slug']} is now read-only")
+
+            return 0
+
+        except ResourceNotFoundError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"💡 {e.solution}")
+            return 1
+
+        except Exception as e:
+            logger.error(f"Failed to discard changes: {e}")
+            logger.debug("Full error:", exc_info=True)
+            return 1
+
     def commit(self, args) -> int:
         """Create VCS commit"""
-        project = self.get_project_or_exit(args.project)
+        # Fuzzy match project
+        project = fuzzy_match_project(args.project, show_matched=False)
+        if not project:
+            logger.error(f"Project '{args.project}' not found")
+            return 1
 
         # Get branch
         if args.branch:
@@ -224,17 +423,59 @@ class VCSCommands(Command):
         print(f"  Author: {author}")
         print(f"  Files: {len(staged)}")
         print(f"  Message: {args.message}")
+
+        # If in edit mode, make read-only and end session
+        from sync import SyncManager, make_readonly
+        try:
+            sync_mgr = SyncManager(project['slug'])
+            checkout_path = sync_mgr.get_checkout_path()
+
+            if sync_mgr.get_edit_session():
+                # Update sync cache with current state
+                hashes = sync_mgr.compute_checkout_hashes()
+                sync_mgr.save_sync_cache(hashes)
+
+                # Back to read-only
+                if checkout_path.exists():
+                    make_readonly(checkout_path)
+
+                # End edit session
+                sync_mgr.end_edit_session()
+
+                print(f"✓ Checkout is now read-only")
+        except Exception as e:
+            logger.debug(f"Could not update read-only status: {e}")
+
         return 0
 
     def status(self, args) -> int:
         """Show working directory status"""
         from error_handler import ResourceNotFoundError
+        from sync import SyncManager, is_writable
 
         try:
-            project_slug = args.project
+            # Fuzzy match project
+            project = fuzzy_match_project(args.project, show_matched=False)
+            if not project:
+                logger.error(f"Project '{args.project}' not found")
+                return 1
 
-            # Get project first (for refresh logic)
-            project = self.service.get_project(project_slug)
+            # Get sync manager to check edit status
+            sync_mgr = SyncManager(project['slug'])
+            checkout_path = sync_mgr.get_checkout_path()
+            edit_session = sync_mgr.get_edit_session()
+
+            # Show checkout mode (read-only vs writable)
+            if checkout_path.exists():
+                writable = is_writable(checkout_path)
+                mode_str = "writable (edit mode)" if writable else "read-only"
+                print(f"Checkout: {checkout_path}")
+                print(f"Mode: {mode_str}")
+                if edit_session:
+                    print(f"Edit session started: {edit_session['started_at']}")
+                    if edit_session.get('reason'):
+                        print(f"Reason: {edit_session['reason']}")
+                print()
 
             # Auto-detect changes if requested or if working state is empty
             if hasattr(args, 'refresh') and args.refresh:
@@ -251,7 +492,7 @@ class VCSCommands(Command):
                     self._refresh_working_state(project)
 
             # Get status from service
-            status = self.service.get_status(project_slug)
+            status = self.service.get_status(project['slug'])
 
             if not status['has_branch']:
                 print("No VCS branch initialized")
@@ -299,7 +540,11 @@ class VCSCommands(Command):
 
     def log(self, args) -> int:
         """Show commit history"""
-        project = self.get_project_or_exit(args.project)
+        # Fuzzy match project
+        project = fuzzy_match_project(args.project, show_matched=False)
+        if not project:
+            logger.error(f"Project '{args.project}' not found")
+            return 1
         limit = args.n if hasattr(args, 'n') and args.n else 10
 
         # Use VCSRepository's get_commit_history method
@@ -321,7 +566,11 @@ class VCSCommands(Command):
 
     def branch(self, args) -> int:
         """List or create branches"""
-        project = self.get_project_or_exit(args.project)
+        # Fuzzy match project
+        project = fuzzy_match_project(args.project, show_matched=False)
+        if not project:
+            logger.error(f"Project '{args.project}' not found")
+            return 1
 
         if hasattr(args, 'name') and args.name:
             # Create new branch - get default branch as parent
@@ -361,21 +610,31 @@ class VCSCommands(Command):
 
     def diff(self, args) -> int:
         """Show diff between file versions"""
-        project = self.get_project_or_exit(args.project)
+        # Fuzzy match project
+        project = fuzzy_match_project(args.project, show_matched=False)
+        if not project:
+            logger.error(f"Project '{args.project}' not found")
+            return 1
 
         # Handle --staged flag (show staged changes)
         if hasattr(args, 'staged') and args.staged:
             return self._diff_staged(project, args)
 
-        # Get file
+        # Fuzzy match file
+        file_record = fuzzy_match_file(project['id'], args.file, show_matched=True)
+        if not file_record:
+            logger.error(f"File not found: {args.file}")
+            logger.info(f"Use: templedb vcs status {args.project} to see available files")
+            return 1
+
+        # Get file row with id
         file_row = self.vcs_repo.query_one("""
             SELECT id, file_path FROM project_files
-            WHERE project_id = ? AND file_path LIKE ?
-        """, (project['id'], f"%{args.file}%"))
+            WHERE project_id = ? AND file_path = ?
+        """, (project['id'], file_record['file_path']))
 
         if not file_row:
             logger.error(f"File not found: {args.file}")
-            logger.info(f"Use: templedb vcs status {args.project} to see available files")
             return 1
 
         # Determine versions to compare
@@ -640,7 +899,11 @@ class VCSCommands(Command):
 
     def show(self, args) -> int:
         """Show commit details"""
-        project = self.get_project_or_exit(args.project)
+        # Fuzzy match project
+        project = fuzzy_match_project(args.project, show_matched=False)
+        if not project:
+            logger.error(f"Project '{args.project}' not found")
+            return 1
 
         # Find commit
         commit = self.vcs_repo.query_one("""
@@ -824,48 +1087,60 @@ def register(cli):
 
     # vcs add
     add_parser = subparsers.add_parser('add', help='Stage files for commit')
-    add_parser.add_argument('-p', '--project', required=True, help='Project slug')
+    add_parser.add_argument('-p', '--project', required=True, help='Project name or pattern (fuzzy matching enabled)')
     add_parser.add_argument('-a', '--all', action='store_true', help='Stage all changes')
-    add_parser.add_argument('files', nargs='*', help='File patterns to stage')
+    add_parser.add_argument('files', nargs='*', help='File patterns to stage (fuzzy matching enabled)')
     cli.commands['vcs.add'] = cmd.add
 
     # vcs reset
     reset_parser = subparsers.add_parser('reset', help='Unstage files')
-    reset_parser.add_argument('-p', '--project', required=True, help='Project slug')
+    reset_parser.add_argument('-p', '--project', required=True, help='Project name or pattern (fuzzy matching enabled)')
     reset_parser.add_argument('-a', '--all', action='store_true', help='Unstage all changes')
-    reset_parser.add_argument('files', nargs='*', help='File patterns to unstage')
+    reset_parser.add_argument('files', nargs='*', help='File patterns to unstage (fuzzy matching enabled)')
     cli.commands['vcs.reset'] = cmd.reset
+
+    # vcs edit
+    edit_parser = subparsers.add_parser('edit', help='Enter edit mode (make checkout writable)')
+    edit_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
+    edit_parser.add_argument('--reason', help='Reason for editing (optional)')
+    cli.commands['vcs.edit'] = cmd.edit
+
+    # vcs discard
+    discard_parser = subparsers.add_parser('discard', help='Discard changes and return to read-only mode')
+    discard_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
+    discard_parser.add_argument('--force', '-f', action='store_true', help='Discard without confirmation')
+    cli.commands['vcs.discard'] = cmd.discard
 
     # vcs commit
     commit_parser = subparsers.add_parser('commit', help='Create commit')
     commit_parser.add_argument('-m', '--message', required=True, help='Commit message')
-    commit_parser.add_argument('-p', '--project', required=True, help='Project slug')
+    commit_parser.add_argument('-p', '--project', required=True, help='Project name or pattern (fuzzy matching enabled)')
     commit_parser.add_argument('-b', '--branch', help='Branch name')
     commit_parser.add_argument('-a', '--author', help='Author name')
     cli.commands['vcs.commit'] = cmd.commit
 
     # vcs status
     status_parser = subparsers.add_parser('status', help='Show working directory status')
-    status_parser.add_argument('project', help='Project slug')
+    status_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
     status_parser.add_argument('--refresh', '-r', action='store_true', help='Refresh working state')
     cli.commands['vcs.status'] = cmd.status
 
     # vcs log
     log_parser = subparsers.add_parser('log', help='Show commit history')
-    log_parser.add_argument('project', help='Project slug')
+    log_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
     log_parser.add_argument('-n', type=int, help='Number of commits to show')
     cli.commands['vcs.log'] = cmd.log
 
     # vcs branch
     branch_parser = subparsers.add_parser('branch', help='List or create branches')
-    branch_parser.add_argument('project', help='Project slug')
+    branch_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
     branch_parser.add_argument('name', nargs='?', help='New branch name')
     cli.commands['vcs.branch'] = cmd.branch
 
     # vcs diff
     diff_parser = subparsers.add_parser('diff', help='Show diff between file versions')
-    diff_parser.add_argument('project', help='Project slug')
-    diff_parser.add_argument('file', nargs='?', help='File path or pattern (not required with --staged)')
+    diff_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
+    diff_parser.add_argument('file', nargs='?', help='File path or pattern (fuzzy matching enabled, not required with --staged)')
     diff_parser.add_argument('commit1', nargs='?', help='First commit hash (optional)')
     diff_parser.add_argument('commit2', nargs='?', help='Second commit hash (optional)')
     diff_parser.add_argument('--staged', action='store_true', help='Show diff of staged changes')
@@ -875,7 +1150,7 @@ def register(cli):
 
     # vcs show
     show_parser = subparsers.add_parser('show', help='Show commit details')
-    show_parser.add_argument('project', help='Project slug')
+    show_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
     show_parser.add_argument('commit', help='Commit hash or prefix')
     cli.commands['vcs.show'] = cmd.show
 

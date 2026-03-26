@@ -116,11 +116,36 @@ class CheckoutCommand:
                         version=version
                     )
 
+            # Save sync cache for hash-based change detection
+            from sync import SyncManager, make_readonly
+            try:
+                sync_mgr = SyncManager(project_slug)
+                hashes = sync_mgr.compute_checkout_hashes()
+                sync_mgr.save_sync_cache(hashes)
+                logger.debug(f"Saved {len(hashes)} file hashes to sync cache")
+
+                # Make checkout read-only by default (unless --writable)
+                if not (hasattr(args, 'writable') and args.writable):
+                    make_readonly(target_dir)
+                    logger.info("Checkout is read-only")
+                else:
+                    logger.info("Checkout is writable")
+            except Exception as e:
+                logger.warning(f"Could not set up sync cache or permissions: {e}")
+
             # Summary
             logger.info("Checkout complete!")
             print(f"   Files written: {files_written}")
             print(f"   Total size: {total_bytes:,} bytes ({total_bytes/1024/1024:.2f} MB)")
             print(f"   Location: {target_dir}")
+
+            # Print mode info
+            if hasattr(args, 'writable') and args.writable:
+                print(f"   Mode: writable")
+            else:
+                print(f"   Mode: read-only")
+                print(f"\n💡 To edit files:")
+                print(f"   templedb vcs edit {project_slug}")
 
             return 0
 

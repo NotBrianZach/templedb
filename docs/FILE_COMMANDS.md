@@ -7,7 +7,7 @@ Quick file access and editing for TempleDB-tracked files.
 ### Show File Content
 
 ```bash
-# Display file content to stdout
+# Display file content (fuzzy matching always enabled)
 templedb file show <project> <file_path>
 
 # Alias
@@ -19,14 +19,30 @@ templedb file get <project> <file_path>
 
 **Examples:**
 ```bash
+# Exact path (silent, fast)
 templedb file show woofs_projects src/main.py
-templedb file cat myproject README.md | grep "TODO"
+[shows content]
+
+# Fuzzy project + file (shows what matched)
+templedb file show woofs main
+Matched file: src/main.py
+[shows content]
+
+# Multiple matches shows options
+templedb file show my config
+Multiple files match 'config':
+  ● src/config.py
+  ● tests/config_test.py
+Please specify exact path
+
+# Pipe to other commands
+templedb file cat myproject README | grep "TODO"
 ```
 
 ### Edit File
 
 ```bash
-# Open file in $EDITOR
+# Open file in $EDITOR (fuzzy matching always enabled)
 templedb file edit <project> <file_path>
 ```
 
@@ -35,8 +51,14 @@ templedb file edit <project> <file_path>
 export EDITOR=nvim
 templedb file edit woofs_projects src/config.py
 
+# Fuzzy match - opens src/main.py
+templedb file edit woofs main
+Matched file: src/main.py
+[opens in editor]
+
 # Or with inline editor specification
-EDITOR=code templedb file edit myproject app.js
+EDITOR=code templedb file edit myproject app
+Matched file: src/app.js
 ```
 
 ### Checkout File

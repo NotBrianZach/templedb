@@ -311,6 +311,7 @@ def register(cli):
     checkout_parser.add_argument('project_slug', help='Project slug')
     checkout_parser.add_argument('target_dir', help='Target directory for checkout')
     checkout_parser.add_argument('--force', '-f', action='store_true', help='Overwrite existing directory')
+    checkout_parser.add_argument('--writable', '-w', action='store_true', help='Make checkout writable (default: read-only)')
     cli.commands['project.checkout'] = checkout_cmd.checkout
 
     # project checkout-list

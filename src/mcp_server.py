@@ -122,8 +122,13 @@ class MCPServer:
             "templedb_vcs_reset": self.tool_vcs_reset,
             "templedb_vcs_commit": self.tool_vcs_commit,
             "templedb_vcs_log": self.tool_vcs_log,
+            "templedb_vcs_edit": self.tool_vcs_edit,
+            "templedb_vcs_discard": self.tool_vcs_discard,
             "templedb_vcs_diff": self.tool_vcs_diff,
             "templedb_vcs_branch": self.tool_vcs_branch,
+            # File operations
+            "templedb_file_get": self.tool_file_get,
+            "templedb_file_set": self.tool_file_set,
             # Deployment operations
             "templedb_deploy": self.tool_deploy,
             "templedb_env_get": self.tool_env_get,
@@ -448,7 +453,7 @@ class MCPServer:
             },
             {
                 "name": "templedb_vcs_status",
-                "description": "Show working directory status for a project. This is the database-native equivalent of checking uncommitted changes. Shows staged, modified, and untracked files.",
+                "description": "Show working directory status for a project. This is the database-native equivalent of checking uncommitted changes. Shows staged, modified, and untracked files, as well as checkout mode (read-only or writable edit mode) and edit session information.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -500,7 +505,7 @@ class MCPServer:
             },
             {
                 "name": "templedb_vcs_commit",
-                "description": "Create a commit in TempleDB with ACID transaction. This commits staged changes with a message and author. Database-native commit with full transaction safety.",
+                "description": "Create a commit in TempleDB with ACID transaction. This commits staged changes with a message and author. Database-native commit with full transaction safety. Automatically ends any active edit session and returns checkout to read-only mode.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -576,6 +581,86 @@ class MCPServer:
                         }
                     },
                     "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_vcs_edit",
+                "description": "Enter edit mode for a project checkout. Makes the checkout writable and starts an edit session. Checkouts are read-only by default; use this to enable editing. Use vcs_commit to save changes or vcs_discard to revert.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Optional reason for entering edit mode (for tracking)"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_vcs_discard",
+                "description": "Discard uncommitted changes and return to read-only mode. Reverts the checkout to the last committed state and ends the edit session. Use --force to discard without confirmation.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Force discard without confirmation (default: false)"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_file_get",
+                "description": "Get file content as string from TempleDB. Returns file content from TempleDB-tracked file. Use this to read files before editing them with file_set.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to file within project"
+                        }
+                    },
+                    "required": ["project", "file_path"]
+                }
+            },
+            {
+                "name": "templedb_file_set",
+                "description": "Set file content from string. Writes content to file in project working directory. Optionally stages the file after writing. Note: Checkout must be in edit mode (use vcs_edit) to write files.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to file within project"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to write to file"
+                        },
+                        "stage": {
+                            "type": "boolean",
+                            "description": "Whether to stage file after writing (default: false)"
+                        }
+                    },
+                    "required": ["project", "file_path", "content"]
                 }
             },
             {
@@ -1880,6 +1965,58 @@ class MCPServer:
             }
         except Exception as e:
             logger.error(f"Error retrieving log: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_edit(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Enter edit mode (make checkout writable)"""
+        try:
+            project_name = args["project"]
+            reason = args.get("reason")
+
+            import subprocess
+            cmd = ["./templedb", "vcs", "edit", project_name]
+            if reason:
+                cmd.extend(["--reason", reason])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Edit mode failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or "Edit mode enabled"}]
+            }
+        except Exception as e:
+            logger.error(f"Error entering edit mode: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_discard(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Discard changes and return to read-only mode"""
+        try:
+            project_name = args["project"]
+            force = args.get("force", False)
+
+            import subprocess
+            cmd = ["./templedb", "vcs", "discard", project_name]
+            if force:
+                cmd.append("--force")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Discard failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or "Changes discarded, checkout is now read-only"}]
+            }
+        except Exception as e:
+            logger.error(f"Error discarding changes: {e}")
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def tool_vcs_diff(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -3545,3 +3682,61 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    def tool_file_get(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get file content"""
+        try:
+            project_name = args["project"]
+            file_path = args["file_path"]
+
+            import subprocess
+            cmd = ["./templedb", "file", "get", project_name, file_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Failed to get file: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout}]
+            }
+        except Exception as e:
+            logger.error(f"Error getting file: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_file_set(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Set file content"""
+        try:
+            project_name = args["project"]
+            file_path = args["file_path"]
+            content = args["content"]
+            stage = args.get("stage", False)
+
+            import subprocess
+            # Use stdin to pass content to templedb file set
+            cmd = ["./templedb", "file", "set", project_name, file_path]
+            if stage:
+                cmd.append("--stage")
+
+            result = subprocess.run(
+                cmd,
+                input=content,
+                capture_output=True,
+                text=True,
+                cwd=str(self.templedb_root)
+            )
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Failed to set file: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or "File updated successfully"}]
+            }
+        except Exception as e:
+            logger.error(f"Error setting file: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
