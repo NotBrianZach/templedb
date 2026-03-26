@@ -268,21 +268,79 @@ templedb work metrics -p myproject
 
 ### 5. MCP (Model Context Protocol) Integration
 
-**TempleDB exposes operations as MCP tools** for Claude Code:
+**⚠️ CRITICAL: ALWAYS PREFER MCP TOOLS OVER CLI COMMANDS**
 
-**Available MCP Tools:**
-- `templedb_project_list` - List all projects
-- `templedb_project_show` - Show project details
+**TempleDB exposes operations as MCP tools** for Claude Code. These tools provide **direct database access with better error handling and structured output** than CLI commands.
+
+#### When to Use MCP Tools
+
+**ALWAYS check if an MCP tool exists before using CLI commands or Bash.**
+
+| Task | MCP Tool | Instead of CLI |
+|------|----------|---------------|
+| Query database | `templedb_query` | `sqlite3 ~/.local/share/templedb/templedb.sqlite "..."` |
+| Generate project context | `templedb_context_generate` | `./templedb llm context <project>` |
+| Search for files | `templedb_search_files` | `find . -name "*.js"` or `./templedb file search` |
+| Search file contents | `templedb_search_content` | `grep -r "pattern"` |
+| List projects | `templedb_project_list` | `./templedb project list` |
+| Show project details | `templedb_project_show` | `./templedb project show <slug>` |
+| VCS status | `templedb_vcs_status` | `./templedb vcs status` |
+| VCS commits | `templedb_vcs_commits` | `./templedb vcs log` |
+| VCS diff | `templedb_vcs_diff` | `./templedb vcs diff` |
+| Read file from DB | `templedb_file_get` | `./templedb file read <path>` |
+
+#### Available MCP Tools
+
+**Project Management:**
+- `templedb_project_list` - List all projects (use instead of `./templedb project list`)
+- `templedb_project_show` - Show project details (use instead of `./templedb project show`)
 - `templedb_project_import` - Import git repository
 - `templedb_project_sync` - Sync with filesystem
-- `templedb_query` - Execute SQL queries
-- `templedb_context_generate` - Generate LLM context
-- `templedb_search_files` - Search by file path
-- `templedb_search_content` - Search file contents
-- `templedb_commit_list` - List commits
-- `templedb_commit_create` - Record commit
 
-**Configuration** (`.mcp.json`):
+**Database Queries:**
+- `templedb_query` - Execute SQL queries **[MOST IMPORTANT - USE THIS INSTEAD OF sqlite3 CLI]**
+- `templedb_context_generate` - Generate comprehensive LLM context
+
+**File Operations:**
+- `templedb_search_files` - Search by file path pattern (use instead of `find` or `Glob`)
+- `templedb_search_content` - Search file contents (use instead of `grep` or `Grep`)
+- `templedb_file_get` - Read file contents from database
+- `templedb_file_set` - Write file contents to database
+
+**Version Control:**
+- `templedb_vcs_status` - Check VCS status
+- `templedb_vcs_commits` - List commits
+- `templedb_vcs_diff` - Show diffs
+- `templedb_vcs_create_commit` - Create new commit
+
+#### Usage Examples
+
+**❌ Don't do this:**
+```bash
+# Using CLI or raw SQL
+sqlite3 ~/.local/share/templedb/templedb.sqlite "SELECT * FROM projects"
+./templedb llm context my-project
+grep -r "function" .
+```
+
+**✅ Do this instead:**
+```
+# Use MCP tools directly
+templedb_query(query="SELECT * FROM projects")
+templedb_context_generate(project="my-project")
+templedb_search_content(pattern="function", project="my-project")
+```
+
+#### Why MCP Tools Are Better
+
+1. **Structured output** - Returns JSON/structured data instead of text
+2. **Better error handling** - Clear error messages with context
+3. **Performance** - Direct database access without subprocess overhead
+4. **Type safety** - Validated parameters and response schemas
+5. **Session aware** - Tracks usage for agent coordination
+
+#### Configuration (`.mcp.json`)
+
 ```json
 {
   "mcpServers": {
@@ -297,7 +355,7 @@ templedb work metrics -p myproject
 }
 ```
 
-Claude Code automatically discovers and uses these tools.
+Claude Code automatically discovers and uses these tools when available.
 
 ### 6. File Tracking & Type Detection
 
@@ -629,9 +687,14 @@ ORDER BY c.committed_at DESC;
    - Use `templedb vcs` commands, not `git`
    - Database is the source of truth, not .git
 
-4. **Leverage MCP tools when available**
-   - Use `templedb_*` MCP tools in Claude Code
-   - Fall back to CLI commands if MCP unavailable
+4. **ALWAYS use MCP tools over CLI commands**
+   - **Check for MCP tools FIRST** before using Bash, Grep, or CLI
+   - Use `templedb_query` instead of `sqlite3` for ALL database queries
+   - Use `templedb_search_files` instead of `find` or `Glob`
+   - Use `templedb_search_content` instead of `grep` or `Grep`
+   - Use `templedb_context_generate` instead of `./templedb llm context`
+   - Use `templedb_vcs_*` tools instead of `./templedb vcs` commands
+   - **Only use CLI as last resort** if no MCP tool exists
 
 5. **Track agent sessions properly**
    - Start session with `agent start`

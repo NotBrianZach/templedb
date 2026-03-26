@@ -343,6 +343,35 @@ You are working on the **{name or slug}** project.
 - Use project-specific context when answering questions
 - This is NOT the TempleDB project itself - this is a separate project tracked by TempleDB
 
+## TempleDB MCP Tools Available
+
+**IMPORTANT**: This project is managed by TempleDB. You have access to specialized MCP tools for database operations. **Prefer using these MCP tools over CLI commands** when they're available:
+
+### When to Use MCP Tools:
+- `templedb_query` - For SQL queries against the database schema
+- `templedb_context_generate` - To generate comprehensive project context for AI
+- `templedb_search_files` - To search for files by name or pattern
+- `templedb_file_read` - To read file contents from the database
+- `templedb_project_info` - To get project metadata and statistics
+- `templedb_vcs_status` - To check version control status
+- `templedb_vcs_commits` - To view commit history
+- `templedb_vcs_diff` - To see changes in commits or working directory
+
+### Examples:
+- Instead of: `./templedb llm context {slug}`
+  Use: `templedb_context_generate` tool with project="{slug}"
+
+- Instead of: `sqlite3 ~/.local/share/templedb/templedb.sqlite "SELECT ..."`
+  Use: `templedb_query` tool with your SQL query
+
+- Instead of: `./templedb vcs status {slug}`
+  Use: `templedb_vcs_status` tool with project="{slug}"
+
+- Instead of: `find . -name "*.js"`
+  Use: `templedb_search_files` tool with pattern="**/*.js"
+
+**Always check if an MCP tool exists for your task before falling back to CLI commands.**
+
 ## Getting Started
 You can help with:
 - Understanding the codebase structure
