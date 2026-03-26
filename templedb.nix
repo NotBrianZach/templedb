@@ -42,6 +42,9 @@ pkgs.python3Packages.buildPythonApplication rec {
     igraph       # Fast graph algorithms
     leidenalg    # Community detection
 
+    # Git server dependencies
+    dulwich      # Pure Python git implementation
+
     # Optional dependencies
     # tqdm  # Progress bars for large operations
   ];
