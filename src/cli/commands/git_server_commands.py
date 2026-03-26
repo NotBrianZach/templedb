@@ -226,31 +226,31 @@ class GitServerCommand(Command):
 
 
 def register(cli):
-    """Register git-server commands with CLI"""
+    """Register gitserver commands with CLI"""
     cmd = GitServerCommand()
 
-    # Create git-server command group
-    git_server_parser = cli.register_command(
-        'git-server',
+    # Create gitserver command group
+    gitserver_parser = cli.register_command(
+        'gitserver',
         None,
         help_text='Database-native git server'
     )
-    subparsers = git_server_parser.add_subparsers(dest='git_server_subcommand', required=True)
+    subparsers = gitserver_parser.add_subparsers(dest='gitserver_subcommand', required=True)
 
     # start command
     start_parser = subparsers.add_parser('start', help='Start git server')
     start_parser.add_argument('--host', default='localhost', help='Host to bind (default: localhost)')
     start_parser.add_argument('--port', type=int, default=9418, help='Port to bind (default: 9418)')
-    cli.commands['git-server.start'] = cmd.start
+    cli.commands['gitserver.start'] = cmd.start
 
     # stop command
     stop_parser = subparsers.add_parser('stop', help='Stop git server')
-    cli.commands['git-server.stop'] = cmd.stop
+    cli.commands['gitserver.stop'] = cmd.stop
 
     # status command
     status_parser = subparsers.add_parser('status', help='Show git server status')
-    cli.commands['git-server.status'] = cmd.status
+    cli.commands['gitserver.status'] = cmd.status
 
     # list-repos command
     list_parser = subparsers.add_parser('list-repos', help='List available repositories')
-    cli.commands['git-server.list-repos'] = cmd.list_repos
+    cli.commands['gitserver.list-repos'] = cmd.list_repos

@@ -128,6 +128,9 @@
             python312Packages.websockets  # WebSocket support
             python312Packages.anthropic  # Claude API for AI question generation
 
+            # Git server dependencies
+            python312Packages.dulwich  # Pure Python git implementation
+
             # Code intelligence dependencies (symbol extraction, dependency analysis)
             python312Packages.tree-sitter  # AST parsing engine
             python312Packages.tree-sitter-grammars.tree-sitter-python
