@@ -197,7 +197,8 @@ FILE_TYPE_PATTERNS = [
 SKIP_DIRS = {
     'node_modules', '.git', 'venv', '__pycache__',
     'dist', 'build', '.direnv', '.next', 'target',
-    '.pytest_cache', 'coverage', '.venv', 'env'
+    '.pytest_cache', 'coverage', '.venv', 'env',
+    'bzaenv', 'library', 'usrlib'  # Project-specific build artifacts
 }
 
 

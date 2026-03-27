@@ -20,13 +20,36 @@ Or, it's like a normalized version  of fossil-scm (sqlite, relational version of
 
 We throw out of the temple those that would lend us technical debt in the form of state duplication, namely filesystem centric tools like git, sops, ci/cd like jenkins and deployment tools like docker. (though in the case of git it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for nixos to tide us over until the day we can make some much more radical changes to operating systems).
 
-**Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) for the complete rationale.**
+**Read [DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md) for the complete rationale.**
 
 ---
 
 ## How It Works
 
-TempleDB uses a **checkout/commit workflow** - your files live in the database, you temporarily extract them to edit, then commit changes back:
+TempleDB supports **two workflows** for working with your code:
+
+### Workflow A: VCS Staging (Git-like) - Recommended for Development
+
+Work directly in your project directory, just like with git:
+
+```
+┌─────────────┐          ┌──────────────┐          ┌─────────────┐
+│  Database   │   sync   │   Project    │   vcs    │  Database   │
+│  (source of │<────────>│  Directory   │  commit  │  (updated)  │
+│   truth)    │          │  (.templedb) │─────────>│             │
+└─────────────┘          └──────────────┘          └─────────────┘
+                              │
+                              ▼
+                         Edit in place:
+                         vim, vscode, grep, etc.
+                         vcs add → vcs commit
+```
+
+**Use for:** Normal development, AI agents, continuous coding
+
+### Workflow B: Checkout/Commit - For Isolated Workspaces
+
+Extract files to a temporary directory for one-off edits:
 
 ```
 ┌─────────────┐          ┌──────────────┐          ┌─────────────┐
@@ -37,17 +60,21 @@ TempleDB uses a **checkout/commit workflow** - your files live in the database, 
                               │
                               ▼
                          Use ANY tool:
-                         vim, vscode, grep,
-                         find, make, npm, etc.
+                         vim, vscode, grep, etc.
 ```
 
-**Why this works:**
+**Use for:** Experimentation, one-off changes, isolated testing
+
+**Why both work:**
 - Database stores **one copy** of each file (content-addressed, versioned)
 - You edit with **familiar tools** (anything that works with files)
 - Commits are **atomic** with conflict detection
 - Multiple agents can work **safely** (optimistic locking with version tracking)
 
 **Example workflow (AI Agent with Claude Code):**
+
+*Note: This example uses **Workflow A (VCS Staging)** - the project directory already exists with files in place. No explicit checkout needed!*
+
 ```bash
 # User initializes project (one-time setup)
 $ cd ~/myproject
@@ -71,7 +98,7 @@ mcp_templedb_search_content(query="auth", project="myproject")
 
 Claude: I found the issue in src/auth.py at line 42. Let me read the current code.
 
-# Claude reads directly from database (no checkout needed!)
+# Claude reads directly from database
 mcp_templedb_query(query="""
   SELECT cb.content_text FROM project_files pf
   JOIN file_contents fc ON fc.file_id = pf.id
@@ -170,23 +197,68 @@ JOIN project_files pf ON fc.file_id = pf.id
 WHERE pf.file_path = 'README.md';
 ```
 
-### 4. **Checkout/Commit Workflow**
+### 4a. **VCS Staging Workflow** (Recommended)
 
-Work with files using familiar tools, stored in database:
+Work in your project directory like git (recommended for AI agents and normal development):
 
 ```bash
-# 1. Extract project to filesystem
+# 1. Initialize project with .templedb/ marker
+cd ~/myproject
+./templedb project init
+
+# 2. Edit files normally (they're already in the directory!)
+vim src/auth.py
+grep -r "TODO" .
+
+# 3. Stage and commit changes (git-like)
+./templedb vcs add -p myproject src/auth.py
+./templedb vcs commit -p myproject -m "Fix auth bug"
+
+# Or stage all changes
+./templedb vcs add -p myproject --all
+./templedb vcs commit -p myproject -m "Multiple fixes"
+```
+
+### 4b. **Checkout/Edit/Commit Workflow** (Isolated Workspaces)
+
+Extract to temporary directory for isolated edits (checkouts are read-only by default):
+
+```bash
+# 1. Extract project to filesystem (read-only)
 ./templedb project checkout myproject /tmp/workspace
 
-# 2. Edit with ANY tool (vim, vscode, grep, etc)
+# 2. Make checkout writable
+./templedb vcs edit myproject
+
+# 3. Edit with ANY tool (vim, vscode, grep, etc)
 cd /tmp/workspace
 vim file.py
 grep -r "TODO" .
 
-# 3. Commit changes back to database
+# 4a. Commit changes back to database
 ./templedb project commit myproject /tmp/workspace -m "Fixed bug"
 
+# 4b. OR discard changes and return to read-only
+./templedb vcs discard myproject
+
 # Multi-agent conflict detection included!
+```
+
+### 4c. **File Edit Commands** (Quick Single-File Changes)
+
+For quick edits to individual files:
+
+```bash
+# Edit file in $EDITOR (opens from project directory)
+./templedb file edit myproject src/config.py
+
+# Stage and commit
+./templedb vcs add -p myproject src/config.py
+./templedb vcs commit -p myproject -m "Update config"
+
+# Or programmatically set content
+echo "new content" | ./templedb file set myproject file.txt --stage
+./templedb vcs commit -p myproject -m "Update via script"
 ```
 
 ### 5. **AI Agent Session Management**
@@ -294,7 +366,7 @@ The installer will:
 - git
 - age (optional, for secret management)
 
-See **[GETTING_STARTED.md](GETTING_STARTED.md)** for detailed installation instructions.
+See **[GETTING_STARTED.md](docs/GETTING_STARTED.md)** for detailed installation instructions.
 
 ### AI Assistant Integration
 
@@ -422,8 +494,8 @@ cd ~/myproject/src
 
 ### Essential Reading
 - **[README.md](README.md)** - You are here! Overview and quick start
-- **[DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md)** - Why TempleDB exists (read this first!)
-- **[GETTING_STARTED.md](GETTING_STARTED.md)** - Installation and beginner's guide
+- **[DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md)** - Why TempleDB exists (read this first!)
+- **[GETTING_STARTED.md](docs/GETTING_STARTED.md)** - Installation and beginner's guide
 - **[docs/WORKFLOWS.md](docs/WORKFLOWS.md)** ⭐ NEW - Workflow orchestration with code intelligence
 
 ### Workflows & Code Intelligence
@@ -435,17 +507,17 @@ cd ~/myproject/src
 ### User Guides
 - **[GUIDE.md](GUIDE.md)** - Complete usage guide (checkout/commit workflow, SQL queries, CLI commands)
 - **[QUICKSTART.md](QUICKSTART.md)** - Advanced workflows for existing users
-- **[DIRENV_INTEGRATION.md](DIRENV_INTEGRATION.md)** ⭐ NEW - Auto-load environments with direnv (v2.0)
+- **[DIRENV_INTEGRATION.md](docs/DIRENV_INTEGRATION.md)** ⭐ NEW - Auto-load environments with direnv (v2.0)
 - **[docs/VIBE.md](docs/VIBE.md)** ⭐ NEW - Vibe coding: Interactive learning from AI-generated code changes
 - **[FILES.md](FILES.md)** - How file tracking and versioning works
-- **[TUI.md](TUI.md)** - Terminal UI guide
-- **[EXAMPLES.md](EXAMPLES.md)** - SQL query examples and common patterns
-- **[WORK_COORDINATION.md](WORK_COORDINATION.md)** ⭐ - Work items and multi-agent coordination
-- **[VCS_METADATA_GUIDE.md](VCS_METADATA_GUIDE.md)** - Commit metadata and AI attribution
+- **[TUI.md](docs/TUI.md)** - Terminal UI guide
+- **[EXAMPLES.md](docs/EXAMPLES.md)** - SQL query examples and common patterns
+- **[WORK_COORDINATION.md](docs/WORK_COORDINATION.md)** ⭐ - Work items and multi-agent coordination
+- **[VCS_METADATA_GUIDE.md](docs/VCS_METADATA_GUIDE.md)** - Commit metadata and AI attribution
 
 ### Critical Reference
-- **[QUERY_BEST_PRACTICES.md](QUERY_BEST_PRACTICES.md)** - ⚠️ **Critical**: Query constraints and best practices (read this!)
-- **[DATABASE_CONSTRAINTS.md](DATABASE_CONSTRAINTS.md)** - ⚠️ **Critical**: All uniqueness constraints and foreign keys
+- **[QUERY_BEST_PRACTICES.md](docs/QUERY_BEST_PRACTICES.md)** - ⚠️ **Critical**: Query constraints and best practices (read this!)
+- **[DATABASE_CONSTRAINTS.md](docs/DATABASE_CONSTRAINTS.md)** - ⚠️ **Critical**: All uniqueness constraints and foreign keys
 
 ### Advanced Topics
 - **[Multi-Key Secret Management](docs/MULTI_KEY_SECRET_MANAGEMENT.md)** ⭐ NEW - Multi-recipient encryption with Yubikeys + filesystem keys
@@ -462,7 +534,7 @@ cd ~/myproject/src
 - **[ROADMAP.md](ROADMAP.md)** - Future features and development plans
 - **[CHANGELOG.md](CHANGELOG.md)** - Version history
 - **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Latest release notes
-- **[MIGRATIONS.md](MIGRATIONS.md)** - Schema evolution history
+- **[MIGRATIONS.md](docs/MIGRATIONS.md)** - Schema evolution history
 
 ### Implementation Details
 - **[Implementation Docs](docs/implementation/)** - Historical analyses, refactors, and completed work
@@ -473,16 +545,28 @@ cd ~/myproject/src
 
 ```bash
 # Projects
+templedb project init                 # Initialize .templedb/ marker in current directory
 templedb project import <path>        # Import git project
 templedb project list                 # List all projects
 templedb project show <slug>          # Show project details
 templedb project sync <proj>          # Re-import project from filesystem
 
-# Checkout/Commit Workflow
-templedb project checkout <proj> <dir>        # Checkout to filesystem
-templedb project commit <proj> <dir> -m <msg> # Commit changes back
-templedb project checkout-list [<proj>]       # List active checkouts
-templedb project checkout-cleanup [<proj>]    # Remove stale checkouts
+# Checkout/Edit/Commit Workflow (with read-only protection)
+templedb project checkout <proj> <dir>            # Checkout to filesystem (read-only)
+templedb vcs edit <proj>                          # Make checkout writable
+templedb project commit <proj> <dir> -m <msg>     # Commit changes back
+templedb vcs discard <proj>                       # Discard changes, return to read-only
+templedb project checkout-list [<proj>]           # List active checkouts
+templedb project checkout-status <proj>           # Show checkout status
+templedb project checkout-pull <proj>             # Pull latest changes to checkout
+templedb project checkout-diff <proj>             # Show diff between checkout and DB
+templedb project checkout-cleanup [<proj>]        # Remove stale checkouts
+
+# File Commands (quick single-file editing)
+templedb file show <proj> <path>                  # Display file content
+templedb file edit <proj> <path>                  # Open in $EDITOR
+templedb file get <proj> <path>                   # Get content programmatically
+templedb file set <proj> <path> [--content] [--stage]  # Set content and optionally stage
 
 # Secrets (age encryption)
 templedb secret init <proj> --age-recipient <key>  # Initialize secrets
