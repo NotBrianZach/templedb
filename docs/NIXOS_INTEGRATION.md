@@ -133,7 +133,10 @@ This creates a complete NixOS configuration that:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    templedb-config.url = "path:/tmp/templedb-self-host";
+    # Option 1: Use TempleDB git server (requires: tdb gitserver start)
+    templedb-config.url = "git+http://localhost:9418/templedb-self-host";
+    # Option 2: Use local path (development)
+    # templedb-config.url = "path:/tmp/templedb-self-host";
   };
 
   outputs = { self, nixpkgs, templedb-config, ... }: {

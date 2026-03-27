@@ -497,7 +497,10 @@ class NixOSGenerator:
 
         templedb_flake_section = '''
     # TempleDB itself (for CLI access everywhere)
-    templedb.url = "github:yourusername/templedb";
+    # Option 1: Use local git server (requires: tdb gitserver start)
+    templedb.url = "git+http://localhost:9418/templedb";
+    # Option 2: Use GitHub release
+    # templedb.url = "github:yourusername/templedb";
 ''' if has_templedb else ''
 
         templedb_package_section = '''

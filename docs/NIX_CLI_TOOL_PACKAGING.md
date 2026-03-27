@@ -293,8 +293,11 @@ templedb deploy-nix add-to-config <project-slug>
 
 {
   inputs = {
-    bza.url = "path:/home/user/bza";
-    # or for git repository:
+    # Option 1: Use TempleDB git server (requires: tdb gitserver start)
+    bza.url = "git+http://localhost:9418/bza";
+    # Option 2: Use local path (development)
+    # bza.url = "path:/home/user/bza";
+    # Option 3: Use GitHub
     # bza.url = "github:yourorg/bza";
   };
 
