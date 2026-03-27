@@ -68,12 +68,11 @@ class GitHTTPHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         """Handle GET requests (info/refs, objects, etc.)"""
         try:
-            path = self.path
-            logger.info(f"GET {path}")
+            logger.info(f"GET {self.path}")
 
             # Parse URL
-            parsed = urlparse(path)
-            repo_path = parsed.path
+            parsed = urlparse(self.path)
+            repo_path = parsed.path  # Path without query string
 
             # Extract project slug (e.g., '/templedb/info/refs' -> 'templedb')
             parts = repo_path.strip('/').split('/')
@@ -90,11 +89,11 @@ class GitHTTPHandler(BaseHTTPRequestHandler):
                 self.send_error(404, str(e))
                 return
 
-            # Route based on path
-            if path.endswith('/info/refs'):
+            # Route based on path (without query string)
+            if repo_path.endswith('/info/refs'):
                 self._handle_info_refs(repo, parsed)
-            elif '/objects/' in path:
-                self._handle_get_object(repo, path)
+            elif '/objects/' in repo_path:
+                self._handle_get_object(repo, repo_path)
             else:
                 self.send_error(404, "Not found")
 
@@ -152,21 +151,22 @@ class GitHTTPHandler(BaseHTTPRequestHandler):
             response = b''
 
             # Service announcement
-            response += self._pkt_line(f"# service=git-upload-pack\n".encode())
+            response += self._pkt_line(b"# service=git-upload-pack\n")
             response += b'0000'  # Flush packet
 
-            # Send refs
-            for ref_name, commit_hash in refs.items():
-                line = f"{commit_hash.decode()} {ref_name.decode()}\n"
-                response += self._pkt_line(line.encode())
-
-            # Capabilities (simplified)
+            # Send refs with capabilities on the first ref
             if refs:
-                first_ref = list(refs.items())[0]
-                ref_name, commit_hash = first_ref
-                caps = "multi_ack thin-pack side-band side-band-64k ofs-delta shallow no-progress include-tag"
-                line = f"{commit_hash.decode()} {ref_name.decode()}\x00{caps}\n"
-                response = self._pkt_line(line.encode()) + response[response.find(b'0000')+4:]
+                first = True
+                for ref_name, commit_hash in refs.items():
+                    if first:
+                        # First ref includes capabilities
+                        # Note: multi_ack_detailed is required for stateless-rpc
+                        caps = b"multi_ack_detailed multi_ack thin-pack side-band side-band-64k ofs-delta shallow no-progress include-tag"
+                        line = commit_hash + b" " + ref_name + b"\x00" + caps + b"\n"
+                        first = False
+                    else:
+                        line = commit_hash + b" " + ref_name + b"\n"
+                    response += self._pkt_line(line)
 
             response += b'0000'  # Flush packet
 
@@ -192,30 +192,34 @@ class GitHTTPHandler(BaseHTTPRequestHandler):
         # TODO: Implement proper negotiation
 
         # Get all commits
-        commits = repo.get_all_commits()
+        commit_hashes = repo.get_all_commits()
 
         # Build pack file
         pack_data = io.BytesIO()
 
         # Collect all objects (commits, trees, blobs)
         objects = []
-        for commit in commits:
-            objects.append((commit, None))  # (object, path)
+        for commit_hash in commit_hashes:
+            # Get the actual Commit object
+            commit = repo.mapper.get_commit(commit_hash.decode())
+            if commit:
+                objects.append((commit, None))  # (object, path)
 
-            # Add tree and blobs
-            tree = repo.mapper.get_tree_for_commit(commit.decode())
-            if tree:
-                objects.append((tree, None))
+                # Add tree and blobs
+                tree = repo.mapper.get_tree_for_commit(commit_hash.decode())
+                if tree:
+                    objects.append((tree, None))
 
-                # Add all blobs in tree
-                for entry in tree.items():
-                    name, mode, sha = entry
-                    blob = repo.mapper._blob_cache.get(sha.decode())
-                    if blob:
-                        objects.append((blob, None))
+                    # Add all blobs in tree
+                    for entry in tree.items():
+                        name, mode, sha = entry
+                        blob = repo.mapper._blob_cache.get(sha.decode())
+                        if blob:
+                            objects.append((blob, None))
 
-        # Write pack file
-        write_pack_objects(pack_data.write, objects)
+        # Write pack file with object format
+        from dulwich.objects import DEFAULT_OBJECT_FORMAT
+        write_pack_objects(pack_data.write, objects, object_format=DEFAULT_OBJECT_FORMAT)
 
         pack_bytes = pack_data.getvalue()
 
@@ -275,7 +279,7 @@ class GitServer:
         self.thread = None
 
     def start(self):
-        """Start the git server in a background thread"""
+        """Start the git server"""
         if self.server:
             logger.warning("Server already running")
             return
@@ -284,11 +288,7 @@ class GitServer:
 
         self.server = HTTPServer((self.host, self.port), GitHTTPHandler)
 
-        # Run in background thread
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-
-        logger.info(f"Git server running at http://{self.host}:{self.port}")
+        logger.info(f"Git server bound to http://{self.host}:{self.port}")
 
     def stop(self):
         """Stop the git server"""
@@ -298,8 +298,16 @@ class GitServer:
 
         logger.info("Stopping git server")
         self.server.shutdown()
+        self.server.server_close()
         self.server = None
-        self.thread = None
+
+    def serve_forever(self):
+        """Run the server (blocking call)"""
+        if not self.server:
+            raise RuntimeError("Server not started. Call start() first.")
+
+        logger.info("Starting serve_forever loop")
+        self.server.serve_forever()
 
     def is_running(self) -> bool:
         """Check if server is running"""

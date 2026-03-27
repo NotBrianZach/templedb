@@ -21,20 +21,27 @@ class TempleDBRepo(BaseRepo):
     """
 
     def __init__(self, project_slug: str):
-        from dulwich.objects import DEFAULT_OBJECT_FORMAT_NAME
+        from dulwich.objects import DEFAULT_OBJECT_FORMAT
 
         self.project_slug = project_slug
         self.mapper = ObjectMapper(project_slug)
 
-        # Set object format (SHA1 for git compatibility)
-        self.object_format_name = DEFAULT_OBJECT_FORMAT_NAME
-
-        # Initialize bare repo (no working directory)
-        super().__init__(None, None)
+        # Initialize bare repo (no working directory, SHA1 object format)
+        super().__init__(None, None, object_format=DEFAULT_OBJECT_FORMAT)
 
     def get_refs(self) -> Dict[bytes, bytes]:
         """Get all refs for this repository"""
-        return self.mapper.get_refs()
+        refs = self.mapper.get_refs()
+
+        # Add HEAD symbolic ref pointing to main or first available branch
+        if b'refs/heads/main' in refs:
+            refs[b'HEAD'] = refs[b'refs/heads/main']
+        elif refs:
+            # Point to first available branch
+            first_branch = next(iter(refs.items()))
+            refs[b'HEAD'] = first_branch[1]
+
+        return refs
 
     def get_peeled(self, ref: bytes) -> bytes:
         """Get the peeled value of a ref (resolve tags to commits)"""
@@ -86,14 +93,21 @@ class TempleDBRepo(BaseRepo):
             return False
 
     def get_all_commits(self) -> List[bytes]:
-        """Get hashes of all commits in the repository"""
-        commits = self.mapper.db.execute("""
+        """Get actual git SHA1 hashes of all valid commits (not TempleDB hashes)"""
+        templedb_commits = self.mapper.db.execute("""
             SELECT commit_hash FROM vcs_commits
-            WHERE project_id = ?
+            WHERE project_id = ? AND LENGTH(commit_hash) = 40
             ORDER BY commit_timestamp DESC
         """, (self.mapper.project_id,)).fetchall()
 
-        return [c['commit_hash'].encode() for c in commits]
+        # Convert TempleDB hashes to actual git SHA1 hashes
+        git_hashes = []
+        for c in templedb_commits:
+            commit_obj = self.mapper.get_commit(c['commit_hash'])
+            if commit_obj:
+                git_hashes.append(commit_obj.id)
+
+        return git_hashes
 
     def close(self):
         """Close the repository"""

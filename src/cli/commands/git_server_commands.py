@@ -71,12 +71,11 @@ class GitServerCommand(Command):
             print(f"  inputs.templedb.url = \"git+http://{host}:{port}/templedb\";")
             print()
             print("Press Ctrl+C to stop...")
+            print()
 
-            # Keep server running
+            # Run server (blocking call)
             try:
-                import time
-                while True:
-                    time.sleep(1)
+                server.serve_forever()
             except KeyboardInterrupt:
                 print("\n\n🛑 Stopping server...")
                 server.stop()

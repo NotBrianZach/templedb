@@ -37,10 +37,11 @@ class ObjectMapper:
 
         self.project_id = project['id']
 
-        # Cache for git objects
+        # Cache for git objects (keyed by git SHA1, not TempleDB hash)
         self._blob_cache = {}
         self._tree_cache = {}
         self._commit_cache = {}
+        self._templedb_to_git_hash = {}  # Map TempleDB hash -> git SHA1
 
     def get_refs(self) -> Dict[bytes, bytes]:
         """
@@ -63,9 +64,20 @@ class ObjectMapper:
 
         for branch in branches:
             if branch['head_commit']:
-                ref_name = f"refs/heads/{branch['branch_name']}".encode()
-                commit_hash = branch['head_commit'].encode()
-                refs[ref_name] = commit_hash
+                # Validate commit hash (must be 40-character hex string for SHA1)
+                if len(branch['head_commit']) != 40:
+                    logger.warning(f"Skipping invalid commit hash for branch {branch['branch_name']}: {branch['head_commit']} (length {len(branch['head_commit'])})")
+                    continue
+
+                # Get the actual git commit object to get its real SHA1
+                commit = self.get_commit(branch['head_commit'])
+                if commit:
+                    ref_name = f"refs/heads/{branch['branch_name']}".encode()
+                    # Use the actual git object ID, not the TempleDB hash
+                    commit_hash = commit.id
+                    refs[ref_name] = commit_hash
+                else:
+                    logger.warning(f"Could not get commit object for {branch['head_commit']}")
 
         logger.debug(f"Found {len(refs)} refs for {self.project_slug}")
         return refs
@@ -75,13 +87,20 @@ class ObjectMapper:
         Convert a TempleDB commit to a git Commit object
 
         Args:
-            commit_hash: TempleDB commit hash
+            commit_hash: TempleDB commit hash OR git SHA1
 
         Returns:
             dulwich Commit object or None if not found
         """
+        # Check if this is already a git SHA1 in cache
         if commit_hash in self._commit_cache:
             return self._commit_cache[commit_hash]
+
+        # Check if we have a mapping from TempleDB hash to git hash
+        if commit_hash in self._templedb_to_git_hash:
+            git_hash = self._templedb_to_git_hash[commit_hash]
+            if git_hash in self._commit_cache:
+                return self._commit_cache[git_hash]
 
         # Get commit from database
         commit_row = self.db.execute("""
@@ -95,11 +114,8 @@ class ObjectMapper:
             logger.warning(f"Commit not found: {commit_hash}")
             return None
 
-        # Create git Commit object
+        # Create git Commit object using private attributes
         commit = Commit()
-        commit.message = commit_row['commit_message'].encode('utf-8')
-        commit.author = commit_row['author'].encode('utf-8')
-        commit.committer = commit_row['author'].encode('utf-8')
 
         # Parse timestamp - TempleDB stores as ISO8601 string
         import time
@@ -108,20 +124,37 @@ class ObjectMapper:
         timestamp = int(dt.timestamp())
         timezone = 0  # UTC
 
-        commit.author_time = timestamp
-        commit.commit_time = timestamp
-        commit.author_timezone = timezone
-        commit.commit_timezone = timezone
+        # Set commit attributes (use private _ attributes for dulwich)
+        commit._message = commit_row['commit_message'].encode('utf-8')
+        commit._author = commit_row['author'].encode('utf-8')
+        commit._committer = commit_row['author'].encode('utf-8')
+        commit._author_time = timestamp
+        commit._commit_time = timestamp
+        commit._author_timezone = timezone
+        commit._commit_timezone = timezone
+        commit._author_timezone_neg_utc = False
+        commit._commit_timezone_neg_utc = False
 
         # Get tree for this commit
         tree = self.get_tree_for_commit(commit_hash)
         if tree:
-            commit.tree = tree.id
+            commit._tree = tree.id
+        else:
+            # Tree is required - create an empty tree if none exists
+            logger.warning(f"No tree found for commit {commit_hash}, using empty tree")
+            empty_tree = Tree()
+            commit._tree = empty_tree.id
 
-        # TODO: Handle parent commits (for now, all commits are root commits)
-        # We'll need to track parent relationships in TempleDB
+        # Set parent commits (empty for root commits)
+        # TODO: Track parent relationships in TempleDB for proper commit graph
+        commit._parents = []
 
-        self._commit_cache[commit_hash] = commit
+        # Cache by actual git SHA1 (commit.id) not TempleDB hash
+        git_hash = commit.id.decode()
+        self._commit_cache[git_hash] = commit
+        # Store mapping from TempleDB hash to git hash
+        self._templedb_to_git_hash[commit_hash] = git_hash
+
         return commit
 
     def get_tree_for_commit(self, commit_hash: str) -> Optional[Tree]:
