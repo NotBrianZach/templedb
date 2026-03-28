@@ -12,12 +12,33 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
 from logger import get_logger
+from db_utils import get_connection
 
 logger = get_logger(__name__)
 
 
 # Server state file
 SERVER_STATE_FILE = Path.home() / '.config' / 'templedb' / 'git-server.json'
+
+
+def get_git_server_config():
+    """Get git server configuration from database"""
+    db = get_connection()
+
+    host = db.execute(
+        "SELECT value FROM system_config WHERE key = ?",
+        ('git_server.host',)
+    ).fetchone()
+
+    port = db.execute(
+        "SELECT value FROM system_config WHERE key = ?",
+        ('git_server.port',)
+    ).fetchone()
+
+    return {
+        'host': host['value'] if host else 'localhost',
+        'port': int(port['value']) if port else 9418
+    }
 
 
 class GitServerCommand(Command):
@@ -41,8 +62,10 @@ class GitServerCommand(Command):
                 print("To stop: tdb git-server stop")
                 return 1
 
-            host = args.host if hasattr(args, 'host') else 'localhost'
-            port = args.port if hasattr(args, 'port') else 9418
+            # Get config from database
+            config = get_git_server_config()
+            host = args.host if hasattr(args, 'host') and args.host else config['host']
+            port = args.port if hasattr(args, 'port') and args.port else config['port']
 
             print(f"🚀 Starting TempleDB Git Server")
             print(f"   Host: {host}")
@@ -166,6 +189,76 @@ class GitServerCommand(Command):
             print(f"❌ Error: {e}")
             return 1
 
+    def config(self, args) -> int:
+        """Configure git server settings"""
+        try:
+            from db_utils import get_connection
+
+            db = get_connection()
+
+            if args.action == 'get':
+                # Show current configuration
+                config = db.execute("""
+                    SELECT key, value, description
+                    FROM system_config
+                    WHERE key LIKE 'git_server.%'
+                    ORDER BY key
+                """).fetchall()
+
+                if not config:
+                    print("No git server configuration found")
+                    return 0
+
+                print("Git Server Configuration")
+                print("=" * 60)
+                for row in config:
+                    print(f"{row['key']}")
+                    print(f"  Value: {row['value']}")
+                    print(f"  Description: {row['description']}")
+                    print()
+
+            elif args.action == 'set':
+                # Set a configuration value
+                valid_keys = ['git_server.host', 'git_server.port', 'git_server.url']
+                if args.key not in valid_keys:
+                    print(f"❌ Invalid config key: {args.key}")
+                    print(f"   Valid keys: {', '.join(valid_keys)}")
+                    return 1
+
+                db.execute("""
+                    INSERT INTO system_config (key, value, description)
+                    VALUES (?, ?, '')
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """, (args.key, args.value))
+                db.commit()
+
+                print(f"✓ Updated {args.key} = {args.value}")
+
+                # If port or host changed, update URL
+                if args.key in ['git_server.host', 'git_server.port']:
+                    host = db.execute(
+                        "SELECT value FROM system_config WHERE key = 'git_server.host'"
+                    ).fetchone()['value']
+                    port = db.execute(
+                        "SELECT value FROM system_config WHERE key = 'git_server.port'"
+                    ).fetchone()['value']
+
+                    new_url = f"http://{host}:{port}"
+                    db.execute("""
+                        UPDATE system_config SET value = ?
+                        WHERE key = 'git_server.url'
+                    """, (new_url,))
+                    db.commit()
+
+                    print(f"✓ Auto-updated git_server.url = {new_url}")
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to configure git server: {e}", exc_info=True)
+            print(f"❌ Error: {e}")
+            return 1
+
     def list_repos(self, args) -> int:
         """List repositories available via git server"""
         try:
@@ -238,8 +331,8 @@ def register(cli):
 
     # start command
     start_parser = subparsers.add_parser('start', help='Start git server')
-    start_parser.add_argument('--host', default='localhost', help='Host to bind (default: localhost)')
-    start_parser.add_argument('--port', type=int, default=9418, help='Port to bind (default: 9418)')
+    start_parser.add_argument('--host', default=None, help='Host to bind (default: from system_config)')
+    start_parser.add_argument('--port', type=int, default=None, help='Port to bind (default: from system_config)')
     cli.commands['gitserver.start'] = cmd.start
 
     # stop command
@@ -253,3 +346,17 @@ def register(cli):
     # list-repos command
     list_parser = subparsers.add_parser('list-repos', help='List available repositories')
     cli.commands['gitserver.list-repos'] = cmd.list_repos
+
+    # config command
+    config_parser = subparsers.add_parser('config', help='Configure git server settings')
+    config_subparsers = config_parser.add_subparsers(dest='action', required=True)
+
+    # config get
+    get_parser = config_subparsers.add_parser('get', help='Show current configuration')
+
+    # config set
+    set_parser = config_subparsers.add_parser('set', help='Set configuration value')
+    set_parser.add_argument('key', help='Configuration key (git_server.host, git_server.port, git_server.url)')
+    set_parser.add_argument('value', help='Configuration value')
+
+    cli.commands['gitserver.config'] = cmd.config

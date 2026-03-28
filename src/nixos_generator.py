@@ -24,6 +24,24 @@ sys.path.insert(0, str(Path(__file__).parent))
 from nix_env_generator import NixEnvGenerator
 
 
+def get_git_server_url(db_path: Optional[str] = None) -> str:
+    """Get git server URL from system config"""
+    if db_path is None:
+        db_path = os.path.expanduser('~/.local/share/templedb/templedb.sqlite')
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    result = conn.execute(
+        "SELECT value FROM system_config WHERE key = ?",
+        ('git_server.url',)
+    ).fetchone()
+
+    conn.close()
+
+    return result['value'] if result else 'http://localhost:9418'
+
+
 @dataclass
 class NixOSConfig:
     """Represents a generated NixOS configuration"""
@@ -494,11 +512,12 @@ class NixOSGenerator:
         """Generate integration guide for NixOS"""
 
         has_templedb = 'templedb' in config.home_packages
+        git_server_url = get_git_server_url()
 
-        templedb_flake_section = '''
+        templedb_flake_section = f'''
     # TempleDB itself (for CLI access everywhere)
     # Option 1: Use local git server (requires: tdb gitserver start)
-    templedb.url = "git+http://localhost:9418/templedb";
+    templedb.url = "git+{git_server_url}/templedb";
     # Option 2: Use GitHub release
     # templedb.url = "github:yourusername/templedb";
 ''' if has_templedb else ''
