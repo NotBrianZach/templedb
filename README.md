@@ -341,6 +341,43 @@ templedb_workflow_execute {
 
 **See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for complete guide.**
 
+### 7. **Database-Native Git Server**
+
+Serve repositories directly from SQLite as standard git repositories via HTTP:
+
+```bash
+# Configure git server (stored in database)
+./templedb gitserver config get
+./templedb gitserver config set git_server.port 9418
+
+# Start the server
+./templedb gitserver start
+# → Git server started at http://localhost:9418
+
+# Clone from database (no filesystem checkout!)
+git clone http://localhost:9418/myproject
+
+# Use in Nix flakes
+{
+  inputs = {
+    myproject.url = "git+http://localhost:9418/myproject";
+  };
+}
+
+# List available repositories
+./templedb gitserver list-repos
+```
+
+**Features:**
+- Zero filesystem checkouts - serve directly from SQLite
+- Standard git smart HTTP protocol
+- Works with git, Nix flakes, and all git clients
+- Configurable host/port via database
+- Automatic URL generation for templates
+- On-the-fly git object generation from database
+
+**See [docs/GIT_SERVER.md](docs/GIT_SERVER.md) for complete guide.**
+
 ---
 
 ## Installation
