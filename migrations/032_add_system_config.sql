@@ -12,9 +12,15 @@ CREATE TABLE IF NOT EXISTS system_config (
 -- Insert default configuration values
 -- These can be overridden by the user
 INSERT OR IGNORE INTO system_config (key, value, description) VALUES
+    -- NixOS configuration
     ('nixos.flake_output', '', 'NixOS flake output name (e.g., zMothership2). Leave empty to auto-detect from hostname.'),
     ('nixos.hostname', '', 'System hostname for flake builds. Leave empty to auto-detect.'),
-    ('nixos.username', '', 'Username for home-manager builds. Leave empty to auto-detect from current user.');
+    ('nixos.username', '', 'Username for home-manager builds. Leave empty to auto-detect from current user.'),
+
+    -- Git server configuration
+    ('git_server.host', 'localhost', 'Git server bind host'),
+    ('git_server.port', '9418', 'Git server bind port'),
+    ('git_server.url', 'http://localhost:9418', 'Git server base URL for Nix flake inputs');
 
 -- Create index for fast lookups
 CREATE INDEX IF NOT EXISTS idx_system_config_key ON system_config(key);
