@@ -96,6 +96,54 @@ Extract files to a temporary directory for one-off edits:
 - Multiple agents can work **safely** (optimistic locking with version tracking)
 - Read-only checkouts prevent accidental modifications
 
+**Three-way merge conflict detection:**
+
+TempleDB uses three content hashes to intelligently detect conflicts:
+
+1. **Base** (cached hash) - What the file was when you started editing
+2. **Yours** (disk hash) - What you have now on disk
+3. **Theirs** (db hash) - What the database has now
+
+```
+Scenario                              Decision
+────────────────────────────────────  ────────────────────
+Only you changed (disk ≠ base, db = base)     ✓ Commit allowed
+Only they changed (db ≠ base, disk = base)    ✓ Pull update first
+Both changed to same (disk = db ≠ base)       ✓ Commit allowed (idempotent)
+Both changed differently (all different)      ✗ CONFLICT - manual merge required
+```
+
+This is the same approach used by git, Subversion, and other modern VCS systems. It prevents false conflicts and enables safe concurrent editing.
+
+**Example conflict scenario:**
+
+```bash
+# You checkout and start editing
+tdb project checkout myproject /tmp/work
+# → TempleDB caches: src/auth.py hash = "abc123"
+
+# You edit the file
+vim /tmp/work/src/auth.py
+# → Disk hash becomes: "xyz999"
+
+# Meanwhile, someone else commits a change to the same file
+# → Database hash becomes: "new456"
+
+# You try to commit
+tdb project commit myproject /tmp/work -m "My changes"
+
+# TempleDB detects conflict:
+# - Cached (base): abc123
+# - Yours (disk): xyz999  ← You changed it
+# - Theirs (db): new456   ← They changed it
+# Result: ✗ Conflict! All three are different
+
+# Error message:
+# "Conflict detected in src/auth.py
+#  Database version changed since checkout
+#  Pull latest changes and resolve conflicts manually"
+```
+
 **Example workflow (AI Agent with Claude Code):**
 
 *Note: This example uses **Workflow A (VCS Staging)** - the project directory already exists with files in place. No explicit checkout needed!*
