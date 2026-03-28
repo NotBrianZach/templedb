@@ -34,18 +34,26 @@ Work directly in your project directory, just like with git:
 
 ```
 ┌─────────────┐          ┌──────────────┐          ┌─────────────┐
-│  Database   │   sync   │   Project    │   vcs    │  Database   │
-│  (source of │<────────>│  Directory   │  commit  │  (updated)  │
-│   truth)    │          │  (.templedb) │─────────>│             │
-└─────────────┘          └──────────────┘          └─────────────┘
+│  Database   │          │   Project    │   vcs    │  Database   │
+│  (source of │          │  Directory   │  add +   │  (updated)  │
+│   truth)    │          │  (.templedb) │  commit  │             │
+└─────────────┘          └──────────────┘─────────>└─────────────┘
                               │
                               ▼
                          Edit in place:
                          vim, vscode, grep, etc.
-                         vcs add → vcs commit
+
+                         Explicit staging workflow:
+                         1. Edit files
+                         2. tdb vcs add myproject file.py
+                         3. tdb vcs commit -m "message"
+
+                         (Conflict detection on commit)
 ```
 
 **Use for:** Normal development, AI agents, continuous coding
+
+**Key Point:** Like git, changes are NOT automatically saved to the database. You must explicitly stage (`vcs add`) and commit (`vcs commit`). The database provides conflict detection using three-way merge logic.
 
 ### Workflow B: Checkout/Commit - For Isolated Workspaces
 
@@ -57,19 +65,36 @@ Extract files to a temporary directory for one-off edits:
 │  (source of │─────────>│  (temporary  │─────────>│  (updated)  │
 │   truth)    │          │  workspace)  │          │             │
 └─────────────┘          └──────────────┘          └─────────────┘
-                              │
-                              ▼
-                         Use ANY tool:
-                         vim, vscode, grep, etc.
+       │                      │
+       │                      ▼
+       │                 Use ANY tool:
+       │                 vim, vscode, grep, etc.
+       │
+       └─> Read-only by default
+           tdb vcs edit → makes writable
+           tdb vcs discard → return to read-only
+
+           Explicit commit workflow:
+           1. tdb project checkout myproject /tmp/work
+           2. tdb vcs edit myproject
+           3. Edit files in /tmp/work
+           4. tdb project commit myproject /tmp/work -m "message"
+
+           (Conflict detection on commit)
 ```
 
 **Use for:** Experimentation, one-off changes, isolated testing
 
+**Key Point:** Checkouts are read-only by default to prevent accidental edits. Use `vcs edit` to enable editing. Like Workflow A, changes require an explicit commit - nothing is automatic.
+
 **Why both work:**
 - Database stores **one copy** of each file (content-addressed, versioned)
 - You edit with **familiar tools** (anything that works with files)
-- Commits are **atomic** with conflict detection
+- Commits are **explicit and atomic** - nothing is automatic
+- Changes require **manual staging** (`vcs add`) and **commit** (`vcs commit`)
+- **Conflict detection** on commit (three-way merge logic)
 - Multiple agents can work **safely** (optimistic locking with version tracking)
+- Read-only checkouts prevent accidental modifications
 
 **Example workflow (AI Agent with Claude Code):**
 
