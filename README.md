@@ -146,7 +146,7 @@ tdb project commit myproject /tmp/work -m "My changes"
 
 **Example workflow (AI Agent with Claude Code):**
 
-*Note: This example uses **Workflow A (VCS Staging)** - the project directory already exists with files in place. No explicit checkout needed!*
+This example uses Workflow A (VCS Staging) where the project directory already exists with files in place.
 
 ```bash
 # User initializes project (one-time setup)
@@ -218,13 +218,13 @@ Claude: Here are the last 3 commits:
 ### 0. **High Performance**
 
 TempleDB is optimized for speed:
-- ⚡ Connection pooling (3-5x faster operations)
-- 🚀 Batch operations (50-100x faster imports)
-- 💾 WAL mode + 64MB cache + 256MB mmap
-- 🔄 Nix expression caching (< 1s boot time)
-- 📊 Optimized queries with proper indexes
+- Connection pooling (3-5x faster operations)
+- Batch operations (50-100x faster imports)
+- WAL mode + 64MB cache + 256MB mmap
+- Nix expression caching (< 1s boot time)
+- Optimized queries with proper indexes
 
-**See [PERFORMANCE.md](PERFORMANCE.md) for benchmarks and tuning.**
+See [PERFORMANCE.md](PERFORMANCE.md) for benchmarks and tuning.
 
 ### 1. **Universal Project Tracking**
 
@@ -270,54 +270,7 @@ JOIN project_files pf ON fc.file_id = pf.id
 WHERE pf.file_path = 'README.md';
 ```
 
-### 4a. **VCS Staging Workflow** (Recommended)
-
-Work in your project directory like git (recommended for AI agents and normal development):
-
-```bash
-# 1. Initialize project with .templedb/ marker
-cd ~/myproject
-./templedb project init
-
-# 2. Edit files normally (they're already in the directory!)
-vim src/auth.py
-grep -r "TODO" .
-
-# 3. Stage and commit changes (git-like)
-./templedb vcs add -p myproject src/auth.py
-./templedb vcs commit -p myproject -m "Fix auth bug"
-
-# Or stage all changes
-./templedb vcs add -p myproject --all
-./templedb vcs commit -p myproject -m "Multiple fixes"
-```
-
-### 4b. **Checkout/Edit/Commit Workflow** (Isolated Workspaces)
-
-Extract to temporary directory for isolated edits (checkouts are read-only by default):
-
-```bash
-# 1. Extract project to filesystem (read-only)
-./templedb project checkout myproject /tmp/workspace
-
-# 2. Make checkout writable
-./templedb vcs edit myproject
-
-# 3. Edit with ANY tool (vim, vscode, grep, etc)
-cd /tmp/workspace
-vim file.py
-grep -r "TODO" .
-
-# 4a. Commit changes back to database
-./templedb project commit myproject /tmp/workspace -m "Fixed bug"
-
-# 4b. OR discard changes and return to read-only
-./templedb vcs discard myproject
-
-# Multi-agent conflict detection included!
-```
-
-### 4c. **File Edit Commands** (Quick Single-File Changes)
+### 4. **File Edit Commands** (Quick Single-File Changes)
 
 For quick edits to individual files:
 
@@ -361,14 +314,9 @@ cd /tmp/work && vim src/auth.py
 ./templedb agent end 1
 ```
 
-**Features:**
-- Session lifecycle tracking (start/active/completed)
-- Automatic commit-to-session linking via `TEMPLEDB_SESSION_ID`
-- Interaction history logging
-- Context snapshot generation
-- Session analytics (duration, commits, metrics)
+Includes session lifecycle tracking, automatic commit linking via `TEMPLEDB_SESSION_ID`, interaction history, context snapshots, and session analytics.
 
-**See [AGENT_SESSIONS.md](AGENT_SESSIONS.md) for complete guide.**
+See [AGENT_SESSIONS.md](AGENT_SESSIONS.md) for details.
 
 ### 6. **Workflow Orchestration & Code Intelligence**
 
@@ -403,16 +351,9 @@ templedb_workflow_execute {
 }
 ```
 
-**Features:**
-- 3 production workflows (bootstrap, deployment, refactoring)
-- Code intelligence: symbol extraction, dependency graphs, impact analysis
-- Hybrid search (BM25 + graph ranking)
-- Leiden algorithm for architectural boundaries
-- Automatic rollback on failure
-- Health checks with retries
-- Test validation with coverage thresholds
+Includes production workflows for bootstrap, deployment, and refactoring. Code intelligence with symbol extraction, dependency graphs, hybrid search (BM25 + graph ranking), and Leiden algorithm for architectural boundaries. Automatic rollback, health checks, and test validation.
 
-**See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for complete guide.**
+See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for details.
 
 ### 7. **Database-Native Git Server**
 
@@ -441,15 +382,9 @@ git clone http://localhost:9418/myproject
 ./templedb gitserver list-repos
 ```
 
-**Features:**
-- Zero filesystem checkouts - serve directly from SQLite
-- Standard git smart HTTP protocol
-- Works with git, Nix flakes, and all git clients
-- Configurable host/port via database
-- Automatic URL generation for templates
-- On-the-fly git object generation from database
+Serves directly from SQLite with zero filesystem checkouts. Implements standard git smart HTTP protocol, works with git/Nix/all git clients. Configurable via database with automatic URL generation and on-the-fly object generation.
 
-**See [docs/GIT_SERVER.md](docs/GIT_SERVER.md) for complete guide.**
+See [docs/GIT_SERVER.md](docs/GIT_SERVER.md) for details.
 
 ---
 
@@ -464,10 +399,10 @@ cd templedb
 ```
 
 The installer will:
-- ✓ Check dependencies (Python, SQLite, git, age)
-- ✓ Install `templedb` to your PATH
-- ✓ Initialize the database at `~/.local/share/templedb/templedb.sqlite`
-- ✓ Optionally import an example project
+- Check dependencies (Python, SQLite, git, age)
+- Install `templedb` to your PATH
+- Initialize the database at `~/.local/share/templedb/templedb.sqlite`
+- Optionally import an example project
 
 ### Requirements
 
@@ -554,13 +489,7 @@ Claude: [uses mcp_templedb_vcs_log to show history]
 - `templedb_env_get/set/list` - Environment variable management
 - `templedb_deploy` - Deployment orchestration
 
-**Agent Workflow Benefits:**
-- ✅ No filesystem checkouts needed - direct database access
-- ✅ Atomic operations with ACID guarantees
-- ✅ Multi-agent coordination via database transactions
-- ✅ Query across all projects with SQL
-- ✅ Automatic conflict detection and version tracking
-- ✅ Natural language interface - just ask Claude to do things!
+Agent workflow provides direct database access without filesystem checkouts, atomic operations with ACID guarantees, multi-agent coordination via transactions, SQL queries across all projects, automatic conflict detection, and natural language interface.
 
 See the interactive example workflow above for a complete session.
 

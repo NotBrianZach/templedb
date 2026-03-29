@@ -7,24 +7,6 @@
 
 ---
 
-## Core Thesis
-
-**TempleDB is a project management and version control system focused on simplifying and unifying underlying abstractions to create a clean and introspectable environment for AI-assisted development and deployment.**
-
-By moving from files and environment variables to SQLite tables, your codebase becomes a **temple** - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
-
-Or, it's like a normalized version of:
-- **Fossil-SCM** (SQLite, relational version of git)
-- **Claude MCP** (API tuned for AI agent interactions)
-- **Superpowers** (hierarchical agent dispatch & contextualization)
-- **GitNexus** (dependency graph/clustering for AI contextualization)
-- **NixOps4** (deployment tool)
-- **SOPS** (secret management)
-
-We throw out of the temple those that would lend us technical debt in the form of **state duplication**, namely filesystem-centric tools like git, sops, CI/CD like Jenkins, and deployment tools like Docker. (Though in the case of git, it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for NixOS to tide us over until the day we can make some much more radical changes to operating systems).
-
----
-
 ## The Fundamental Problem: State Duplication
 
 ### The Example: React Components Scattered Across Projects
@@ -91,94 +73,7 @@ Traditional code management tools (git, filesystems) treat code as text files:
 
 ---
 
-## The Pain of Duplication
-
-### 1. Duplicated Components
-
-**Traditional Approach:**
-```bash
-# Copy Button component to new project
-cp ../webapp/src/components/Button.jsx ./components/
-
-# Developer A updates Button in webapp
-vim webapp/src/components/Button.jsx
-
-# Developer B doesn't know, uses old Button in mobile-app
-# Result: 2 versions of Button diverge over time
-```
-
-**The Problem:**
-- Button exists in 4 places
-- Update one → must update all manually
-- Easy to forget, hard to track
-- No way to see "who uses Button?"
-
-**TempleDB Approach:**
-```bash
-# Register Button once as shared component
-templedb component add Button src/components/Button.jsx \
-  --type react_component --shared
-
-# Link to multiple projects (no duplication!)
-templedb component link webapp Button
-templedb component link mobile-app Button
-templedb component link admin-panel Button
-
-# Update Button once
-templedb component update Button src/components/Button.jsx
-# → All 3 projects automatically get update
-
-# See who uses it
-templedb component usage Button
-# → Shows: webapp, mobile-app, admin-panel
-```
-
-**Benefits:**
-- Button stored **once** in database
-- 3 projects reference it (no copies)
-- Update once → affects all users
-- Query usage instantly
-
-### 2. Scattered Secrets
-
-**Traditional Approach:**
-```bash
-webapp/.env.production          # Database password
-mobile-app/.env.production      # Same password copied
-backend/.env.production         # Same password again
-marketing-site/config/.env      # DIFFERENT password (staging?)
-admin-panel/secrets.json        # JSON format, same secrets
-```
-
-**The Problem:**
-- Same secret in 5 places
-- Update password → must update 5 files
-- Easy to miss one → production breaks
-- No encryption → secrets in git history
-- No audit trail → who accessed what?
-
-**TempleDB Approach:**
-```bash
-# Store secret once, encrypted with age
-templedb secret edit myproject --profile production
-# Opens editor, saves encrypted to database
-
-# All projects query database for secrets
-templedb secret export myproject --format shell
-# → Decrypts and outputs to environment
-
-# Audit trail built-in
-SELECT * FROM secret_history WHERE project_id = 1;
-```
-
-**Benefits:**
-- Secrets stored **once**, encrypted
-- All projects query database
-- Update once → all environments get it
-- Age-encrypted (Yubikey support)
-- Full audit trail
-
-### 3. Version Control Overhead
+## Version Control Overhead
 
 **Traditional Git:**
 ```bash
@@ -378,10 +273,10 @@ SELECT * FROM deployment_targets;      -- All deployment config
 ```
 
 **Result:**
-- **One abstraction**: SQLite tables
-- **One query language**: SQL
-- **One source of truth**: Database
-- **One tool**: templedb CLI
+- **One abstraction**: SQLite tables (er, well, and nix)
+- **One query language**: SQL (er, well, and nix)
+- **One source of truth**: Database (er, well, and nix)
+- **One tool**: templedb CLI (er, well, and nix)
 
 ### Clean and Introspectable
 
