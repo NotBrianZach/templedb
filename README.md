@@ -12,15 +12,42 @@
 ## What is TempleDB?
 
 <img src="assets/logo.svg" align="right" width="150" alt="TempleDB Logo"/>
-  Templedb is a project management and version control system focused on simplifying and unifying underlying abstractions to create a clean and introspectable environment for ai assisted development and deployment.
+  TempleDB is a project management and version control system focused on simplifying and unifying underlying abstractions to create a clean and introspectable environment for AI-assisted development and deployment.
 
 By moving from files and environment variables to sqlite tables your codebase becomes a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
 
-Or, it's like a normalized version  of fossil-scm (sqlite, relational version of git) + claude mcp&stored procedures (api tuned for ai agent interactions) + superpowers (hierchical agent dispatch&contextualization) + gitnexus (dependency graph/clustering for ai contextualization) + nixops4 (deployment tool) + sops (secret management).
+Or, it's like a normalized version of fossil-scm (sqlite, relational version of git) + claude mcp&stored procedures (api tuned for AI agent interactions) + superpowers (hierarchical agent dispatch&contextualization) + gitnexus (dependency graph/clustering for AI contextualization) + nixops4 (deployment tool) + sops (secret management).
 
 We throw out of the temple those that would lend us technical debt in the form of state duplication, namely filesystem centric tools like git, sops, ci/cd like jenkins and deployment tools like docker. (though in the case of git it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for nixos to tide us over until the day we can make some much more radical changes to operating systems).
 
 **Read [DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md) for the complete rationale.**
+
+---
+
+## Table of Contents
+
+- [How It Works](#how-it-works)
+  - [Workflow A: VCS Staging](#workflow-a-vcs-staging-git-like---recommended-for-development)
+  - [Workflow B: Checkout/Commit](#workflow-b-checkoutcommit---for-isolated-workspaces)
+  - [Three-Way Merge Conflict Detection](#why-both-work)
+- [Core Features](#core-features)
+  - [High Performance](#0-high-performance)
+  - [Universal Project Tracking](#1-universal-project-tracking)
+  - [Database-Native Version Control](#2-database-native-version-control)
+  - [File Versioning](#3-complete-file-versioning)
+  - [File Edit Commands](#4-file-edit-commands-quick-single-file-changes)
+  - [AI Agent Sessions](#5-ai-agent-session-management)
+  - [Workflow Orchestration](#6-workflow-orchestration--code-intelligence)
+  - [Git Server](#7-database-native-git-server)
+- [Installation](#installation)
+  - [Quick Install](#quick-install)
+  - [Requirements](#requirements)
+  - [AI Assistant Integration](#ai-assistant-integration)
+  - [MCP Server](#mcp-server-for-ai-agents)
+- [Quick Start](#quick-start)
+- [Documentation](#documentation)
+- [CLI Commands](#cli-commands)
+- [Contributing](#contributing)
 
 ---
 
