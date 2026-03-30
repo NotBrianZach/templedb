@@ -365,7 +365,7 @@ ls -t ~/backups/templedb-*.sqlite | tail -n +11 | xargs rm
 
 ```bash
 # 1. Fresh install
-git clone https://github.com/user/templedb.git
+git clone git@github.com:user/templedb.git
 cd templedb
 nix develop  # or ./install.sh
 

@@ -73,7 +73,7 @@ templedb_project_show({"project": "my-project"})
 ```javascript
 // Import from git
 templedb_project_import({
-  "repo_url": "https://github.com/user/repo.git",
+  "repo_url": "git@github.com:user/repo.git",
   "name": "my-project"  // optional
 })
 

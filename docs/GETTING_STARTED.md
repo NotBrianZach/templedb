@@ -5,7 +5,7 @@
 ## Install
 
 ```bash
-git clone https://github.com/yourusername/templedb.git
+git clone git@github.com:yourusername/templedb.git
 cd templedb
 ./install.sh
 ```
@@ -170,7 +170,7 @@ DNS, secrets, environment variables auto-configured. No manual steps.
 
 **Standalone (recommended):**
 ```bash
-git clone https://github.com/yourusername/templedb.git
+git clone git@github.com:yourusername/templedb.git
 ./templedb/templedb --help
 ```
 
@@ -189,7 +189,7 @@ nix profile install github:yourusername/templedb
 
 **Development:**
 ```bash
-git clone https://github.com/yourusername/templedb.git
+git clone git@github.com:yourusername/templedb.git
 cd templedb
 python3 src/main.py --help
 ```

@@ -3,7 +3,7 @@
 ## Quick Install (Recommended)
 
 ```bash
-git clone https://github.com/yourusername/templedb.git
+git clone git@github.com:yourusername/templedb.git
 cd templedb
 ./install.sh
 ```
@@ -43,7 +43,7 @@ wget -qO- https://raw.githubusercontent.com/yourusername/templedb/main/install.s
 ### Option 1: Automatic Installation (Recommended)
 
 ```bash
-git clone https://github.com/yourusername/templedb.git
+git clone git@github.com:yourusername/templedb.git
 cd templedb
 ./install.sh
 ```
@@ -77,7 +77,7 @@ sudo ./install.sh
 Run directly from the repository without installing:
 
 ```bash
-git clone https://github.com/yourusername/templedb.git
+git clone git@github.com:yourusername/templedb.git
 cd templedb
 ./templedb --help
 ```
@@ -111,7 +111,7 @@ sudo apt update
 sudo apt install python3 python3-pip sqlite3 git age
 
 # Install TempleDB
-git clone https://github.com/yourusername/templedb.git
+git clone git@github.com:yourusername/templedb.git
 cd templedb
 ./install.sh
 ```
@@ -128,7 +128,7 @@ tar xzf age-v1.3.1-linux-amd64.tar.gz
 sudo mv age/age age/age-keygen /usr/local/bin/
 
 # Install TempleDB
-git clone https://github.com/yourusername/templedb.git
+git clone git@github.com:yourusername/templedb.git
 cd templedb
 ./install.sh
 ```
@@ -140,7 +140,7 @@ cd templedb
 brew install python sqlite git age
 
 # Install TempleDB
-git clone https://github.com/yourusername/templedb.git
+git clone git@github.com:yourusername/templedb.git
 cd templedb
 ./install.sh
 ```

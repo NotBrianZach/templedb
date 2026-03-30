@@ -420,7 +420,7 @@ See [docs/GIT_SERVER.md](docs/GIT_SERVER.md) for details.
 ### Quick Install
 
 ```bash
-git clone https://github.com/yourusername/templedb.git
+git clone git@github.com:yourusername/templedb.git
 cd templedb
 ./install.sh
 ```
