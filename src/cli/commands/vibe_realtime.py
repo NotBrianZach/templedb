@@ -125,10 +125,15 @@ class VibeRealtimeCommands(Command):
             print("❌ Failed to start vibe server")
             return 1
 
-        time.sleep(2)  # Wait for server to be ready
+        # 2. Wait for server to be ready
+        print("2️⃣  Waiting for server to be ready...")
+        if not self._wait_for_server(port, timeout=10):
+            print("❌ Server failed to become ready")
+            vibe_server.terminate()
+            return 1
 
-        # 2. Initialize session via API
-        print("2️⃣  Initializing vibe session...")
+        # 3. Initialize session via API
+        print("3️⃣  Initializing vibe session...")
         session_info = self._init_session(project, port)
         if not session_info:
             print("❌ Failed to initialize session")
@@ -138,16 +143,16 @@ class VibeRealtimeCommands(Command):
         session_id = session_info['session_id']
         print(f"   ✓ Session ID: {session_id}")
 
-        # 3. Start quiz UI
-        print(f"3️⃣  Launching quiz UI ({ui_mode})...")
+        # 4. Start quiz UI
+        print(f"4️⃣  Launching quiz UI ({ui_mode})...")
         ui_process = self._start_ui(ui_mode, session_id, port)
 
-        # 4. Launch Claude Code
-        print("4️⃣  Launching Claude Code...")
+        # 5. Launch Claude Code
+        print("5️⃣  Launching Claude Code...")
         claude_process = self._start_claude(project, args.claude_args)
 
-        # 5. Start file watcher for auto-question generation
-        print("5️⃣  Starting file watcher...")
+        # 6. Start file watcher for auto-question generation
+        print("6️⃣  Starting file watcher...")
         watcher_process = self._start_file_watcher(project, session_id, port)
 
         print()
@@ -190,16 +195,45 @@ class VibeRealtimeCommands(Command):
 
         return 0
 
+    def _wait_for_server(self, port: int, timeout: int = 10) -> bool:
+        """Wait for server to be ready by checking if it responds to HTTP requests"""
+        import requests
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                # Try to connect to the server's root endpoint
+                response = requests.get(f"http://localhost:{port}/", timeout=1)
+                # If we get any response (even 404), server is up
+                print(f"   ✓ Server is ready (took {time.time() - start_time:.1f}s)")
+                return True
+            except requests.exceptions.ConnectionError:
+                # Server not ready yet, wait a bit
+                time.sleep(0.5)
+            except Exception as e:
+                # Some other error, but server might still be starting
+                time.sleep(0.5)
+
+        return False
+
     def _start_vibe_server(self, port: int) -> subprocess.Popen:
         """Start the vibe server"""
         vibe_server_path = Path(__file__).parent.parent.parent / "vibe_server.py"
 
         try:
+            # Don't pipe stdout/stderr - let them go to terminal for debugging
             process = subprocess.Popen(
-                [sys.executable, str(vibe_server_path), "--port", str(port)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                [sys.executable, str(vibe_server_path), "--port", str(port)]
             )
+
+            # Give server a moment to fail if it's going to
+            time.sleep(0.5)
+
+            # Check if process is still running
+            if process.poll() is not None:
+                print(f"   ✗ Server process exited with code {process.returncode}")
+                return None
+
             return process
         except Exception as e:
             print(f"Error starting server: {e}")
