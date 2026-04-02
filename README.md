@@ -39,6 +39,7 @@ We throw out of the temple those that would lend us technical debt in the form o
   - [AI Agent Sessions](#5-ai-agent-session-management)
   - [Workflow Orchestration](#6-workflow-orchestration--code-intelligence)
   - [Git Server](#7-database-native-git-server)
+  - [Natural Language File Queries](#8-natural-language-file-queries)
 - [Installation](#installation)
   - [Quick Install](#quick-install)
   - [Requirements](#requirements)
@@ -412,6 +413,57 @@ git clone http://localhost:9418/myproject
 Serves directly from SQLite with zero filesystem checkouts. Implements standard git smart HTTP protocol, works with git/Nix/all git clients. Configurable via database with automatic URL generation and on-the-fly object generation.
 
 See [docs/GIT_SERVER.md](docs/GIT_SERVER.md) for details.
+
+### 8. **Natural Language File Queries**
+
+Find and open files using natural language queries, integrating seamlessly with your editor:
+
+```bash
+# Query and open files matching natural language description
+./templedb query-open myapp "authentication code"
+./templedb query-open bza "prompts that do character analysis on a page"
+
+# Preview results without opening
+./templedb query myapp "config files" --json
+
+# Limit results
+./templedb query-open myapp "test files" --limit 5
+
+# Open in background (no focus stealing)
+./templedb query-open myapp "database migrations" --no-select
+```
+
+**From Emacs:**
+
+```elisp
+;; Load TempleDB query integration
+(require 'templedb-query)
+
+;; Query and open files interactively
+M-x templedb-query-open
+
+;; Quick helpers
+M-x templedb-find-config-files
+M-x templedb-find-tests
+M-x templedb-find-auth-code
+```
+
+**From Claude in vterm:**
+
+Just use natural language - Claude automatically uses the query system:
+
+```
+You: "open the bza files with character analysis prompts"
+Claude: [finds and opens matching files in Emacs]
+```
+
+**How it works:**
+- Uses FTS5 full-text search with relevance ranking
+- Auto-detects Emacs and uses `emacsclient` for instant file opening
+- Supports natural queries: "auth code", "config files", "database migrations"
+- Advanced syntax: boolean operators (AND/OR/NOT), phrases, prefix matching
+
+See [docs/QUERY_OPEN.md](docs/QUERY_OPEN.md) for complete guide and examples.
 
 ---
 

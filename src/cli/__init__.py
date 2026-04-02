@@ -15,7 +15,7 @@ from cli.commands import (
     project, vcs, env, search, system, cathedral, deploy, migration,
     target, secret, tui_launcher, config, workitem, mcp, direnv, merge,
     blob, domain, backup, claude, prompt, vibe, nixos, key, cache, nixops4,
-    deploy_nix, file, tutorial, git_server_commands
+    deploy_nix, file, tutorial, git_server_commands, query_open
     # Note: code module not imported - functionality available via MCP tools
 )
 from cli.core import cli
@@ -50,6 +50,7 @@ def main():
     tutorial.register(cli)  # Interactive tutorials and onboarding
     nixos.register(cli)
     git_server_commands.register(cli)  # Database-native git server
+    query_open.register(cli)  # Natural language file queries with editor integration
 
     # Register key management commands
     key.register(cli)
