@@ -1,7 +1,10 @@
--- Add deployment plugins system
+-- Add deployment scripts system
 -- Allows projects to register custom deployment scripts
+--
+-- NOTE: Originally named 'deployment_plugins' but renamed to 'deployment_scripts'
+-- in migration 043. This base migration now uses the final name.
 
-CREATE TABLE IF NOT EXISTS deployment_plugins (
+CREATE TABLE IF NOT EXISTS deployment_scripts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_slug TEXT NOT NULL,
     script_path TEXT NOT NULL,
@@ -12,12 +15,12 @@ CREATE TABLE IF NOT EXISTS deployment_plugins (
     UNIQUE(project_slug)
 );
 
-CREATE INDEX IF NOT EXISTS idx_deployment_plugins_project ON deployment_plugins(project_slug);
-CREATE INDEX IF NOT EXISTS idx_deployment_plugins_enabled ON deployment_plugins(enabled);
+CREATE INDEX IF NOT EXISTS idx_deployment_scripts_project ON deployment_scripts(project_slug);
+CREATE INDEX IF NOT EXISTS idx_deployment_scripts_enabled ON deployment_scripts(enabled);
 
 -- Trigger to update timestamp
-CREATE TRIGGER IF NOT EXISTS update_deployment_plugins_timestamp
-AFTER UPDATE ON deployment_plugins
+CREATE TRIGGER IF NOT EXISTS update_deployment_scripts_timestamp
+AFTER UPDATE ON deployment_scripts
 BEGIN
-    UPDATE deployment_plugins SET updated_at = datetime('now') WHERE id = NEW.id;
+    UPDATE deployment_scripts SET updated_at = datetime('now') WHERE id = NEW.id;
 END;

@@ -8,6 +8,9 @@
 --
 -- Total tables removed: 18
 -- Expected disk space saved: 5-10 MB
+--
+-- NOTE: Base schema files have been updated to not create these tables.
+-- This migration is only needed for databases created before cleanup.
 
 -- ============================================================================
 -- Phase 1: Remove Obsolete Migration/Backup Tables

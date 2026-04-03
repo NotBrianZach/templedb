@@ -1,5 +1,9 @@
 -- Migration: Remove project_id from secret_blobs (use join table instead)
 -- This completes the refactoring to pure many-to-many relationships
+--
+-- NOTE: The base secret_blobs schema (if found) should be updated to never
+-- include project_id in the first place. This migration is only needed for
+-- databases created before the refactoring.
 
 -- SQLite doesn't support DROP COLUMN, so we need to recreate the table
 

@@ -254,12 +254,11 @@ CREATE TABLE code_search_index (
 );
 
 -- FTS5 virtual table for full-text search
+-- NOTE: Originally configured with content=code_search_index but this caused issues.
+-- Fixed in migration 037 to use standalone FTS5 table. Base migration now uses correct config.
 CREATE VIRTUAL TABLE code_search_fts USING fts5(
     symbol_id UNINDEXED,
-    qualified_name,
-    docstring,
-    content=code_search_index,
-    content_rowid=symbol_id
+    search_text
 );
 
 -- ============================================================================
