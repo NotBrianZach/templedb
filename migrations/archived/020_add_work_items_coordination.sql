@@ -1,6 +1,11 @@
 -- Migration 020: Add Work Items and Multi-Agent Coordination
 -- Implements Gas Town-inspired Beads system for structured work items
 -- and multi-agent task coordination with mailbox-style assignment
+--
+-- NOTE: This migration has been updated to remove convoy-related objects
+-- that were later removed in migration 040 (work_convoys, convoy_work_items,
+-- convoy_progress_view, update_convoy_on_completion trigger).
+-- The convoy system was never fully implemented and has been deprecated.
 
 -- Work items table (inspired by Gas Town's Beads)
 CREATE TABLE IF NOT EXISTS work_items (
@@ -47,44 +52,9 @@ CREATE INDEX IF NOT EXISTS idx_work_items_status_priority
 CREATE INDEX IF NOT EXISTS idx_work_items_parent
     ON work_items(parent_item_id);
 
--- Convoys table (inspired by Gas Town - bundles of related work items)
-CREATE TABLE IF NOT EXISTS work_convoys (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    convoy_name TEXT NOT NULL,
-    project_id INTEGER NOT NULL,
-    description TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',     -- pending, active, completed, cancelled
-
-    -- Coordination
-    coordinator TEXT,                           -- Mayor/coordinator agent identifier
-
-    -- Timestamps
-    created_at TEXT DEFAULT (datetime('now')),
-    started_at TEXT,
-    completed_at TEXT,
-
-    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-
-    CHECK (status IN ('pending', 'active', 'completed', 'cancelled'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_convoys_project_status
-    ON work_convoys(project_id, status);
-
--- Junction table for work items in convoys
-CREATE TABLE IF NOT EXISTS convoy_work_items (
-    convoy_id INTEGER NOT NULL,
-    work_item_id TEXT NOT NULL,
-    sequence_order INTEGER,                     -- Order within convoy
-    added_at TEXT DEFAULT (datetime('now')),
-
-    PRIMARY KEY (convoy_id, work_item_id),
-    FOREIGN KEY (convoy_id) REFERENCES work_convoys(id) ON DELETE CASCADE,
-    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_convoy_items_convoy
-    ON convoy_work_items(convoy_id, sequence_order);
+-- NOTE: Convoy tables (work_convoys, convoy_work_items) were removed in migration 040
+-- They were part of the original Gas Town-inspired design but were never fully implemented
+-- See migrations/040_safe_cleanup_verified_unused.sql for removal details
 
 -- Workflow templates table (TOML-style formulas)
 CREATE TABLE IF NOT EXISTS workflow_templates (
@@ -130,7 +100,7 @@ CREATE TABLE IF NOT EXISTS work_item_notifications (
     recipient TEXT NOT NULL,                    -- User/agent identifier
     message_type TEXT NOT NULL,                 -- work_assignment, notification, coordination_request
     work_item_id TEXT,                          -- Related work item if applicable
-    convoy_id INTEGER,                          -- Related convoy if applicable
+    convoy_id INTEGER,                          -- Legacy column (convoys removed in migration 040)
     message_content TEXT NOT NULL,              -- JSON message content
     priority TEXT DEFAULT 'normal',             -- low, normal, high, urgent
 
@@ -141,7 +111,7 @@ CREATE TABLE IF NOT EXISTS work_item_notifications (
     acknowledged_at TEXT,
 
     FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
-    FOREIGN KEY (convoy_id) REFERENCES work_convoys(id) ON DELETE CASCADE,
+    -- Removed: FOREIGN KEY (convoy_id) REFERENCES work_convoys(id) ON DELETE CASCADE
 
     CHECK (message_type IN ('work_assignment', 'notification', 'coordination_request', 'status_update')),
     CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
@@ -204,27 +174,8 @@ JOIN projects p ON wi.project_id = p.id
 WHERE wi.assigned_to IS NOT NULL
 GROUP BY wi.assigned_to, p.slug;
 
--- Convoy progress view
-CREATE VIEW IF NOT EXISTS convoy_progress_view AS
-SELECT
-    c.id as convoy_id,
-    c.convoy_name,
-    c.status as convoy_status,
-    p.slug as project_slug,
-    COUNT(cwi.work_item_id) as total_items,
-    SUM(CASE WHEN wi.status = 'completed' THEN 1 ELSE 0 END) as completed_items,
-    SUM(CASE WHEN wi.status IN ('in_progress', 'assigned') THEN 1 ELSE 0 END) as active_items,
-    SUM(CASE WHEN wi.status = 'blocked' THEN 1 ELSE 0 END) as blocked_items,
-    ROUND(
-        CAST(SUM(CASE WHEN wi.status = 'completed' THEN 1 ELSE 0 END) AS FLOAT) /
-        CAST(COUNT(cwi.work_item_id) AS FLOAT) * 100,
-        2
-    ) as completion_percentage
-FROM work_convoys c
-JOIN projects p ON c.project_id = p.id
-LEFT JOIN convoy_work_items cwi ON c.id = cwi.convoy_id
-LEFT JOIN work_items wi ON cwi.work_item_id = wi.id
-GROUP BY c.id;
+-- NOTE: convoy_progress_view was removed in migration 040
+-- It was part of the Gas Town convoy system that was never fully implemented
 
 -- Triggers for work item management
 
@@ -297,28 +248,8 @@ BEGIN
     );
 END;
 
--- Update convoy status when all items complete
-CREATE TRIGGER IF NOT EXISTS update_convoy_on_completion
-AFTER UPDATE OF status ON work_items
-WHEN NEW.status = 'completed'
-BEGIN
-    UPDATE work_convoys
-    SET
-        status = 'completed',
-        completed_at = datetime('now')
-    WHERE id IN (
-        SELECT convoy_id
-        FROM convoy_work_items
-        WHERE work_item_id = NEW.id
-    )
-    AND NOT EXISTS (
-        SELECT 1
-        FROM convoy_work_items cwi
-        JOIN work_items wi ON cwi.work_item_id = wi.id
-        WHERE cwi.convoy_id = work_convoys.id
-        AND wi.status != 'completed'
-    );
-END;
+-- NOTE: update_convoy_on_completion trigger was removed in migration 040
+-- It was part of the Gas Town convoy system that was never fully implemented
 
 -- Migration complete
 -- Run: ./templedb migration apply 020

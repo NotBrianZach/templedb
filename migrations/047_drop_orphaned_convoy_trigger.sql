@@ -11,6 +11,10 @@
 --   3. Foreign Key: work_item_notifications.convoy_id -> work_convoys(id)
 --
 -- FIX: Remove all references to deleted work_convoys table
+--
+-- NOTE: This migration is only needed for databases created before the
+-- schema cleanup. Migration 020 (archived) has been updated to not create
+-- these objects in the first place for new databases.
 
 -- 1. Drop orphaned trigger
 DROP TRIGGER IF EXISTS update_convoy_on_completion;
