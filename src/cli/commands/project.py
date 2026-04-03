@@ -74,11 +74,17 @@ class ProjectCommands(Command):
         try:
             project_path = Path(args.path).resolve()
             dry_run = hasattr(args, 'dry_run') and args.dry_run
+            allow_non_nix = hasattr(args, 'allow_non_nix') and args.allow_non_nix
+            generate_flake = hasattr(args, 'generate_flake') and args.generate_flake
+            project_category = getattr(args, 'category', 'package')
 
             stats = self.service.import_project(
                 project_path=project_path,
                 slug=args.slug,
-                dry_run=dry_run
+                dry_run=dry_run,
+                allow_non_nix=allow_non_nix,
+                generate_flake=generate_flake,
+                project_category=project_category
             )
 
             print(f"\n📈 Import Statistics:")
@@ -101,18 +107,62 @@ class ProjectCommands(Command):
 
     def list_projects(self, args) -> int:
         """List all projects"""
-        projects = self.service.get_all()
+        from db_utils import get_connection
 
-        if not projects:
-            print("No projects found")
-            return 0
+        # Check for filters
+        nix_only = hasattr(args, 'nix_only') and args.nix_only
+        category_filter = getattr(args, 'category', None)
 
-        # Format as table
-        print(self.format_table(
-            projects,
-            ['slug', 'name', 'file_count', 'total_lines'],
-            title="Projects"
-        ))
+        if nix_only or category_filter:
+            # Use custom query for filtered results
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            query = """
+                SELECT p.slug, p.name, p.project_category,
+                       p.is_nix_project, p.flake_check_status,
+                       COUNT(DISTINCT pf.id) as file_count,
+                       SUM(pf.lines_of_code) as total_lines
+                FROM projects p
+                LEFT JOIN project_files pf ON pf.project_id = p.id
+                WHERE 1=1
+            """
+            params = []
+
+            if nix_only:
+                query += " AND p.is_nix_project = 1"
+
+            if category_filter:
+                query += " AND p.project_category = ?"
+                params.append(category_filter)
+
+            query += " GROUP BY p.id ORDER BY p.slug"
+
+            cursor.execute(query, params)
+            projects = [dict(row) for row in cursor.fetchall()]
+
+            if not projects:
+                print("No projects found matching filters")
+                return 0
+
+            # Format as table with Nix columns
+            columns = ['slug', 'name', 'project_category', 'flake_check_status', 'file_count', 'total_lines']
+            print(self.format_table(projects, columns, title="Nix Projects"))
+
+        else:
+            # Default: show all projects
+            projects = self.service.get_all()
+
+            if not projects:
+                print("No projects found")
+                return 0
+
+            print(self.format_table(
+                projects,
+                ['slug', 'name', 'file_count', 'total_lines'],
+                title="Projects"
+            ))
+
         return 0
 
     def show_project(self, args) -> int:
@@ -149,6 +199,63 @@ class ProjectCommands(Command):
             logger.error(f"{e}")
             if e.solution:
                 logger.info(f"{e.solution}")
+            return 1
+
+    def validate_project(self, args) -> int:
+        """Validate a project's Nix flake"""
+        from error_handler import ResourceNotFoundError, ValidationError
+        from db_utils import get_connection
+        from services.nix_validation_service import NixValidationService
+        from pathlib import Path
+
+        try:
+            project = self.service.get_by_slug(args.slug, required=True)
+
+            # Check if it's a Nix project
+            if not project.get('is_nix_project'):
+                print(f"⚠  Project '{args.slug}' is not a Nix project")
+                print("   Import with a flake.nix to enable Nix validation")
+                return 1
+
+            # Get project path
+            project_path = Path(project['repo_url'])
+            if not project_path.exists():
+                raise ValidationError(
+                    f"Project path does not exist: {project_path}",
+                    solution="Update project repo_url or check filesystem"
+                )
+
+            print(f"Validating Nix flake for project: {args.slug}")
+            print(f"Path: {project_path}\n")
+
+            # Run validation
+            db_conn = get_connection()
+            nix_service = NixValidationService(db_conn)
+
+            validation_result = nix_service.validate_and_store(
+                project['id'],
+                project_path,
+                quick=False  # Full validation including build
+            )
+
+            if validation_result.success:
+                print("✅ Validation successful!")
+                print(f"   Duration: {validation_result.duration_seconds:.2f}s")
+                return 0
+            else:
+                print("❌ Validation failed")
+                print(f"\nError: {validation_result.error}")
+                if validation_result.error_log:
+                    print(f"\nDetails:\n{validation_result.error_log}")
+                return 1
+
+        except (ResourceNotFoundError, ValidationError) as e:
+            logger.error(f"{e}")
+            if hasattr(e, 'solution') and e.solution:
+                logger.info(f"{e.solution}")
+            return 1
+        except Exception as e:
+            logger.error(f"Validation failed: {e}", exc_info=True)
             return 1
 
     def sync_project(self, args) -> int:
@@ -276,10 +383,20 @@ def register(cli):
     import_parser.add_argument('path', help='Path to project directory')
     import_parser.add_argument('--slug', help='Project slug (default: directory name)')
     import_parser.add_argument('--dry-run', action='store_true', help='Dry run (no changes)')
+    import_parser.add_argument('--allow-non-nix', action='store_true', dest='allow_non_nix',
+                               help='Allow importing projects without flake.nix (limited features)')
+    import_parser.add_argument('--generate-flake', action='store_true', dest='generate_flake',
+                               help='Generate a starter flake.nix if missing')
+    import_parser.add_argument('--category', choices=['package', 'service', 'desktop-app', 'nixos-module', 'home-module'],
+                               default='package', help='Project category (default: package)')
     cli.commands['project.import'] = cmd.import_project
 
     # project list
     list_parser = subparsers.add_parser('list', help='List all projects', aliases=['ls'])
+    list_parser.add_argument('--nix-only', action='store_true', dest='nix_only',
+                            help='Show only Nix projects')
+    list_parser.add_argument('--category', choices=['package', 'service', 'desktop-app', 'nixos-module', 'home-module'],
+                            help='Filter by project category')
     cli.commands['project.list'] = cmd.list_projects
     cli.commands['project.ls'] = cmd.list_projects
 
@@ -287,6 +404,11 @@ def register(cli):
     show_parser = subparsers.add_parser('show', help='Show project details')
     show_parser.add_argument('slug', help='Project slug')
     cli.commands['project.show'] = cmd.show_project
+
+    # project validate
+    validate_parser = subparsers.add_parser('validate', help='Validate Nix flake')
+    validate_parser.add_argument('slug', help='Project slug')
+    cli.commands['project.validate'] = cmd.validate_project
 
     # project sync
     sync_parser = subparsers.add_parser('sync', help='Re-import project from filesystem')

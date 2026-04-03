@@ -182,7 +182,10 @@ class ProjectService(BaseService):
         self,
         project_path: Path,
         slug: Optional[str] = None,
-        dry_run: bool = False
+        dry_run: bool = False,
+        allow_non_nix: bool = False,
+        generate_flake: bool = False,
+        project_category: str = 'package'
     ) -> ImportStats:
         """
         Import a project from filesystem into database.
@@ -194,6 +197,9 @@ class ProjectService(BaseService):
             project_path: Path to project directory
             slug: Project slug (defaults to directory name)
             dry_run: If True, don't make changes
+            allow_non_nix: If True, allow projects without flake.nix
+            generate_flake: If True, generate a starter flake.nix
+            project_category: Project category ('package', 'service', 'desktop-app', etc.)
 
         Returns:
             ImportStats with import statistics
@@ -201,6 +207,8 @@ class ProjectService(BaseService):
         Raises:
             ValidationError: If path doesn't exist or isn't a directory
         """
+        from error_handler import ValidationError
+
         project_path = project_path.resolve()
 
         if not project_path.exists():
@@ -250,6 +258,93 @@ class ProjectService(BaseService):
                 )
                 self.logger.info("Added .templedb marker to existing project")
 
+        # Nix validation and metadata extraction
+        from db_utils import get_connection
+        db_conn = get_connection()
+
+        is_nix_project = False
+        flake_path = project_path / "flake.nix"
+
+        if flake_path.exists():
+            self.logger.info("✓ Found flake.nix")
+            is_nix_project = True
+
+            if not dry_run:
+                # Validate flake and extract metadata
+                from services.nix_validation_service import NixValidationService
+
+                nix_service = NixValidationService(db_conn)
+                self.logger.info("⚙  Validating Nix flake...")
+
+                validation_result = nix_service.validate_and_store(
+                    project_id,
+                    project_path,
+                    quick=True  # Quick validation during import
+                )
+
+                if validation_result.success:
+                    self.logger.info("✓ Flake validated successfully")
+                else:
+                    self.logger.warning(f"⚠  Flake validation failed: {validation_result.error}")
+                    if not allow_non_nix:
+                        raise ValidationError(
+                            f"Flake validation failed: {validation_result.error}",
+                            solution="Fix flake errors, or use --allow-non-nix to import anyway"
+                        )
+
+            # Update project with Nix status
+            cursor = db_conn.cursor()
+            cursor.execute("""
+                UPDATE projects
+                SET is_nix_project = 1,
+                    project_category = ?
+                WHERE id = ?
+            """, (project_category, project_id))
+            db_conn.commit()
+
+            # If this is a service project, analyze the NixOS module
+            if project_category == 'service' and not dry_run:
+                self.logger.info("⚙  Analyzing service module...")
+                from services.nix_service_analyzer import NixServiceAnalyzer
+
+                service_analyzer = NixServiceAnalyzer(db_conn)
+                service_metadata = service_analyzer.analyze_and_store(
+                    project_id,
+                    project_path,
+                    final_slug
+                )
+
+                if service_metadata:
+                    self.logger.info(f"✓ Extracted service metadata:")
+                    if service_metadata.module_path:
+                        self.logger.info(f"   Module: {service_metadata.module_path}")
+                    if service_metadata.opens_ports:
+                        self.logger.info(f"   Ports: {service_metadata.opens_ports}")
+                    if service_metadata.requires_services:
+                        self.logger.info(f"   Requires: {service_metadata.requires_services}")
+                else:
+                    self.logger.warning("⚠  Could not extract service metadata")
+
+        else:
+            # No flake.nix found
+            if generate_flake:
+                self.logger.info("⚙  Generating starter flake.nix...")
+                self._generate_starter_flake(project_path, project_category)
+                self.logger.info("✓ Created flake.nix (needs manual review)")
+                is_nix_project = True
+            elif not allow_non_nix:
+                raise ValidationError(
+                    "Project is not a Nix flake (no flake.nix found)",
+                    solution=(
+                        "Options:\n"
+                        "  1. Add --generate-flake to create a starter flake\n"
+                        "  2. Add --allow-non-nix to import without Nix support\n"
+                        "  3. Create flake.nix manually and re-import"
+                    )
+                )
+            else:
+                self.logger.warning("⚠  Importing non-Nix project (limited features)")
+
         # Import files using ProjectImporter
         from importer import ProjectImporter
 
@@ -260,6 +355,11 @@ class ProjectService(BaseService):
             f"Import completed: {stats.files_imported} files, "
             f"{stats.content_stored} content stored"
         )
+
+        if is_nix_project:
+            self.logger.info("✓ Project imported as Nix project")
+        else:
+            self.logger.info("ℹ  Project imported without Nix support")
 
         return stats
 
@@ -375,3 +475,118 @@ class ProjectService(BaseService):
         self.logger.info(f"Generated .envrc at {envrc_path}")
 
         return envrc_path
+
+
+    def _generate_starter_flake(self, project_path: Path, project_category: str):
+        """Generate a starter flake.nix based on project category"""
+        flake_path = project_path / "flake.nix"
+
+        if flake_path.exists():
+            self.logger.warning("flake.nix already exists, skipping generation")
+            return
+
+        # Basic flake template
+        template = '''{{
+  description = "{project_name} - TODO: Add description";
+
+  inputs = {{
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+  }};
+
+  outputs = {{ self, nixpkgs, flake-utils }}:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = nixpkgs.legacyPackages.${{system}};
+      in
+      {{
+        packages.default = pkgs.stdenv.mkDerivation {{
+          pname = "{project_name}";
+          version = "0.1.0";
+          src = ./.;
+
+          # TODO: Add build dependencies
+          # buildInputs = [ pkgs.hello ];
+
+          # TODO: Add build phase
+          # buildPhase = ''
+          #   # Build commands here
+          # '';
+
+          # TODO: Add install phase
+          # installPhase = ''
+          #   mkdir -p $out/bin
+          #   # Install commands here
+          # '';
+        }};
+
+        devShells.default = pkgs.mkShell {{
+          packages = [
+            # TODO: Add development dependencies
+          ];
+        }};
+      }}
+    );
+}}
+'''
+
+        project_name = project_path.name
+        flake_content = template.format(project_name=project_name)
+
+        flake_path.write_text(flake_content)
+        self.logger.info(f"Created starter flake.nix at {flake_path}")
+
+        # Also create a TODO file
+        todo_path = project_path / "FLAKE_TODO.md"
+        todo_content = f"""# Flake.nix TODO
+
+The starter flake.nix has been generated. You need to customize it:
+
+## Required Changes:
+
+1. **Add build dependencies** - What packages does your project need?
+2. **Add build phase** - How to build your project?
+3. **Add install phase** - How to install the built artifacts?
+
+## For {project_category} projects:
+
+"""
+
+        if project_category == 'service':
+            todo_content += """
+- Add a NixOS module output (nixosModules.default)
+- Define systemd service configuration
+- Specify ports, users, and dependencies
+- See: /docs/DAEMON_PROJECT_SCHEMA.md
+"""
+        elif project_category == 'package':
+            todo_content += """
+- Focus on proper package derivation
+- Add runtime dependencies
+- Test with: nix build
+"""
+
+        todo_content += """
+## Testing:
+
+```bash
+# Validate flake structure
+nix flake check
+
+# Try building
+nix build
+
+# Enter development shell
+nix develop
+```
+
+## Resources:
+
+- Nix manual: https://nixos.org/manual/nix/stable/
+- Nixpkgs manual: https://nixos.org/manual/nixpkgs/stable/
+- NixOS manual: https://nixos.org/manual/nixos/stable/
+"""
+
+        todo_path.write_text(todo_content)
+        self.logger.info(f"Created FLAKE_TODO.md with instructions")
+
