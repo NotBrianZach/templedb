@@ -33,13 +33,14 @@ We throw out of the temple those that would lend us technical debt in the form o
 - [Core Features](#core-features)
   - [High Performance](#0-high-performance)
   - [Universal Project Tracking](#1-universal-project-tracking)
-  - [Database-Native Version Control](#2-database-native-version-control)
-  - [File Versioning](#3-complete-file-versioning)
-  - [File Edit Commands](#4-file-edit-commands-quick-single-file-changes)
-  - [AI Agent Sessions](#5-ai-agent-session-management)
-  - [Workflow Orchestration](#6-workflow-orchestration--code-intelligence)
-  - [Git Server](#7-database-native-git-server)
-  - [Natural Language File Queries](#8-natural-language-file-queries)
+  - [Nix-First Project Management](#2-nix-first-project-management)
+  - [Database-Native Version Control](#3-database-native-version-control)
+  - [File Versioning](#4-complete-file-versioning)
+  - [File Edit Commands](#5-file-edit-commands-quick-single-file-changes)
+  - [AI Agent Sessions](#6-ai-agent-session-management)
+  - [Workflow Orchestration](#7-workflow-orchestration--code-intelligence)
+  - [Git Server](#8-database-native-git-server)
+  - [Natural Language File Queries](#9-natural-language-file-queries)
 - [Installation](#installation)
   - [Quick Install](#quick-install)
   - [Requirements](#requirements)
@@ -268,7 +269,57 @@ FROM files_with_types_view
 WHERE type_name = 'jsx_component';
 ```
 
-### 2. **Database-Native Version Control**
+### 2. **Nix-First Project Management**
+
+TempleDB encourages reproducible, declarative projects with Nix flakes:
+
+```bash
+# Import a Nix project (validates flake automatically)
+templedb project import /path/to/project
+
+# Generate a starter flake for existing projects
+templedb project import /path/to/project --generate-flake
+
+# Support different project types
+templedb project import /path/to/daemon --category service
+
+# List only Nix projects
+templedb project list --nix-only
+
+# Validate flake and extract metadata
+templedb project validate my-project
+```
+
+**What TempleDB tracks for Nix projects:**
+- Flake validation status (valid/invalid)
+- Packages, apps, devShells, modules, overlays
+- Flake inputs and nixpkgs commit
+- For services: ports, users, dependencies, systemd config
+
+**Service/daemon projects get special treatment:**
+- Extract NixOS module metadata
+- Detect required services (PostgreSQL, Redis, etc.)
+- Parse systemd configuration
+- Store port bindings and user requirements
+
+```sql
+-- View all Nix projects with their flake status
+SELECT slug, project_category, flake_check_status
+FROM projects WHERE is_nix_project = 1;
+
+-- See what packages a project provides
+SELECT project_slug, packages, apps, nixosModules
+FROM nix_flake_metadata_view;
+
+-- Find all services that use PostgreSQL
+SELECT project_slug, service_name, opens_ports
+FROM nix_service_metadata
+WHERE requires_databases LIKE '%postgresql%';
+```
+
+**System integration:** Generate flake inputs for NixOS configurations automatically. See [TEMPLEDB_INTEGRATION.md](../system_config/TEMPLEDB_INTEGRATION.md) for system_config integration examples.
+
+### 3. **Database-Native Version Control**
 
 Forget git. Use SQL:
 
@@ -283,7 +334,7 @@ SELECT * FROM vcs_branch_summary_view;
 SELECT * FROM vcs_changes_view;
 ```
 
-### 3. **Complete File Versioning**
+### 4. **Complete File Versioning**
 
 Every file's content and history stored in the database:
 
@@ -298,7 +349,7 @@ JOIN project_files pf ON fc.file_id = pf.id
 WHERE pf.file_path = 'README.md';
 ```
 
-### 4. **File Edit Commands** (Quick Single-File Changes)
+### 5. **File Edit Commands** (Quick Single-File Changes)
 
 For quick edits to individual files:
 
@@ -315,7 +366,7 @@ echo "new content" | ./templedb file set myproject file.txt --stage
 ./templedb vcs commit -p myproject -m "Update via script"
 ```
 
-### 5. **AI Agent Session Management**
+### 6. **AI Agent Session Management**
 
 Track AI agent sessions with automatic commit linking:
 
@@ -346,7 +397,7 @@ Includes session lifecycle tracking, automatic commit linking via `TEMPLEDB_SESS
 
 See [AGENT_SESSIONS.md](AGENT_SESSIONS.md) for details.
 
-### 6. **Workflow Orchestration & Code Intelligence**
+### 7. **Workflow Orchestration & Code Intelligence**
 
 Execute multi-phase operations with systematic safety checks:
 
@@ -383,7 +434,7 @@ Includes production workflows for bootstrap, deployment, and refactoring. Code i
 
 See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for details.
 
-### 7. **Database-Native Git Server**
+### 8. **Database-Native Git Server**
 
 Serve repositories directly from SQLite as standard git repositories via HTTP:
 
@@ -414,7 +465,7 @@ Serves directly from SQLite with zero filesystem checkouts. Implements standard 
 
 See [docs/GIT_SERVER.md](docs/GIT_SERVER.md) for details.
 
-### 8. **Natural Language File Queries**
+### 9. **Natural Language File Queries**
 
 Find and open files using natural language queries, integrating seamlessly with your editor:
 
