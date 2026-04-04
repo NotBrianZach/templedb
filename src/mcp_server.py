@@ -174,6 +174,15 @@ class MCPServer:
             "templedb_context_get_default": self.tool_context_get_default,
             # Schema exploration
             "templedb_schema_explore": self.tool_schema_explore,
+            # README cross-reference system
+            "templedb_readme_scan": self.tool_readme_scan,
+            "templedb_readme_create": self.tool_readme_create,
+            "templedb_readme_add_topic": self.tool_readme_add_topic,
+            "templedb_readme_add_reference": self.tool_readme_add_reference,
+            "templedb_readme_generate_index": self.tool_readme_generate_index,
+            "templedb_readme_find_related": self.tool_readme_find_related,
+            "templedb_readme_verify_links": self.tool_readme_verify_links,
+            "templedb_readme_list": self.tool_readme_list,
         }
 
     def _get_db_connection(self):
@@ -1368,6 +1377,179 @@ class MCPServer:
                         }
                     },
                     "required": ["query"]
+                }
+            },
+            {
+                "name": "templedb_readme_scan",
+                "description": "Scan a project for README files and register them in the cross-reference system. Extracts title, description, and sections from each README.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug to scan for README files"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_readme_create",
+                "description": "Create a new README file with proper metadata and auto-generated cross-references. Optionally generates index sections based on templates.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug for the README"
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path relative to project root (e.g., 'docs/DEPLOYMENT.md')"
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "README title"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "README content (markdown)"
+                        },
+                        "category": {
+                            "type": "string",
+                            "description": "Optional category: setup, api, deployment, architecture"
+                        },
+                        "topics": {
+                            "type": "array",
+                            "description": "Optional topic tags (e.g., ['nix', 'deployment'])",
+                            "items": {"type": "string"}
+                        }
+                    },
+                    "required": ["project", "file_path", "title", "content"]
+                }
+            },
+            {
+                "name": "templedb_readme_add_topic",
+                "description": "Tag a README with topics for better discovery and cross-referencing.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "readme_id": {
+                            "type": "integer",
+                            "description": "README file ID"
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "Topic tag (e.g., 'nix', 'deployment', 'vcs')"
+                        },
+                        "relevance": {
+                            "type": "number",
+                            "description": "Relevance score 0.0-1.0 (default: 1.0)"
+                        }
+                    },
+                    "required": ["readme_id", "topic"]
+                }
+            },
+            {
+                "name": "templedb_readme_add_reference",
+                "description": "Create a cross-reference link between two README files.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source_readme_id": {
+                            "type": "integer",
+                            "description": "Source README ID"
+                        },
+                        "target_readme_id": {
+                            "type": "integer",
+                            "description": "Target README ID (or use target_url for external links)"
+                        },
+                        "target_url": {
+                            "type": "string",
+                            "description": "External URL (if not linking to another README)"
+                        },
+                        "link_text": {
+                            "type": "string",
+                            "description": "Text for the link"
+                        },
+                        "section": {
+                            "type": "string",
+                            "description": "Section containing the reference"
+                        }
+                    },
+                    "required": ["source_readme_id", "link_text"]
+                }
+            },
+            {
+                "name": "templedb_readme_generate_index",
+                "description": "Generate auto-index section for a README based on related documentation. Uses templates to create 'Related Documentation' sections.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "readme_id": {
+                            "type": "integer",
+                            "description": "README to generate index for"
+                        },
+                        "template": {
+                            "type": "string",
+                            "description": "Optional template name (default: auto-detect based on category)"
+                        }
+                    },
+                    "required": ["readme_id"]
+                }
+            },
+            {
+                "name": "templedb_readme_find_related",
+                "description": "Find READMEs related to a given README based on shared topics, categories, or explicit references.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "readme_id": {
+                            "type": "integer",
+                            "description": "README ID to find related docs for"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max number of results (default: 10)"
+                        }
+                    },
+                    "required": ["readme_id"]
+                }
+            },
+            {
+                "name": "templedb_readme_verify_links",
+                "description": "Verify all links in README files and report broken references. Updates is_broken status for each reference.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Optional project slug to scope verification"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_readme_list",
+                "description": "List all registered README files with their topics and metadata.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Optional project slug to filter by"
+                        },
+                        "category": {
+                            "type": "string",
+                            "description": "Optional category to filter by"
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "Optional topic to filter by"
+                        }
+                    },
+                    "required": []
                 }
             }
         ]
@@ -3740,3 +3922,237 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Error setting file: {e}")
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    # ========================================================================
+    # README Cross-Reference System Tools
+    # ========================================================================
+
+    def tool_readme_scan(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Scan project for README files and register them"""
+        try:
+            project_slug = args["project"]
+            
+            # Run CLI command
+            result = self._run_templedb_cli(["readme", "scan", project_slug])
+            
+            if result["returncode"] != 0:
+                return self._error_response(
+                    f"Failed to scan README files: {result['stderr']}",
+                    ErrorCode.INTERNAL_ERROR
+                )
+            
+            return self._success_response(result["stdout"], format_json=False)
+            
+        except Exception as e:
+            logger.error(f"Error scanning README files: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_readme_create(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new README file with metadata"""
+        try:
+            project_slug = args["project"]
+            file_path = args["file_path"]
+            title = args["title"]
+            content = args["content"]
+            category = args.get("category")
+            topics = args.get("topics", [])
+            
+            # Build CLI command
+            cmd = ["readme", "create", project_slug, file_path, 
+                   "--title", title]
+            
+            if category:
+                cmd.extend(["--category", category])
+            
+            for topic in topics:
+                cmd.extend(["--topic", topic])
+            
+            # Use subprocess with stdin for content
+            import subprocess
+            full_cmd = [str(self.templedb_root / "templedb")] + cmd
+            
+            result = subprocess.run(
+                full_cmd,
+                input=content,
+                capture_output=True,
+                text=True,
+                cwd=str(self.templedb_root)
+            )
+            
+            if result.returncode != 0:
+                return self._error_response(
+                    f"Failed to create README: {result.stderr}",
+                    ErrorCode.INTERNAL_ERROR
+                )
+            
+            return self._success_response(result.stdout, format_json=False)
+            
+        except Exception as e:
+            logger.error(f"Error creating README: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_readme_add_topic(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Add topic tag to a README"""
+        try:
+            readme_id = args["readme_id"]
+            topic = args["topic"]
+            relevance = args.get("relevance", 1.0)
+            
+            # Insert into database
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT OR REPLACE INTO readme_topics (readme_id, topic, relevance, source)
+                VALUES (?, ?, ?, 'manual')
+            """, (readme_id, topic, relevance))
+            conn.commit()
+            
+            return self._success_response(f"Added topic '{topic}' to README {readme_id}")
+            
+        except Exception as e:
+            logger.error(f"Error adding topic: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_readme_add_reference(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Add cross-reference between READMEs"""
+        try:
+            source_id = args["source_readme_id"]
+            target_id = args.get("target_readme_id")
+            target_url = args.get("target_url")
+            link_text = args["link_text"]
+            section = args.get("section")
+            
+            # Insert into database
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT INTO readme_references 
+                (source_readme_id, target_readme_id, target_external_url, link_text, section)
+                VALUES (?, ?, ?, ?, ?)
+            """, (source_id, target_id, target_url, link_text, section))
+            conn.commit()
+            
+            return self._success_response(f"Added reference from README {source_id}")
+            
+        except Exception as e:
+            logger.error(f"Error adding reference: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_readme_generate_index(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate index section for README"""
+        try:
+            readme_id = args["readme_id"]
+            template = args.get("template")
+            
+            cmd = ["readme", "generate-index", str(readme_id)]
+            if template:
+                cmd.extend(["--template", template])
+            
+            result = self._run_templedb_cli(cmd)
+            
+            if result["returncode"] != 0:
+                return self._error_response(
+                    f"Failed to generate index: {result['stderr']}",
+                    ErrorCode.INTERNAL_ERROR
+                )
+            
+            return self._success_response(result["stdout"], format_json=False)
+            
+        except Exception as e:
+            logger.error(f"Error generating index: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_readme_find_related(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Find related README files"""
+        try:
+            readme_id = args["readme_id"]
+            limit = args.get("limit", 10)
+            
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            
+            # Use the related_readmes view
+            cursor.execute("""
+                SELECT 
+                    rr.related_readme_id,
+                    rf.title,
+                    rf.file_path,
+                    p.slug as project_slug,
+                    rr.shared_topics,
+                    rr.relevance_score
+                FROM related_readmes rr
+                JOIN readme_files rf ON rr.related_readme_id = rf.id
+                JOIN projects p ON rf.project_id = p.id
+                WHERE rr.readme_id = ?
+                ORDER BY rr.relevance_score DESC
+                LIMIT ?
+            """, (readme_id, limit))
+            
+            results = [dict(row) for row in cursor.fetchall()]
+            return self._success_response(results)
+            
+        except Exception as e:
+            logger.error(f"Error finding related READMEs: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_readme_verify_links(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Verify README links and report broken ones"""
+        try:
+            project_slug = args.get("project")
+            
+            cmd = ["readme", "verify-links"]
+            if project_slug:
+                cmd.append(project_slug)
+            
+            result = self._run_templedb_cli(cmd)
+            
+            if result["returncode"] != 0:
+                return self._error_response(
+                    f"Failed to verify links: {result['stderr']}",
+                    ErrorCode.INTERNAL_ERROR
+                )
+            
+            return self._success_response(result["stdout"], format_json=False)
+            
+        except Exception as e:
+            logger.error(f"Error verifying links: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_readme_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List README files with metadata"""
+        try:
+            project_slug = args.get("project")
+            category = args.get("category")
+            topic = args.get("topic")
+            
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            
+            # Build query with optional filters
+            query = "SELECT * FROM readme_files_with_topics WHERE 1=1"
+            params = []
+            
+            if project_slug:
+                query += " AND project_slug = ?"
+                params.append(project_slug)
+            
+            if category:
+                query += " AND category = ?"
+                params.append(category)
+            
+            if topic:
+                query += " AND topics LIKE ?"
+                params.append(f"%{topic}%")
+            
+            query += " ORDER BY index_priority DESC, title"
+            
+            cursor.execute(query, params)
+            results = [dict(row) for row in cursor.fetchall()]
+            
+            return self._success_response(results)
+            
+        except Exception as e:
+            logger.error(f"Error listing READMEs: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
