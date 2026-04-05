@@ -298,6 +298,117 @@ class EnvCommands(Command):
             logger.error(f"Failed to delete environment variable: {e}")
             return 1
 
+    def var_export(self, args) -> int:
+        """Export environment variables in various formats"""
+        import re
+
+        try:
+            project = self.get_project_or_exit(args.project)
+            target = args.target if hasattr(args, 'target') and args.target else 'staging'
+            format_type = args.format if hasattr(args, 'format') and args.format else 'dotenv'
+
+            # Get all environment variables for this project and target
+            rows = self.env_repo.query_all("""
+                SELECT var_name, var_value, value_type, template
+                FROM environment_variables
+                WHERE scope_type = 'project'
+                  AND scope_id = ?
+                  AND (var_name LIKE ? OR var_name NOT LIKE '%:%')
+                ORDER BY var_name
+            """, (project['id'], f"{target}:%"))
+
+            if not rows:
+                logger.error(f"No environment variables found for {args.project} ({target})")
+                logger.info(f"💡 Set variables with: ./templedb env set {args.project} VAR_NAME value --target {target}")
+                return 1
+
+            # Process variables and resolve templates
+            env_vars = {}
+            templates = {}
+
+            for row in rows:
+                var_name = row['var_name']
+                value_type = row.get('value_type', 'static')
+
+                # Parse target from var_name (target:varname format)
+                if ':' in var_name:
+                    var_target, actual_name = var_name.split(':', 1)
+                    # Skip if not matching target
+                    if var_target != target:
+                        continue
+                else:
+                    actual_name = var_name
+
+                if value_type == 'compound' and row.get('template'):
+                    # Store template for second pass resolution
+                    templates[actual_name] = row['template']
+                elif value_type == 'static' and row.get('var_value'):
+                    env_vars[actual_name] = row['var_value']
+
+            # Second pass: Resolve compound values (templates)
+            for var_name, template in templates.items():
+                resolved_value = self._resolve_template(template, env_vars)
+                env_vars[var_name] = resolved_value
+
+            # Format output based on requested format
+            if format_type == 'dotenv':
+                for key, value in sorted(env_vars.items()):
+                    # Quote values that contain spaces or special chars
+                    if ' ' in value or '"' in value or "'" in value or '$' in value:
+                        # Escape quotes and wrap in double quotes
+                        escaped = value.replace('"', '\\"')
+                        print(f'{key}="{escaped}"')
+                    else:
+                        print(f"{key}={value}")
+
+            elif format_type == 'shell':
+                for key, value in sorted(env_vars.items()):
+                    # Shell export format with proper escaping
+                    escaped = value.replace("'", "'\\''")
+                    print(f"export {key}='{escaped}'")
+
+            elif format_type == 'json':
+                import json
+                print(json.dumps(env_vars, indent=2))
+
+            elif format_type == 'yaml':
+                # Simple YAML output
+                for key, value in sorted(env_vars.items()):
+                    # Quote values that need it
+                    if ':' in value or value.startswith('"'):
+                        print(f'{key}: "{value}"')
+                    else:
+                        print(f"{key}: {value}")
+
+            else:
+                logger.error(f"Unknown format: {format_type}")
+                logger.info(f"💡 Supported formats: dotenv, shell, json, yaml")
+                return 1
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to export environment variables: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
+
+    def _resolve_template(self, template: str, env_vars: dict) -> str:
+        """Resolve template string with variable substitutions"""
+        import re
+
+        def resolve_var(match):
+            var_name = match.group(1)
+            # First check if it's already in env_vars
+            if var_name in env_vars:
+                return env_vars[var_name]
+            # Fall back to environment variable
+            return os.environ.get(var_name, match.group(0))
+
+        # Resolve ${VAR} style references
+        resolved = re.sub(r'\$\{([^}]+)\}', resolve_var, template)
+        return resolved
+
 
 def register(cli):
     """Register environment commands"""
@@ -362,3 +473,11 @@ def register(cli):
     vardel_parser.add_argument('var_name', help='Variable name')
     vardel_parser.add_argument('--target', default='default', help='Deployment target (default: default)')
     cli.commands['env.unset'] = cmd.var_delete
+
+    # env export
+    export_parser = subparsers.add_parser('export', help='Export environment variables')
+    export_parser.add_argument('project', help='Project slug')
+    export_parser.add_argument('--target', default='staging', help='Deployment target (default: staging)')
+    export_parser.add_argument('--format', choices=['dotenv', 'shell', 'json', 'yaml'], default='dotenv',
+                                help='Output format (default: dotenv)')
+    cli.commands['env.export'] = cmd.var_export

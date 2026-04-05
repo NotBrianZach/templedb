@@ -14,6 +14,7 @@ import shutil
 
 from services.base import BaseService
 from services.deployment_cache import DeploymentCacheService, ContentHash
+from services.deployment_tracking_service import DeploymentTrackingService
 from error_handler import ResourceNotFoundError, DeploymentError
 from config import DEPLOYMENT_USE_FHS, DEPLOYMENT_USE_FULL_FHS, DEPLOYMENT_FHS_DIR, DEPLOYMENT_FALLBACK_DIR
 import time
@@ -46,6 +47,7 @@ class DeploymentService(BaseService):
         self.project_repo = context.project_repo
         self.script_dir = context.script_dir
         self.cache_service = DeploymentCacheService()
+        self.tracking_service = DeploymentTrackingService()
 
     def deploy(
         self,
@@ -96,8 +98,16 @@ class DeploymentService(BaseService):
         start_time = time.time()
         export_time = 0
         build_time = 0
+        deployment_id = None
+        content_hash_str = None
 
         try:
+            # Start deployment tracking
+            if not dry_run:
+                deployment_id = self.tracking_service.start_deployment(
+                    project_id=project['id'],
+                    target=target
+                )
             # Step 1: Determine deployment location (FHS-style or /tmp)
             if DEPLOYMENT_USE_FHS:
                 self.logger.info(f"Using FHS-style deployment directory: {DEPLOYMENT_FHS_DIR}")
@@ -448,7 +458,7 @@ class DeploymentService(BaseService):
                     try:
                         result = fhs.run_deployment_in_fhs(
                             context=self._fhs_context,
-                            deployment_command=["bash", str(deploy_script)]
+                            deployment_command=["bash", str(deploy_script), "--target", target]
                         )
 
                         if result['success']:
@@ -482,7 +492,7 @@ class DeploymentService(BaseService):
                 else:
                     # Execute without FHS
                     result = subprocess.run(
-                        ["bash", str(deploy_script)],
+                        ["bash", str(deploy_script), "--target", target],
                         cwd=work_dir,
                         env={**subprocess.os.environ, "DEPLOYMENT_TARGET": target}
                     )

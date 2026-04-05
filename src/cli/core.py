@@ -131,7 +131,7 @@ New to TempleDB?
 
             try:
                 # Determine which command to run
-                if '.' in args.command:
+                if args.command and '.' in args.command:
                     # Direct subcommand
                     handler = self.commands.get(args.command)
                 else:

@@ -29,6 +29,31 @@ class DeployCommands(Command):
         self.ctx = ServiceContext()
         self.service = self.ctx.get_deployment_service()
 
+    def _get_available_targets(self, project_slug: str) -> list:
+        """Get list of available deployment targets for a project"""
+        from services.context import ServiceContext
+        ctx = ServiceContext()
+
+        project = ctx.project_repo.get_by_slug(project_slug)
+        if not project:
+            return []
+
+        # Query environment variables to find target prefixes
+        rows = ctx.base_repo.query_all("""
+            SELECT DISTINCT
+                CASE
+                    WHEN var_name LIKE '%:%'
+                    THEN substr(var_name, 1, instr(var_name, ':') - 1)
+                    ELSE NULL
+                END as target
+            FROM environment_variables
+            WHERE scope_type = 'project' AND scope_id = ?
+              AND var_name LIKE '%:%'
+        """, (project['id'],))
+
+        targets = [row['target'] for row in rows if row['target']]
+        return sorted(set(targets))  # Return unique sorted list
+
     def deploy(self, args) -> int:
         """Deploy project from TempleDB"""
         from error_handler import ResourceNotFoundError, DeploymentError
@@ -36,7 +61,35 @@ class DeployCommands(Command):
 
         try:
             project_slug = args.slug
-            target = args.target if hasattr(args, 'target') and args.target else 'production'
+
+            # Check if target was explicitly provided
+            target_provided = hasattr(args, 'target') and args.target
+
+            if not target_provided:
+                # Get available targets
+                available_targets = self._get_available_targets(project_slug)
+
+                if len(available_targets) > 1:
+                    # Multiple targets available - show list and exit
+                    print(f"📋 Available deployment targets for {project_slug}:\n")
+                    for i, t in enumerate(available_targets, 1):
+                        print(f"  {i}. {t}")
+                    print(f"\n💡 Please specify a target:")
+                    print(f"   ./templedb deploy run {project_slug} --target <target>\n")
+                    print(f"Example:")
+                    print(f"   ./templedb deploy run {project_slug} --target {available_targets[0]}")
+                    return 0
+                elif len(available_targets) == 1:
+                    # Only one target - use it automatically
+                    target = available_targets[0]
+                    print(f"ℹ️  Auto-selected target: {target} (only available target)\n")
+                else:
+                    # No targets configured - default to production
+                    target = 'production'
+                    print(f"⚠️  No deployment targets configured - using default: production\n")
+            else:
+                target = args.target
+
             dry_run = args.dry_run if hasattr(args, 'dry_run') and args.dry_run else False
             skip_validation = hasattr(args, 'skip_validation') and args.skip_validation
             mutable = hasattr(args, 'mutable') and args.mutable
@@ -69,10 +122,42 @@ class DeployCommands(Command):
                     cmd = [script_path]
                     if dry_run:
                         cmd.append('--dry-run')
+                    # Pass target to deployment script
+                    cmd.extend(['--target', target])
 
-                    # Run the deployment script
+                    # Run the deployment script and track it
+                    import time
+                    deploy_start_time = time.time()
+
                     try:
                         result = subprocess.run(cmd, check=False)
+                        deploy_duration = time.time() - deploy_start_time
+
+                        # Record deployment (if not dry run)
+                        if not dry_run:
+                            try:
+                                from services.deployment_tracking_service import DeploymentTrackingService
+                                tracking_service = DeploymentTrackingService()
+
+                                # Get project ID
+                                project = self.ctx.project_repo.get_by_slug(project_slug)
+                                if project:
+                                    deployment_id = tracking_service.start_deployment(
+                                        project_id=project['id'],
+                                        target=target
+                                    )
+
+                                    tracking_service.complete_deployment(
+                                        deployment_id=deployment_id,
+                                        success=(result.returncode == 0),
+                                        exit_code=result.returncode,
+                                        duration_seconds=deploy_duration,
+                                        notes=None if result.returncode == 0 else "Deployment script failed"
+                                    )
+                            except Exception as e:
+                                # Don't fail deployment if tracking fails
+                                logger.warning(f"Failed to record deployment: {e}")
+
                         return result.returncode
                     except Exception as e:
                         print(f"❌ Deployment script execution failed: {e}")
@@ -97,6 +182,9 @@ class DeployCommands(Command):
                 print("📋 DRY RUN - No actual deployment will occur\n")
 
             # Use service for deployment
+            import time
+            deploy_start_time = time.time()
+
             result = self.service.deploy(
                 project_slug=project_slug,
                 target=target,
@@ -105,6 +193,34 @@ class DeployCommands(Command):
                 mutable=mutable or no_fhs,  # Both disable FHS
                 use_full_fhs=not no_fhs if not mutable else False
             )
+
+            deploy_duration = time.time() - deploy_start_time
+
+            # Record deployment (if not dry run)
+            if not dry_run:
+                try:
+                    from services.deployment_tracking_service import DeploymentTrackingService
+                    tracking_service = DeploymentTrackingService()
+
+                    # Get project ID
+                    project = self.ctx.project_repo.get_by_slug(project_slug)
+                    if project:
+                        deployment_id = tracking_service.start_deployment(
+                            project_id=project['id'],
+                            target=target,
+                            work_dir=result.work_dir
+                        )
+
+                        tracking_service.complete_deployment(
+                            deployment_id=deployment_id,
+                            success=result.success,
+                            exit_code=result.exit_code,
+                            duration_seconds=deploy_duration,
+                            notes=result.message if not result.success else None
+                        )
+                except Exception as e:
+                    # Don't fail deployment if tracking fails
+                    logger.warning(f"Failed to record deployment: {e}")
 
             # Present results
             if result.success:
@@ -442,61 +558,242 @@ class DeployCommands(Command):
             return 1
 
     def history(self, args) -> int:
-        """Show deployment history for a project"""
+        """Show deployment history with timestamps and health checks"""
         try:
+            from services.deployment_tracking_service import DeploymentTrackingService
+            from datetime import datetime
+
             project_slug = args.slug
-            project = self.get_project_or_exit(project_slug)
-
-            from deployment_tracker import DeploymentTracker
-            tracker = DeploymentTracker(db_utils)
-
             target = args.target if hasattr(args, 'target') and args.target else None
             limit = args.limit if hasattr(args, 'limit') and args.limit else 10
+
+            tracking_service = DeploymentTrackingService()
+            deployments = tracking_service.get_deployment_history(
+                project_slug=project_slug,
+                target=target,
+                limit=limit
+            )
+
+            if not deployments:
+                print(f"\nNo deployments found for {project_slug}")
+                if target:
+                    print(f"(filtered by target: {target})")
+                return 0
 
             print(f"\n📜 Deployment History: {project_slug}")
             if target:
                 print(f"   Target: {target}")
-            print()
+            print(f"   Showing last {len(deployments)} deployments\n")
 
-            # Get deployment history
-            history = tracker.get_deployment_history(
-                project_id=project['id'],
-                target_name=target,
-                limit=limit
-            )
-
-            if not history:
-                print("   No deployments found")
-                return 0
-
-            # Display history
-            for record in history:
+            for deployment in deployments:
                 status_icon = {
                     'success': '✅',
                     'failed': '❌',
                     'in_progress': '🔄',
                     'rolled_back': '⏪'
-                }.get(record.status, '❓')
+                }.get(deployment.get('status'), '❓')
 
-                print(f"{status_icon} #{record.id} - {record.target_name}")
-                print(f"   Status: {record.status}")
-                print(f"   Started: {record.started_at}")
-                if record.completed_at:
-                    print(f"   Duration: {record.duration_ms / 1000:.1f}s")
-                if record.commit_hash:
-                    print(f"   Commit: {record.commit_hash[:8]}")
-                if record.deployed_by:
-                    print(f"   By: {record.deployed_by}")
-                if record.groups_deployed:
-                    print(f"   Groups: {', '.join(record.groups_deployed)}")
-                if record.error_message:
-                    print(f"   Error: {record.error_message[:100]}")
+                deployed_at = deployment.get('deployed_at')
+                if isinstance(deployed_at, str):
+                    try:
+                        dt = datetime.fromisoformat(deployed_at.replace('Z', '+00:00'))
+                        deployed_at = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    except:
+                        pass
+
+                print(f"{status_icon} Deployment #{deployment.get('id')}")
+                print(f"   Target:    {deployment.get('target')}")
+                print(f"   Status:    {deployment.get('status')}")
+                print(f"   Deployed:  {deployed_at}")
+
+                if deployment.get('duration_seconds'):
+                    print(f"   Duration:  {deployment.get('duration_seconds'):.2f}s")
+
+                if deployment.get('deployment_hash'):
+                    print(f"   Hash:      {deployment.get('deployment_hash')[:12]}...")
+
+                if deployment.get('deployed_by'):
+                    print(f"   By:        {deployment.get('deployed_by')}")
+
+                if deployment.get('notes'):
+                    print(f"   Notes:     {deployment.get('notes')}")
+
+                # Get health checks
+                health_checks = tracking_service.get_health_checks(deployment.get('id'))
+                if health_checks:
+                    print(f"   Health Checks:")
+                    for check in health_checks:
+                        check_icon = {
+                            'pass': '✅',
+                            'fail': '❌',
+                            'skip': '⏭️',
+                            'timeout': '⏱️'
+                        }.get(check.get('status'), '❓')
+                        print(f"      {check_icon} {check.get('check_name')}: {check.get('status')}")
+                        if check.get('response_time_ms'):
+                            print(f"         ({check.get('response_time_ms')}ms)")
+
                 print()
 
             return 0
 
         except Exception as e:
-            print(f"✗ Failed to get deployment history: {e}", file=sys.stderr)
+            logger.error(f"Failed to get deployment history: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
+
+    def stats(self, args) -> int:
+        """Show deployment statistics"""
+        try:
+            from services.deployment_tracking_service import DeploymentTrackingService
+
+            project_slug = args.slug
+            tracking_service = DeploymentTrackingService()
+            stats = tracking_service.get_deployment_stats(project_slug)
+
+            if not stats:
+                print(f"\nNo deployment statistics found for {project_slug}")
+                return 0
+
+            print(f"\n📊 Deployment Statistics: {project_slug}\n")
+
+            for stat in stats:
+                success_rate = (stat['successful_deployments'] / stat['total_deployments'] * 100) if stat['total_deployments'] > 0 else 0
+
+                print(f"Target: {stat['target']}")
+                print(f"  Total deployments:      {stat['total_deployments']}")
+                print(f"  Successful:             {stat['successful_deployments']}")
+                print(f"  Failed:                 {stat['failed_deployments']}")
+                print(f"  Success rate:           {success_rate:.1f}%")
+
+                if stat['avg_duration_seconds']:
+                    print(f"  Avg duration:           {stat['avg_duration_seconds']:.2f}s")
+
+                if stat['last_deployed_at']:
+                    print(f"  Last deployment:        {stat['last_deployed_at']}")
+
+                print()
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to get deployment statistics: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
+
+    def health_check(self, args) -> int:
+        """Run health checks on deployed project"""
+        try:
+            from services.deployment_tracking_service import DeploymentTrackingService
+
+            project_slug = args.slug
+            target = args.target if hasattr(args, 'target') and args.target else 'production'
+
+            tracking_service = DeploymentTrackingService()
+
+            # Get latest deployment for this target
+            deployments = tracking_service.get_deployment_history(
+                project_slug=project_slug,
+                target=target,
+                limit=1
+            )
+
+            if not deployments:
+                print(f"\nNo deployments found for {project_slug} ({target})")
+                return 1
+
+            deployment = deployments[0]
+            print(f"\n🏥 Running health checks for {project_slug} ({target})")
+            print(f"   Deployment #{deployment.get('id')} from {deployment.get('deployed_at')}\n")
+
+            # Get project to access environment variables
+            project = self.get_project_or_exit(project_slug)
+
+            # Get environment variables for health check URLs
+            env_vars = self.ctx.base_repo.query_all("""
+                SELECT var_name, var_value
+                FROM environment_variables
+                WHERE scope_type = 'project'
+                  AND scope_id = ?
+                  AND (var_name LIKE ? OR var_name NOT LIKE '%:%')
+            """, (project['id'], f"{target}:%"))
+
+            env_dict = {}
+            for row in env_vars:
+                var_name = row['var_name']
+                if ':' in var_name:
+                    _, actual_name = var_name.split(':', 1)
+                else:
+                    actual_name = var_name
+                env_dict[actual_name] = row['var_value']
+
+            # Run HTTP health checks
+            checks_run = 0
+
+            # Check SUPABASE_URL
+            if 'SUPABASE_URL' in env_dict:
+                url = env_dict['SUPABASE_URL']
+                print(f"Checking Supabase API...")
+                result = tracking_service.run_http_health_check(
+                    deployment_id=deployment.get("id"),
+                    check_name="Supabase API",
+                    url=url
+                )
+                status_icon = '✅' if result.status == 'pass' else '❌'
+                print(f"  {status_icon} {result.status.upper()}", end='')
+                if result.response_time_ms:
+                    print(f" ({result.response_time_ms}ms)", end='')
+                if result.error_message:
+                    print(f" - {result.error_message}", end='')
+                print()
+                checks_run += 1
+
+            # Check DATABASE_URL
+            if 'DATABASE_URL' in env_dict:
+                print(f"Checking database connectivity...")
+                result = tracking_service.run_database_health_check(
+                    deployment_id=deployment.get("id"),
+                    check_name="Database",
+                    database_url=env_dict['DATABASE_URL']
+                )
+                status_icon = '✅' if result.status == 'pass' else '❌'
+                print(f"  {status_icon} {result.status.upper()}", end='')
+                if result.response_time_ms:
+                    print(f" ({result.response_time_ms}ms)", end='')
+                if result.error_message:
+                    print(f" - {result.error_message}", end='')
+                print()
+                checks_run += 1
+
+            # Check PUBLIC_URL
+            if 'PUBLIC_URL' in env_dict:
+                url = env_dict['PUBLIC_URL']
+                print(f"Checking public URL...")
+                result = tracking_service.run_http_health_check(
+                    deployment_id=deployment.get("id"),
+                    check_name="Public URL",
+                    url=url
+                )
+                status_icon = '✅' if result.status == 'pass' else '❌'
+                print(f"  {status_icon} {result.status.upper()}", end='')
+                if result.response_time_ms:
+                    print(f" ({result.response_time_ms}ms)", end='')
+                if result.error_message:
+                    print(f" - {result.error_message}", end='')
+                print()
+                checks_run += 1
+
+            if checks_run == 0:
+                print("No health check endpoints configured")
+                print("Set SUPABASE_URL, DATABASE_URL, or PUBLIC_URL to enable health checks")
+
+            print()
+            return 0
+
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
             import traceback
             traceback.print_exc()
             return 1
@@ -1136,7 +1433,7 @@ def register(cli):
     # deploy run command
     run_parser = subparsers.add_parser('run', help='Deploy project (uses FHS isolation by default)')
     run_parser.add_argument('slug', help='Project slug')
-    run_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
+    run_parser.add_argument('--target', default=None, help='Deployment target (shows available targets if not specified)')
     run_parser.add_argument('--dry-run', action='store_true', help='Show what would be deployed without deploying')
     run_parser.add_argument('--skip-validation', action='store_true', help='Skip environment variable validation')
     run_parser.add_argument('--mutable', action='store_true',
@@ -1174,11 +1471,22 @@ def register(cli):
     cli.commands['deploy.target'] = deploy_handler.target
 
     # deploy history command
-    history_parser = subparsers.add_parser('history', help='Show deployment history')
+    history_parser = subparsers.add_parser('history', help='Show deployment history with timestamps and health checks')
     history_parser.add_argument('slug', help='Project slug')
     history_parser.add_argument('--target', help='Filter by target')
     history_parser.add_argument('--limit', type=int, default=10, help='Number of deployments to show (default: 10)')
     cli.commands['deploy.history'] = deploy_handler.history
+
+    # deploy stats command
+    stats_parser = subparsers.add_parser('stats', help='Show deployment statistics')
+    stats_parser.add_argument('slug', help='Project slug')
+    cli.commands['deploy.stats'] = deploy_handler.stats
+
+    # deploy health-check command
+    health_parser = subparsers.add_parser('health-check', help='Run health checks on deployed project')
+    health_parser.add_argument('slug', help='Project slug')
+    health_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
+    cli.commands['deploy.health-check'] = deploy_handler.health_check
 
     # deploy rollback command
     rollback_parser = subparsers.add_parser('rollback', help='Rollback to previous deployment')

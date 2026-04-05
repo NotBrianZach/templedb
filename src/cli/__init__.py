@@ -15,7 +15,7 @@ from cli.commands import (
     project, vcs, env, search, system, cathedral, deploy, migration,
     target, secret, tui_launcher, config, workitem, mcp, direnv, merge,
     blob, domain, backup, claude, prompt, vibe, nixos, key, cache, nixops4,
-    deploy_nix, file, tutorial, git_server_commands, query_open
+    deploy_nix, file, tutorial, git_server_commands, query_open, dev, deploy_history
     # Note: code module not imported - functionality available via MCP tools
 )
 from cli.core import cli
@@ -24,6 +24,7 @@ from cli.core import cli
 def main():
     """Main CLI entry point"""
     # Register all command modules
+    dev.register(cli)  # Local development with TempleDB environment - REGISTER FIRST FOR TESTING
     project.register(cli)
     vcs.register(cli)
     file.register(cli)
@@ -32,6 +33,7 @@ def main():
     system.register(cli)  # Only registers 'status' now
     cathedral.register(cli)
     deploy.register(cli)
+    deploy_history.register(cli)  # Deployment history and health checks
     migration.register(cli)
     target.register(cli)
     secret.register(cli)
