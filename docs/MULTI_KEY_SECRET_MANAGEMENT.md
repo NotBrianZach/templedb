@@ -24,7 +24,7 @@ TempleDB uses [age](https://github.com/FiloSottile/age) encryption with:
 ### 1. List Registered Keys
 
 ```bash
-./templedb key list
+templedb key list
 ```
 
 Example output:
@@ -54,30 +54,30 @@ yubikey-slot2 (yubikey) - ✓ ACTIVE
 
 ```bash
 # Lazy mode (default) - adds to all existing secrets
-./templedb key add filesystem --name backup-key --path ~/.age/backup.txt --location "USB drive"
+templedb key add filesystem --name backup-key --path ~/.age/backup.txt --location "USB drive"
 
 # Corpo mode - only registers key
-./templedb key add filesystem --name backup-key --path ~/.age/backup.txt --no-lazy
+templedb key add filesystem --name backup-key --path ~/.age/backup.txt --no-lazy
 ```
 
 ### 3. Setup a Yubikey
 
 ```bash
 # Interactive setup - generates age identity on Yubikey
-./templedb key setup-yubikey
+templedb key setup-yubikey
 
 # Then register it (lazy mode adds to all secrets automatically)
-./templedb key add yubikey --name yubikey-primary --location "daily-use"
+templedb key add yubikey --name yubikey-primary --location "daily-use"
 
 # Register specific slot
-./templedb key add yubikey --name yubikey-backup --location "safe" --slot 2
+templedb key add yubikey --name yubikey-backup --location "safe" --slot 2
 ```
 
 ### 4. View Secret Keys
 
 ```bash
 # See which keys protect a secret
-./templedb secret show-keys templedb --profile default
+templedb secret show-keys templedb --profile default
 ```
 
 Example output:
@@ -110,13 +110,13 @@ Encrypted with 4 keys:
 Manually add a key to specific secrets (useful in corpo mode):
 
 ```bash
-./templedb secret add-key PROJECT --profile default --key KEY_NAME
+templedb secret add-key PROJECT --profile default --key KEY_NAME
 ```
 
 ### Remove Keys from Secrets
 
 ```bash
-./templedb secret remove-key PROJECT --profile default --key KEY_NAME
+templedb secret remove-key PROJECT --profile default --key KEY_NAME
 ```
 
 Note: Cannot remove the last key from a secret.
@@ -126,7 +126,7 @@ Note: Cannot remove the last key from a secret.
 Verify a key can encrypt/decrypt:
 
 ```bash
-./templedb key test KEY_NAME
+templedb key test KEY_NAME
 ```
 
 ### Disable/Enable Keys
@@ -134,8 +134,8 @@ Verify a key can encrypt/decrypt:
 Temporarily disable a key without deletion:
 
 ```bash
-./templedb key disable KEY_NAME
-./templedb key enable KEY_NAME
+templedb key disable KEY_NAME
+templedb key enable KEY_NAME
 ```
 
 ### Key Info
@@ -143,7 +143,7 @@ Temporarily disable a key without deletion:
 Show detailed information about a key:
 
 ```bash
-./templedb key info KEY_NAME
+templedb key info KEY_NAME
 ```
 
 ## Modes
@@ -153,7 +153,7 @@ Show detailed information about a key:
 When adding a key in lazy mode, it's automatically added to ALL existing secrets:
 
 ```bash
-./templedb key add yubikey --name yk-1 --location "daily-use"
+templedb key add yubikey --name yk-1 --location "daily-use"
 ```
 
 **What happens:**
@@ -173,7 +173,7 @@ When adding a key in lazy mode, it's automatically added to ALL existing secrets
 Only registers the key without modifying secrets:
 
 ```bash
-./templedb key add yubikey --name yk-2 --location "offsite" --no-lazy
+templedb key add yubikey --name yk-2 --location "offsite" --no-lazy
 ```
 
 **What happens:**
@@ -189,7 +189,7 @@ Only registers the key without modifying secrets:
 
 **Then manually add to secrets:**
 ```bash
-./templedb secret add-key my-project --key yk-2
+templedb secret add-key my-project --key yk-2
 ```
 
 ## Multi-Recipient Secret Initialization
@@ -197,7 +197,7 @@ Only registers the key without modifying secrets:
 Create a new secret with multiple keys from the start:
 
 ```bash
-./templedb secret init-multi PROJECT \
+templedb secret init-multi PROJECT \
   --profile default \
   --keys "key1,key2,key3"
 ```
@@ -207,7 +207,7 @@ Create a new secret with multiple keys from the start:
 Revoke a compromised key with quorum approval (requires 2-of-4 keys):
 
 ```bash
-./templedb key revoke COMPROMISED_KEY --reason "Lost Yubikey"
+templedb key revoke COMPROMISED_KEY --reason "Lost Yubikey"
 ```
 
 **What happens:**
@@ -219,7 +219,7 @@ Revoke a compromised key with quorum approval (requires 2-of-4 keys):
 
 **View revoked keys:**
 ```bash
-./templedb key show-revoked
+templedb key show-revoked
 ```
 
 ## Decryption Behavior
@@ -245,18 +245,18 @@ TempleDB automatically tries all available keys when decrypting:
 
 ```bash
 # 1. Generate age identities on 3 Yubikeys
-./templedb key setup-yubikey  # Insert Yubikey 1, follow prompts
-./templedb key add yubikey --name yubikey-daily --location "daily-use"
+templedb key setup-yubikey  # Insert Yubikey 1, follow prompts
+templedb key add yubikey --name yubikey-daily --location "daily-use"
 
-./templedb key setup-yubikey  # Insert Yubikey 2
-./templedb key add yubikey --name yubikey-safe --location "home-safe"
+templedb key setup-yubikey  # Insert Yubikey 2
+templedb key add yubikey --name yubikey-safe --location "home-safe"
 
-./templedb key setup-yubikey  # Insert Yubikey 3
-./templedb key add yubikey --name yubikey-offsite --location "bank-deposit-box"
+templedb key setup-yubikey  # Insert Yubikey 3
+templedb key add yubikey --name yubikey-offsite --location "bank-deposit-box"
 
 # 2. Add filesystem backup key
 age-keygen -o ~/.age/usb-backup.txt
-./templedb key add filesystem \
+templedb key add filesystem \
   --name usb-backup \
   --path ~/.age/usb-backup.txt \
   --location "USB drive in safe"
@@ -268,11 +268,11 @@ age-keygen -o ~/.age/usb-backup.txt
 
 ```bash
 # 1. Revoke compromised key (requires 2-of-4 approval)
-./templedb key revoke yubikey-daily --reason "Lost during travel"
+templedb key revoke yubikey-daily --reason "Lost during travel"
 
 # 2. Add replacement key
-./templedb key setup-yubikey  # New Yubikey
-./templedb key add yubikey --name yubikey-replacement --location "daily-use"
+templedb key setup-yubikey  # New Yubikey
+templedb key add yubikey --name yubikey-replacement --location "daily-use"
 
 # Result: All secrets now use 4 keys again (3 Yubikeys + 1 filesystem)
 ```
@@ -286,11 +286,11 @@ age-keygen -o ~/.age/usb-backup.txt
 export TEMPLEDB_AGE_KEY_FILE=~/.age/usb-backup.txt
 
 # Access all secrets
-./templedb secret export my-project --format yaml
+templedb secret export my-project --format yaml
 
 # Setup new Yubikeys
-./templedb key setup-yubikey
-./templedb key add yubikey --name yubikey-new-1 --location "daily-use"
+templedb key setup-yubikey
+templedb key add yubikey --name yubikey-new-1 --location "daily-use"
 # Repeat for additional Yubikeys
 
 # Result: Back to full redundancy
@@ -388,7 +388,7 @@ Requires:
 
 **DO:**
 - Keep filesystem backup in physically separate location
-- Test backups regularly (`./templedb key test`)
+- Test backups regularly (`templedb key test`)
 - Document key locations
 - Use quorum revocation for compromised keys
 
@@ -441,8 +441,8 @@ If you see "Generated recipients for 2 slots":
 age-plugin-yubikey --list
 
 # Add specific slot
-./templedb key add yubikey --name yk-slot1 --slot 1
-./templedb key add yubikey --name yk-slot2 --slot 2
+templedb key add yubikey --name yk-slot1 --slot 1
+templedb key add yubikey --name yk-slot2 --slot 2
 ```
 
 ## Reference
@@ -451,21 +451,21 @@ age-plugin-yubikey --list
 
 ```bash
 # Key management
-./templedb key add {yubikey|filesystem} --name NAME [options]
-./templedb key list [--all]
-./templedb key info KEY_NAME
-./templedb key test KEY_NAME
-./templedb key enable KEY_NAME
-./templedb key disable KEY_NAME
-./templedb key setup-yubikey
-./templedb key revoke KEY_NAME [--reason REASON] [--quorum N]
-./templedb key show-revoked
+templedb key add {yubikey|filesystem} --name NAME [options]
+templedb key list [--all]
+templedb key info KEY_NAME
+templedb key test KEY_NAME
+templedb key enable KEY_NAME
+templedb key disable KEY_NAME
+templedb key setup-yubikey
+templedb key revoke KEY_NAME [--reason REASON] [--quorum N]
+templedb key show-revoked
 
 # Secret management
-./templedb secret init-multi PROJECT --keys "key1,key2,key3"
-./templedb secret show-keys PROJECT [--profile PROFILE]
-./templedb secret add-key PROJECT --key KEY_NAME [--profile PROFILE]
-./templedb secret remove-key PROJECT --key KEY_NAME [--profile PROFILE]
+templedb secret init-multi PROJECT --keys "key1,key2,key3"
+templedb secret show-keys PROJECT [--profile PROFILE]
+templedb secret add-key PROJECT --key KEY_NAME [--profile PROFILE]
+templedb secret remove-key PROJECT --key KEY_NAME [--profile PROFILE]
 ```
 
 ### Key Add Flags

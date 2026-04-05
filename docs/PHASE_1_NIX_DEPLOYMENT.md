@@ -69,7 +69,7 @@ templedb deploy-nix build <project-slug>
 
 **Example**:
 ```bash
-./templedb deploy-nix build woofs_projects
+templedb deploy-nix build woofs_projects
 
 # Output:
 # 🔨 Building Nix closure for woofs_projects...
@@ -97,7 +97,7 @@ templedb deploy-nix transfer <project-slug> --host <target-host> [--user deploy]
 
 **Example**:
 ```bash
-./templedb deploy-nix transfer woofs_projects --host vps.example.com --user deploy
+templedb deploy-nix transfer woofs_projects --host vps.example.com --user deploy
 
 # Output:
 # 📤 Transferring closure to deploy@vps.example.com...
@@ -125,7 +125,7 @@ templedb deploy-nix import <project-slug> --host <target-host> [--user deploy]
 
 **Example**:
 ```bash
-./templedb deploy-nix import woofs_projects --host vps.example.com
+templedb deploy-nix import woofs_projects --host vps.example.com
 
 # Output:
 # 📥 Importing closure on vps.example.com...
@@ -156,7 +156,7 @@ templedb deploy-nix activate <project-slug> --host <target-host> [--port 8000]
 
 **Example**:
 ```bash
-./templedb deploy-nix activate woofs_projects --host vps.example.com --port 8000
+templedb deploy-nix activate woofs_projects --host vps.example.com --port 8000
 
 # Output:
 # 🚀 Activating service on vps.example.com...
@@ -189,7 +189,7 @@ Runs steps 1-6 in sequence:
 
 **Example**:
 ```bash
-./templedb deploy-nix run woofs_projects --host vps.example.com --port 8000
+templedb deploy-nix run woofs_projects --host vps.example.com --port 8000
 
 # Output:
 # ======================================================================
@@ -245,7 +245,7 @@ templedb deploy-nix health --host <target-host> [--port 8000] [--endpoint /healt
 
 **Example**:
 ```bash
-./templedb deploy-nix health --host vps.example.com --port 8000
+templedb deploy-nix health --host vps.example.com --port 8000
 
 # Output:
 # 🏥 Running health check on vps.example.com:8000/health...
@@ -331,10 +331,10 @@ Ensure your project has a `flake.nix` (will be auto-generated if missing):
 
 ```bash
 # Import project into TempleDB
-./templedb project import ~/projects/woofs_projects
+templedb project import ~/projects/woofs_projects
 
 # Verify project
-./templedb project show woofs_projects
+templedb project show woofs_projects
 ```
 
 ### Step 2: Set Environment Variables
@@ -343,13 +343,13 @@ Add production secrets to TempleDB:
 
 ```bash
 # Database URL
-./templedb secret set woofs_projects DATABASE_URL postgresql://user:pass@db.example.com/woofs --env production
+templedb secret set woofs_projects DATABASE_URL postgresql://user:pass@db.example.com/woofs --env production
 
 # API keys
-./templedb secret set woofs_projects OPENAI_API_KEY sk-... --env production
+templedb secret set woofs_projects OPENAI_API_KEY sk-... --env production
 
 # Other config
-./templedb env set woofs_projects LOG_LEVEL info --target production
+templedb env set woofs_projects LOG_LEVEL info --target production
 ```
 
 ### Step 3: Configure Target
@@ -357,7 +357,7 @@ Add production secrets to TempleDB:
 Add deployment target to TempleDB:
 
 ```bash
-./templedb target add woofs_projects production \
+templedb target add woofs_projects production \
   --type native_service \
   --host vps.example.com \
   --provider self_hosted \
@@ -369,7 +369,7 @@ Add deployment target to TempleDB:
 Run the full deployment:
 
 ```bash
-./templedb deploy-nix run woofs_projects --host vps.example.com --port 8000
+templedb deploy-nix run woofs_projects --host vps.example.com --port 8000
 ```
 
 **That's it!** Your service is now running on the VPS.
@@ -490,7 +490,7 @@ ssh deploy@vps.example.com 'sudo journalctl -u woofs_projects -n 50'
 The service may still be starting. Wait a few seconds and try again:
 
 ```bash
-./templedb deploy-nix health --host vps.example.com --port 8000
+templedb deploy-nix health --host vps.example.com --port 8000
 ```
 
 If still failing, check:
@@ -505,7 +505,7 @@ If still failing, check:
 ### Custom Health Check Endpoint
 
 ```bash
-./templedb deploy-nix health \
+templedb deploy-nix health \
   --host vps.example.com \
   --port 8000 \
   --endpoint /api/status
@@ -514,7 +514,7 @@ If still failing, check:
 ### Deploy to Different User
 
 ```bash
-./templedb deploy-nix run woofs_projects \
+templedb deploy-nix run woofs_projects \
   --host vps.example.com \
   --user app-deploy \
   --port 3000
@@ -526,19 +526,19 @@ For debugging or learning, run each step individually:
 
 ```bash
 # 1. Build
-./templedb deploy-nix build woofs_projects
+templedb deploy-nix build woofs_projects
 
 # 2. Transfer
-./templedb deploy-nix transfer woofs_projects --host vps.example.com
+templedb deploy-nix transfer woofs_projects --host vps.example.com
 
 # 3. Import
-./templedb deploy-nix import woofs_projects --host vps.example.com
+templedb deploy-nix import woofs_projects --host vps.example.com
 
 # 4. Activate
-./templedb deploy-nix activate woofs_projects --host vps.example.com --port 8000
+templedb deploy-nix activate woofs_projects --host vps.example.com --port 8000
 
 # 5. Health check
-./templedb deploy-nix health --host vps.example.com --port 8000
+templedb deploy-nix health --host vps.example.com --port 8000
 ```
 
 ---

@@ -15,7 +15,7 @@ TempleDB deployments now use **FHS isolation by default**, providing reproducibl
 **Isolated, reproducible deployment in Nix FHS environment**
 
 ```bash
-./templedb deploy run my-project
+templedb deploy run my-project
 ```
 
 **What happens:**
@@ -42,7 +42,7 @@ TempleDB deployments now use **FHS isolation by default**, providing reproducibl
 **Direct file access, allows editing during deployment**
 
 ```bash
-./templedb deploy run my-project --mutable
+templedb deploy run my-project --mutable
 ```
 
 **What happens:**
@@ -69,7 +69,7 @@ TempleDB deployments now use **FHS isolation by default**, providing reproducibl
 **Completely disable FHS (legacy behavior)**
 
 ```bash
-./templedb deploy run my-project --no-fhs
+templedb deploy run my-project --no-fhs
 ```
 
 **What happens:**
@@ -88,7 +88,7 @@ TempleDB deployments now use **FHS isolation by default**, providing reproducibl
 
 ```bash
 # Just deploy - FHS automatically
-./templedb deploy run my-project
+templedb deploy run my-project
 
 # Output:
 🚀 Deploying my-project to production
@@ -109,15 +109,15 @@ TempleDB deployments now use **FHS isolation by default**, providing reproducibl
 ✅ Deployment complete!
 
 🔧 FHS environment available
-   Enter shell:  ./templedb deploy shell my-project
-   Run command:  ./templedb deploy exec my-project '<cmd>'
+   Enter shell:  templedb deploy shell my-project
+   Run command:  templedb deploy exec my-project '<cmd>'
 ```
 
 ### Mutable Mode Deployment
 
 ```bash
 # Deploy in mutable mode
-./templedb deploy run my-project --mutable
+templedb deploy run my-project --mutable
 
 # Output:
 ⚠️  MUTABLE MODE: Files can be edited directly
@@ -138,13 +138,13 @@ Both modes support the same access commands:
 
 ```bash
 # Enter shell (FHS if available, regular shell if mutable)
-./templedb deploy shell my-project
+templedb deploy shell my-project
 
 # Run command
-./templedb deploy exec my-project 'npm test'
+templedb deploy exec my-project 'npm test'
 
 # Get path
-cd $(./templedb deploy path my-project)
+cd $(templedb deploy path my-project)
 ```
 
 ## Workflows
@@ -153,25 +153,25 @@ cd $(./templedb deploy path my-project)
 
 ```bash
 # 1. Deploy with FHS
-./templedb deploy run my-app --target production
+templedb deploy run my-app --target production
 
 # 2. Test in isolated environment
-./templedb deploy shell my-app
+templedb deploy shell my-app
 (fhs:my-app) $ npm test
 (fhs:my-app) $ exit
 
 # 3. Check logs
-./templedb deploy exec my-app 'tail -f logs/app.log'
+templedb deploy exec my-app 'tail -f logs/app.log'
 ```
 
 ### Development Iteration (Mutable)
 
 ```bash
 # 1. Deploy in mutable mode
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # 2. Edit deployment script
-cd $(./templedb deploy path my-app)
+cd $(templedb deploy path my-app)
 vim deploy.sh
 
 # 3. Test immediately
@@ -180,27 +180,27 @@ vim deploy.sh
 # 4. Repeat until working
 
 # 5. Final deploy with FHS
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 ### Debugging (Mixed)
 
 ```bash
 # 1. Deploy with FHS
-./templedb deploy run my-app
+templedb deploy run my-app
 
 # 2. Something's wrong - enter mutable shell
-./templedb deploy shell my-app
+templedb deploy shell my-app
 
 # 3. Debug interactively
 (fhs:my-app) $ echo "Debug info" >> deploy.sh
 (fhs:my-app) $ ./deploy.sh  # Test fix
 
 # 4. If FHS is the problem, redeploy mutable
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # 5. Fix and redeploy with FHS
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 ## Comparison
@@ -222,14 +222,14 @@ The system automatically detects and shows the mode:
 
 ```bash
 # FHS mode
-./templedb deploy list
+templedb deploy list
 
   ✓ my-app 🔧 [FHS]              # 🔧 = FHS environment
-     Shell: ./templedb deploy shell my-app
+     Shell: templedb deploy shell my-app
 
 # Mutable mode
   ✓ test-app [FHS]               # No 🔧 = No FHS wrapper
-     Shell: ./templedb deploy shell test-app
+     Shell: templedb deploy shell test-app
 ```
 
 ## Configuration
@@ -267,23 +267,23 @@ extra_packages = ["docker", "kubectl"]
 
 **Before:**
 ```bash
-./templedb deploy run my-project
+templedb deploy run my-project
 # Used system packages
 ```
 
 **After (automatic):**
 ```bash
-./templedb deploy run my-project
+templedb deploy run my-project
 # Now uses FHS automatically!
 ```
 
 **If it breaks:**
 ```bash
 # Temporarily use old behavior
-./templedb deploy run my-project --no-fhs
+templedb deploy run my-project --no-fhs
 
 # Or use mutable mode
-./templedb deploy run my-project --mutable
+templedb deploy run my-project --mutable
 ```
 
 ### To Mutable When Needed
@@ -292,14 +292,14 @@ extra_packages = ["docker", "kubectl"]
 
 ```bash
 # Before: Manual navigation
-./templedb deploy run my-project
+templedb deploy run my-project
 cd /complicated/path/to/deployment
 vim deploy.sh
 ./deploy.sh
 
 # After: Mutable mode
-./templedb deploy run my-project --mutable
-cd $(./templedb deploy path my-project)
+templedb deploy run my-project --mutable
+cd $(templedb deploy path my-project)
 vim deploy.sh
 ./deploy.sh
 ```
@@ -310,23 +310,23 @@ vim deploy.sh
 
 1. **Use FHS for production**
    ```bash
-   ./templedb deploy run my-app --target production
+   templedb deploy run my-app --target production
    ```
 
 2. **Use mutable for development**
    ```bash
-   ./templedb deploy run my-app --target dev --mutable
+   templedb deploy run my-app --target dev --mutable
    ```
 
 3. **Test in FHS before production**
    ```bash
-   ./templedb deploy run my-app --target staging
-   ./templedb deploy shell my-app  # Test
+   templedb deploy run my-app --target staging
+   templedb deploy shell my-app  # Test
    ```
 
 4. **Use deploy shell for debugging**
    ```bash
-   ./templedb deploy shell my-app
+   templedb deploy shell my-app
    # Better than cd + manual exploration
    ```
 
@@ -335,20 +335,20 @@ vim deploy.sh
 1. **Don't use --no-fhs without reason**
    ```bash
    # Bad: Loses reproducibility
-   ./templedb deploy run my-app --no-fhs
+   templedb deploy run my-app --no-fhs
    ```
 
 2. **Don't edit files in FHS mode**
    ```bash
    # Won't work - FHS files are from Nix store
-   cd $(./templedb deploy path my-app)
+   cd $(templedb deploy path my-app)
    vim some-file  # Changes may not persist
    ```
 
 3. **Don't deploy mutable to production**
    ```bash
    # Bad: Not reproducible
-   ./templedb deploy run my-app --target prod --mutable
+   templedb deploy run my-app --target prod --mutable
    ```
 
 ## Troubleshooting
@@ -360,14 +360,14 @@ vim deploy.sh
 **Solution:**
 ```bash
 # Check what packages were detected
-./templedb deploy run my-app --dry-run
+templedb deploy run my-app --dry-run
 
 # Try mutable mode to debug
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Add missing packages
 export TEMPLEDB_FHS_EXTRA_PACKAGES="missing-pkg"
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 ### Need to Edit Files
@@ -377,11 +377,11 @@ export TEMPLEDB_FHS_EXTRA_PACKAGES="missing-pkg"
 **Solution:**
 ```bash
 # Use mutable mode
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Or edit source and redeploy
-./templedb project sync my-app
-./templedb deploy run my-app
+templedb project sync my-app
+templedb deploy run my-app
 ```
 
 ### FHS Too Slow
@@ -394,10 +394,10 @@ export TEMPLEDB_FHS_EXTRA_PACKAGES="missing-pkg"
 # Subsequent deploys are fast (~500ms)
 
 # Or use mutable for rapid iteration
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Then final deploy with FHS
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 ## FAQ

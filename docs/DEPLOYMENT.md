@@ -6,15 +6,15 @@ Deploy projects from TempleDB to staging/production. Automated migrations, DNS, 
 
 ```bash
 # Setup
-./templedb target add myapp production --provider supabase --host db.example.com
-./templedb secret init myapp --age-recipient $(age-keygen -y ~/.config/age/keys.txt)
-./templedb secret edit myapp  # Add SUPABASE_SERVICE_KEY, etc.
+templedb target add myapp production --provider supabase --host db.example.com
+templedb secret init myapp --age-recipient $(age-keygen -y ~/.config/age/keys.txt)
+templedb secret edit myapp  # Add SUPABASE_SERVICE_KEY, etc.
 
 # Deploy
-./templedb deploy run myapp --target production
+templedb deploy run myapp --target production
 
 # Rollback if needed
-./templedb deploy rollback myapp --target production
+templedb deploy rollback myapp --target production
 ```
 
 ## Workflow
@@ -30,15 +30,15 @@ Deploy projects from TempleDB to staging/production. Automated migrations, DNS, 
 
 ```bash
 # Add targets
-./templedb target add myapp local --provider postgresql --host localhost:5432
-./templedb target add myapp staging --provider supabase --host staging.example.com
-./templedb target add myapp production --provider supabase --host db.example.com
+templedb target add myapp local --provider postgresql --host localhost:5432
+templedb target add myapp staging --provider supabase --host staging.example.com
+templedb target add myapp production --provider supabase --host db.example.com
 
 # List all targets
-./templedb target list --project myapp
+templedb target list --project myapp
 
 # Show target details
-./templedb target show myapp production
+templedb target show myapp production
 ```
 
 **Target config stored in database:**
@@ -54,10 +54,10 @@ age-keygen -o ~/.config/age/keys.txt
 export TEMPLEDB_AGE_KEY_FILE=~/.config/age/keys.txt
 
 # Per-project: Initialize secrets
-./templedb secret init myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
+templedb secret init myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
 
 # Edit secrets (opens $EDITOR with decrypted YAML)
-./templedb secret edit myapp
+templedb secret edit myapp
 
 # Example secrets.yaml:
 # supabase:
@@ -67,10 +67,10 @@ export TEMPLEDB_AGE_KEY_FILE=~/.config/age/keys.txt
 #   api_token: xyz123...
 
 # List secrets (shows keys only, not values)
-./templedb secret list myapp
+templedb secret list myapp
 
 # Export to environment
-eval "$(./templedb secret export myapp --format shell)"
+eval "$(templedb secret export myapp --format shell)"
 ```
 
 Secrets encrypted with age, stored in database, decrypted on-demand during deployment.
@@ -79,14 +79,14 @@ Secrets encrypted with age, stored in database, decrypted on-demand during deplo
 
 ```bash
 # Dry run (preview what will happen)
-./templedb deploy run myapp --target production --dry-run
+templedb deploy run myapp --target production --dry-run
 
 # Full deployment
-./templedb deploy run myapp --target production
+templedb deploy run myapp --target production
 
 # Skip specific steps
-./templedb deploy run myapp --target production --skip migrations
-./templedb deploy run myapp --target production --skip tests
+templedb deploy run myapp --target production --skip migrations
+templedb deploy run myapp --target production --skip tests
 ```
 
 **What happens:**
@@ -172,16 +172,16 @@ critical: false      # Don't fail deployment if this fails
 
 ```bash
 # List deployments
-./templedb deploy list myapp --target production
+templedb deploy list myapp --target production
 
 # Show deployment details
-./templedb deploy show myapp <deployment-id>
+templedb deploy show myapp <deployment-id>
 
 # Rollback to previous version
-./templedb deploy rollback myapp --target production
+templedb deploy rollback myapp --target production
 
 # Rollback to specific deployment
-./templedb deploy rollback myapp --target production --to <deployment-id>
+templedb deploy rollback myapp --target production --to <deployment-id>
 ```
 
 **What rollback does:**
@@ -195,12 +195,12 @@ critical: false      # Don't fail deployment if this fails
 
 ```bash
 # Register domain + configure DNS
-./templedb domain register myapp example.com --registrar cloudflare
-./templedb domain dns configure myapp example.com --target production
-./templedb domain dns apply myapp example.com --target production
+templedb domain register myapp example.com --registrar cloudflare
+templedb domain dns configure myapp example.com --target production
+templedb domain dns apply myapp example.com --target production
 
 # Deploy (uses DNS config automatically)
-./templedb deploy run myapp --target production
+templedb deploy run myapp --target production
 ```
 
 Auto-generated environment variables:
@@ -222,7 +222,7 @@ See [DNS.md](DNS.md) for full DNS documentation.
 **Check variables:**
 ```bash
 # Show environment for target
-./templedb deploy env myapp --target production
+templedb deploy env myapp --target production
 
 # Query database
 sqlite3 ~/.local/share/templedb/templedb.sqlite
@@ -244,13 +244,13 @@ VALUES (
 
 ```bash
 # View deployment history
-./templedb deploy list myapp
+templedb deploy list myapp
 
 # Show latest deployment
-./templedb deploy show myapp --latest
+templedb deploy show myapp --latest
 
 # Check status
-./templedb deploy status myapp --target production
+templedb deploy status myapp --target production
 ```
 
 **Database queries:**
@@ -280,20 +280,20 @@ GROUP BY target_name;
 
 ```bash
 # 1. Setup project + target
-./templedb project import https://github.com/user/myapp
-./templedb target add myapp production --provider supabase --host db.example.com
+templedb project import https://github.com/user/myapp
+templedb target add myapp production --provider supabase --host db.example.com
 
 # 2. Setup secrets
 age-keygen -o ~/.config/age/keys.txt
 export TEMPLEDB_AGE_KEY_FILE=~/.config/age/keys.txt
-./templedb secret init myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
-./templedb secret edit myapp
+templedb secret init myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
+templedb secret edit myapp
 # Add: supabase.service_key, supabase.anon_key
 
 # 3. Setup DNS (optional)
-./templedb domain register myapp example.com --registrar cloudflare
-./templedb domain dns configure myapp example.com --target production
-./templedb domain dns apply myapp example.com --target production
+templedb domain register myapp example.com --registrar cloudflare
+templedb domain dns configure myapp example.com --target production
+templedb domain dns apply myapp example.com --target production
 
 # 4. Configure deployment
 cat > .templedb/deploy.yaml <<EOF
@@ -313,61 +313,61 @@ hooks:
 EOF
 
 # 5. Test deployment (dry run)
-./templedb deploy run myapp --target production --dry-run
+templedb deploy run myapp --target production --dry-run
 
 # 6. Deploy
-./templedb deploy run myapp --target production
+templedb deploy run myapp --target production
 
 # 7. Verify
-./templedb deploy status myapp --target production
+templedb deploy status myapp --target production
 curl https://example.com/health
 
 # 8. Rollback if needed
-./templedb deploy rollback myapp --target production
+templedb deploy rollback myapp --target production
 ```
 
 ## Multi-Environment
 
 ```bash
 # Deploy to staging first
-./templedb deploy run myapp --target staging
-./templedb deploy status myapp --target staging
+templedb deploy run myapp --target staging
+templedb deploy status myapp --target staging
 
 # Verify staging
 curl https://staging.example.com/health
 
 # Deploy to production
-./templedb deploy run myapp --target production
+templedb deploy run myapp --target production
 
 # Compare environments
-./templedb deploy diff myapp --from staging --to production
+templedb deploy diff myapp --from staging --to production
 ```
 
 ## Troubleshooting
 
 **"Target not found"**
 ```bash
-./templedb target list --project myapp
-./templedb target add myapp production --provider supabase --host db.example.com
+templedb target list --project myapp
+templedb target add myapp production --provider supabase --host db.example.com
 ```
 
 **"Secrets not found"**
 ```bash
-./templedb secret list myapp
-./templedb secret init myapp --age-recipient <key>
-./templedb secret edit myapp
+templedb secret list myapp
+templedb secret init myapp --age-recipient <key>
+templedb secret edit myapp
 ```
 
 **"Migration failed"**
 ```bash
 # Check migration error
-./templedb deploy show myapp --latest
+templedb deploy show myapp --latest
 
 # Run migration manually
 psql $DATABASE_URL -f migrations/001_init.sql
 
 # Skip migrations on retry
-./templedb deploy run myapp --target production --skip migrations
+templedb deploy run myapp --target production --skip migrations
 ```
 
 **"Deployment timeout"**
@@ -381,7 +381,7 @@ groups:
 **"Hook failed"**
 ```bash
 # Check hook output
-./templedb deploy show myapp --latest
+templedb deploy show myapp --latest
 
 # Make hook non-critical
 hooks:
@@ -394,30 +394,30 @@ hooks:
 
 ```bash
 # Targets
-./templedb target add <proj> <name> --provider <prov> --host <host>
-./templedb target list [--project <proj>]
-./templedb target show <proj> <name>
-./templedb target remove <proj> <name>
+templedb target add <proj> <name> --provider <prov> --host <host>
+templedb target list [--project <proj>]
+templedb target show <proj> <name>
+templedb target remove <proj> <name>
 
 # Deployment
-./templedb deploy run <proj> --target <target> [--dry-run] [--skip <step>]
-./templedb deploy list <proj>
-./templedb deploy show <proj> [<deploy-id>] [--latest]
-./templedb deploy status <proj> --target <target>
-./templedb deploy env <proj> --target <target>
-./templedb deploy rollback <proj> --target <target> [--to <id>]
-./templedb deploy diff <proj> --from <target1> --to <target2>
+templedb deploy run <proj> --target <target> [--dry-run] [--skip <step>]
+templedb deploy list <proj>
+templedb deploy show <proj> [<deploy-id>] [--latest]
+templedb deploy status <proj> --target <target>
+templedb deploy env <proj> --target <target>
+templedb deploy rollback <proj> --target <target> [--to <id>]
+templedb deploy diff <proj> --from <target1> --to <target2>
 
 # Secrets (see docs/SECURITY.md)
-./templedb secret init <proj> --age-recipient <key>
-./templedb secret edit <proj>
-./templedb secret list <proj>
-./templedb secret export <proj> --format shell
+templedb secret init <proj> --age-recipient <key>
+templedb secret edit <proj>
+templedb secret list <proj>
+templedb secret export <proj> --format shell
 
 # DNS (see docs/DNS.md)
-./templedb domain register <proj> <domain> --registrar <reg>
-./templedb domain dns configure <proj> <domain> --target <target>
-./templedb domain dns apply <proj> <domain> --target <target>
+templedb domain register <proj> <domain> --registrar <reg>
+templedb domain dns configure <proj> <domain> --target <target>
+templedb domain dns apply <proj> <domain> --target <target>
 ```
 
 ## Database Schema

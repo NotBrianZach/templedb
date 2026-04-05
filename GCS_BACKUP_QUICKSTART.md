@@ -42,13 +42,13 @@ cat > ~/.config/templedb/backup-gcs.json << 'EOF'
 EOF
 
 # 3. Test it
-./templedb backup cloud push gcs
+templedb backup cloud push gcs
 
 # 4. Verify
-./templedb backup cloud status gcs
+templedb backup cloud status gcs
 ```
 
-Done! Now you can run `./templedb backup cloud push gcs` anytime.
+Done! Now you can run `templedb backup cloud push gcs` anytime.
 
 ## 🎯 Method 3: One-Time Backup (No Setup)
 
@@ -85,19 +85,19 @@ Once set up, use these commands:
 
 ```bash
 # Upload backup to cloud
-./templedb backup cloud push gcs
+templedb backup cloud push gcs
 
 # List all backups
-./templedb backup cloud status gcs
+templedb backup cloud status gcs
 
 # Restore specific backup
-./templedb backup cloud pull gcs BACKUP_ID
+templedb backup cloud pull gcs BACKUP_ID
 
 # Clean up old backups (keep last 30 days)
-./templedb backup cloud cleanup gcs --days 30
+templedb backup cloud cleanup gcs --days 30
 
 # Test connection
-./templedb backup cloud test gcs
+templedb backup cloud test gcs
 ```
 
 ## Cost
@@ -159,13 +159,13 @@ Topics covered:
 ./scripts/setup-gcs-backup.sh
 
 # Backup now
-./templedb backup cloud push gcs
+templedb backup cloud push gcs
 
 # List backups
-./templedb backup cloud status gcs
+templedb backup cloud status gcs
 
 # Restore
-./templedb backup cloud pull gcs <backup-id>
+templedb backup cloud pull gcs <backup-id>
 
 # View logs
 tail -f ~/.local/share/templedb/backup.log
@@ -187,9 +187,9 @@ gsutil cp ~/.local/share/templedb/templedb.sqlite \
 ## Next Steps
 
 1. Run setup script: `./scripts/setup-gcs-backup.sh`
-2. Test a backup: `./templedb backup cloud push gcs`
-3. Verify it worked: `./templedb backup cloud status gcs`
-4. Test restore: `./templedb backup cloud pull gcs <backup-id> --db-path /tmp/test.sqlite`
+2. Test a backup: `templedb backup cloud push gcs`
+3. Verify it worked: `templedb backup cloud status gcs`
+4. Test restore: `templedb backup cloud pull gcs <backup-id> --db-path /tmp/test.sqlite`
 5. Set it and forget it! ✨
 
 ---

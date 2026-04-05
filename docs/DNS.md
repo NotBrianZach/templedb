@@ -6,20 +6,20 @@ Automated DNS via Cloudflare, Namecheap, Route53 APIs. No manual configuration p
 
 ```bash
 # Setup provider
-./templedb domain provider add cloudflare
+templedb domain provider add cloudflare
 
 # Register domain
-./templedb domain register myapp example.com --registrar cloudflare
+templedb domain register myapp example.com --registrar cloudflare
 
 # Add deployment target
-./templedb target add myapp production --provider supabase --host db.example.com
+templedb target add myapp production --provider supabase --host db.example.com
 
 # Configure DNS
-./templedb domain dns configure myapp example.com --target production
-./templedb domain dns apply myapp example.com --target production
+templedb domain dns configure myapp example.com --target production
+templedb domain dns apply myapp example.com --target production
 
 # Deploy
-./templedb deploy run myapp --target production
+templedb deploy run myapp --target production
 ```
 
 ## Workflow
@@ -36,7 +36,7 @@ Automated DNS via Cloudflare, Namecheap, Route53 APIs. No manual configuration p
 ### Cloudflare
 
 ```bash
-./templedb domain provider add cloudflare
+templedb domain provider add cloudflare
 # Prompts for: API token (recommended) or Global API Key + Email
 ```
 
@@ -50,7 +50,7 @@ Automated DNS via Cloudflare, Namecheap, Route53 APIs. No manual configuration p
 ### Namecheap
 
 ```bash
-./templedb domain provider add namecheap
+templedb domain provider add namecheap
 # Prompts for: API username, API key, Client IP (whitelisted)
 ```
 
@@ -63,7 +63,7 @@ Automated DNS via Cloudflare, Namecheap, Route53 APIs. No manual configuration p
 ### AWS Route53
 
 ```bash
-./templedb domain provider add route53
+templedb domain provider add route53
 # Prompts for: AWS Access Key ID, AWS Secret Access Key, Region
 ```
 
@@ -107,21 +107,21 @@ Then run `domain dns apply` to push to provider.
 
 ```bash
 # Providers
-./templedb domain provider list
-./templedb domain provider add <provider>
-./templedb domain provider remove <provider>
+templedb domain provider list
+templedb domain provider add <provider>
+templedb domain provider remove <provider>
 
 # Domains
-./templedb domain register <project> <domain> --registrar <name>
-./templedb domain list [--project <project>]
-./templedb domain show <domain>
-./templedb domain remove <domain>
+templedb domain register <project> <domain> --registrar <name>
+templedb domain list [--project <project>]
+templedb domain show <domain>
+templedb domain remove <domain>
 
 # DNS Configuration
-./templedb domain dns configure <project> <domain> --target <target>
-./templedb domain dns apply <project> <domain> --target <target>
-./templedb domain dns verify <project> <domain>
-./templedb domain dns list <project> <domain>
+templedb domain dns configure <project> <domain> --target <target>
+templedb domain dns apply <project> <domain> --target <target>
+templedb domain dns verify <project> <domain>
+templedb domain dns list <project> <domain>
 
 # Query database directly
 sqlite3 ~/.local/share/templedb/templedb.sqlite
@@ -146,46 +146,46 @@ SUPABASE_URL=https://abc123.supabase.co
 SUPABASE_ANON_KEY=<key from secrets>
 ```
 
-Load with: `./templedb deploy run myapp --target production`
+Load with: `templedb deploy run myapp --target production`
 
 ## Troubleshooting
 
 **"Provider not found"**
 ```bash
-./templedb domain provider list
+templedb domain provider list
 # If missing, add it:
-./templedb domain provider add cloudflare
+templedb domain provider add cloudflare
 ```
 
 **"Domain already registered"**
 ```bash
 # Check existing domains
-./templedb domain list
+templedb domain list
 
 # Remove if needed
-./templedb domain remove example.com --force
+templedb domain remove example.com --force
 ```
 
 **"DNS apply failed"**
 ```bash
 # Verify provider credentials
-./templedb domain provider list
+templedb domain provider list
 
 # Check DNS records generated
 sqlite3 ~/.local/share/templedb/templedb.sqlite
 SELECT * FROM dns_records WHERE domain = 'example.com';
 
 # Try manual verification
-./templedb domain dns verify myapp example.com
+templedb domain dns verify myapp example.com
 ```
 
 **"Target not found"**
 ```bash
 # List targets
-./templedb target list --project myapp
+templedb target list --project myapp
 
 # Add missing target
-./templedb target add myapp production --provider supabase --host db.example.com
+templedb target add myapp production --provider supabase --host db.example.com
 ```
 
 ## Database Schema
@@ -232,48 +232,48 @@ WHERE d.project_id = (SELECT id FROM projects WHERE slug = 'myapp');
 
 ```bash
 # 1. Add provider
-./templedb domain provider add cloudflare
+templedb domain provider add cloudflare
 
 # 2. Register domain
-./templedb domain register myapp example.com --registrar cloudflare
+templedb domain register myapp example.com --registrar cloudflare
 
 # 3. Add Supabase target
-./templedb target add myapp production \
+templedb target add myapp production \
   --provider supabase \
   --host db.example.com \
   --project-ref abc123xyz
 
 # 4. Configure DNS (generates records)
-./templedb domain dns configure myapp example.com --target production
+templedb domain dns configure myapp example.com --target production
 
 # 5. Review records
 sqlite3 ~/.local/share/templedb/templedb.sqlite \
   "SELECT * FROM dns_records WHERE domain = 'example.com'"
 
 # 6. Apply to Cloudflare
-./templedb domain dns apply myapp example.com --target production
+templedb domain dns apply myapp example.com --target production
 
 # 7. Verify
-./templedb domain dns verify myapp example.com
+templedb domain dns verify myapp example.com
 
 # 8. Deploy
-./templedb deploy run myapp --target production
+templedb deploy run myapp --target production
 ```
 
 ### Multiple Environments
 
 ```bash
 # Production
-./templedb target add myapp production --provider supabase --host prod.db.example.com
-./templedb domain dns configure myapp example.com --target production
+templedb target add myapp production --provider supabase --host prod.db.example.com
+templedb domain dns configure myapp example.com --target production
 
 # Staging
-./templedb target add myapp staging --provider supabase --host staging.db.example.com
-./templedb domain dns configure myapp staging.example.com --target staging
+templedb target add myapp staging --provider supabase --host staging.db.example.com
+templedb domain dns configure myapp staging.example.com --target staging
 
 # Apply both
-./templedb domain dns apply myapp example.com --target production
-./templedb domain dns apply myapp staging.example.com --target staging
+templedb domain dns apply myapp example.com --target production
+templedb domain dns apply myapp staging.example.com --target staging
 ```
 
 ### Custom DNS Records
@@ -287,7 +287,7 @@ FROM domains WHERE domain = 'example.com';
 SQL
 
 # Apply
-./templedb domain dns apply myapp example.com --target production
+templedb domain dns apply myapp example.com --target production
 ```
 
 ## Security

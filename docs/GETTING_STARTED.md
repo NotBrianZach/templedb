@@ -16,14 +16,14 @@ cd templedb
 
 ```bash
 # Import a project
-./templedb project import https://github.com/user/myapp
+templedb project import https://github.com/user/myapp
 
 # Launch Claude Code with full context
 ./tdb claude myapp
 
 # Or work directly
-./templedb project list
-./templedb project show myapp
+templedb project list
+templedb project show myapp
 sqlite3 ~/.local/share/templedb/templedb.sqlite
 ```
 
@@ -35,7 +35,7 @@ Done.
 
 ```bash
 # 1. Checkout files to edit
-./templedb project checkout myapp /tmp/workspace
+templedb project checkout myapp /tmp/workspace
 
 # 2. Edit with any tools
 cd /tmp/workspace
@@ -44,7 +44,7 @@ npm run build
 pytest
 
 # 3. Commit changes back
-./templedb project commit myapp /tmp/workspace -m "Fix auth bug"
+templedb project commit myapp /tmp/workspace -m "Fix auth bug"
 ```
 
 Workspace is ephemeral. Database is permanent. No git merge conflicts.
@@ -92,9 +92,9 @@ export TEMPLEDB_USER=agent-b
 ./tdb claude myapp
 
 # Terminal 3 - Coordinator
-./templedb work create --project myapp --title "Refactor auth"
-./templedb work assign tdb-abc123 agent-a
-./templedb work assign tdb-def456 agent-b
+templedb work create --project myapp --title "Refactor auth"
+templedb work assign tdb-abc123 agent-a
+templedb work assign tdb-def456 agent-b
 ```
 
 Agents coordinate via database. No git conflicts. Atomic commits.
@@ -107,9 +107,9 @@ age-keygen -o ~/.config/sops/age/keys.txt
 export TEMPLEDB_AGE_KEY_FILE=~/.config/sops/age/keys.txt
 
 # Per-project
-./templedb secret init myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
-./templedb secret edit myapp
-eval "$(./templedb secret export myapp --format shell)"
+templedb secret init myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
+templedb secret edit myapp
+eval "$(templedb secret export myapp --format shell)"
 ```
 
 Secrets encrypted with age, stored in database, loaded on-demand.
@@ -143,7 +143,7 @@ Your entire codebase is a SQL database. Query it.
 
 ```bash
 pip install textual
-./templedb tui
+templedb tui
 ```
 
 Keyboard-driven interface for projects, files, VCS, secrets, search.
@@ -154,14 +154,14 @@ Keyboard-driven interface for projects, files, VCS, secrets, search.
 
 ```bash
 # Set up target
-./templedb target add myapp production --provider supabase --host db.example.com
+templedb target add myapp production --provider supabase --host db.example.com
 
 # Register domain + DNS
-./templedb domain register myapp example.com --registrar cloudflare
-./templedb domain dns configure myapp example.com --target production
+templedb domain register myapp example.com --registrar cloudflare
+templedb domain dns configure myapp example.com --target production
 
 # Deploy
-./templedb deploy run myapp --target production
+templedb deploy run myapp --target production
 ```
 
 DNS, secrets, environment variables auto-configured. No manual steps.
@@ -171,7 +171,7 @@ DNS, secrets, environment variables auto-configured. No manual steps.
 **Standalone (recommended):**
 ```bash
 git clone git@github.com:yourusername/templedb.git
-./templedb/templedb --help
+templedb/templedb --help
 ```
 
 **NixOS:**
@@ -198,42 +198,42 @@ python3 src/main.py --help
 
 ```bash
 # Projects
-./templedb project import <url>          # Add project from git
-./templedb project list                  # List all
-./templedb project show <slug>           # Details
-./templedb project checkout <slug> <dir> # Extract to filesystem
-./templedb project commit <slug> <dir>   # Save changes
+templedb project import <url>          # Add project from git
+templedb project list                  # List all
+templedb project show <slug>           # Details
+templedb project checkout <slug> <dir> # Extract to filesystem
+templedb project commit <slug> <dir>   # Save changes
 
 # Version Control
-./templedb vcs status <project>          # Show changes
-./templedb vcs add <project> <file>      # Stage files
-./templedb vcs commit -m "msg" -p <proj> # Commit
-./templedb vcs log <project>             # History
-./templedb vcs diff <project>            # Show diffs
+templedb vcs status <project>          # Show changes
+templedb vcs add <project> <file>      # Stage files
+templedb vcs commit -m "msg" -p <proj> # Commit
+templedb vcs log <project>             # History
+templedb vcs diff <project>            # Show diffs
 
 # Secrets
-./templedb secret init <proj> --age-recipient <key>
-./templedb secret edit <project>
-./templedb secret export <proj> --format shell
+templedb secret init <proj> --age-recipient <key>
+templedb secret edit <project>
+templedb secret export <proj> --format shell
 
 # Work Items (multi-agent)
-./templedb work create --project <proj> --title "Task"
-./templedb work list --assigned-to <agent>
-./templedb work assign <work-id> <agent>
-./templedb work complete <work-id>
+templedb work create --project <proj> --title "Task"
+templedb work list --assigned-to <agent>
+templedb work assign <work-id> <agent>
+templedb work complete <work-id>
 
 # Search
-./templedb search files <pattern>
-./templedb search content <query>
+templedb search files <pattern>
+templedb search content <query>
 
 # Deployment
-./templedb target add <proj> <name> --provider <prov> --host <host>
-./templedb domain register <proj> <domain> --registrar <reg>
-./templedb deploy run <proj> --target <target>
+templedb target add <proj> <name> --provider <prov> --host <host>
+templedb domain register <proj> <domain> --registrar <reg>
+templedb deploy run <proj> --target <target>
 
 # Database
-./templedb status                        # Overall stats
-./templedb tui                           # Interactive UI
+templedb status                        # Overall stats
+templedb tui                           # Interactive UI
 sqlite3 ~/.local/share/templedb/templedb.sqlite
 ```
 

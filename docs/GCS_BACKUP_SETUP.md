@@ -40,12 +40,12 @@ gcloud iam service-accounts keys create ~/templedb-gcs-key.json \
 # See "Storing Credentials" section below
 
 # 8. Test connection
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt ./templedb backup cloud test \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud test \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 
 # 9. Create your first backup
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt ./templedb backup cloud push \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud push \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 ```
@@ -176,7 +176,7 @@ TempleDB stores GCS credentials encrypted in the `system_config` project secrets
 age-keygen -y ~/.age/key.txt
 
 # Initialize secrets for system_config
-./templedb secret init system_config \
+templedb secret init system_config \
   --profile default \
   --age-recipient YOUR_AGE_PUBLIC_KEY
 ```
@@ -276,7 +276,7 @@ The service account credentials will be loaded from TempleDB secrets automatical
 ### Test Connection
 
 ```bash
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt ./templedb backup cloud test \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud test \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 ```
@@ -293,7 +293,7 @@ INFO     Successfully authenticated with GCS bucket: your-bucket-name
 ### Create Backup
 
 ```bash
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt ./templedb backup cloud push \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud push \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 ```
@@ -311,7 +311,7 @@ INFO     Upload successful: templedb-backups/templedb_backup_20260313_213000.sql
 ### List Backups
 
 ```bash
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt ./templedb backup cloud status \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud status \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 ```
@@ -329,7 +329,7 @@ Found 3 backup(s) in Google Cloud Storage:
 ### Restore Backup
 
 ```bash
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt ./templedb backup cloud pull \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud pull \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json \
   --backup-id templedb-backups/templedb_backup_20260313_213000.sqlite
@@ -338,7 +338,7 @@ TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt ./templedb backup cloud pull \
 ### Cleanup Old Backups
 
 ```bash
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt ./templedb backup cloud cleanup \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud cleanup \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 ```
@@ -584,7 +584,7 @@ For production deployments, you can use ADC instead of service account keys:
 gcloud auth application-default login
 
 # No config file needed, just bucket name
-./templedb backup cloud push --provider gcs --bucket YOUR_BUCKET_NAME
+templedb backup cloud push --provider gcs --bucket YOUR_BUCKET_NAME
 ```
 
 This avoids storing credentials entirely - GCP provides them automatically to running instances.

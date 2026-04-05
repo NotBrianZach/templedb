@@ -11,10 +11,10 @@
 ./scripts/setup_multi_yubikey.sh
 
 # Manual setup
-./templedb migrate
+templedb migrate
 age-plugin-yubikey --generate  # Repeat for each Yubikey
-./templedb key add yubikey --name "yubikey-1-primary" --location "daily-use"
-./templedb key add filesystem --name "usb-backup" --path ~/.age/backup-key.txt
+templedb key add yubikey --name "yubikey-1-primary" --location "daily-use"
+templedb key add filesystem --name "usb-backup" --path ~/.age/backup-key.txt
 ```
 
 ---
@@ -23,26 +23,26 @@ age-plugin-yubikey --generate  # Repeat for each Yubikey
 
 ### Initialize Secrets (Multi-Key)
 ```bash
-./templedb secret init-multi myproject \
+templedb secret init-multi myproject \
   --keys yubikey-1-primary,yubikey-2-backup,yubikey-3-dr,usb-backup
 ```
 
 ### Edit Secrets
 ```bash
-./templedb secret edit myproject
+templedb secret edit myproject
 # Uses any available key (Yubikey #1 if plugged in)
 ```
 
 ### Export Secrets
 ```bash
-./templedb secret export myproject --format shell
-./templedb secret export myproject --format json
-./templedb secret export myproject --format dotenv
+templedb secret export myproject --format shell
+templedb secret export myproject --format json
+templedb secret export myproject --format dotenv
 ```
 
 ### Show Keys for Secret
 ```bash
-./templedb secret show-keys myproject
+templedb secret show-keys myproject
 ```
 
 ---
@@ -51,28 +51,28 @@ age-plugin-yubikey --generate  # Repeat for each Yubikey
 
 ### List Keys
 ```bash
-./templedb key list
-./templedb key list --all  # Include disabled/revoked
+templedb key list
+templedb key list --all  # Include disabled/revoked
 ```
 
 ### Key Info
 ```bash
-./templedb key info yubikey-1-primary
+templedb key info yubikey-1-primary
 ```
 
 ### Test Key
 ```bash
-./templedb key test yubikey-1-primary
+templedb key test yubikey-1-primary
 ```
 
 ### Add Key to Secret
 ```bash
-./templedb secret add-key myproject --key new-yubikey
+templedb secret add-key myproject --key new-yubikey
 ```
 
 ### Remove Key from Secret
 ```bash
-./templedb secret remove-key myproject --key old-yubikey
+templedb secret remove-key myproject --key old-yubikey
 ```
 
 ---
@@ -81,14 +81,14 @@ age-plugin-yubikey --generate  # Repeat for each Yubikey
 
 ### Revoke Key (Requires 2 Other Keys)
 ```bash
-./templedb key revoke yubikey-1-primary \
+templedb key revoke yubikey-1-primary \
   --reason "Lost during travel" \
   --quorum 2
 ```
 
 ### Show Revoked Keys
 ```bash
-./templedb key show-revoked
+templedb key show-revoked
 ```
 
 ---
@@ -99,21 +99,21 @@ age-plugin-yubikey --generate  # Repeat for each Yubikey
 ```bash
 # 1. Get backup keys (Yubikey #2 + #3 or USB)
 # 2. Revoke compromised key
-./templedb key revoke yubikey-1-primary --reason "Lost/stolen"
+templedb key revoke yubikey-1-primary --reason "Lost/stolen"
 
 # 3. Add replacement
 age-plugin-yubikey --generate
-./templedb key add yubikey --name "yubikey-4-replacement"
+templedb key add yubikey --name "yubikey-4-replacement"
 
 # 4. Add to all secrets
-./templedb secret add-key myproject --key yubikey-4-replacement
+templedb secret add-key myproject --key yubikey-4-replacement
 ```
 
 ### All Yubikeys Unavailable
 ```bash
 # Use USB backup key
 export TEMPLEDB_AGE_KEY_FILE=~/.age/backup-key.txt
-./templedb secret edit myproject
+templedb secret edit myproject
 ```
 
 ### Forgot Yubikey PIN
@@ -183,19 +183,19 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite \
 ```bash
 for key in yubikey-1-primary yubikey-2-backup yubikey-3-dr usb-backup; do
   echo "Testing $key..."
-  ./templedb key test $key
+  templedb key test $key
 done
 ```
 
 ### Verify Secret Access
 ```bash
 # Test decryption works
-./templedb secret export myproject --format json > /dev/null && echo "✓ OK"
+templedb secret export myproject --format json > /dev/null && echo "✓ OK"
 ```
 
 ### Check Key Count
 ```bash
-./templedb secret show-keys myproject | grep "Encrypted with"
+templedb secret show-keys myproject | grep "Encrypted with"
 # Should show: "Encrypted with 4 keys"
 ```
 
@@ -205,7 +205,7 @@ done
 
 ### Monthly
 - [ ] Test all 4 keys work
-- [ ] Review key usage: `./templedb key list`
+- [ ] Review key usage: `templedb key list`
 - [ ] Check audit log for suspicious activity
 
 ### Quarterly
@@ -225,20 +225,20 @@ done
 ```bash
 # Full workflow: Setup → Initialize → Use
 ./scripts/setup_multi_yubikey.sh
-./templedb secret init-multi myproject --keys yubikey-1-primary,yubikey-2-backup,yubikey-3-dr,usb-backup
-./templedb secret edit myproject
+templedb secret init-multi myproject --keys yubikey-1-primary,yubikey-2-backup,yubikey-3-dr,usb-backup
+templedb secret edit myproject
 
 # Add new key to existing secret
 age-plugin-yubikey --generate
-./templedb key add yubikey --name "new-key"
-./templedb secret add-key myproject --key new-key
+templedb key add yubikey --name "new-key"
+templedb secret add-key myproject --key new-key
 
 # Revoke compromised key
-./templedb key revoke old-key --reason "Compromised"
+templedb key revoke old-key --reason "Compromised"
 
 # Emergency access with USB backup
 export TEMPLEDB_AGE_KEY_FILE=/path/to/usb/backup-key.txt
-./templedb secret edit myproject
+templedb secret edit myproject
 ```
 
 ---
@@ -275,7 +275,7 @@ export AGE_PLUGIN_YUBIKEY_IDENTITY_FILE=~/.config/age-plugin-yubikey/identities.
 |---------|----------|
 | No Yubikey detected | `lsusb \| grep -i yubi`, check pcscd service |
 | Incorrect PIN | Try again, check attempts: `ykman piv info` |
-| Decryption failed | Verify key in use: `./templedb key test <name>` |
+| Decryption failed | Verify key in use: `templedb key test <name>` |
 | Key test failed | Check physical connection, PIN, identity file |
 | Not enough keys for revocation | Need ≥3 total keys to revoke 1 |
 
@@ -285,11 +285,11 @@ export AGE_PLUGIN_YUBIKEY_IDENTITY_FILE=~/.config/age-plugin-yubikey/identities.
 
 ```bash
 # Get help
-./templedb key --help
-./templedb secret --help
+templedb key --help
+templedb secret --help
 
 # Check version
-./templedb --version
+templedb --version
 
 # View logs
 tail -f ~/.local/share/templedb/templedb.log

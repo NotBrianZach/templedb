@@ -8,7 +8,7 @@ TempleDB now supports **template rendering** for NixOps4 deployments, allowing y
 
 ### 1. Template Rendering Hook
 
-When you run `./templedb nixops4 deploy`, the system automatically:
+When you run `templedb nixops4 deploy`, the system automatically:
 1. Finds all `*.template` files in your project checkout
 2. Renders them using values from `system_config` table
 3. Writes the rendered configs to the same directory (without `.template` extension)
@@ -60,16 +60,16 @@ Set up woofs for all machines:
 
 ```bash
 # Configure woofs globally
-./templedb system config set woofs.enable "true"
-./templedb system config set woofs.schedule_file "/etc/woofs/schedule.toml"
+templedb system config set woofs.enable "true"
+templedb system config set woofs.schedule_file "/etc/woofs/schedule.toml"
 
 # Create network and machines
-./templedb nixops4 network create myproject prod-network
-./templedb nixops4 machine add myproject prod-network web1 --host 192.168.1.10
-./templedb nixops4 machine add myproject prod-network web2 --host 192.168.1.11
+templedb nixops4 network create myproject prod-network
+templedb nixops4 machine add myproject prod-network web1 --host 192.168.1.10
+templedb nixops4 machine add myproject prod-network web2 --host 192.168.1.11
 
 # Deploy (templates will be rendered automatically)
-./templedb nixops4 deploy myproject prod-network
+templedb nixops4 deploy myproject prod-network
 ```
 
 **Result**: Both `web1` and `web2` will have woofs enabled with the same config.
@@ -82,18 +82,18 @@ Enable woofs on some machines but not others:
 
 ```bash
 # System-wide default: disabled
-./templedb system config set woofs.enable "false"
+templedb system config set woofs.enable "false"
 
 # Enable only for web1
-./templedb system config set web1.woofs.enable "true"
-./templedb system config set web1.woofs.schedule_file "/etc/woofs/web1-schedule.toml"
+templedb system config set web1.woofs.enable "true"
+templedb system config set web1.woofs.schedule_file "/etc/woofs/web1-schedule.toml"
 
 # Enable only for db1 with different config
-./templedb system config set db1.woofs.enable "true"
-./templedb system config set db1.woofs.schedule_file "/etc/woofs/db1-schedule.toml"
+templedb system config set db1.woofs.enable "true"
+templedb system config set db1.woofs.schedule_file "/etc/woofs/db1-schedule.toml"
 
 # Deploy all machines
-./templedb nixops4 deploy myproject prod-network
+templedb nixops4 deploy myproject prod-network
 ```
 
 **Result**:
@@ -109,17 +109,17 @@ Override only some variables per machine:
 
 ```bash
 # System-wide defaults
-./templedb system config set nginx.enable "true"
-./templedb system config set nginx.worker_processes "4"
-./templedb system config set nginx.worker_connections "1024"
+templedb system config set nginx.enable "true"
+templedb system config set nginx.worker_processes "4"
+templedb system config set nginx.worker_connections "1024"
 
 # web1: Use more workers
-./templedb system config set web1.nginx.worker_processes "16"
+templedb system config set web1.nginx.worker_processes "16"
 
 # web2: Use defaults (no overrides)
 
 # Deploy
-./templedb nixops4 deploy myproject prod-network
+templedb nixops4 deploy myproject prod-network
 ```
 
 **Result**:
@@ -173,21 +173,21 @@ You can extend this by adding custom logic to `TemplateRenderer._get_computed_va
 
 ```bash
 # 1. Set up configuration values
-./templedb system config set woofs.enable "true"
-./templedb system config set web1.woofs.schedule_file "/custom/path.toml"
+templedb system config set woofs.enable "true"
+templedb system config set web1.woofs.schedule_file "/custom/path.toml"
 
 # 2. Create network (if not exists)
-./templedb nixops4 network create myproject prod --flake-uri "github:me/infra#prod"
+templedb nixops4 network create myproject prod --flake-uri "github:me/infra#prod"
 
 # 3. Add machines
-./templedb nixops4 machine add myproject prod web1 --host 10.0.1.10
-./templedb nixops4 machine add myproject prod web2 --host 10.0.1.11
+templedb nixops4 machine add myproject prod web1 --host 10.0.1.10
+templedb nixops4 machine add myproject prod web2 --host 10.0.1.11
 
 # 4. Deploy (templates rendered automatically before deployment)
-./templedb nixops4 deploy myproject prod
+templedb nixops4 deploy myproject prod
 
 # 5. Check deployment status
-./templedb nixops4 status myproject prod
+templedb nixops4 status myproject prod
 ```
 
 ---
@@ -196,16 +196,16 @@ You can extend this by adding custom logic to `TemplateRenderer._get_computed_va
 
 ```bash
 # Set system-wide value
-./templedb system config set <key> <value>
+templedb system config set <key> <value>
 
 # List all config values
-./templedb system config list
+templedb system config list
 
 # Get specific value
-./templedb system config get <key>
+templedb system config get <key>
 
 # Delete value
-./templedb system config delete <key>
+templedb system config delete <key>
 ```
 
 ---
@@ -235,15 +235,15 @@ If you prefer manual control:
 ### 1. Use System-Wide Defaults
 Set sensible defaults that work for most machines:
 ```bash
-./templedb system config set nginx.enable "true"
-./templedb system config set nginx.worker_processes "4"
+templedb system config set nginx.enable "true"
+templedb system config set nginx.worker_processes "4"
 ```
 
 ### 2. Override Only What's Needed
 Use machine-specific overrides sparingly:
 ```bash
 # Only override for high-traffic machines
-./templedb system config set web1.nginx.worker_processes "32"
+templedb system config set web1.nginx.worker_processes "32"
 ```
 
 ### 3. Document Your Schema
@@ -302,12 +302,12 @@ If you're migrating from standalone `system_service`:
 
 ```bash
 # Old approach (single machine)
-./templedb system switch myproject
+templedb system switch myproject
 
 # New approach (network-based)
-./templedb nixops4 network create myproject local-network
-./templedb nixops4 machine add myproject local-network $(hostname) --host localhost
-./templedb nixops4 deploy myproject local-network
+templedb nixops4 network create myproject local-network
+templedb nixops4 machine add myproject local-network $(hostname) --host localhost
+templedb nixops4 deploy myproject local-network
 ```
 
 Both systems can coexist! Use:

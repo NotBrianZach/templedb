@@ -686,7 +686,7 @@ The TempleDB TUI now includes an **Environments screen** (SPC → n).
 ### Usage
 
 ```bash
-./templedb-tui
+templedb-tui
 
 # Press SPACE
 # Press 'n' for Nix Environments
@@ -730,7 +730,7 @@ WHERE slug = 'myproject';
 ### 3. Via TUI
 
 ```bash
-./templedb-tui
+templedb-tui
 # SPC → n (Environments)
 # Press 'n' (New Environment)
 # Edit template in $EDITOR

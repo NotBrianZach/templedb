@@ -39,13 +39,13 @@ The nixops4 integration adds the following tables to TempleDB:
 
 ```bash
 # Create a new deployment network
-./templedb nixops4 network create <project> <name> [options]
+templedb nixops4 network create <project> <name> [options]
 
 # List all networks
-./templedb nixops4 network list [--project PROJECT]
+templedb nixops4 network list [--project PROJECT]
 
 # Show network details
-./templedb nixops4 network info <project> <network>
+templedb nixops4 network info <project> <network>
 ```
 
 **Options for `network create`:**
@@ -58,13 +58,13 @@ The nixops4 integration adds the following tables to TempleDB:
 
 ```bash
 # Add a machine to a network
-./templedb nixops4 machine add <project> <network> <machine> --host <host> [options]
+templedb nixops4 machine add <project> <network> <machine> --host <host> [options]
 
 # List machines in a network
-./templedb nixops4 machine list <project> <network>
+templedb nixops4 machine list <project> <network>
 
 # Remove a machine from a network
-./templedb nixops4 machine remove <project> <network> <machine>
+templedb nixops4 machine remove <project> <network> <machine>
 ```
 
 **Options for `machine add`:**
@@ -78,10 +78,10 @@ The nixops4 integration adds the following tables to TempleDB:
 
 ```bash
 # Deploy a network
-./templedb nixops4 deploy <project> <network> [options]
+templedb nixops4 deploy <project> <network> [options]
 
 # Show deployment status
-./templedb nixops4 status <project> <network> [--deployment-uuid UUID]
+templedb nixops4 status <project> <network> [--deployment-uuid UUID]
 ```
 
 **Options for `deploy`:**
@@ -112,7 +112,7 @@ These tools are automatically available when using TempleDB as an MCP server wit
 ### 1. Create a Network
 
 ```bash
-./templedb nixops4 network create my-project prod-network \
+templedb nixops4 network create my-project prod-network \
   --description "Production infrastructure" \
   --flake-uri "github:myorg/infra#prod"
 ```
@@ -121,12 +121,12 @@ These tools are automatically available when using TempleDB as an MCP server wit
 
 ```bash
 # Add web server
-./templedb nixops4 machine add my-project prod-network web1 \
+templedb nixops4 machine add my-project prod-network web1 \
   --host 192.168.1.10 \
   --system-type nixos
 
 # Add database server
-./templedb nixops4 machine add my-project prod-network db1 \
+templedb nixops4 machine add my-project prod-network db1 \
   --host 192.168.1.20 \
   --system-type nixos
 ```
@@ -135,20 +135,20 @@ These tools are automatically available when using TempleDB as an MCP server wit
 
 ```bash
 # Dry run first
-./templedb nixops4 deploy my-project prod-network --dry-run
+templedb nixops4 deploy my-project prod-network --dry-run
 
 # Deploy for real
-./templedb nixops4 deploy my-project prod-network
+templedb nixops4 deploy my-project prod-network
 ```
 
 ### 4. Monitor Deployment
 
 ```bash
 # Check status
-./templedb nixops4 status my-project prod-network
+templedb nixops4 status my-project prod-network
 
 # View network info
-./templedb nixops4 network info my-project prod-network
+templedb nixops4 network info my-project prod-network
 ```
 
 ## Database Tracking
@@ -184,11 +184,11 @@ The database maintains current state for:
 
 The nixops4 integration **does not replace** the existing deployment system. Both can coexist:
 
-- **Old system** (`./templedb deploy`) - Simple cathedral export + FHS deployment
+- **Old system** (`templedb deploy`) - Simple cathedral export + FHS deployment
   - Best for: Single-machine deployments, non-NixOS targets
   - Tables: `deployment_targets`, `file_deployments`, `system_deployments`
 
-- **NixOps4** (`./templedb nixops4`) - Declarative network orchestration
+- **NixOps4** (`templedb nixops4`) - Declarative network orchestration
   - Best for: Multi-machine NixOS infrastructure, coordinated deployments
   - Tables: `nixops4_*` tables
 

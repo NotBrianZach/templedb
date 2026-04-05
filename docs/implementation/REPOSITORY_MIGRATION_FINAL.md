@@ -60,36 +60,36 @@ Successfully completed a comprehensive 3-phase migration of the entire TempleDB 
 
 ```bash
 # Project operations - PASSED
-./templedb project list
+templedb project list
 # → Listed 17 projects successfully
 
-./templedb project show templedb
+templedb project show templedb
 # → Showed 149 files, 40,818 lines
 
 # Search operations - PASSED
-./templedb search files ".py" -p templedb
+templedb search files ".py" -p templedb
 # → Found 61 Python files
 
-./templedb search content "repository" -p templedb
+templedb search content "repository" -p templedb
 # → FTS5 search with 23 results
 
 # VCS operations - PASSED
-./templedb vcs log templedb -n 5
+templedb vcs log templedb -n 5
 # → Showed commit history
 
 # Checkout/Commit workflow - PASSED
-./templedb project checkout templedb /tmp/test-templedb --force
+templedb project checkout templedb /tmp/test-templedb --force
 # → Extracted 149 files (1.21 MB)
 
-./templedb project commit templedb /tmp/test-templedb -m "Test"
+templedb project commit templedb /tmp/test-templedb -m "Test"
 # → Commit ID: 37, Files changed: 1
 # → Verified in vcs log
 
 # Environment & System - PASSED
-./templedb env list templedb
+templedb env list templedb
 # → Listed dev environment
 
-./templedb status
+templedb status
 # → Comprehensive status dashboard
 ```
 

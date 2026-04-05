@@ -79,7 +79,7 @@ Run directly from the repository without installing:
 ```bash
 git clone git@github.com:yourusername/templedb.git
 cd templedb
-./templedb --help
+templedb --help
 ```
 
 Add to PATH in current session:
@@ -316,7 +316,7 @@ xattr -d com.apple.quarantine install.sh
 |--------------|------------|
 | User install | `~/.local/bin/templedb` or `~/bin/templedb` |
 | System install | `/usr/local/bin/templedb` |
-| Development | `./templedb` (in repo directory) |
+| Development | `templedb` (in repo directory) |
 
 ## Environment Variables
 

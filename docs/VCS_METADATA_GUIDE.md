@@ -85,21 +85,21 @@ Quick metadata without interrupting your workflow:
 
 ```bash
 # Basic metadata
-./templedb project commit my-project ~/workspace \
+templedb project commit my-project ~/workspace \
   -m "Add user authentication" \
   --type feature \
   --scope auth \
   --impact high
 
 # Breaking change
-./templedb project commit my-project ~/workspace \
+templedb project commit my-project ~/workspace \
   -m "Refactor authentication API" \
   --type refactor \
   --breaking \
   --impact critical
 
 # AI-assisted change
-./templedb project commit my-project ~/workspace \
+templedb project commit my-project ~/workspace \
   -m "Optimize database queries" \
   --type perf \
   --ai-assisted \
@@ -113,7 +113,7 @@ Quick metadata without interrupting your workflow:
 Rich, guided metadata collection:
 
 ```bash
-./templedb project commit my-project ~/workspace \
+templedb project commit my-project ~/workspace \
   -m "Implement OAuth2 authentication" \
   --interactive
 ```
@@ -215,10 +215,10 @@ Commit metadata is **included** in Cathedral exports:
 
 ```bash
 # Export project with full commit history and metadata
-./templedb cathedral export my-project --include-vcs
+templedb cathedral export my-project --include-vcs
 
 # Import on another machine
-./templedb cathedral import my-project.cathedral
+templedb cathedral import my-project.cathedral
 ```
 
 The metadata travels with your code!

@@ -40,7 +40,7 @@ def _execute_deploy_task(task_def, context):
 
 def _deploy_nixops4(task_def, context):
     """Deploy using NixOps4 integration"""
-    # Calls: ./templedb nixops4 deploy {project} {network}
+    # Calls: templedb nixops4 deploy {project} {network}
 
 def _deploy_generic(task_def, context):
     """Deploy using custom command"""

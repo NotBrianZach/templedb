@@ -32,15 +32,15 @@ templedb deploy-steam build-unity <project-slug> \
 **Example**:
 ```bash
 # Build for Windows
-./templedb deploy-steam build-unity mygame \
+templedb deploy-steam build-unity mygame \
   --targets StandaloneWindows64
 
 # Build for all platforms
-./templedb deploy-steam build-unity mygame \
+templedb deploy-steam build-unity mygame \
   --targets StandaloneWindows64,StandaloneOSX,StandaloneLinux64
 
 # Development build (with debugging)
-./templedb deploy-steam build-unity mygame \
+templedb deploy-steam build-unity mygame \
   --targets StandaloneWindows64 \
   --development
 
@@ -80,11 +80,11 @@ templedb deploy-steam build-godot <project-slug> \
 **Example**:
 ```bash
 # Export for Linux
-./templedb deploy-steam build-godot mygame \
+templedb deploy-steam build-godot mygame \
   --presets "Linux/X11"
 
 # Export for multiple platforms
-./templedb deploy-steam build-godot mygame \
+templedb deploy-steam build-godot mygame \
   --presets "Windows Desktop,Linux/X11,macOS"
 
 # Output:
@@ -122,7 +122,7 @@ templedb deploy-steam package-html5 <project-slug> \
 
 **Example**:
 ```bash
-./templedb deploy-steam package-html5 mygame \
+templedb deploy-steam package-html5 mygame \
   --name "My Awesome Game"
 
 # Output:
@@ -155,7 +155,7 @@ templedb deploy-steam install-steamworks <project-slug> \
 
 **Example**:
 ```bash
-./templedb deploy-steam install-steamworks mygame \
+templedb deploy-steam install-steamworks mygame \
   --version 20.2.0
 
 # Output:
@@ -188,7 +188,7 @@ templedb deploy-steam install-godotsteam <project-slug> \
 
 **Example**:
 ```bash
-./templedb deploy-steam install-godotsteam mygame
+templedb deploy-steam install-godotsteam mygame
 
 # Output:
 # 📦 Installing GodotSteam latest for mygame...
@@ -227,7 +227,7 @@ templedb deploy-steam upload <project-slug> \
 
 **Example**:
 ```bash
-./templedb deploy-steam upload mygame \
+templedb deploy-steam upload mygame \
   --app-id 480 \
   --depot-id 481 \
   --build-path /tmp/templedb-steam/unity-build-StandaloneWindows64 \
@@ -278,7 +278,7 @@ templedb deploy-steam deploy-unity <project-slug> \
 
 **Example**:
 ```bash
-./templedb deploy-steam deploy-unity mygame \
+templedb deploy-steam deploy-unity mygame \
   --app-id 480 \
   --depot-id 481 \
   --username mysteamuser \
@@ -320,7 +320,7 @@ templedb deploy-steam deploy-godot <project-slug> \
 
 **Example**:
 ```bash
-./templedb deploy-steam deploy-godot mygame \
+templedb deploy-steam deploy-godot mygame \
   --app-id 480 \
   --depot-id 481 \
   --username mysteamuser \
@@ -346,16 +346,16 @@ templedb deploy-steam deploy-godot <project-slug> \
 
 ```bash
 # Step 1: Import Unity project to TempleDB
-./templedb project import /path/to/unity-game mygame
+templedb project import /path/to/unity-game mygame
 
 # Step 2: Install Steamworks.NET
-./templedb deploy-steam install-steamworks mygame
+templedb deploy-steam install-steamworks mygame
 
 # Step 3: Configure Steam App ID in Unity
 # (Manual step: Open Unity, set Steam App ID in SteamManager script)
 
 # Step 4: Build and deploy to Steam
-./templedb deploy-steam deploy-unity mygame \
+templedb deploy-steam deploy-unity mygame \
   --app-id 480 \
   --depot-id 481 \
   --username mysteamuser \
@@ -370,10 +370,10 @@ templedb deploy-steam deploy-godot <project-slug> \
 
 ```bash
 # Step 1: Import Godot project to TempleDB
-./templedb project import /path/to/godot-game mygame
+templedb project import /path/to/godot-game mygame
 
 # Step 2: Install GodotSteam plugin
-./templedb deploy-steam install-godotsteam mygame
+templedb deploy-steam install-godotsteam mygame
 
 # Step 3: Download GodotSteam binaries and configure
 # (Manual: Download from GitHub, place in addons/, enable plugin)
@@ -382,7 +382,7 @@ templedb deploy-steam deploy-godot <project-slug> \
 # (Manual: Project → Export → Add presets for Windows, Linux, macOS)
 
 # Step 5: Build and deploy to Steam
-./templedb deploy-steam deploy-godot mygame \
+templedb deploy-steam deploy-godot mygame \
   --app-id 480 \
   --depot-id 481 \
   --username mysteamuser \
@@ -397,13 +397,13 @@ templedb deploy-steam deploy-godot <project-slug> \
 
 ```bash
 # Step 1: Import HTML5 game to TempleDB
-./templedb project import /path/to/html5-game mygame
+templedb project import /path/to/html5-game mygame
 
 # Step 2: Package for Steam
-./templedb deploy-steam package-html5 mygame
+templedb deploy-steam package-html5 mygame
 
 # Step 3: Upload to Steam
-./templedb deploy-steam upload mygame \
+templedb deploy-steam upload mygame \
   --app-id 480 \
   --depot-id 481 \
   --build-path /tmp/templedb-steam/html5-mygame \
@@ -767,23 +767,23 @@ Steam Guard code: _
 ### 3. Integrate Steamworks in Your Game
 ```bash
 # For Unity
-./templedb deploy-steam install-steamworks mygame
+templedb deploy-steam install-steamworks mygame
 
 # For Godot
-./templedb deploy-steam install-godotsteam mygame
+templedb deploy-steam install-godotsteam mygame
 ```
 
 ### 4. Build and Upload
 ```bash
 # Unity
-./templedb deploy-steam deploy-unity mygame \
+templedb deploy-steam deploy-unity mygame \
   --app-id YOUR_APP_ID \
   --depot-id YOUR_DEPOT_ID \
   --username YOUR_STEAM_USER \
   --targets StandaloneWindows64,StandaloneOSX,StandaloneLinux64
 
 # Godot
-./templedb deploy-steam deploy-godot mygame \
+templedb deploy-steam deploy-godot mygame \
   --app-id YOUR_APP_ID \
   --depot-id YOUR_DEPOT_ID \
   --username YOUR_STEAM_USER \

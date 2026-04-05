@@ -22,7 +22,7 @@
 ┌─────────────────────────────────────────────┐
 │ Host System                                  │
 │                                              │
-│  ./templedb deploy run my-project           │
+│  templedb deploy run my-project           │
 │    │                                         │
 │    ├─> Exports to FHS directory             │
 │    ├─> Reconstructs files                   │
@@ -46,7 +46,7 @@
 ┌──────────────────────────────────────────────────────┐
 │ Host System                                           │
 │                                                       │
-│  ./templedb deploy run my-project --use-fhs          │
+│  templedb deploy run my-project --use-fhs          │
 │    │                                                  │
 │    ├─> Detects project needs (auto-scan)            │
 │    │   • package.json → nodejs, npm                 │
@@ -152,7 +152,7 @@ All deployment commands run inside the FHS environment:
 
 ```bash
 # Deploy with FHS
-./templedb deploy run my-project --use-fhs
+templedb deploy run my-project --use-fhs
 
 # What happens:
 1. Detect packages → nodejs, python3, postgresql
@@ -172,10 +172,10 @@ All deployment commands run inside the FHS environment:
 ```bash
 # Option 1: Environment variable
 export TEMPLEDB_FULL_FHS=true
-./templedb deploy run my-project
+templedb deploy run my-project
 
 # Option 2: Command flag
-./templedb deploy run my-project --use-fhs
+templedb deploy run my-project --use-fhs
 
 # Option 3: Config file (~/.templedb/config.toml)
 [deployment]
@@ -215,7 +215,7 @@ Total: 15 packages
 
 ```bash
 # Deploy creates an entry script
-./templedb deploy run my-project --use-fhs
+templedb deploy run my-project --use-fhs
 
 # Enter the FHS environment
 ~/.templedb/fhs-deployments/my-project/working/enter-fhs.sh
@@ -236,7 +236,7 @@ Python 3.11.7  # From Nix, not system
 ```bash
 # Add extra packages via environment
 export TEMPLEDB_FHS_EXTRA_PACKAGES="docker,kubectl,terraform"
-./templedb deploy run my-project --use-fhs
+templedb deploy run my-project --use-fhs
 
 # Or in config
 [deployment.fhs]
@@ -263,7 +263,7 @@ my-app/
 
 **Deployment:**
 ```bash
-./templedb deploy run my-app --use-fhs
+templedb deploy run my-app --use-fhs
 
 # Runs in FHS with:
 # ✓ Node.js 20.x
@@ -289,7 +289,7 @@ ml-service/
 
 **Deployment:**
 ```bash
-./templedb deploy run ml-service --use-fhs
+templedb deploy run ml-service --use-fhs
 
 # Runs in FHS with:
 # ✓ Python 3.11
@@ -321,7 +321,7 @@ fullstack/
 ```bash
 # Add terraform manually
 export TEMPLEDB_FHS_EXTRA_PACKAGES="terraform"
-./templedb deploy run fullstack --use-fhs
+templedb deploy run fullstack --use-fhs
 
 # Runs in FHS with all languages available
 ```
@@ -458,10 +458,10 @@ FHS environments are cached and reused:
 
 ```bash
 # First deployment: Creates FHS (~2s)
-./templedb deploy run my-project --use-fhs
+templedb deploy run my-project --use-fhs
 
 # Second deployment: Reuses FHS (~500ms)
-./templedb deploy run my-project --use-fhs
+templedb deploy run my-project --use-fhs
 
 # FHS is cached at:
 ~/.templedb/fhs-deployments/my-project/fhs-env.nix
@@ -509,7 +509,7 @@ nix-shell ~/.templedb/fhs-deployments/my-project/fhs-env.nix
 
 # Rebuild
 rm -rf ~/.templedb/fhs-deployments/my-project
-./templedb deploy run my-project --use-fhs
+templedb deploy run my-project --use-fhs
 ```
 
 ## Comparison
@@ -563,7 +563,7 @@ Full Nix FHS integration provides:
 ✅ **Fast** - Cached and reused
 ✅ **Flexible** - Override and extend as needed
 
-Enable with: `./templedb deploy run my-project --use-fhs`
+Enable with: `templedb deploy run my-project --use-fhs`
 
 ---
 

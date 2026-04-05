@@ -112,14 +112,14 @@ age-plugin-yubikey --identity
 YUBIKEY_RECIPIENT=$(age-plugin-yubikey --identity | grep age1yubikey)
 
 # Initialize secrets
-./templedb secret init myproject --age-recipient $YUBIKEY_RECIPIENT
+templedb secret init myproject --age-recipient $YUBIKEY_RECIPIENT
 ```
 
 ### Edit Secrets (Requires Yubikey + PIN)
 
 ```bash
 # Make sure Yubikey is plugged in
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # When prompted:
 #   1. Touch Yubikey if configured
@@ -132,7 +132,7 @@ YUBIKEY_RECIPIENT=$(age-plugin-yubikey --identity | grep age1yubikey)
 
 ```bash
 # Export requires Yubikey to decrypt
-./templedb secret export myproject --format shell
+templedb secret export myproject --format shell
 
 # Will prompt for PIN each time
 ```
@@ -141,7 +141,7 @@ YUBIKEY_RECIPIENT=$(age-plugin-yubikey --identity | grep age1yubikey)
 
 ```bash
 # Deployment will decrypt secrets using Yubikey
-./templedb deploy run myproject --target staging
+templedb deploy run myproject --target staging
 
 # Yubikey must be present and you must enter PIN
 ```
@@ -378,18 +378,18 @@ ykman piv keys set-touch-policy 9a OFF
 2. **Decrypt existing secrets:**
    ```bash
    # Export to temporary file
-   ./templedb secret export myproject --format yaml > /tmp/secrets.yml
+   templedb secret export myproject --format yaml > /tmp/secrets.yml
    ```
 
 3. **Re-initialize with Yubikey:**
    ```bash
-   ./templedb secret init myproject --age-recipient $YUBIKEY
+   templedb secret init myproject --age-recipient $YUBIKEY
    ```
 
 4. **Re-import secrets:**
    ```bash
    # Edit to add old secrets
-   ./templedb secret edit myproject
+   templedb secret edit myproject
    # Paste contents of /tmp/secrets.yml
    ```
 
@@ -424,10 +424,10 @@ For automated deployments, you have options:
 age-keygen -o ~/.config/age/ci-key.txt
 CI_KEY=$(age-keygen -y ~/.config/age/ci-key.txt)
 
-./templedb secret init myproject --profile ci --age-recipient $CI_KEY
+templedb secret init myproject --profile ci --age-recipient $CI_KEY
 
 # Use --profile ci in CI pipelines
-./templedb deploy run myproject --profile ci
+templedb deploy run myproject --profile ci
 ```
 
 #### Option 2: Encrypted CI Secrets
@@ -496,7 +496,7 @@ Using Yubikey with TempleDB:
 1. **Install:** `cargo install age-plugin-yubikey`
 2. **Generate:** `age-plugin-yubikey --generate`
 3. **Get recipient:** `age-plugin-yubikey --identity`
-4. **Use with TempleDB:** `./templedb secret init project --age-recipient age1yubikey...`
+4. **Use with TempleDB:** `templedb secret init project --age-recipient age1yubikey...`
 
 **Benefits:**
 - ✅ Hardware-protected private keys

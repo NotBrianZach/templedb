@@ -1269,7 +1269,7 @@ def select_deployment_strategy(target: str, project: str) -> str:
     """
     # Detect target
     result = subprocess.run(
-        ['./templedb-detect-target.sh', target],
+        ['templedb-detect-target.sh', target],
         capture_output=True,
         text=True
     )

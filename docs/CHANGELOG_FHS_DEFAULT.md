@@ -10,7 +10,7 @@
 
 ```bash
 # This command now automatically:
-./templedb deploy run my-project
+templedb deploy run my-project
 
 # 1. Detects your dependencies (nodejs, python, postgres, etc.)
 # 2. Creates isolated Nix FHS environment
@@ -18,7 +18,7 @@
 # 4. Gives you reproducible deployments
 
 # Need to edit files? Use mutable mode:
-./templedb deploy run my-project --mutable
+templedb deploy run my-project --mutable
 ```
 
 ## What Changed
@@ -26,7 +26,7 @@
 ### Before (v1.x)
 
 ```bash
-./templedb deploy run my-project
+templedb deploy run my-project
 → Uses system packages (npm, python from your PATH)
 → Can break if you update system packages
 → Not reproducible across machines
@@ -35,7 +35,7 @@
 ### After (v2.0)
 
 ```bash
-./templedb deploy run my-project
+templedb deploy run my-project
 → Auto-detects dependencies from your project
 → Creates Nix FHS environment with exact versions
 → Completely isolated from system
@@ -74,7 +74,7 @@ Most projects will work immediately with no changes:
 
 ```bash
 # Just deploy as normal
-./templedb deploy run my-project
+templedb deploy run my-project
 
 # Output will show:
 # 📦 Detected dependencies: nodejs, python3, postgresql
@@ -90,10 +90,10 @@ Use mutable mode:
 
 ```bash
 # Deploy in mutable mode
-./templedb deploy run my-project --mutable
+templedb deploy run my-project --mutable
 
 # Now you can edit files directly
-cd $(./templedb deploy path my-project)
+cd $(templedb deploy path my-project)
 vim deploy.sh
 ./deploy.sh
 ```
@@ -104,10 +104,10 @@ Temporarily disable FHS:
 
 ```bash
 # Use old behavior
-./templedb deploy run my-project --no-fhs
+templedb deploy run my-project --no-fhs
 
 # Or use mutable mode (preferred)
-./templedb deploy run my-project --mutable
+templedb deploy run my-project --mutable
 ```
 
 Then file a bug report with what went wrong!
@@ -121,7 +121,7 @@ Install Nix or use mutable mode:
 curl -L https://nixos.org/nix/install | sh
 
 # Option 2: Use mutable mode
-./templedb deploy run my-project --mutable
+templedb deploy run my-project --mutable
 ```
 
 ## New Features
@@ -129,7 +129,7 @@ curl -L https://nixos.org/nix/install | sh
 ### 1. `deploy shell` - Enter FHS Environment
 
 ```bash
-./templedb deploy shell my-project
+templedb deploy shell my-project
 
 # Enters isolated shell with all packages:
 (fhs:my-project) $ node --version  # From Nix
@@ -141,21 +141,21 @@ curl -L https://nixos.org/nix/install | sh
 
 ```bash
 # Run tests in FHS environment
-./templedb deploy exec my-project 'npm test'
+templedb deploy exec my-project 'npm test'
 
 # Check versions
-./templedb deploy exec my-project 'node --version'
+templedb deploy exec my-project 'node --version'
 ```
 
 ### 3. Visual FHS Indicators
 
 ```bash
-./templedb deploy list
+templedb deploy list
 
 📦 Deployed Projects:
 
   ✓ my-project 🔧 [FHS]    # 🔧 = FHS environment available
-     Shell: ./templedb deploy shell my-project
+     Shell: templedb deploy shell my-project
 ```
 
 ### 4. Automatic Package Detection
@@ -173,7 +173,7 @@ Detects from:
 ### FHS Mode (Default)
 
 ```bash
-./templedb deploy run my-project
+templedb deploy run my-project
 ```
 - ✅ Isolated
 - ✅ Reproducible
@@ -185,7 +185,7 @@ Detects from:
 ### Mutable Mode (Opt-In)
 
 ```bash
-./templedb deploy run my-project --mutable
+templedb deploy run my-project --mutable
 ```
 - ✅ Can edit files
 - ✅ Fast iteration
@@ -197,7 +197,7 @@ Detects from:
 ### No-FHS Mode (Discouraged)
 
 ```bash
-./templedb deploy run my-project --no-fhs
+templedb deploy run my-project --no-fhs
 ```
 - ⚠️ Completely disables FHS
 - ⚠️ Old behavior
@@ -264,13 +264,13 @@ export TEMPLEDB_FHS_EXTRA_PACKAGES="docker,kubectl,terraform"
 
 **Before:**
 ```bash
-./templedb deploy run my-app
+templedb deploy run my-app
 # Used system npm (whatever version installed)
 ```
 
 **After:**
 ```bash
-./templedb deploy run my-app
+templedb deploy run my-app
 
 # Output:
 📦 Detected dependencies: nodejs 20.x, npm 10.x
@@ -284,13 +284,13 @@ export TEMPLEDB_FHS_EXTRA_PACKAGES="docker,kubectl,terraform"
 
 **Before:**
 ```bash
-./templedb deploy run api
+templedb deploy run api
 # Used system python and psql
 ```
 
 **After:**
 ```bash
-./templedb deploy run api
+templedb deploy run api
 
 # Output:
 📦 Detected dependencies: python3 3.11, postgresql 15
@@ -302,7 +302,7 @@ export TEMPLEDB_FHS_EXTRA_PACKAGES="docker,kubectl,terraform"
 
 **Before:**
 ```bash
-./templedb deploy run my-app
+templedb deploy run my-app
 cd /some/path
 vim deploy.sh
 ./deploy.sh
@@ -310,13 +310,13 @@ vim deploy.sh
 
 **After:**
 ```bash
-./templedb deploy run my-app --mutable
-cd $(./templedb deploy path my-app)
+templedb deploy run my-app --mutable
+cd $(templedb deploy path my-app)
 vim deploy.sh
 ./deploy.sh
 
 # Final deploy with FHS:
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 ## Performance
@@ -335,10 +335,10 @@ vim deploy.sh
 FHS environments are cached:
 ```bash
 # First deploy: ~2s overhead
-./templedb deploy run my-project
+templedb deploy run my-project
 
 # Subsequent deploys: ~500ms overhead
-./templedb deploy run my-project
+templedb deploy run my-project
 ```
 
 ## Troubleshooting
@@ -347,10 +347,10 @@ FHS environments are cached:
 
 ```bash
 # Check what was detected
-./templedb deploy run my-app --dry-run
+templedb deploy run my-app --dry-run
 
 # Try mutable mode
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Report issue with output
 ```
@@ -360,14 +360,14 @@ FHS environments are cached:
 ```bash
 # Add manually
 export TEMPLEDB_FHS_EXTRA_PACKAGES="missing-package"
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 ### Can't Edit Files
 
 ```bash
 # Use mutable mode
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 ```
 
 ### Nix Not Installed
@@ -377,7 +377,7 @@ export TEMPLEDB_FHS_EXTRA_PACKAGES="missing-package"
 curl -L https://nixos.org/nix/install | sh
 
 # Option 2: Use mutable mode
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 ```
 
 ## Rollback
@@ -386,7 +386,7 @@ If you need to completely disable FHS:
 
 ```bash
 # Temporary (single command)
-./templedb deploy run my-app --no-fhs
+templedb deploy run my-app --no-fhs
 
 # Permanent (add to shell config)
 echo 'export TEMPLEDB_DEPLOYMENT_USE_FULL_FHS=false' >> ~/.bashrc
@@ -414,22 +414,22 @@ File issues at: [templedb/issues](https://github.com/yourusername/templedb/issue
 
 ```bash
 # Default (FHS isolation)
-./templedb deploy run my-app
+templedb deploy run my-app
 
 # Mutable mode (file editing)
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Disable FHS (emergency)
-./templedb deploy run my-app --no-fhs
+templedb deploy run my-app --no-fhs
 
 # Enter shell
-./templedb deploy shell my-app
+templedb deploy shell my-app
 
 # Run command
-./templedb deploy exec my-app 'npm test'
+templedb deploy exec my-app 'npm test'
 
 # List deployments (shows FHS status)
-./templedb deploy list
+templedb deploy list
 ```
 
 ---

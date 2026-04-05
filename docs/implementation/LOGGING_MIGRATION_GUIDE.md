@@ -173,13 +173,13 @@ Test each module after migration:
 
 ```bash
 # Test normal operation
-./templedb project list
+templedb project list
 
 # Test with DEBUG logging
-TEMPLEDB_LOG_LEVEL=DEBUG ./templedb project list
+TEMPLEDB_LOG_LEVEL=DEBUG templedb project list
 
 # Test with file logging
-TEMPLEDB_LOG_TO_FILE=true ./templedb project list
+TEMPLEDB_LOG_TO_FILE=true templedb project list
 tail -f ~/.local/share/templedb/templedb.log
 ```
 

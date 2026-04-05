@@ -123,10 +123,10 @@ cd templedb
 ./init_example_database.sh
 
 # Import a project
-./templedb project import /path/to/project my-project
+templedb project import /path/to/project my-project
 
 # Start TUI
-./templedb tui
+templedb tui
 ```
 
 ### 🔄 Migration Guide
@@ -135,7 +135,7 @@ cd templedb
 
 1. **Backup your database**:
    ```bash
-   ./templedb backup
+   templedb backup
    ```
 
 2. **Apply migration 014**:
@@ -145,13 +145,13 @@ cd templedb
 
 3. **Verify migration**:
    ```bash
-   ./templedb status
+   templedb status
    ```
 
 4. **Test operations**:
    ```bash
-   ./templedb project list
-   ./templedb vcs status <project>
+   templedb project list
+   templedb vcs status <project>
    ```
 
 #### Breaking Changes

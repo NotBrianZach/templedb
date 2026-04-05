@@ -110,7 +110,7 @@ aBcD3fGhIjKlMnOpQrStUvWxYz1234567890AbCdEf
 ### 7. Add Token to TempleDB
 
 ```bash
-./templedb domain provider add cloudflare
+templedb domain provider add cloudflare
 # Choose "Use API Token? Y"
 # Paste your token
 ```
@@ -119,10 +119,10 @@ aBcD3fGhIjKlMnOpQrStUvWxYz1234567890AbCdEf
 
 ```bash
 # List providers to verify it was added
-./templedb domain provider list
+templedb domain provider list
 
 # Try applying DNS (will test API access)
-./templedb domain dns apply PROJECT DOMAIN --target staging
+templedb domain dns apply PROJECT DOMAIN --target staging
 ```
 
 ## Alternative: Global API Key (Not Recommended)
@@ -144,7 +144,7 @@ If you must use the Global API Key instead of a token:
 5. Copy the key
 
 ```bash
-./templedb domain provider add cloudflare
+templedb domain provider add cloudflare
 # Choose "Use API Token? n"
 # Enter your Cloudflare email
 # Enter your Global API Key
@@ -232,10 +232,10 @@ https://dash.cloudflare.com/profile/api-tokens
 ```bash
 # 1. Create new token in Cloudflare
 # 2. Update in TempleDB
-./templedb domain provider add cloudflare
+templedb domain provider add cloudflare
 # (Will replace existing token)
 # 3. Test new token
-./templedb domain dns apply PROJECT DOMAIN --target staging
+templedb domain dns apply PROJECT DOMAIN --target staging
 # 4. Revoke old token in Cloudflare
 ```
 
@@ -309,7 +309,7 @@ TTL: 6 months
 
 Once configured, you can fully automate DNS management:
 ```bash
-./templedb domain dns apply PROJECT DOMAIN --target TARGET
+templedb domain dns apply PROJECT DOMAIN --target TARGET
 ```
 
 No more manual DNS configuration! 🎉

@@ -124,10 +124,10 @@ def deploy(self, args) -> int:
                 print("⚠️  No deployment configuration or deploy.sh found")
                 print("\n📝 To enable automated deployment:")
                 print(f"   Option 1 - Use deployment config (recommended):")
-                print(f"      ./templedb deploy init {project_slug}")
+                print(f"      templedb deploy init {project_slug}")
                 print(f"   Option 2 - Use deploy.sh script:")
                 print(f"      1. Create a deploy.sh script in {project_slug}")
-                print(f"      2. Re-import: ./templedb project sync {project_slug}")
+                print(f"      2. Re-import: templedb project sync {project_slug}")
 
                 if not dry_run:
                     print(f"\n💡 Deployment files available at: {work_dir}")
@@ -176,10 +176,10 @@ def deploy(self, args) -> int:
                 print("⚠️  No deployment configuration or deploy.sh found")
                 print("\n📝 To enable automated deployment:")
                 print(f"   Option 1 - Use deployment config (recommended):")
-                print(f"      ./templedb deploy init {project_slug}")
+                print(f"      templedb deploy init {project_slug}")
                 print(f"   Option 2 - Use deploy.sh script:")
                 print(f"      1. Create a deploy.sh script in {project_slug}")
-                print(f"      2. Re-import: ./templedb project sync {project_slug}")
+                print(f"      2. Re-import: templedb project sync {project_slug}")
 
                 if not dry_run:
                     print(f"\n💡 Deployment files available at: {result.work_dir}")

@@ -331,7 +331,7 @@ MCP server reads from `.mcp.json`:
 {
   "mcpServers": {
     "templedb": {
-      "command": "./templedb",
+      "command": "templedb",
       "args": ["mcp", "serve"],
       "env": {
         "TEMPLEDB_DB_PATH": "~/.templedb/projdb.db"
@@ -345,7 +345,7 @@ MCP server reads from `.mcp.json`:
 
 ```bash
 # Test server
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize",...}' | ./templedb mcp serve
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize",...}' | templedb mcp serve
 
 # Verify tools
 python3 -c "from src.mcp_server import MCPServer; print(len(MCPServer().tools))"

@@ -344,15 +344,15 @@ For quick edits to individual files:
 
 ```bash
 # Edit file in $EDITOR (opens from project directory)
-./templedb file edit myproject src/config.py
+templedb file edit myproject src/config.py
 
 # Stage and commit
-./templedb vcs add -p myproject src/config.py
-./templedb vcs commit -p myproject -m "Update config"
+templedb vcs add -p myproject src/config.py
+templedb vcs commit -p myproject -m "Update config"
 
 # Or programmatically set content
-echo "new content" | ./templedb file set myproject file.txt --stage
-./templedb vcs commit -p myproject -m "Update via script"
+echo "new content" | templedb file set myproject file.txt --stage
+templedb vcs commit -p myproject -m "Update via script"
 ```
 
 ### 6. **AI Agent Session Management**
@@ -361,25 +361,25 @@ Track AI agent sessions with automatic commit linking:
 
 ```bash
 # Start an agent session
-./templedb agent start --project myproject --goal "Implement authentication"
+templedb agent start --project myproject --goal "Implement authentication"
 # → Session ID: 1
 
 # Export session ID to link commits
 export TEMPLEDB_SESSION_ID=1
 
 # Checkout and work
-./templedb project checkout myproject /tmp/work
+templedb project checkout myproject /tmp/work
 cd /tmp/work && vim src/auth.py
 
 # Commit - automatically linked to session
-./templedb project commit myproject /tmp/work -m "Add auth" --ai-assisted
+templedb project commit myproject /tmp/work -m "Add auth" --ai-assisted
 
 # View session status
-./templedb agent status 1
+templedb agent status 1
 # → Shows commits, interactions, duration
 
 # End session
-./templedb agent end 1
+templedb agent end 1
 ```
 
 Includes session lifecycle tracking, automatic commit linking via `TEMPLEDB_SESSION_ID`, interaction history, context snapshots, and session analytics.
@@ -429,11 +429,11 @@ Serve repositories directly from SQLite as standard git repositories via HTTP:
 
 ```bash
 # Configure git server (stored in database)
-./templedb gitserver config get
-./templedb gitserver config set git_server.port 9418
+templedb gitserver config get
+templedb gitserver config set git_server.port 9418
 
 # Start the server
-./templedb gitserver start
+templedb gitserver start
 # → Git server started at http://localhost:9418
 
 # Clone from database (no filesystem checkout!)
@@ -447,7 +447,7 @@ git clone http://localhost:9418/myproject
 }
 
 # List available repositories
-./templedb gitserver list-repos
+templedb gitserver list-repos
 ```
 
 Serves directly from SQLite with zero filesystem checkouts. Implements standard git smart HTTP protocol, works with git/Nix/all git clients. Configurable via database with automatic URL generation and on-the-fly object generation.
@@ -460,17 +460,17 @@ Find and open files using natural language queries, integrating seamlessly with 
 
 ```bash
 # Query and open files matching natural language description
-./templedb query-open myapp "authentication code"
-./templedb query-open bza "prompts that do character analysis on a page"
+templedb query-open myapp "authentication code"
+templedb query-open bza "prompts that do character analysis on a page"
 
 # Preview results without opening
-./templedb query myapp "config files" --json
+templedb query myapp "config files" --json
 
 # Limit results
-./templedb query-open myapp "test files" --limit 5
+templedb query-open myapp "test files" --limit 5
 
 # Open in background (no focus stealing)
-./templedb query-open myapp "database migrations" --no-select
+templedb query-open myapp "database migrations" --no-select
 ```
 
 **From Emacs:**
@@ -548,13 +548,13 @@ See **[GETTING_STARTED.md](docs/GETTING_STARTED.md)** for detailed installation 
 
 ```bash
 # Launch Claude Code with full TempleDB context
-./templedb claude
+templedb claude
 
 # Or if you have templedb in your PATH
 templedb claude
 
 # You can also pass additional arguments
-./templedb claude --model opus
+templedb claude --model opus
 
 # Alternatively, use the claude command directly
 claude --append-system-prompt-file .claude/project-context.md
@@ -588,7 +588,7 @@ TempleDB includes a Model Context Protocol (MCP) server that exposes the databas
 }
 
 # Option 2: Or start manually for testing
-./templedb mcp serve
+templedb mcp serve
 ```
 
 **Usage:**
@@ -633,10 +633,10 @@ TempleDB uses git-like CWD-based project discovery with `.templedb/` markers:
 ```bash
 # Initialize current directory as a TempleDB project
 cd ~/myproject
-./templedb project init
+templedb project init
 
 # Or import an existing project from elsewhere
-./templedb project import /path/to/project --slug myproject
+templedb project import /path/to/project --slug myproject
 ```
 
 This creates a `.templedb/` marker in your project root - just like `.git/`!
@@ -645,17 +645,17 @@ This creates a `.templedb/` marker in your project root - just like `.git/`!
 
 ```bash
 # View database status
-./templedb status
+templedb status
 
 # List all projects
-./templedb project list
+templedb project list
 
 # Show current project details (from anywhere in project tree)
 cd ~/myproject/src
-./templedb project show
+templedb project show
 
 # Or show specific project
-./templedb project show myproject
+templedb project show myproject
 ```
 
 ## Documentation

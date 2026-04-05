@@ -184,7 +184,7 @@ logger.debug("Full traceback:", exc_info=True)  # Only shown in debug mode
 
 Users can enable debug mode:
 ```bash
-TEMPLEDB_LOG_LEVEL=DEBUG ./templedb <command>
+TEMPLEDB_LOG_LEVEL=DEBUG templedb <command>
 ```
 
 ## Error Message Template
@@ -281,15 +281,15 @@ When testing commands, verify:
 
 ```bash
 # Test with invalid input
-./templedb project show nonexistent
+templedb project show nonexistent
 # Should show: Error with suggestion to list projects
 
 # Test with missing file
-./templedb vcs diff myproject --file missing.py
+templedb vcs diff myproject --file missing.py
 # Should show: Error with suggestion to run status
 
 # Test with debug mode
-TEMPLEDB_LOG_LEVEL=DEBUG ./templedb <failing-command>
+TEMPLEDB_LOG_LEVEL=DEBUG templedb <failing-command>
 # Should show: Full traceback and detailed logs
 ```
 

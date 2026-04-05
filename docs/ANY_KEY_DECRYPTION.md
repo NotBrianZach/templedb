@@ -27,7 +27,7 @@ Secret encrypted with 4 recipients:
 When you initialize secrets with multiple keys:
 
 ```bash
-./templedb secret init-multi myproject \
+templedb secret init-multi myproject \
   --keys yubikey-1-primary,yubikey-2-backup,yubikey-3-dr,usb-backup
 ```
 
@@ -45,7 +45,7 @@ Result: Secret blob contains 4 copies of the DEK, each encrypted for a different
 When you decrypt:
 
 ```bash
-./templedb secret edit myproject
+templedb secret edit myproject
 ```
 
 TempleDB passes **all available identity files** to `age`:
@@ -93,7 +93,7 @@ All existing files are automatically used for decryption attempts.
 
 ```bash
 # Your ~/.age/key.txt exists
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # age automatically uses ~/.age/key.txt
 # No Yubikey needed!
@@ -103,7 +103,7 @@ All existing files are automatically used for decryption attempts.
 
 ```bash
 # Insert Yubikey, enter PIN when prompted
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # age tries filesystem keys first, then Yubikey
 # Uses whichever works
@@ -114,7 +114,7 @@ All existing files are automatically used for decryption attempts.
 ```bash
 # Override to use only one specific key
 export TEMPLEDB_AGE_KEY_FILE=/path/to/specific/key.txt
-./templedb secret edit myproject
+templedb secret edit myproject
 ```
 
 ### Check Which Keys Will Be Tried
@@ -134,7 +134,7 @@ ls -la ~/.config/sops/age/keys.txt \
 
 ```bash
 # You have ~/.age/key.txt
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # Decrypts instantly with filesystem key
 # No Yubikey needed, no PIN required
@@ -144,7 +144,7 @@ ls -la ~/.config/sops/age/keys.txt \
 
 ```bash
 # Yubikey #1 plugged in
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # Tries filesystem keys first (if present)
 # Falls back to Yubikey if needed
@@ -156,7 +156,7 @@ ls -la ~/.config/sops/age/keys.txt \
 ```bash
 # Get Yubikey #2 from safe
 # Remove Yubikey #1
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # Works with Yubikey #2
 # Each Yubikey has independent identity
@@ -171,7 +171,7 @@ ls -la ~/.config/sops/age/keys.txt \
 # Copy backup key to standard location
 cp /mnt/usb/backup-key.txt ~/.age/key.txt
 
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # Works with filesystem backup key
 ```
@@ -183,7 +183,7 @@ cp /mnt/usb/backup-key.txt ~/.age/key.txt
 #   - ~/.age/key.txt
 #   - Yubikey #1 plugged in
 
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # age tries both:
 #   1. Tries ~/.age/key.txt → Success! (faster, no PIN)
@@ -326,7 +326,7 @@ age-plugin-yubikey --generate
 1. **Wrong keys** - Secret encrypted with different keys
    ```bash
    # Check which keys encrypt the secret
-   ./templedb secret show-keys myproject
+   templedb secret show-keys myproject
    ```
 
 2. **Yubikey not inserted**
@@ -362,7 +362,7 @@ age-plugin-yubikey --generate
 **Solution:**
 ```bash
 # Check secret version history
-./templedb vcs log
+templedb vcs log
 ```
 
 ---
@@ -419,7 +419,7 @@ This is **standard age behavior**, not TempleDB-specific.
 ```bash
 # Use fast filesystem key for rapid iteration
 export TEMPLEDB_AGE_KEY_FILE=~/.age/dev-key.txt
-./templedb secret edit myproject
+templedb secret edit myproject
 ```
 
 ### Production
@@ -427,7 +427,7 @@ export TEMPLEDB_AGE_KEY_FILE=~/.age/dev-key.txt
 ```bash
 # Use Yubikey for production (hardware-protected)
 # Filesystem key as backup only
-./templedb secret edit myproject
+templedb secret edit myproject
 # Will prompt for Yubikey PIN
 ```
 
@@ -438,7 +438,7 @@ export TEMPLEDB_AGE_KEY_FILE=~/.age/dev-key.txt
 # Only use when Yubikeys unavailable
 cp /secure/location/backup-key.txt ~/.age/emergency-key.txt
 export TEMPLEDB_AGE_KEY_FILE=~/.age/emergency-key.txt
-./templedb secret edit myproject
+templedb secret edit myproject
 ```
 
 ### Key Hierarchy
@@ -457,11 +457,11 @@ age tries in order you specify via `-i` flags.
 
 ```bash
 # Secret encrypted with 4 keys
-./templedb secret init-multi myproject \
+templedb secret init-multi myproject \
   --keys key1,key2,key3,key4
 
 # Decrypt with ANY key (automatic discovery)
-./templedb secret edit myproject
+templedb secret edit myproject
 # ↓
 # age -d -i key1 -i key2 -i key3 -i key4
 # ↓

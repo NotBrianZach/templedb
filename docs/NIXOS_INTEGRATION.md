@@ -63,13 +63,13 @@ TempleDB can analyze your projects and generate complete NixOS configurations.
 
 ```bash
 # Detect what would be generated
-./templedb nixos detect myproject
+templedb nixos detect myproject
 
 # Generate NixOS + Home Manager modules
-./templedb nixos generate myproject
+templedb nixos generate myproject
 
 # Full export with Cathedral package
-./templedb nixos export myproject -o /tmp/myproject-nixos
+templedb nixos export myproject -o /tmp/myproject-nixos
 ```
 
 ### What Gets Generated
@@ -98,10 +98,10 @@ By default, generated modules include TempleDB as a dependency, creating a self-
 
 ```bash
 # Include TempleDB (default)
-./templedb nixos generate myproject --include-templedb
+templedb nixos generate myproject --include-templedb
 
 # Exclude TempleDB
-./templedb nixos generate myproject --no-templedb
+templedb nixos generate myproject --no-templedb
 ```
 
 This means:
@@ -115,10 +115,10 @@ Export TempleDB's own configuration:
 
 ```bash
 # Make sure templedb project is tracked
-./templedb project list | grep templedb
+templedb project list | grep templedb
 
 # Generate NixOS modules for TempleDB itself
-./templedb nixos export templedb -o /tmp/templedb-self-host
+templedb nixos export templedb -o /tmp/templedb-self-host
 ```
 
 This creates a complete NixOS configuration that:
@@ -181,7 +181,7 @@ Environment variables stored in TempleDB are automatically included:
 
 ```bash
 # Set environment variable
-./templedb env set myproject API_KEY "secret-value"
+templedb env set myproject API_KEY "secret-value"
 
 # Generated module will include:
 # environment.variables = {
@@ -199,10 +199,10 @@ TempleDB integrates with sops-nix for secure secret management:
 
 ```bash
 # Initialize secrets
-./templedb secret init myproject --age-recipient $(cat ~/.config/sops/age/keys.txt | age-keygen -y)
+templedb secret init myproject --age-recipient $(cat ~/.config/sops/age/keys.txt | age-keygen -y)
 
 # Edit secrets (opens $EDITOR)
-./templedb secret edit myproject
+templedb secret edit myproject
 ```
 
 ### 2. Generated Modules Include Placeholders
@@ -244,18 +244,18 @@ Here's a complete workflow from project to NixOS system:
 
 ```bash
 # 1. Import a project
-./templedb project import https://github.com/user/myapp
+templedb project import https://github.com/user/myapp
 
 # 2. Add environment variables
-./templedb env set myapp PORT 3000
-./templedb env set myapp NODE_ENV production
+templedb env set myapp PORT 3000
+templedb env set myapp NODE_ENV production
 
 # 3. Add secrets
-./templedb secret init myapp
-./templedb secret edit myapp  # Add DATABASE_URL, API_KEYS, etc.
+templedb secret init myapp
+templedb secret edit myapp  # Add DATABASE_URL, API_KEYS, etc.
 
 # 4. Generate NixOS configuration
-./templedb nixos export myapp -o ~/nixos-configs/myapp
+templedb nixos export myapp -o ~/nixos-configs/myapp
 
 # 5. Review generated files
 cat ~/nixos-configs/myapp/myapp-INTEGRATION.md
@@ -278,16 +278,16 @@ Combine with TempleDB's deployment features:
 
 ```bash
 # 1. Deploy project from TempleDB
-./templedb deploy run myapp
+templedb deploy run myapp
 
 # 2. Navigate to deployed project
-cd $(./templedb deploy path myapp)
+cd $(templedb deploy path myapp)
 
 # 3. Work with the deployed project
 # All dependencies from NixOS module are available
 
 # 4. Update NixOS config as project evolves
-./templedb nixos export myapp -o /etc/nixos/modules/
+templedb nixos export myapp -o /etc/nixos/modules/
 sudo nixos-rebuild switch
 ```
 
@@ -345,7 +345,7 @@ exec $SHELL
 
 1. Check detected file types:
    ```bash
-   ./templedb nixos detect myproject
+   templedb nixos detect myproject
    ```
 
 2. Manually edit the generated `.nix` files
@@ -366,7 +366,7 @@ exec $SHELL
 
 3. Ensure secrets are encrypted with correct key:
    ```bash
-   ./templedb secret export myproject --format yaml
+   templedb secret export myproject --format yaml
    ```
 
 ## Benefits of TempleDB + NixOS

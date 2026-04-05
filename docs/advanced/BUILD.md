@@ -194,11 +194,11 @@ Requires dependencies:
 ```bash
 # With Nix
 nix-shell -p python311 python311Packages.textual python311Packages.rich
-./templedb-tui
+templedb-tui
 
 # With pip
 pip install --user textual rich
-./templedb-tui
+templedb-tui
 ```
 
 ### Advantages

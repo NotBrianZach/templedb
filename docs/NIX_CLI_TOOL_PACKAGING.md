@@ -53,7 +53,7 @@ templedb deploy-nix generate-flake <project-slug> \
 
 **Example - Python CLI Tool**:
 ```bash
-./templedb deploy-nix generate-flake bza \
+templedb deploy-nix generate-flake bza \
   --description "AI-powered code generation CLI" \
   --version 1.0.0
 
@@ -222,7 +222,7 @@ templedb deploy-nix install <project-slug>
 
 **Example**:
 ```bash
-./templedb deploy-nix install bza
+templedb deploy-nix install bza
 
 # Output:
 # 📥 Installing bza to local Nix profile...
@@ -271,7 +271,7 @@ templedb deploy-nix add-to-config <project-slug>
 
 **Example**:
 ```bash
-./templedb deploy-nix add-to-config bza
+templedb deploy-nix add-to-config bza
 
 # Output:
 # ⚙️  Generating NixOS/home-manager configuration snippet...
@@ -335,10 +335,10 @@ templedb deploy-nix add-to-config <project-slug>
 
 ```bash
 # Step 1: Import project to TempleDB
-./templedb project import /home/user/bza bza
+templedb project import /home/user/bza bza
 
 # Step 2: Generate Nix flake
-./templedb deploy-nix generate-flake bza \
+templedb deploy-nix generate-flake bza \
   --description "AI-powered code generation CLI" \
   --version 1.0.0
 
@@ -350,10 +350,10 @@ nix build
 nix run .
 
 # Step 5a: Install locally (for personal use)
-./templedb deploy-nix install bza
+templedb deploy-nix install bza
 
 # Step 5b: Or add to system config (for system-wide availability)
-./templedb deploy-nix add-to-config bza
+templedb deploy-nix add-to-config bza
 # Then copy snippet to configuration.nix and rebuild
 
 # Done! CLI tool is now available
@@ -366,10 +366,10 @@ bza --help
 
 ```bash
 # Step 1: Import project
-./templedb project import /home/user/mytool mytool
+templedb project import /home/user/mytool mytool
 
 # Step 2: Generate flake
-./templedb deploy-nix generate-flake mytool
+templedb deploy-nix generate-flake mytool
 
 # Step 3: Update npmDepsHash
 cd /home/user/mytool
@@ -381,7 +381,7 @@ nix build 2>&1 | grep "got:" | awk '{print $2}'
 nix build
 
 # Step 5: Install
-./templedb deploy-nix install mytool
+templedb deploy-nix install mytool
 
 # Done!
 mytool --version
@@ -393,10 +393,10 @@ mytool --version
 
 ```bash
 # Step 1: Import project
-./templedb project import /home/user/rustool rustool
+templedb project import /home/user/rustool rustool
 
 # Step 2: Generate flake
-./templedb deploy-nix generate-flake rustool
+templedb deploy-nix generate-flake rustool
 
 # Step 3: Ensure Cargo.lock exists
 cd /home/user/rustool
@@ -406,7 +406,7 @@ cargo generate-lockfile  # if needed
 nix build
 
 # Step 5: Install
-./templedb deploy-nix install rustool
+templedb deploy-nix install rustool
 
 # Done!
 rustool --help

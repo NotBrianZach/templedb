@@ -565,7 +565,7 @@ All features reuse existing services:
 ✅ Error handling works (project not found, symbol not found)
 ✅ Response format matches MCP spec
 ✅ Performance meets requirements (<100ms)
-✅ Integration tested with ./templedb mcp serve
+✅ Integration tested with templedb mcp serve
 
 ## Benefits for AI Agents
 

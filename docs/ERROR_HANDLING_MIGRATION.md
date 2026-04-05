@@ -113,7 +113,7 @@ def create_project(self, args) -> int:
     if existing:
         raise ValidationError(
             f"Project '{args.slug}' already exists.\n"
-            f"Use './templedb project list' to see existing projects"
+            f"Use 'templedb project list' to see existing projects"
         )
 
     # Create project
@@ -137,7 +137,7 @@ def show_project(self, args) -> int:
 
     if not project:
         print(f"❌ Error: Project '{args.project}' not found")
-        print(f"Use './templedb project list' to see available projects")
+        print(f"Use 'templedb project list' to see available projects")
         return 1
 
     print(f"Project: {project['name']}")
@@ -278,7 +278,7 @@ def deploy(self, args) -> int:
         config_file = Path(f"configs/{args.target}.yaml")
         if not config_file.exists():
             print(f"❌ Error: Config file not found: {config_file}")
-            print("Create one with: ./templedb deploy init")
+            print("Create one with: templedb deploy init")
             return 1
 
         # Validate project
@@ -323,7 +323,7 @@ def deploy(self, args) -> int:
     if not config_file.exists():
         raise ConfigurationError(
             f"Config file not found: {config_file}\n"
-            f"Create one with: ./templedb deploy init {args.target}"
+            f"Create one with: templedb deploy init {args.target}"
         )
 
     # Run deployment
@@ -435,7 +435,7 @@ Run the command with:
 - Valid input (should succeed)
 - Invalid input (should show helpful error)
 - Missing resources (should show helpful error)
-- Debug mode: `TEMPLEDB_LOG_LEVEL=DEBUG ./templedb command`
+- Debug mode: `TEMPLEDB_LOG_LEVEL=DEBUG templedb command`
 
 ## Common Mistakes to Avoid
 
@@ -488,7 +488,7 @@ if not config:
 if not config:
     raise ConfigurationError(
         f"Config file not found: {config_path}\n"
-        f"Create one with: ./templedb config init"
+        f"Create one with: templedb config init"
     )
 ```
 
@@ -518,19 +518,19 @@ def command(self, args) -> int:
 
 ```bash
 # Test with valid input
-./templedb command valid-input
+templedb command valid-input
 # Should: succeed with success message
 
 # Test with invalid input
-./templedb command ''
+templedb command ''
 # Should: show validation error with helpful message
 
 # Test with missing resource
-./templedb command nonexistent
+templedb command nonexistent
 # Should: show resource not found error
 
 # Test in debug mode
-TEMPLEDB_LOG_LEVEL=DEBUG ./templedb command failing-input
+TEMPLEDB_LOG_LEVEL=DEBUG templedb command failing-input
 # Should: show full traceback and detailed logs
 ```
 
@@ -538,15 +538,15 @@ TEMPLEDB_LOG_LEVEL=DEBUG ./templedb command failing-input
 
 ```bash
 # Success case
-./templedb command valid-input
+templedb command valid-input
 echo $?  # Should be 0
 
 # Error case
-./templedb command invalid-input
+templedb command invalid-input
 echo $?  # Should be 1
 
 # Application error case (if bug exists)
-./templedb command triggers-bug
+templedb command triggers-bug
 echo $?  # Should be 2
 ```
 

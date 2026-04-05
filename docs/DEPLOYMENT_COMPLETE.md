@@ -33,7 +33,7 @@ This gives TempleDB projects a complete, production-ready deployment pipeline fr
 
 **Example**:
 ```bash
-./templedb deploy-nix run woofs_projects \
+templedb deploy-nix run woofs_projects \
   --target-host 192.168.1.100 \
   --target-user deploy \
   --port 3000 \
@@ -64,17 +64,17 @@ This gives TempleDB projects a complete, production-ready deployment pipeline fr
 **Example**:
 ```bash
 # Homebrew
-./templedb deploy-appstore homebrew bza \
+templedb deploy-appstore homebrew bza \
   --version 1.0.0 \
   --publish
 
 # Snap
-./templedb deploy-appstore snap bza \
+templedb deploy-appstore snap bza \
   --version 1.0.0 \
   --publish
 
 # macOS App Store
-./templedb deploy-appstore macos bza \
+templedb deploy-appstore macos bza \
   --executable dist/bza \
   --sign \
   --notarize
@@ -109,14 +109,14 @@ This gives TempleDB projects a complete, production-ready deployment pipeline fr
 **Example**:
 ```bash
 # Unity
-./templedb deploy-steam deploy-unity mygame \
+templedb deploy-steam deploy-unity mygame \
   --app-id 480 \
   --depot-id 481 \
   --username steamuser \
   --targets StandaloneWindows64,StandaloneOSX,StandaloneLinux64
 
 # Godot
-./templedb deploy-steam deploy-godot mygame \
+templedb deploy-steam deploy-godot mygame \
   --app-id 480 \
   --depot-id 481 \
   --username steamuser \
@@ -143,7 +143,7 @@ This gives TempleDB projects a complete, production-ready deployment pipeline fr
 
 ```bash
 # Deploy to VPS with systemd
-./templedb deploy-nix run <project-slug> \
+templedb deploy-nix run <project-slug> \
   --target-host <ip-address> \
   --target-user deploy \
   --port <port> \
@@ -154,17 +154,17 @@ This gives TempleDB projects a complete, production-ready deployment pipeline fr
 
 ```bash
 # Deploy to Homebrew
-./templedb deploy-appstore homebrew <project-slug> \
+templedb deploy-appstore homebrew <project-slug> \
   --version 1.0.0 \
   --publish
 
 # Deploy to Snap Store
-./templedb deploy-appstore snap <project-slug> \
+templedb deploy-appstore snap <project-slug> \
   --version 1.0.0 \
   --publish
 
 # Deploy to macOS App Store
-./templedb deploy-appstore macos <project-slug> \
+templedb deploy-appstore macos <project-slug> \
   --executable dist/<binary> \
   --sign --notarize
 ```
@@ -173,14 +173,14 @@ This gives TempleDB projects a complete, production-ready deployment pipeline fr
 
 ```bash
 # Unity → Steam
-./templedb deploy-steam deploy-unity <project-slug> \
+templedb deploy-steam deploy-unity <project-slug> \
   --app-id <steam-app-id> \
   --depot-id <steam-depot-id> \
   --username <steam-username> \
   --targets StandaloneWindows64,StandaloneOSX,StandaloneLinux64
 
 # Godot → Steam
-./templedb deploy-steam deploy-godot <project-slug> \
+templedb deploy-steam deploy-godot <project-slug> \
   --app-id <steam-app-id> \
   --depot-id <steam-depot-id> \
   --username <steam-username> \

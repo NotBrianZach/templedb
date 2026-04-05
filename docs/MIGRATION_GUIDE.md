@@ -422,10 +422,10 @@ After migrating, verify:
 
 ```bash
 # 1. Command still works
-./templedb <your-command> <args>
+templedb <your-command> <args>
 
 # 2. Error handling works
-./templedb <your-command> nonexistent  # Should show friendly error
+templedb <your-command> nonexistent  # Should show friendly error
 
 # 3. Unit tests pass
 pytest tests/unit/services/test_your_service.py -v

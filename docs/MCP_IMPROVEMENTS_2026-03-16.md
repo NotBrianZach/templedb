@@ -140,7 +140,7 @@ python3 -m py_compile src/mcp_server.py
 python3 -c "from src.mcp_server import MCPServer; MCPServer()"
 
 # Protocol test
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize",...}' | ./templedb mcp serve
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize",...}' | templedb mcp serve
 ```
 
 ## Statistics
@@ -266,7 +266,7 @@ python3 -m py_compile src/mcp_server.py
 python3 -c "from src.mcp_server import MCPServer; s = MCPServer(); print(f'✓ {len(s.tools)} tools')"
 
 # 3. Test protocol
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | ./templedb mcp serve 2>&1 | grep "TempleDB MCP Server"
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | templedb mcp serve 2>&1 | grep "TempleDB MCP Server"
 
 # 4. Test in Claude Code
 # Start Claude Code in templedb directory

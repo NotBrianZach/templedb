@@ -116,16 +116,16 @@
 ### 1. Final Testing
 ```bash
 # Backup production database
-./templedb backup
+templedb backup
 
 # Apply migration on test copy
 cp ~/.local/share/templedb/templedb.sqlite test.db
 sqlite3 test.db < migrations/014_consolidate_duplicate_versions.sql
 
 # Run tests
-./templedb project list
-./templedb vcs status <project>
-./templedb tui
+templedb project list
+templedb vcs status <project>
+templedb tui
 ```
 
 ### 2. Sanitize Documentation

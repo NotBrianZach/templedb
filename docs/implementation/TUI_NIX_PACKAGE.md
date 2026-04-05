@@ -28,7 +28,7 @@ The Nix package includes:
 ## Package Structure
 
 ```
-/nix/store/.../templedb-tui-1.0.0/
+/nix/store/..templedb-tui-1.0.0/
 ├── bin/
 │   └── templedb-tui          # Wrapper script (347 bytes)
 └── lib/templedb/src/
@@ -49,9 +49,9 @@ The package uses `makeWrapper` to create a small bash script that:
 Example wrapper script:
 ```bash
 #!/nix/store/.../bash -e
-export PYTHONPATH='/nix/store/.../templedb-tui-1.0.0/lib/templedb/src'
+export PYTHONPATH='/nix/store/..templedb-tui-1.0.0/lib/templedb/src'
 exec "/nix/store/.../python3-3.11.14-env/bin/python3" \
-  /nix/store/.../templedb-tui-1.0.0/lib/templedb/src/tui.py "$@"
+  /nix/store/..templedb-tui-1.0.0/lib/templedb/src/tui.py "$@"
 ```
 
 ## Advantages Over Zipapp

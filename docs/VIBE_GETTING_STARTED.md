@@ -18,22 +18,22 @@ python3 -c "import aiohttp, watchdog, websockets" && echo "✓ Ready"
 
 ```bash
 # Option A: Import existing project
-./templedb project import /path/to/project
+templedb project import /path/to/project
 
 # Option B: Use existing TempleDB project
-./templedb project list
+templedb project list
 ```
 
 ### 3. Start Vibe Coding Session
 
 ```bash
 # Launch everything with one command
-./templedb vibe-start myproject
+templedb vibe-start myproject
 
 # Or choose your UI
-./templedb vibe-start myproject --ui browser   # Default
-./templedb vibe-start myproject --ui emacs     # For Emacs users
-./templedb vibe-start myproject --ui terminal  # Future TUI
+templedb vibe-start myproject --ui browser   # Default
+templedb vibe-start myproject --ui emacs     # For Emacs users
+templedb vibe-start myproject --ui terminal  # Future TUI
 ```
 
 ### What Happens
@@ -53,7 +53,7 @@ When you run `vibe-start`:
 
 ```bash
 # Start vibe session
-./templedb vibe-start ecommerce-api
+templedb vibe-start ecommerce-api
 
 # You ask Claude: "Add JWT authentication"
 # Claude makes changes to auth.py, middleware.py, etc.
@@ -70,7 +70,7 @@ When you run `vibe-start`:
 
 ```bash
 # After AI makes significant changes
-./templedb vibe-start myproject
+templedb vibe-start myproject
 
 # Review the code with Claude
 # Questions test your understanding
@@ -81,7 +81,7 @@ When you run `vibe-start`:
 
 ```bash
 # New team member explores codebase
-./templedb vibe-start legacy-app
+templedb vibe-start legacy-app
 
 # As they navigate with Claude
 # Questions help them understand patterns
@@ -126,7 +126,7 @@ ln -s ~/templeDB/integrations/emacs/templedb-vibe.el ~/.emacs.d/lisp/
 
 **Launch**:
 ```bash
-./templedb vibe-start myproject --ui emacs
+templedb vibe-start myproject --ui emacs
 ```
 
 ### Terminal UI (Future)
@@ -173,7 +173,7 @@ Final Score: 12/15 (80%)
 Strong areas: security, architecture
 Needs practice: performance
 
-Full results: ./templedb vibe results <session_id>
+Full results: templedb vibe results <session_id>
 ```
 
 ## Manual Quiz Commands
@@ -182,10 +182,10 @@ If you prefer manual control over automated workflow:
 
 ```bash
 # Generate quiz from specific commit
-./templedb vibe generate myproject --commit abc123
+templedb vibe generate myproject --commit abc123
 
 # Add questions manually
-./templedb vibe add-question <session_id> \
+templedb vibe add-question <session_id> \
   "Why use bcrypt for passwords?" \
   "Adaptive cost factor for security" \
   --type short_answer \
@@ -193,13 +193,13 @@ If you prefer manual control over automated workflow:
   --difficulty medium
 
 # Take quiz interactively
-./templedb vibe take <session_id> --developer-id alice
+templedb vibe take <session_id> --developer-id alice
 
 # View results
-./templedb vibe results <session_id> --detailed
+templedb vibe results <session_id> --detailed
 
 # Check learning progress
-./templedb vibe progress --developer-id alice
+templedb vibe progress --developer-id alice
 ```
 
 ## Configuration
@@ -217,11 +217,11 @@ export VIBE_DEBOUNCE_SECONDS=2           # Change debounce time
 
 ```bash
 # Custom port
-./templedb vibe-start myproject --port 9000
+templedb vibe-start myproject --port 9000
 
 # Pass arguments to Claude
-./templedb vibe-start myproject --model opus
-./templedb vibe-start myproject --verbose
+templedb vibe-start myproject --model opus
+templedb vibe-start myproject --verbose
 ```
 
 ## Troubleshooting
@@ -231,7 +231,7 @@ export VIBE_DEBOUNCE_SECONDS=2           # Change debounce time
 **Solution**: Enter Nix shell first
 ```bash
 nix develop
-./templedb vibe-start myproject
+templedb vibe-start myproject
 ```
 
 ### Quiz UI doesn't open
@@ -262,7 +262,7 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite \
 **Fix**:
 1. Ensure Emacs is in PATH: `which emacs`
 2. Check package loaded: `(require 'templedb-vibe)` in Emacs
-3. Use browser UI instead: `./templedb vibe-start myproject --ui browser`
+3. Use browser UI instead: `templedb vibe-start myproject --ui browser`
 
 ## Advanced Usage
 
@@ -272,7 +272,7 @@ Use the vibe prompt templates:
 
 ```bash
 # Render quiz generation prompt for a commit
-./templedb prompt render vibe-quiz-generation \
+templedb prompt render vibe-quiz-generation \
   --vars '{
     "project_name": "myproject",
     "commit_hash": "abc123",
@@ -280,7 +280,7 @@ Use the vibe prompt templates:
   }'
 
 # Or use directly with Claude
-./templedb claude --from-db --template vibe-commit-review
+templedb claude --from-db --template vibe-commit-review
 ```
 
 ### Custom Question Templates

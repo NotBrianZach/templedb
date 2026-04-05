@@ -61,15 +61,15 @@ TempleDB now supports **FHS-style deployments** as an alternative to deploying p
 ```bash
 # Use FHS-style deployments (default)
 export TEMPLEDB_DEPLOYMENT_USE_FHS=true
-./templedb deploy run my-project
+templedb deploy run my-project
 
 # Use traditional /tmp deployments
 export TEMPLEDB_DEPLOYMENT_USE_FHS=false
-./templedb deploy run my-project
+templedb deploy run my-project
 
 # Custom FHS directory
 export TEMPLEDB_DEPLOYMENT_FHS_DIR=/data/templedb-deployments
-./templedb deploy run my-project
+templedb deploy run my-project
 ```
 
 ## Usage
@@ -80,7 +80,7 @@ FHS-style deployments work exactly the same as before:
 
 ```bash
 # Deploy project (uses FHS by default)
-./templedb deploy run my-project
+templedb deploy run my-project
 
 # Deployment locations:
 #   FHS: ~/.local/share/templedb/fhs-deployments/my-project/working
@@ -90,7 +90,7 @@ FHS-style deployments work exactly the same as before:
 ### Listing Deployed Projects
 
 ```bash
-./templedb deploy list
+templedb deploy list
 ```
 
 Output shows deployment location:
@@ -107,7 +107,7 @@ Output shows deployment location:
      Updated: 2 days ago
 
 💡 Tips:
-   Jump to project:  cd $(./templedb deploy path my-project)
+   Jump to project:  cd $(templedb deploy path my-project)
    FHS deployments:  /home/user/.local/share/templedb/fhs-deployments
 ```
 
@@ -115,10 +115,10 @@ Output shows deployment location:
 
 ```bash
 # Get deployment path (checks FHS first, then /tmp)
-./templedb deploy path my-project
+templedb deploy path my-project
 
 # Use in cd command
-cd $(./templedb deploy path my-project)
+cd $(templedb deploy path my-project)
 
 # Or with tdb alias
 cd $(tdb deploy path my-project)
@@ -212,7 +212,7 @@ Existing deployments in `/tmp` continue to work:
 
 ```bash
 # List all deployments (shows location)
-./templedb deploy list
+templedb deploy list
 
 # Old /tmp deployments can be safely removed
 rm -rf /tmp/templedb_deploy_*
@@ -243,14 +243,14 @@ mkdir -p ~/.local/share/templedb/fhs-deployments
 **Solution:**
 ```bash
 # List all deployments
-./templedb deploy list
+templedb deploy list
 
 # Check both locations
 ls -la ~/.local/share/templedb/fhs-deployments/
 ls -la /tmp/templedb_deploy_*
 
 # Redeploy if needed
-./templedb deploy run my-project
+templedb deploy run my-project
 ```
 
 ### Want to Use /tmp Again
@@ -295,7 +295,7 @@ du -sh ~/.local/share/templedb/fhs-deployments/*
 **Planned features:**
 
 1. **Full Nix FHS integration** - Automatic FHS environment wrapping
-2. **Deployment cleanup** - `./templedb deploy clean <project>` command
+2. **Deployment cleanup** - `templedb deploy clean <project>` command
 3. **FHS environment caching** - Reuse Nix FHS environments
 4. **Custom package lists** - Per-project FHS package configuration
 5. **Environment profiles** - Save/load FHS environment configurations
@@ -306,7 +306,7 @@ du -sh ~/.local/share/templedb/fhs-deployments/*
 
 ```bash
 # Deploy with FHS (default)
-./templedb deploy run my-project --target production
+templedb deploy run my-project --target production
 
 # Result:
 #   Created: ~/.local/share/templedb/fhs-deployments/my-project/
@@ -317,7 +317,7 @@ du -sh ~/.local/share/templedb/fhs-deployments/*
 
 ```bash
 # Navigate to deployed project
-cd $(./templedb deploy path my-project)
+cd $(templedb deploy path my-project)
 
 # Or create alias
 alias cdtdb='cd $(tdb deploy path $1)'
@@ -329,7 +329,7 @@ cdtdb my-project
 ```bash
 # Use custom location
 export TEMPLEDB_DEPLOYMENT_FHS_DIR=/data/deployments
-./templedb deploy run my-project
+templedb deploy run my-project
 
 # Result: /data/deployments/my-project/
 ```
@@ -338,7 +338,7 @@ export TEMPLEDB_DEPLOYMENT_FHS_DIR=/data/deployments
 
 ```bash
 # Single deployment to /tmp
-TEMPLEDB_DEPLOYMENT_USE_FHS=false ./templedb deploy run my-project
+TEMPLEDB_DEPLOYMENT_USE_FHS=false templedb deploy run my-project
 
 # Result: /tmp/templedb_deploy_my-project/
 ```

@@ -7,14 +7,14 @@
 
 ```bash
 # Default deployment (FHS isolation - reproducible)
-./templedb deploy run my-project
+templedb deploy run my-project
 
 # Mutable deployment (file editing enabled)
-./templedb deploy run my-project --mutable
+templedb deploy run my-project --mutable
 
 # Access deployed project
-./templedb deploy shell my-project
-./templedb deploy exec my-project 'npm test'
+templedb deploy shell my-project
+templedb deploy exec my-project 'npm test'
 ```
 
 ## Deployment Modes
@@ -23,7 +23,7 @@
 
 **Command:**
 ```bash
-./templedb deploy run my-project
+templedb deploy run my-project
 ```
 
 **What happens:**
@@ -46,7 +46,7 @@
 
 **Command:**
 ```bash
-./templedb deploy run my-project --mutable
+templedb deploy run my-project --mutable
 ```
 
 **What happens:**
@@ -69,7 +69,7 @@
 
 **Command:**
 ```bash
-./templedb deploy run my-project --no-fhs
+templedb deploy run my-project --no-fhs
 ```
 
 **What happens:**
@@ -87,20 +87,20 @@
 
 ```bash
 # Standard production deploy
-./templedb deploy run my-app
+templedb deploy run my-app
 
 # Deploy to specific target
-./templedb deploy run my-app --target staging
+templedb deploy run my-app --target staging
 
 # Dry run (see what would happen)
-./templedb deploy run my-app --dry-run
+templedb deploy run my-app --dry-run
 ```
 
 ### Edit and Redeploy
 
 ```bash
 # Deploy in mutable mode
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Edit files
 cd ~/.templedb/fhs-deployments/my-app/working
@@ -110,26 +110,26 @@ vim deploy.sh
 ./deploy.sh
 
 # Final deploy with FHS
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 ### Access Deployment
 
 ```bash
 # Enter interactive shell
-./templedb deploy shell my-app
+templedb deploy shell my-app
 
 # Run single command
-./templedb deploy exec my-app 'npm test'
+templedb deploy exec my-app 'npm test'
 
 # Get deployment path
-./templedb deploy path my-app
+templedb deploy path my-app
 ```
 
 ### List Deployments
 
 ```bash
-./templedb deploy list
+templedb deploy list
 ```
 
 **Output:**
@@ -137,7 +137,7 @@ vim deploy.sh
 📦 Deployed Projects:
 
   ✓ my-app 🔧 [FHS]
-     Shell: ./templedb deploy shell my-app
+     Shell: templedb deploy shell my-app
 ```
 
 Legend:
@@ -184,8 +184,8 @@ Plus base packages: coreutils, git, openssl, cacert, wget
 ✅ Deployment complete!
 
 🔧 FHS environment available:
-   Enter shell:  ./templedb deploy shell my-app
-   Run command:  ./templedb deploy exec my-app '<command>'
+   Enter shell:  templedb deploy shell my-app
+   Run command:  templedb deploy exec my-app '<command>'
 ```
 
 ### Mutable Deployment
@@ -240,7 +240,7 @@ force_mutable = true  # Always use mutable mode
 curl -L https://nixos.org/nix/install | sh
 
 # Option 2: Use mutable mode
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 ```
 
 ### Need to Edit Files
@@ -250,14 +250,14 @@ curl -L https://nixos.org/nix/install | sh
 **Solution:**
 ```bash
 # Use mutable mode
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Edit and test
-cd $(./templedb deploy path my-app)
+cd $(templedb deploy path my-app)
 vim some-file
 
 # Redeploy with FHS when ready
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 ### Missing Package
@@ -268,7 +268,7 @@ vim some-file
 ```bash
 # Add manually
 export TEMPLEDB_FHS_EXTRA_PACKAGES="missing-package"
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 ### Too Slow
@@ -281,42 +281,42 @@ export TEMPLEDB_FHS_EXTRA_PACKAGES="missing-package"
 # Subsequent deploys: ~500ms
 
 # Or use mutable for rapid iteration
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Final deploy with FHS
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 ## Cheat Sheet
 
 | Task | Command |
 |------|---------|
-| Deploy (FHS) | `./templedb deploy run my-app` |
-| Deploy (mutable) | `./templedb deploy run my-app --mutable` |
-| Deploy (no FHS) | `./templedb deploy run my-app --no-fhs` |
-| Enter shell | `./templedb deploy shell my-app` |
-| Run command | `./templedb deploy exec my-app 'cmd'` |
-| List deployments | `./templedb deploy list` |
-| Get path | `./templedb deploy path my-app` |
+| Deploy (FHS) | `templedb deploy run my-app` |
+| Deploy (mutable) | `templedb deploy run my-app --mutable` |
+| Deploy (no FHS) | `templedb deploy run my-app --no-fhs` |
+| Enter shell | `templedb deploy shell my-app` |
+| Run command | `templedb deploy exec my-app 'cmd'` |
+| List deployments | `templedb deploy list` |
+| Get path | `templedb deploy path my-app` |
 
 ## Migration from v1.x
 
 ### Before (v1.x)
 ```bash
-./templedb deploy run my-app
+templedb deploy run my-app
 # Used system packages, deployed to /tmp
 ```
 
 ### After (v2.0)
 ```bash
-./templedb deploy run my-app
+templedb deploy run my-app
 # Auto-detects packages, uses FHS, reproducible!
 ```
 
 **If it breaks:**
 ```bash
 # Temporary fallback
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Or completely disable FHS
 export TEMPLEDB_DEPLOYMENT_USE_FULL_FHS=false

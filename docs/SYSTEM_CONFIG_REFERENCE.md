@@ -20,23 +20,23 @@ TempleDB stores system deployment configuration in the database instead of hardc
 
 ```bash
 # List all configuration
-./templedb nixos config-list
+templedb nixos config-list
 
 # Get specific value
-./templedb nixos config-get nixos.flake_output
+templedb nixos config-get nixos.flake_output
 ```
 
 ### Set Configuration
 
 ```bash
 # Set flake output name
-./templedb nixos config-set nixos.flake_output zMothership2
+templedb nixos config-set nixos.flake_output zMothership2
 
 # Set username
-./templedb nixos config-set nixos.username zach
+templedb nixos config-set nixos.username zach
 
 # Clear value (enables auto-detect)
-./templedb nixos config-set nixos.username ""
+templedb nixos config-set nixos.username ""
 ```
 
 ## Quick Start
@@ -46,11 +46,11 @@ TempleDB stores system deployment configuration in the database instead of hardc
 sqlite3 ~/.local/share/templedb/templedb.sqlite < migrations/032_add_system_config.sql
 
 # 2. Set your configuration
-./templedb nixos config-set nixos.flake_output zMothership2
-./templedb nixos config-set nixos.username zach
+templedb nixos config-set nixos.flake_output zMothership2
+templedb nixos config-set nixos.username zach
 
 # 3. Deploy with home-manager
-./templedb nixos system-switch system_config --with-home-manager
+templedb nixos system-switch system_config --with-home-manager
 ```
 
 ## Auto-Detection
@@ -69,33 +69,33 @@ This ensures backwards compatibility with existing setups.
 
 ```bash
 # On workstation
-./templedb nixos config-set nixos.flake_output workstation
+templedb nixos config-set nixos.flake_output workstation
 
 # On server
-./templedb nixos config-set nixos.flake_output server
+templedb nixos config-set nixos.flake_output server
 ```
 
 ### Testing Configurations
 
 ```bash
 # Switch to test config
-./templedb nixos config-set nixos.flake_output test-config
+templedb nixos config-set nixos.flake_output test-config
 
 # Test deployment
-./templedb nixos system-test system_config --dry-run
+templedb nixos system-test system_config --dry-run
 
 # Switch back
-./templedb nixos config-set nixos.flake_output zMothership2
+templedb nixos config-set nixos.flake_output zMothership2
 ```
 
 ### Shared User Accounts
 
 ```bash
 # Override username for shared machines
-./templedb nixos config-set nixos.username admin
+templedb nixos config-set nixos.username admin
 
 # Deploy as specific user
-./templedb nixos system-switch system_config --with-home-manager
+templedb nixos system-switch system_config --with-home-manager
 ```
 
 ## Database Access
@@ -133,7 +133,7 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite < migrations/032_add_system_conf
 **Wrong flake output**:
 ```bash
 # Check current value
-./templedb nixos config-get nixos.flake_output
+templedb nixos config-get nixos.flake_output
 
 # Verify against flake
 grep "nixosConfigurations\." ~/.config/templedb/checkouts/system_config/flake.nix

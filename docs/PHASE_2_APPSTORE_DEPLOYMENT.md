@@ -35,7 +35,7 @@ templedb deploy-appstore homebrew <project-slug> \
 **Example**:
 ```bash
 # Generate formula (dry run)
-./templedb deploy-appstore homebrew bza \
+templedb deploy-appstore homebrew bza \
   --version 1.0.0 \
   --description "AI-powered code generation CLI" \
   --homepage https://github.com/yourorg/bza \
@@ -79,7 +79,7 @@ templedb deploy-appstore homebrew <project-slug> \
 
 **With --publish flag** (auto-publish to GitHub):
 ```bash
-./templedb deploy-appstore homebrew bza \
+templedb deploy-appstore homebrew bza \
   --version 1.0.0 \
   --description "AI-powered code generation CLI" \
   --homepage https://github.com/yourorg/bza \
@@ -121,7 +121,7 @@ templedb deploy-appstore snap <project-slug> \
 **Example**:
 ```bash
 # Build Snap package
-./templedb deploy-appstore snap bza \
+templedb deploy-appstore snap bza \
   --version 1.0.0 \
   --summary "AI-powered code generation CLI" \
   --description "Generate code using AI models"
@@ -171,7 +171,7 @@ templedb deploy-appstore snap <project-slug> \
 
 **With --publish flag**:
 ```bash
-./templedb deploy-appstore snap bza \
+templedb deploy-appstore snap bza \
   --version 1.0.0 \
   --summary "AI-powered code generation CLI" \
   --publish \
@@ -218,7 +218,7 @@ templedb deploy-appstore macos <project-slug> \
 pyinstaller --onefile bza.py
 
 # Create .app bundle
-./templedb deploy-appstore macos bza \
+templedb deploy-appstore macos bza \
   --executable dist/bza \
   --version 1.0.0 \
   --name "BZA" \
@@ -240,7 +240,7 @@ pyinstaller --onefile bza.py
 
 **Example (with code signing)**:
 ```bash
-./templedb deploy-appstore macos bza \
+templedb deploy-appstore macos bza \
   --executable dist/bza \
   --version 1.0.0 \
   --sign \
@@ -258,7 +258,7 @@ pyinstaller --onefile bza.py
 
 **Example (with notarization)**:
 ```bash
-./templedb deploy-appstore macos bza \
+templedb deploy-appstore macos bza \
   --executable dist/bza \
   --version 1.0.0 \
   --sign \
@@ -304,7 +304,7 @@ gh release create v1.0.0 bza-1.0.0.tar.gz
 sha256sum bza-1.0.0.tar.gz
 
 # Step 4: Generate Homebrew formula and publish
-./templedb deploy-appstore homebrew bza \
+templedb deploy-appstore homebrew bza \
   --version 1.0.0 \
   --description "AI-powered code generation CLI" \
   --homepage https://github.com/yourorg/bza \
@@ -327,7 +327,7 @@ sha256sum bza-1.0.0.tar.gz
 snapcraft login
 
 # Step 2: Build and publish
-./templedb deploy-appstore snap bza \
+templedb deploy-appstore snap bza \
   --version 1.0.0 \
   --summary "AI-powered code generation CLI" \
   --description "Generate code using AI models" \
@@ -347,7 +347,7 @@ snapcraft login
 pyinstaller --onefile --windowed bza.py
 
 # Step 2: Create .app bundle with signing and notarization
-./templedb deploy-appstore macos bza \
+templedb deploy-appstore macos bza \
   --executable dist/bza \
   --version 1.0.0 \
   --name "BZA" \

@@ -10,13 +10,13 @@
 
 ```bash
 # Default deployment (no FHS)
-./templedb deploy run my-project
+templedb deploy run my-project
 # → Deploys to directory
 # → Runs deploy.sh with system packages
 # → FHS not used
 
 # FHS deployment (opt-in)
-./templedb deploy run my-project --use-fhs
+templedb deploy run my-project --use-fhs
 # → Deploys to FHS directory
 # → Creates FHS environment
 # → Runs deploy.sh in FHS
@@ -54,21 +54,21 @@ nix-build
 **TempleDB (Current):** Regular deployment is first-class, FHS is opt-in
 ```bash
 # Default:
-./templedb deploy run my-project
+templedb deploy run my-project
 # Uses system packages (not FHS)
 
 # FHS is an addon:
-./templedb deploy run my-project --use-fhs
+templedb deploy run my-project --use-fhs
 ```
 
 **TempleDB (Vision):** FHS is first-class
 ```bash
 # Default:
-./templedb deploy run my-project
+templedb deploy run my-project
 # ALWAYS uses FHS (automatic package detection)
 
 # System packages is opt-out:
-./templedb deploy run my-project --no-fhs
+templedb deploy run my-project --no-fhs
 ```
 
 ## Path to First-Class FHS
@@ -135,7 +135,7 @@ def deploy():
 **Default output shows FHS info:**
 
 ```bash
-./templedb deploy run my-project
+templedb deploy run my-project
 
 🚀 Deploying my-project to production
 
@@ -156,8 +156,8 @@ def deploy():
 ✅ Deployment complete!
 
 💡 Access your deployment:
-   Shell:   ./templedb deploy shell my-project
-   Command: ./templedb deploy exec my-project '<cmd>'
+   Shell:   templedb deploy shell my-project
+   Command: templedb deploy exec my-project '<cmd>'
 ```
 
 **FHS is mentioned prominently** - it's not hidden.
@@ -269,7 +269,7 @@ TempleDB deploys projects in isolated Nix FHS environments.
 ## Deploy a Project
 
 \`\`\`bash
-./templedb deploy run my-project
+templedb deploy run my-project
 \`\`\`
 
 This automatically:
@@ -313,14 +313,14 @@ User: "It's isolated? Nice!"
 
 ```bash
 # Deployment (most users):
-./templedb deploy run my-project
+templedb deploy run my-project
 → Uses system packages
 → Can break if system changes
 → No isolation
 → Users don't know about FHS
 
 # Power users only:
-./templedb deploy run my-project --use-fhs
+templedb deploy run my-project --use-fhs
 → Uses FHS
 → Isolated
 → Requires knowing about feature
@@ -332,7 +332,7 @@ User: "It's isolated? Nice!"
 
 ```bash
 # Deployment (all users):
-./templedb deploy run my-project
+templedb deploy run my-project
 → Auto-detects packages
 → Creates FHS environment
 → Fully isolated
@@ -340,7 +340,7 @@ User: "It's isolated? Nice!"
 → Everyone gets best experience
 
 # Escape hatch (rarely needed):
-./templedb deploy run my-project --no-fhs
+templedb deploy run my-project --no-fhs
 → Uses system packages
 → Only if FHS breaks
 ```
@@ -385,7 +385,7 @@ User: "It's isolated? Nice!"
 ### Phase 1: Warn Users (Current Release)
 
 ```bash
-./templedb deploy run my-project
+templedb deploy run my-project
 
 ⚠️  Deploying without FHS environment
 💡 Use --use-fhs for isolated, reproducible deployments
@@ -399,7 +399,7 @@ User: "It's isolated? Nice!"
 DEPLOYMENT_USE_FULL_FHS = 'true'
 
 # Add prominent warning for opt-out
-./templedb deploy run my-project --no-fhs
+templedb deploy run my-project --no-fhs
 
 ⚠️  WARNING: Deploying without FHS isolation
 ⚠️  This uses system packages and may not be reproducible
@@ -411,7 +411,7 @@ DEPLOYMENT_USE_FULL_FHS = 'true'
 ```bash
 # Only FHS path exists
 # --no-fhs flag is deprecated/removed
-./templedb deploy run my-project
+templedb deploy run my-project
 # Always uses FHS
 ```
 

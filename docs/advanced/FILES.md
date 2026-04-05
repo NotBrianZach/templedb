@@ -157,7 +157,7 @@ Add custom types in `file_types` table.
 ### Import Process
 
 ```bash
-./templedb project import /path/to/project
+templedb project import /path/to/project
 ```
 
 1. **Scan directory** - FileScanner finds all tracked file types
@@ -170,7 +170,7 @@ Add custom types in `file_types` table.
 ### Checkout Process
 
 ```bash
-./templedb project checkout myproject /tmp/workspace
+templedb project checkout myproject /tmp/workspace
 ```
 
 1. **Query current files** - Get all is_current=1 files
@@ -182,7 +182,7 @@ Add custom types in `file_types` table.
 ### Commit Process
 
 ```bash
-./templedb project commit myproject /tmp/workspace -m "Changes"
+templedb project commit myproject /tmp/workspace -m "Changes"
 ```
 
 1. **Scan workspace** - Find added/modified/deleted files
@@ -245,13 +245,13 @@ WHERE file_id = ? AND version = ?;  -- Only if version unchanged
 
 ```bash
 # Abort (default) - show conflicts, don't commit
-./templedb project commit proj /tmp/work -m "Changes"
+templedb project commit proj /tmp/work -m "Changes"
 
 # Force - overwrite conflicts (dangerous!)
-./templedb project commit proj /tmp/work -m "Changes" --force
+templedb project commit proj /tmp/work -m "Changes" --force
 
 # Strategy flag
-./templedb project commit proj /tmp/work -m "Changes" --strategy abort
+templedb project commit proj /tmp/work -m "Changes" --strategy abort
 ```
 
 ---
@@ -341,7 +341,7 @@ GROUP BY c.id;
 ### 1. Commit Frequently
 ```bash
 # Good: Small, focused commits
-./templedb project commit myproj /tmp/work -m "Fix auth bug"
+templedb project commit myproj /tmp/work -m "Fix auth bug"
 
 # Avoid: Massive commits with many changes
 ```
@@ -358,10 +358,10 @@ GROUP BY c.id;
 ### 3. Clean Up Checkouts
 ```bash
 # List stale checkouts
-./templedb project checkout-list
+templedb project checkout-list
 
 # Remove invalid ones
-./templedb project checkout-cleanup --force
+templedb project checkout-cleanup --force
 ```
 
 ### 4. Monitor Storage
@@ -384,7 +384,7 @@ FROM file_contents;
 
 ### "No changes to commit"
 **Cause**: Files not tracked type or no actual changes
-**Fix**: Check file types with `./templedb project show`
+**Fix**: Check file types with `templedb project show`
 
 ### "Conflict detected"
 **Cause**: Someone else modified the file

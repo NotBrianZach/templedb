@@ -18,7 +18,7 @@ Think of it as Git for your AI conversations.
 
 ```bash
 cd ~/templeDB
-./templedb migration apply 030
+templedb migration apply 030
 ```
 
 This creates 6 tables, 6 views, and 16 indexes for interaction storage.

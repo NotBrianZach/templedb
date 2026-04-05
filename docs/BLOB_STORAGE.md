@@ -6,20 +6,20 @@ Store large files (images, videos, binaries) outside the database. Supports loca
 
 ```bash
 # Setup S3 storage
-./templedb blob setup --provider s3 \
+templedb blob setup --provider s3 \
   --bucket my-blobs \
   --region us-east-1 \
   --access-key $AWS_ACCESS_KEY \
   --secret-key $AWS_SECRET_KEY
 
 # Store file
-./templedb blob upload myapp assets/logo.png
+templedb blob upload myapp assets/logo.png
 
 # Retrieve file
-./templedb blob download myapp logo.png --output ./logo.png
+templedb blob download myapp logo.png --output ./logo.png
 
 # List blobs
-./templedb blob list myapp
+templedb blob list myapp
 ```
 
 ## Why Blob Storage?
@@ -46,10 +46,10 @@ Store large files (images, videos, binaries) outside the database. Supports loca
 
 ```bash
 # Setup (default)
-./templedb blob setup --provider local --path ~/templedb-blobs
+templedb blob setup --provider local --path ~/templedb-blobs
 
 # Upload
-./templedb blob upload myapp large-file.zip
+templedb blob upload myapp large-file.zip
 
 # Stored at: ~/templedb-blobs/<project-slug>/<hash>
 ```
@@ -61,17 +61,17 @@ Store large files (images, videos, binaries) outside the database. Supports loca
 
 ```bash
 # Setup
-./templedb blob setup --provider s3 \
+templedb blob setup --provider s3 \
   --bucket my-project-blobs \
   --region us-east-1 \
   --access-key $AWS_ACCESS_KEY_ID \
   --secret-key $AWS_SECRET_ACCESS_KEY
 
 # Upload
-./templedb blob upload myapp assets/video.mp4
+templedb blob upload myapp assets/video.mp4
 
 # Download
-./templedb blob download myapp video.mp4 --output ./video.mp4
+templedb blob download myapp video.mp4 --output ./video.mp4
 ```
 
 **Pros:** Scalable, durable (99.999999999%), CDN integration
@@ -81,13 +81,13 @@ Store large files (images, videos, binaries) outside the database. Supports loca
 
 ```bash
 # Setup
-./templedb blob setup --provider backblaze \
+templedb blob setup --provider backblaze \
   --bucket my-blobs \
   --key-id $B2_KEY_ID \
   --app-key $B2_APPLICATION_KEY
 
 # Upload/download same as S3
-./templedb blob upload myapp large-dataset.tar.gz
+templedb blob upload myapp large-dataset.tar.gz
 ```
 
 **Pros:** Cheap ($0.005/GB/month), S3-compatible API
@@ -97,14 +97,14 @@ Store large files (images, videos, binaries) outside the database. Supports loca
 
 ```bash
 # Setup
-./templedb blob setup --provider r2 \
+templedb blob setup --provider r2 \
   --bucket my-blobs \
   --account-id $CF_ACCOUNT_ID \
   --access-key $R2_ACCESS_KEY \
   --secret-key $R2_SECRET_KEY
 
 # Upload/download same as S3
-./templedb blob upload myapp build-artifacts.zip
+templedb blob upload myapp build-artifacts.zip
 ```
 
 **Pros:** Free egress (no transfer costs), fast CDN
@@ -116,59 +116,59 @@ Store large files (images, videos, binaries) outside the database. Supports loca
 
 ```bash
 # Basic upload
-./templedb blob upload myapp file.pdf
+templedb blob upload myapp file.pdf
 
 # With content type
-./templedb blob upload myapp image.png --content-type image/png
+templedb blob upload myapp image.png --content-type image/png
 
 # With metadata
-./templedb blob upload myapp report.pdf --metadata '{"author": "alice", "version": "1.0"}'
+templedb blob upload myapp report.pdf --metadata '{"author": "alice", "version": "1.0"}'
 
 # Multiple files
-./templedb blob upload myapp assets/*.jpg
+templedb blob upload myapp assets/*.jpg
 ```
 
 ### Download
 
 ```bash
 # Download to current directory
-./templedb blob download myapp file.pdf
+templedb blob download myapp file.pdf
 
 # Download to specific path
-./templedb blob download myapp file.pdf --output ~/downloads/file.pdf
+templedb blob download myapp file.pdf --output ~/downloads/file.pdf
 
 # Download specific version
-./templedb blob download myapp file.pdf --version 2
+templedb blob download myapp file.pdf --version 2
 ```
 
 ### List
 
 ```bash
 # List all blobs for project
-./templedb blob list myapp
+templedb blob list myapp
 
 # Filter by pattern
-./templedb blob list myapp --pattern "*.png"
+templedb blob list myapp --pattern "*.png"
 
 # Show sizes
-./templedb blob list myapp --show-size
+templedb blob list myapp --show-size
 
 # Show metadata
-./templedb blob list myapp --show-metadata
+templedb blob list myapp --show-metadata
 ```
 
 ### Delete
 
 ```bash
 # Delete blob
-./templedb blob delete myapp file.pdf
+templedb blob delete myapp file.pdf
 
 # Delete all versions
-./templedb blob delete myapp file.pdf --all-versions
+templedb blob delete myapp file.pdf --all-versions
 
 # Cleanup unused blobs
-./templedb blob cleanup myapp --dry-run
-./templedb blob cleanup myapp
+templedb blob cleanup myapp --dry-run
+templedb blob cleanup myapp
 ```
 
 ## Versioning
@@ -177,18 +177,18 @@ Blobs are automatically versioned (content-addressed by hash).
 
 ```bash
 # Upload same filename, different content
-./templedb blob upload myapp config.json
+templedb blob upload myapp config.json
 # Version 1: hash abc123...
 
 # Modify config.json locally
-./templedb blob upload myapp config.json
+templedb blob upload myapp config.json
 # Version 2: hash def456...
 
 # List versions
-./templedb blob versions myapp config.json
+templedb blob versions myapp config.json
 
 # Download specific version
-./templedb blob download myapp config.json --version 1
+templedb blob download myapp config.json --version 1
 ```
 
 **Deduplication:**
@@ -201,7 +201,7 @@ Store metadata alongside blobs:
 
 ```bash
 # Upload with metadata
-./templedb blob upload myapp photo.jpg --metadata '{
+templedb blob upload myapp photo.jpg --metadata '{
   "camera": "Canon EOS",
   "location": "San Francisco",
   "date": "2026-03-11"
@@ -212,7 +212,7 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite
 SELECT filename, metadata FROM blob_storage WHERE project_slug = 'myapp';
 
 # Update metadata
-./templedb blob update-metadata myapp photo.jpg --metadata '{"tags": ["landscape", "city"]}'
+templedb blob update-metadata myapp photo.jpg --metadata '{"tags": ["landscape", "city"]}'
 ```
 
 ## CDN Integration
@@ -220,10 +220,10 @@ SELECT filename, metadata FROM blob_storage WHERE project_slug = 'myapp';
 **CloudFlare + R2:**
 ```bash
 # Upload to R2
-./templedb blob upload myapp assets/logo.png
+templedb blob upload myapp assets/logo.png
 
 # Get CDN URL
-./templedb blob url myapp logo.png
+templedb blob url myapp logo.png
 # https://cdn.example.com/myapp/logo.png
 ```
 
@@ -231,13 +231,13 @@ SELECT filename, metadata FROM blob_storage WHERE project_slug = 'myapp';
 ```bash
 # Setup CloudFront distribution pointing to S3 bucket
 # Configure in blob provider settings
-./templedb blob setup --provider s3 --cdn-domain cdn.example.com
+templedb blob setup --provider s3 --cdn-domain cdn.example.com
 
 # Upload
-./templedb blob upload myapp image.jpg
+templedb blob upload myapp image.jpg
 
 # Get CDN URL
-./templedb blob url myapp image.jpg --cdn
+templedb blob url myapp image.jpg --cdn
 # https://cdn.example.com/myapp/image.jpg
 ```
 
@@ -247,26 +247,26 @@ SELECT filename, metadata FROM blob_storage WHERE project_slug = 'myapp';
 
 ```bash
 # Copy from local to S3
-./templedb blob migrate myapp --from local --to s3
+templedb blob migrate myapp --from local --to s3
 
 # Verify migration
-./templedb blob verify myapp --provider s3
+templedb blob verify myapp --provider s3
 
 # Switch provider
-./templedb blob set-provider myapp s3
+templedb blob set-provider myapp s3
 ```
 
 ### Import existing files
 
 ```bash
 # Import directory
-./templedb blob import myapp ~/assets/*.png
+templedb blob import myapp ~/assets/*.png
 
 # Import with pattern
-./templedb blob import myapp ~/media --pattern "*.{jpg,png,mp4}"
+templedb blob import myapp ~/media --pattern "*.{jpg,png,mp4}"
 
 # Dry run
-./templedb blob import myapp ~/assets --dry-run
+templedb blob import myapp ~/assets --dry-run
 ```
 
 ## Database Schema
@@ -317,33 +317,33 @@ HAVING count > 1;
 **1. Compress before upload:**
 ```bash
 gzip large-file.log
-./templedb blob upload myapp large-file.log.gz
+templedb blob upload myapp large-file.log.gz
 ```
 
 **2. Use CDN for public assets:**
 ```bash
-./templedb blob upload myapp public-image.jpg --public
-./templedb blob url myapp public-image.jpg --cdn
+templedb blob upload myapp public-image.jpg --public
+templedb blob url myapp public-image.jpg --cdn
 ```
 
 **3. Set content types:**
 ```bash
-./templedb blob upload myapp file.pdf --content-type application/pdf
-./templedb blob upload myapp image.png --content-type image/png
+templedb blob upload myapp file.pdf --content-type application/pdf
+templedb blob upload myapp image.png --content-type image/png
 ```
 
 **4. Tag blobs with metadata:**
 ```bash
-./templedb blob upload myapp report.pdf --metadata '{"category": "reports", "year": 2026}'
+templedb blob upload myapp report.pdf --metadata '{"category": "reports", "year": 2026}'
 ```
 
 **5. Regular cleanup:**
 ```bash
 # Find unused blobs
-./templedb blob list myapp --unused
+templedb blob list myapp --unused
 
 # Delete blobs older than 90 days
-./templedb blob cleanup myapp --older-than 90d
+templedb blob cleanup myapp --older-than 90d
 ```
 
 ## Storage Costs
@@ -367,43 +367,43 @@ gzip large-file.log
 
 ```bash
 # Setup
-./templedb blob setup --provider <prov> --bucket <name> --region <region>
+templedb blob setup --provider <prov> --bucket <name> --region <region>
 
 # Upload
-./templedb blob upload <proj> <file> [--content-type <type>] [--metadata <json>]
+templedb blob upload <proj> <file> [--content-type <type>] [--metadata <json>]
 
 # Download
-./templedb blob download <proj> <filename> [--output <path>] [--version <n>]
+templedb blob download <proj> <filename> [--output <path>] [--version <n>]
 
 # List
-./templedb blob list <proj> [--pattern <glob>] [--show-size] [--show-metadata]
+templedb blob list <proj> [--pattern <glob>] [--show-size] [--show-metadata]
 
 # Delete
-./templedb blob delete <proj> <filename> [--all-versions]
+templedb blob delete <proj> <filename> [--all-versions]
 
 # Metadata
-./templedb blob update-metadata <proj> <filename> --metadata <json>
+templedb blob update-metadata <proj> <filename> --metadata <json>
 
 # Versioning
-./templedb blob versions <proj> <filename>
+templedb blob versions <proj> <filename>
 
 # Migration
-./templedb blob migrate <proj> --from <prov> --to <prov>
-./templedb blob import <proj> <path> [--pattern <glob>]
+templedb blob migrate <proj> --from <prov> --to <prov>
+templedb blob import <proj> <path> [--pattern <glob>]
 
 # Maintenance
-./templedb blob cleanup <proj> [--dry-run] [--older-than <days>]
-./templedb blob verify <proj> --provider <prov>
+templedb blob cleanup <proj> [--dry-run] [--older-than <days>]
+templedb blob verify <proj> --provider <prov>
 
 # CDN
-./templedb blob url <proj> <filename> [--cdn]
+templedb blob url <proj> <filename> [--cdn]
 ```
 
 ## Troubleshooting
 
 **"Provider not configured"**
 ```bash
-./templedb blob setup --provider s3 --bucket my-blobs
+templedb blob setup --provider s3 --bucket my-blobs
 ```
 
 **"Upload failed: access denied"**
@@ -415,10 +415,10 @@ gzip large-file.log
 **"Blob not found"**
 ```bash
 # List all blobs
-./templedb blob list myapp
+templedb blob list myapp
 
 # Check specific version
-./templedb blob versions myapp filename.pdf
+templedb blob versions myapp filename.pdf
 ```
 
 **"Out of disk space" (local)**
@@ -427,7 +427,7 @@ gzip large-file.log
 du -sh ~/templedb-blobs
 
 # Cleanup old blobs
-./templedb blob cleanup myapp --older-than 90d
+templedb blob cleanup myapp --older-than 90d
 ```
 
 ---

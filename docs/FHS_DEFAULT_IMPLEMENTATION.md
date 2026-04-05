@@ -94,8 +94,8 @@ if self._use_full_fhs and self._fhs_context:
 # Show FHS access information
 if result.success and self._use_full_fhs:
     self.logger.info("🔧 FHS environment available:")
-    self.logger.info(f"   Enter shell:  ./templedb deploy shell {project_slug}")
-    self.logger.info(f"   Run command:  ./templedb deploy exec {project_slug} '<command>'")
+    self.logger.info(f"   Enter shell:  templedb deploy shell {project_slug}")
+    self.logger.info(f"   Run command:  templedb deploy exec {project_slug} '<command>'")
 ```
 
 ### 3. CLI Commands (src/cli/commands/deploy.py)
@@ -153,7 +153,7 @@ All existing deployment commands work unchanged:
 
 **Command:**
 ```bash
-./templedb deploy run test-fhs-deploy
+templedb deploy run test-fhs-deploy
 ```
 
 **Output:**
@@ -178,8 +178,8 @@ All existing deployment commands work unchanged:
 ✅ Deployment complete!
 
 🔧 FHS environment available:
-   Enter shell:  ./templedb deploy shell test-fhs-deploy
-   Run command:  ./templedb deploy exec test-fhs-deploy '<command>'
+   Enter shell:  templedb deploy shell test-fhs-deploy
+   Run command:  templedb deploy exec test-fhs-deploy '<command>'
 ```
 
 **Result:** Package detection works, FHS environment created, guidance provided.
@@ -188,7 +188,7 @@ All existing deployment commands work unchanged:
 
 **Command:**
 ```bash
-./templedb deploy run test-fhs-deploy --mutable
+templedb deploy run test-fhs-deploy --mutable
 ```
 
 **Output:**
@@ -219,7 +219,7 @@ Environment: DEPLOYMENT_TARGET=production
 
 **Command:**
 ```bash
-./templedb deploy run test-fhs-deploy --no-fhs
+templedb deploy run test-fhs-deploy --no-fhs
 ```
 
 **Output:**
@@ -269,7 +269,7 @@ Environment: DEPLOYMENT_TARGET=production
 ### Scenario 1: Everything Works
 ```bash
 # Just deploy as normal - FHS is automatic
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 **Action:** None needed!
@@ -277,14 +277,14 @@ Environment: DEPLOYMENT_TARGET=production
 ### Scenario 2: Need to Edit Files
 ```bash
 # Use mutable mode
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Edit and test
-cd $(./templedb deploy path my-app)
+cd $(templedb deploy path my-app)
 vim deploy.sh
 
 # Final deploy with FHS
-./templedb deploy run my-app
+templedb deploy run my-app
 ```
 
 **Action:** Add `--mutable` flag.
@@ -295,7 +295,7 @@ vim deploy.sh
 curl -L https://nixos.org/nix/install | sh
 
 # Option 2: Use mutable mode
-./templedb deploy run my-app --mutable
+templedb deploy run my-app --mutable
 
 # Option 3: Disable FHS globally (not recommended)
 export TEMPLEDB_DEPLOYMENT_USE_FULL_FHS=false
@@ -306,7 +306,7 @@ export TEMPLEDB_DEPLOYMENT_USE_FULL_FHS=false
 ### Scenario 4: FHS Breaks Something
 ```bash
 # Temporary: Use no-fhs
-./templedb deploy run my-app --no-fhs
+templedb deploy run my-app --no-fhs
 
 # File a bug report with output
 ```
@@ -337,7 +337,7 @@ export TEMPLEDB_DEPLOYMENT_USE_FULL_FHS=false
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    CLI Layer                            │
-│  ./templedb deploy run <project> [--mutable|--no-fhs]  │
+│  templedb deploy run <project> [--mutable|--no-fhs]  │
 └─────────────────┬───────────────────────────────────────┘
                   │
                   ▼

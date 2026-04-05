@@ -99,7 +99,7 @@ def _hash_dependency_manifests(project_dir):
 Projects without lock files get warnings:
 
 ```bash
-./templedb deploy myapp production
+templedb deploy myapp production
 
 ⚠️ WARNING: No lock file found (package-lock.json or yarn.lock)
    Recommendation: Run npm install locally and commit lock file for reproducible builds
@@ -161,14 +161,14 @@ git commit -m "Update express to 4.19.0"
 
 ```bash
 # Validate deployment (shows lock file warnings)
-./templedb deploy validate myapp production
+templedb deploy validate myapp production
 ```
 
 ### See What Changed
 
 ```bash
 # Deployment cache tracks lock file changes
-./templedb cache list --project myapp
+templedb cache list --project myapp
 
 # Output shows content hash includes lock files:
 #   Hash:       abc123def456  # Changes when lock files change
@@ -191,7 +191,7 @@ git add package-lock.json
 git commit -m "Update lock file"
 
 # Redeploy
-./templedb deploy myapp production
+templedb deploy myapp production
 ```
 
 ### Lock File Conflicts During Git Merge
@@ -256,7 +256,7 @@ class ProjectCapabilities:
 
 1. **Lock File Diffing**
    ```bash
-   ./templedb deploy diff myapp production
+   templedb deploy diff myapp production
    # Shows which dependencies changed in lock file
    ```
 

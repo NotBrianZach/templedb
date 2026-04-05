@@ -16,7 +16,7 @@ TempleDB now integrates directly with Claude Code via MCP, exposing templedb ope
    - Exposes 10 templedb tools
 
 2. **CLI Command** (`src/cli/commands/mcp.py`)
-   - `./templedb mcp serve` - Start MCP server
+   - `templedb mcp serve` - Start MCP server
    - Registered in main CLI
 
 3. **Configuration** (`.mcp.json`)
@@ -501,19 +501,19 @@ Test the MCP server directly:
 
 ```bash
 # Initialize
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | ./templedb mcp serve
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | templedb mcp serve
 
 # List tools
 (
   echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-) | ./templedb mcp serve
+) | templedb mcp serve
 
 # Call a tool
 (
   echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"templedb_project_list","arguments":{}}}'
-) | ./templedb mcp serve
+) | templedb mcp serve
 ```
 
 ## Configuration
@@ -524,7 +524,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 {
   "mcpServers": {
     "templedb": {
-      "command": "./templedb",
+      "command": "templedb",
       "args": ["mcp", "serve"],
       "env": {
         "TEMPLEDB_DB_PATH": "~/.templedb/projdb.db"
@@ -628,7 +628,7 @@ These may be removed in a future version once MCP integration is proven.
 **Logging:**
 - INFO level to stderr
 - Clean JSON-RPC on stdout
-- Debug with: `./templedb mcp serve 2>debug.log`
+- Debug with: `templedb mcp serve 2>debug.log`
 
 **Performance Optimizations:**
 - SQLite connection pooling (reuse across tool calls)
@@ -739,7 +739,7 @@ self.tools = {
 
 4. Test:
 ```bash
-echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"templedb_new_tool","arguments":{"param":"value"}}}' | ./templedb mcp serve
+echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"templedb_new_tool","arguments":{"param":"value"}}}' | templedb mcp serve
 ```
 
 ### Testing
@@ -761,7 +761,7 @@ assert "content" in result
 **Manual Testing:**
 ```bash
 # Interactive testing
-./templedb mcp serve
+templedb mcp serve
 # Then send JSON-RPC messages via stdin
 ```
 
@@ -775,14 +775,14 @@ logging.basicConfig(level=logging.DEBUG, ...)
 
 **Capture stderr:**
 ```bash
-./templedb mcp serve 2>mcp.log
+templedb mcp serve 2>mcp.log
 tail -f mcp.log
 ```
 
 **Protocol debugging:**
 ```bash
 # See all JSON-RPC messages
-./templedb mcp serve 2>&1 | tee protocol.log
+templedb mcp serve 2>&1 | tee protocol.log
 ```
 
 ## Verification
@@ -790,14 +790,14 @@ tail -f mcp.log
 ### Check MCP Server Available
 
 ```bash
-./templedb --help | grep mcp
+templedb --help | grep mcp
 # Should show: mcp    Model Context Protocol server
 ```
 
 ### Test Server Starts
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | timeout 5 ./templedb mcp serve 2>&1 | grep "TempleDB MCP Server"
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | timeout 5 templedb mcp serve 2>&1 | grep "TempleDB MCP Server"
 ```
 
 ### Test Tool List
@@ -806,7 +806,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 (
   echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-) | ./templedb mcp serve 2>&1 | grep "templedb_project_list"
+) | templedb mcp serve 2>&1 | grep "templedb_project_list"
 ```
 
 ### Test Tool Call
@@ -815,7 +815,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 (
   echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"templedb_project_list","arguments":{}}}'
-) | ./templedb mcp serve 2>&1 | tail -1 | python3 -m json.tool
+) | templedb mcp serve 2>&1 | tail -1 | python3 -m json.tool
 ```
 
 ### Verify in Claude Code
@@ -831,7 +831,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 **Check command:**
 ```bash
-./templedb mcp serve
+templedb mcp serve
 # Should not error immediately
 ```
 
@@ -860,7 +860,7 @@ claude mcp list
 
 **Check logs:**
 ```bash
-./templedb mcp serve 2>error.log
+templedb mcp serve 2>error.log
 # Check error.log for details
 ```
 

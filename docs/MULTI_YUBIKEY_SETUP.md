@@ -118,7 +118,7 @@ If you prefer manual setup:
 #### 1. Run Migration
 
 ```bash
-./templedb migrate
+templedb migrate
 ```
 
 #### 2. Setup Yubikey #1 (Primary)
@@ -128,7 +128,7 @@ If you prefer manual setup:
 age-plugin-yubikey --generate
 
 # Register in TempleDB
-./templedb key add yubikey \
+templedb key add yubikey \
   --name "yubikey-1-primary" \
   --location "daily-use" \
   --notes "Primary Yubikey for daily operations"
@@ -141,7 +141,7 @@ age-plugin-yubikey --generate
 age-plugin-yubikey --generate
 
 # Register in TempleDB
-./templedb key add yubikey \
+templedb key add yubikey \
   --name "yubikey-2-backup" \
   --location "safe" \
   --notes "Backup Yubikey stored in office safe"
@@ -154,7 +154,7 @@ age-plugin-yubikey --generate
 age-plugin-yubikey --generate
 
 # Register in TempleDB
-./templedb key add yubikey \
+templedb key add yubikey \
   --name "yubikey-3-dr" \
   --location "offsite" \
   --notes "Disaster recovery Yubikey stored offsite"
@@ -167,7 +167,7 @@ age-plugin-yubikey --generate
 age-keygen -o ~/.age/backup-key.txt
 
 # Register in TempleDB
-./templedb key add filesystem \
+templedb key add filesystem \
   --name "usb-backup" \
   --path ~/.age/backup-key.txt \
   --location "usb-drive" \
@@ -196,11 +196,11 @@ sudo umount /mnt/usb
 
 ```bash
 # Encrypt with all 4 keys
-./templedb secret init-multi myproject \
+templedb secret init-multi myproject \
   --keys yubikey-1-primary,yubikey-2-backup,yubikey-3-dr,usb-backup
 
 # Encrypt with specific profile
-./templedb secret init-multi myproject \
+templedb secret init-multi myproject \
   --profile production \
   --keys yubikey-1-primary,yubikey-2-backup,yubikey-3-dr,usb-backup
 ```
@@ -209,7 +209,7 @@ sudo umount /mnt/usb
 
 ```bash
 # With Yubikey #1 plugged in (daily use)
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # Will prompt for PIN, then open $EDITOR
 ```
@@ -218,19 +218,19 @@ sudo umount /mnt/usb
 
 ```bash
 # Shell export format
-./templedb secret export myproject --format shell
+templedb secret export myproject --format shell
 
 # JSON format
-./templedb secret export myproject --format json
+templedb secret export myproject --format json
 
 # .env format
-./templedb secret export myproject --format dotenv
+templedb secret export myproject --format dotenv
 ```
 
 ### Show Which Keys Encrypt a Secret
 
 ```bash
-./templedb secret show-keys myproject
+templedb secret show-keys myproject
 
 # Output:
 # Secret: myproject (profile: default)
@@ -263,16 +263,16 @@ sudo umount /mnt/usb
 
 ```bash
 # Show active keys
-./templedb key list
+templedb key list
 
 # Show all keys (including disabled)
-./templedb key list --all
+templedb key list --all
 ```
 
 ### View Key Details
 
 ```bash
-./templedb key info yubikey-1-primary
+templedb key info yubikey-1-primary
 
 # Output:
 # ================================================================
@@ -304,7 +304,7 @@ sudo umount /mnt/usb
 
 ```bash
 # Test if key can encrypt/decrypt
-./templedb key test yubikey-1-primary
+templedb key test yubikey-1-primary
 
 # Will attempt encryption and decryption test
 # For Yubikeys, you'll need to enter PIN
@@ -314,7 +314,7 @@ sudo umount /mnt/usb
 
 ```bash
 # Add a new Yubikey to secret
-./templedb secret add-key myproject --key yubikey-4-new
+templedb secret add-key myproject --key yubikey-4-new
 
 # This will:
 # 1. Decrypt secret with existing keys
@@ -326,7 +326,7 @@ sudo umount /mnt/usb
 
 ```bash
 # Remove a key (requires at least one key to remain)
-./templedb secret remove-key myproject --key yubikey-1-primary
+templedb secret remove-key myproject --key yubikey-1-primary
 
 # This will:
 # 1. Decrypt secret with existing keys
@@ -338,7 +338,7 @@ sudo umount /mnt/usb
 
 ```bash
 # Disable key without deleting (can re-enable later)
-./templedb key disable yubikey-1-primary
+templedb key disable yubikey-1-primary
 
 # Key will no longer be used for new encryptions
 # Existing secrets encrypted with it remain accessible
@@ -348,7 +348,7 @@ sudo umount /mnt/usb
 
 ```bash
 # Re-enable a disabled key
-./templedb key enable yubikey-1-primary
+templedb key enable yubikey-1-primary
 ```
 
 ---
@@ -364,20 +364,20 @@ sudo umount /mnt/usb
 ```bash
 # 1. Use backup Yubikey #2 from safe
 # Insert Yubikey #2, then edit secrets normally
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # 2. Remove compromised key from all secrets
-./templedb secret remove-key myproject --key yubikey-1-primary
+templedb secret remove-key myproject --key yubikey-1-primary
 
 # 3. Get new Yubikey, set it up
 age-plugin-yubikey --generate
-./templedb key add yubikey --name "yubikey-4-new" --location "daily-use"
+templedb key add yubikey --name "yubikey-4-new" --location "daily-use"
 
 # 4. Add new key to all secrets
-./templedb secret add-key myproject --key yubikey-4-new
+templedb secret add-key myproject --key yubikey-4-new
 
 # 5. Disable old key in registry
-./templedb key disable yubikey-1-primary
+templedb key disable yubikey-1-primary
 ```
 
 ### Scenario 2: All Yubikeys Unavailable
@@ -396,7 +396,7 @@ cp /mnt/usb/templedb-backup-key.txt ~/.age/backup-key.txt
 export TEMPLEDB_AGE_KEY_FILE=~/.age/backup-key.txt
 
 # 4. Access secrets normally
-./templedb secret edit myproject
+templedb secret edit myproject
 
 # Secret will decrypt using filesystem key
 ```
@@ -452,7 +452,7 @@ ykman piv reset
 
 ### Key Hygiene
 
-- **Test keys regularly:** `./templedb key test <key-name>`
+- **Test keys regularly:** `templedb key test <key-name>`
 - **Update last_tested_at:** Proves keys are still functional
 - **Rotate keys annually:** Add new keys, remove old ones
 - **Audit key usage:** Review `encryption_key_audit` table
@@ -467,10 +467,10 @@ ykman piv reset
 #### Monthly Audit
 ```bash
 # Test all keys
-./templedb key test yubikey-1-primary
-./templedb key test yubikey-2-backup
-./templedb key test yubikey-3-dr
-./templedb key test usb-backup
+templedb key test yubikey-1-primary
+templedb key test yubikey-2-backup
+templedb key test yubikey-3-dr
+templedb key test usb-backup
 
 # Review key usage
 sqlite3 ~/.local/share/templedb/templedb.sqlite \
@@ -506,7 +506,7 @@ sudo systemctl restart pcscd
 
 ```bash
 # Check which keys encrypt the secret
-./templedb secret show-keys myproject
+templedb secret show-keys myproject
 
 # Try each key:
 # 1. Insert Yubikey #1, try decrypt
@@ -514,7 +514,7 @@ sudo systemctl restart pcscd
 # 3. Use USB backup key
 
 # If all fail, check for corruption:
-./templedb secret print-raw myproject
+templedb secret print-raw myproject
 ```
 
 ### "Key test failed"
@@ -542,7 +542,7 @@ By default, age-plugin-yubikey uses slot 9a. You can use other slots:
 age-plugin-yubikey --generate --slot 9c
 
 # Register with slot info
-./templedb key add yubikey \
+templedb key add yubikey \
   --name "yubikey-1-slot-9c" \
   --slot 9c
 ```
@@ -564,12 +564,12 @@ Use different key sets for different environments:
 
 ```bash
 # Production: All 4 keys
-./templedb secret init-multi myproject \
+templedb secret init-multi myproject \
   --profile production \
   --keys yubikey-1-primary,yubikey-2-backup,yubikey-3-dr,usb-backup
 
 # Development: Only filesystem key
-./templedb secret init myproject \
+templedb secret init myproject \
   --profile development \
   --age-recipient $(age-keygen -y ~/.age/dev-key.txt)
 ```
@@ -583,19 +583,19 @@ Use different key sets for different environments:
 ./scripts/setup_multi_yubikey.sh
 
 # Daily usage
-./templedb secret init-multi myproject --keys yubikey-1-primary,yubikey-2-backup,yubikey-3-dr,usb-backup
-./templedb secret edit myproject
-./templedb secret export myproject --format shell
+templedb secret init-multi myproject --keys yubikey-1-primary,yubikey-2-backup,yubikey-3-dr,usb-backup
+templedb secret edit myproject
+templedb secret export myproject --format shell
 
 # Key management
-./templedb key list
-./templedb key info yubikey-1-primary
-./templedb key test yubikey-1-primary
+templedb key list
+templedb key info yubikey-1-primary
+templedb key test yubikey-1-primary
 
 # Disaster recovery
-./templedb secret show-keys myproject
-./templedb secret remove-key myproject --key compromised-key
-./templedb secret add-key myproject --key new-key
+templedb secret show-keys myproject
+templedb secret remove-key myproject --key compromised-key
+templedb secret add-key myproject --key new-key
 ```
 
 **TempleDB - Your secrets, multiply protected** 🔐

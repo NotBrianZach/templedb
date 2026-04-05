@@ -44,7 +44,7 @@ Instead of managing prompts as static files, TempleDB stores them in the databas
 Apply the migration:
 
 ```bash
-./templedb migration apply 027
+templedb migration apply 027
 
 # Seed with default templates (including project-context.md)
 python3 migrations/027_seed_prompts.py
@@ -58,38 +58,38 @@ This imports `.claude/project-context.md` as the `templedb-project-context` temp
 
 ```bash
 # List all templates
-./templedb prompt list
+templedb prompt list
 
 # Filter by category
-./templedb prompt list --category task
+templedb prompt list --category task
 
 # Show only active templates
-./templedb prompt list --active-only
+templedb prompt list --active-only
 ```
 
 ### Show Template Details
 
 ```bash
-./templedb prompt show templedb-project-context
-./templedb prompt show debugging-context
+templedb prompt show templedb-project-context
+templedb prompt show debugging-context
 ```
 
 ### Project-Specific Prompts
 
 ```bash
 # Create a project prompt
-./templedb prompt create myproject "custom-debugging" \
+templedb prompt create myproject "custom-debugging" \
   --text "Project-specific debugging instructions..." \
   --scope project \
   --priority 10
 
 # Or from a file
-./templedb prompt create myproject "custom-context" \
+templedb prompt create myproject "custom-context" \
   --file prompts/myproject-context.md \
   --template templedb-project-context
 
 # List project prompts
-./templedb prompt project-list myproject
+templedb prompt project-list myproject
 ```
 
 ### Render Prompts with Variables
@@ -98,17 +98,17 @@ Templates support variable substitution using `{{variable_name}}` syntax:
 
 ```bash
 # Render with variables
-./templedb prompt render debugging-context \
+templedb prompt render debugging-context \
   --project myproject \
   --vars '{"project_name": "myproject", "work_item_id": "tdb-a4f2e"}'
 
 # Save to file
-./templedb prompt render debugging-context \
+templedb prompt render debugging-context \
   --vars '{"project_name": "myproject"}' \
   --output /tmp/rendered-prompt.md
 
 # Log usage for analytics
-./templedb prompt render code-review-context \
+templedb prompt render code-review-context \
   --vars '{"commit_hash": "abc123"}' \
   --log-usage \
   --used-by "agent-42" \
@@ -119,16 +119,16 @@ Templates support variable substitution using `{{variable_name}}` syntax:
 
 ```bash
 # Default: Load from .claude/project-context.md (file-based)
-./templedb claude
+templedb claude
 
 # Load from database (uses templedb-project-context template)
-./templedb claude --from-db
+templedb claude --from-db
 
 # Load project-specific prompt
-./templedb claude --from-db --project myproject
+templedb claude --from-db --project myproject
 
 # Load specific template
-./templedb claude --from-db --template debugging-context
+templedb claude --from-db --template debugging-context
 ```
 
 ## Use Cases
@@ -138,12 +138,12 @@ Templates support variable substitution using `{{variable_name}}` syntax:
 Create custom prompts for each project:
 
 ```bash
-./templedb prompt create ecommerce-app "project-context" \
+templedb prompt create ecommerce-app "project-context" \
   --file .claude/ecommerce-context.md \
   --scope project
 ```
 
-Now `./templedb claude --from-db --project ecommerce-app` loads this custom context.
+Now `templedb claude --from-db --project ecommerce-app` loads this custom context.
 
 ### 2. Task-Specific Instructions
 
@@ -292,7 +292,7 @@ Work items can have attached prompts for agent context:
 
 ```bash
 # Create work item
-./templedb work create -p myproject -t "Fix auth bug" --type bug
+templedb work create -p myproject -t "Fix auth bug" --type bug
 
 # Attach debugging prompt
 sqlite3 ~/.local/share/templedb/templedb.sqlite <<SQL
@@ -311,7 +311,7 @@ Use deployment-specific prompts:
 
 ```bash
 # Render deployment checklist
-./templedb prompt render deployment-context \
+templedb prompt render deployment-context \
   --vars '{"project_name": "myproject", "target_name": "production", "environment": "prod"}'
 ```
 
@@ -334,10 +334,10 @@ VALUES (
 
 For existing TempleDB users:
 
-1. **Apply migration**: `./templedb migration apply 027`
+1. **Apply migration**: `templedb migration apply 027`
 2. **Seed templates**: `python3 migrations/027_seed_prompts.py`
-3. **Test file-based workflow**: `./templedb claude` (still works)
-4. **Test DB-based workflow**: `./templedb claude --from-db`
+3. **Test file-based workflow**: `templedb claude` (still works)
+4. **Test DB-based workflow**: `templedb claude --from-db`
 5. **Create project prompts** as needed
 6. **Gradually migrate** to DB-based approach
 
