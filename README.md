@@ -31,7 +31,6 @@ We throw out of the temple those that would lend us technical debt in the form o
   - [Workflow B: Checkout/Commit](#workflow-b-checkoutcommit---for-isolated-workspaces)
   - [Three-Way Merge Conflict Detection](#why-both-work)
 - [Core Features](#core-features)
-  - [High Performance](#0-high-performance)
   - [Universal Project Tracking](#1-universal-project-tracking)
   - [Nix-First Project Management](#2-nix-first-project-management)
   - [Database-Native Version Control](#3-database-native-version-control)
@@ -41,6 +40,7 @@ We throw out of the temple those that would lend us technical debt in the form o
   - [Workflow Orchestration](#7-workflow-orchestration--code-intelligence)
   - [Git Server](#8-database-native-git-server)
   - [Natural Language File Queries](#9-natural-language-file-queries)
+  - [High Performance](#10-high-performance)
 - [Installation](#installation)
   - [Quick Install](#quick-install)
   - [Requirements](#requirements)
@@ -243,17 +243,6 @@ Claude: Here are the last 3 commits:
 ---
 
 ## Core Features
-
-### 0. **High Performance**
-
-TempleDB is optimized for speed:
-- Connection pooling (3-5x faster operations)
-- Batch operations (50-100x faster imports)
-- WAL mode + 64MB cache + 256MB mmap
-- Nix expression caching (< 1s boot time)
-- Optimized queries with proper indexes
-
-See [PERFORMANCE.md](PERFORMANCE.md) for benchmarks and tuning.
 
 ### 1. **Universal Project Tracking**
 
@@ -515,6 +504,16 @@ Claude: [finds and opens matching files in Emacs]
 - Advanced syntax: boolean operators (AND/OR/NOT), phrases, prefix matching
 
 See [docs/QUERY_OPEN.md](docs/QUERY_OPEN.md) for complete guide and examples.
+
+### 10. **High Performance**
+
+TempleDB is optimized for speed:
+- **Connection pooling**: 3-5x faster operations
+- **Batch operations**: 50-100x faster imports
+- **SQLite tuning**: WAL mode + 64MB cache + 256MB mmap
+- **Optimized queries**: Proper indexes and query planning
+
+See [PERFORMANCE.md](PERFORMANCE.md) for benchmarks and tuning guide.
 
 ---
 
