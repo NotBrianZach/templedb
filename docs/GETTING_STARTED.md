@@ -287,3 +287,29 @@ To backup: `cp ~/.local/share/templedb/templedb.sqlite ~/backup/`
 ---
 
 **Status:** v0.0.1 - Active development. Use for personal projects, not production infrastructure yet.
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Database Types Gap Analysis](../docs/implementation/DATABASE_TYPES_GAP_ANALYSIS.md)**
+- **[Backup & Restore](../docs/BACKUP.md)**
+- **[TempleDB TUI - Nix Package](../docs/implementation/TUI_NIX_PACKAGE.md)**
+- **[Vibe Coding Quiz System](../docs/VIBE_CODING.md)**
+
+### Architecture
+
+- **[Phase 2: Hierarchical Agent Dispatch - Design Document](../docs/phases/PHASE_2_DESIGN.md)**
+- **[Using Yubikey for TempleDB Secrets](../docs/advanced/YUBIKEY_SECRETS.md)**
+
+### Deployment
+
+- **[TempleDB Deployment Architecture Review (v2)](../docs/DEPLOYMENT_ARCHITECTURE_V2.md)**
+
+### Setup
+
+- **[Schema Consolidation Summary](../docs/fixes/SCHEMA_CONSOLIDATION.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

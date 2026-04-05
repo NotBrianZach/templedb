@@ -606,3 +606,26 @@ Use different key sets for different environments:
 - [Yubikey Basics](YUBIKEY_SECRETS.md)
 - [Secret Management](../docs/BACKUP.md)
 - [Deployment with Secrets](../docs/DEPLOYMENT.md)
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Key Revocation Guide](../docs/KEY_REVOCATION_GUIDE.md)**
+- **[TempleDB VCS Enhanced Commit Metadata](../docs/VCS_METADATA_GUIDE.md)**
+- **[Database Types Gap Analysis](../docs/implementation/DATABASE_TYPES_GAP_ANALYSIS.md)**
+- **[Backup & Restore](../docs/BACKUP.md)**
+
+### Architecture
+
+- **[Phase 2: Hierarchical Agent Dispatch - Design Document](../docs/phases/PHASE_2_DESIGN.md)**
+- **[CathedralDB Design Document](../docs/advanced/CATHEDRAL.md)**
+
+### Deployment
+
+- **[Deployment](../docs/DEPLOYMENT.md)**
+- **[TempleDB Deployment Architecture Review (v2)](../docs/DEPLOYMENT_ARCHITECTURE_V2.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

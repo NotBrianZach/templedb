@@ -491,3 +491,32 @@ See `src/cli/commands/mcp.py` for full API.
 - [Key Revocation Guide](KEY_REVOCATION_GUIDE.md) - Revoke compromised keys
 - [Security Threat Model](SECURITY_THREAT_MODEL.md) - Security architecture
 - [Deployment](DEPLOYMENT.md) - Using secrets in deployments
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Backup & Restore](../docs/BACKUP.md)**
+- **[Database Types Gap Analysis](../docs/implementation/DATABASE_TYPES_GAP_ANALYSIS.md)**
+- **[TempleDB TUI - Nix Package](../docs/implementation/TUI_NIX_PACKAGE.md)**
+- **[Vibe Coding Quiz System](../docs/VIBE_CODING.md)**
+
+### Api
+
+- **[TempleDB MCP Tools - Quick Reference](../docs/MCP_QUICK_REFERENCE.md)**
+
+### Architecture
+
+- **[CathedralDB Design Document](../docs/advanced/CATHEDRAL.md)**
+
+### Deployment
+
+- **[TempleDB Deployment Architecture Review (v2)](../docs/DEPLOYMENT_ARCHITECTURE_V2.md)**
+
+### Setup
+
+- **[Schema Consolidation Summary](../docs/fixes/SCHEMA_CONSOLIDATION.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

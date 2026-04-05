@@ -152,3 +152,29 @@ whoami    # Should match username in flake
 - `src/services/system_service.py` - Service implementation
 - `src/cli/commands/nixos.py` - CLI commands
 - `migrations/032_add_system_config.sql` - Schema definition
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Key Revocation Guide](../docs/KEY_REVOCATION_GUIDE.md)**
+- **[Full Nix FHS Integration in TempleDB](../docs/FULL_FHS_INTEGRATION.md)**
+
+### Api
+
+- **[TempleDB MCP Tools - Quick Reference](../docs/MCP_QUICK_REFERENCE.md)**
+
+### Architecture
+
+- **[CathedralDB Design Document](../docs/advanced/CATHEDRAL.md)**
+
+### Deployment
+
+- **[FHS First-Class Integration - Vision](../docs/FHS_FIRST_CLASS_VISION.md)**
+- **[TempleDB Deployment Architecture Review (v2)](../docs/DEPLOYMENT_ARCHITECTURE_V2.md)**
+- **[TempleDB Deployment Architecture Review](../docs/DEPLOYMENT_ARCHITECTURE.md)**
+- **[Deployment](../docs/DEPLOYMENT.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

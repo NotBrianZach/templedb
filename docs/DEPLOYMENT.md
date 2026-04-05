@@ -469,3 +469,32 @@ ORDER BY d.started_at DESC;
 ---
 
 **Next:** [DNS.md](DNS.md), [SECURITY.md](SECURITY.md)
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Backup & Restore](../docs/BACKUP.md)**
+- **[Error Handling Migration Guide](../docs/ERROR_HANDLING_MIGRATION.md)**
+- **[Multi-Key Secret Management](../docs/MULTI_KEY_SECRET_MANAGEMENT.md)**
+
+### Api
+
+- **[TempleDB MCP Tools - Quick Reference](../docs/MCP_QUICK_REFERENCE.md)**
+
+### Architecture
+
+- **[Phase 2: Hierarchical Agent Dispatch - Design Document](../docs/phases/PHASE_2_DESIGN.md)**
+
+### Deployment
+
+- **[TempleDB Deployment Architecture Review (v2)](../docs/DEPLOYMENT_ARCHITECTURE_V2.md)**
+- **[Phase 2.3 Complete: Safe Deployment Workflow](../docs/phases/PHASE_2_3_COMPLETE.md)**
+
+### Setup
+
+- **[Schema Consolidation Summary](../docs/fixes/SCHEMA_CONSOLIDATION.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

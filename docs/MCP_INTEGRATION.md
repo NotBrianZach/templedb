@@ -952,3 +952,29 @@ To improve MCP integration:
 **TempleDB Version:** 1.0.0
 
 *Replacing interactive agents with protocol-based tool integration.*
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Vibe Coding Quiz System](../docs/VIBE_CODING.md)**
+- **[TempleDB Security Threat Model](../docs/SECURITY_THREAT_MODEL.md)**
+
+### Api
+
+- **[TempleDB MCP Tools - Quick Reference](../docs/MCP_QUICK_REFERENCE.md)**
+
+### Architecture
+
+- **[Phase 2: Hierarchical Agent Dispatch - Design Document](../docs/phases/PHASE_2_DESIGN.md)**
+- **[Phase 1.7 Complete: MCP Integration for Code Intelligence](../docs/phases/PHASE_1_7_COMPLETE.md)**
+- **[Phase 2.2 Complete: MCP Workflow Tools](../docs/phases/PHASE_2_2_COMPLETE.md)**
+
+### Deployment
+
+- **[Phase 2.3 Complete: Safe Deployment Workflow](../docs/phases/PHASE_2_3_COMPLETE.md)**
+- **[TempleDB Deployment Architecture Review (v2)](../docs/DEPLOYMENT_ARCHITECTURE_V2.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

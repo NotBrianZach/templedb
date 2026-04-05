@@ -448,3 +448,26 @@ if revoke_key("yubikey-1-primary", "Automated rotation"):
 - [Multi-Yubikey Setup](MULTI_YUBIKEY_SETUP.md)
 - [Disaster Recovery](MULTI_YUBIKEY_SETUP.md#disaster-recovery)
 - [Key Management](MULTI_YUBIKEY_SETUP.md#key-management)
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Documentation Consolidation Plan](../docs/implementation/DOCUMENTATION_CONSOLIDATION_PLAN.md)**
+- **[Backup & Restore](../docs/BACKUP.md)**
+- **[Database Types Gap Analysis](../docs/implementation/DATABASE_TYPES_GAP_ANALYSIS.md)**
+- **[Multi-Key Secret Management](../docs/MULTI_KEY_SECRET_MANAGEMENT.md)**
+
+### Architecture
+
+- **[Project Deletion Bug Fix](../docs/fixes/PROJECT_DELETION_FIX.md)**
+- **[Phase 2: Hierarchical Agent Dispatch - Design Document](../docs/phases/PHASE_2_DESIGN.md)**
+
+### Setup
+
+- **[Schema Consolidation Summary](../docs/fixes/SCHEMA_CONSOLIDATION.md)**
+- **[TempleDB Installation Guide](../docs/INSTALL.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

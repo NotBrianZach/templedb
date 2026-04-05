@@ -1077,3 +1077,26 @@ FROM projects WHERE slug = 'fullstack-app';
 *"An operating system is a temple."* - Terry A. Davis
 
 **TempleDB Nix Environments - Reproducible development, blessed by the database**
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[TempleDB TUI - Nix Package](../../docs/implementation/TUI_NIX_PACKAGE.md)**
+- **[Database Types Gap Analysis](../../docs/implementation/DATABASE_TYPES_GAP_ANALYSIS.md)**
+- **[Logging Migration Guide](../../docs/implementation/LOGGING_MIGRATION_GUIDE.md)**
+- **[Repository Migration - COMPLETE ✅](../../docs/implementation/REPOSITORY_MIGRATION_FINAL.md)**
+- **[Synchronization Cost Analysis](../../docs/implementation/SYNCHRONIZATION_COST_ANALYSIS.md)**
+
+### Architecture
+
+- **[Project Deletion Bug Fix](../../docs/fixes/PROJECT_DELETION_FIX.md)**
+- **[Refactor: Remove SOPS, Use Age Directly](../../docs/implementation/REFACTOR_AGE_DIRECT.md)**
+
+### Setup
+
+- **[Schema Consolidation Summary](../../docs/fixes/SCHEMA_CONSOLIDATION.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

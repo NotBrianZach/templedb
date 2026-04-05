@@ -714,3 +714,26 @@ This approach:
 *"In the temple, there is only one truth, stored in one place, queryable by all."*
 
 **TempleDB - A sacred, organized space for AI-assisted development**
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Vibe Coding Quiz System](../docs/VIBE_CODING.md)**
+- **[TempleDB Security Threat Model](../docs/SECURITY_THREAT_MODEL.md)**
+- **[VCS Commands with Fuzzy Matching](../docs/VCS_FUZZY_MATCHING.md)**
+
+### Architecture
+
+- **[Phase 2: Hierarchical Agent Dispatch - Design Document](../docs/phases/PHASE_2_DESIGN.md)**
+- **[CathedralDB Design Document](../docs/advanced/CATHEDRAL.md)**
+
+### Deployment
+
+- **[TempleDB Deployment Architecture Review](../docs/DEPLOYMENT_ARCHITECTURE.md)**
+- **[TempleDB Deployment Architecture Review (v2)](../docs/DEPLOYMENT_ARCHITECTURE_V2.md)**
+- **[Phase 2.3 Complete: Safe Deployment Workflow](../docs/phases/PHASE_2_3_COMPLETE.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

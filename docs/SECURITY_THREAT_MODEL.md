@@ -1034,3 +1034,26 @@ TempleDB's **single-user, local-first** design significantly reduces attack surf
 **Document Status:** Draft - needs review and validation
 **Next Review:** Before 1.0 release
 **Maintained by:** TempleDB Security Team
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Backup & Restore](../docs/BACKUP.md)**
+- **[Error Handling Migration Guide](../docs/ERROR_HANDLING_MIGRATION.md)**
+- **[Vibe Coding Quiz System](../docs/VIBE_CODING.md)**
+- **[Blob Storage](../docs/BLOB_STORAGE.md)**
+
+### Architecture
+
+- **[Phase 2: Hierarchical Agent Dispatch - Design Document](../docs/phases/PHASE_2_DESIGN.md)**
+- **[CathedralDB Design Document](../docs/advanced/CATHEDRAL.md)**
+
+### Deployment
+
+- **[TempleDB Deployment Architecture Review (v2)](../docs/DEPLOYMENT_ARCHITECTURE_V2.md)**
+- **[Phase 2.3 Complete: Safe Deployment Workflow](../docs/phases/PHASE_2_3_COMPLETE.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

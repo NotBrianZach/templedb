@@ -575,3 +575,26 @@ lsof ~/.local/share/templedb/templedb.sqlite
 - [GCS_BACKUP_SETUP.md](GCS_BACKUP_SETUP.md) - Complete Google Cloud Storage setup guide
 - [SECURITY_THREAT_MODEL.md](SECURITY_THREAT_MODEL.md) - Security best practices
 - [MULTI_KEY_SECRET_MANAGEMENT.md](MULTI_KEY_SECRET_MANAGEMENT.md) - Multi-key encryption for backups
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Logging Migration Guide](../docs/implementation/LOGGING_MIGRATION_GUIDE.md)**
+
+### Architecture
+
+- **[Phase 2: Hierarchical Agent Dispatch - Design Document](../docs/phases/PHASE_2_DESIGN.md)**
+- **[Phase 2.2 Complete: MCP Workflow Tools](../docs/phases/PHASE_2_2_COMPLETE.md)**
+- **[Project Deletion Bug Fix](../docs/fixes/PROJECT_DELETION_FIX.md)**
+- **[CathedralDB Design Document](../docs/advanced/CATHEDRAL.md)**
+
+### Deployment
+
+- **[Phase 2.3 Complete: Safe Deployment Workflow](../docs/phases/PHASE_2_3_COMPLETE.md)**
+- **[Phase 3: Steam Game Deployment (IMPLEMENTED)](../docs/PHASE_3_STEAM_DEPLOYMENT.md)**
+- **[TempleDB Performance Optimizations](../docs/advanced/ADVANCED.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

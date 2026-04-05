@@ -383,3 +383,26 @@ TEMPLEDB_DEPLOYMENT_USE_FHS=false ./templedb deploy run my-project
 **Configuration:** Environment variables
 **Migration:** Automatic and backward compatible
 **Cleanup:** Manual (FHS) or automatic (/tmp)
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Nix Packaging for CLI Tools](../docs/NIX_CLI_TOOL_PACKAGING.md)**
+- **[Full Nix FHS Integration in TempleDB](../docs/FULL_FHS_INTEGRATION.md)**
+
+### Architecture
+
+- **[CathedralDB Design Document](../docs/advanced/CATHEDRAL.md)**
+
+### Deployment
+
+- **[Phase 3: Steam Game Deployment (IMPLEMENTED)](../docs/PHASE_3_STEAM_DEPLOYMENT.md)**
+- **[Game Engine Deployment Guide](../docs/GAME_ENGINE_DEPLOYMENT.md)**
+- **[FHS First-Class Integration - Vision](../docs/FHS_FIRST_CLASS_VISION.md)**
+- **[TempleDB Deployment Architecture Review (v2)](../docs/DEPLOYMENT_ARCHITECTURE_V2.md)**
+- **[TempleDB Deployment Architecture Review](../docs/DEPLOYMENT_ARCHITECTURE.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

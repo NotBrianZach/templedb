@@ -242,3 +242,26 @@ templedb file checkout myproject config.yaml 2>/dev/null || \
 - [templedb-magit.el](../integrations/emacs/README-MAGIT.md) - Emacs integration
 - `templedb vcs --help` - Version control commands
 - `templedb project --help` - Project management
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[TempleDB TUI - Nix Package](../docs/implementation/TUI_NIX_PACKAGE.md)**
+- **[Backup & Restore](../docs/BACKUP.md)**
+- **[Error Handling Guidelines](../docs/ERROR_HANDLING.md)**
+- **[Before & After Comparison](../docs/BEFORE_AFTER_COMPARISON.md)**
+- **[Logging Migration Guide](../docs/implementation/LOGGING_MIGRATION_GUIDE.md)**
+
+### Deployment
+
+- **[Lock Files in TempleDB Deployments](../docs/LOCK_FILES.md)**
+- **[TempleDB Deployment Architecture Review (v2)](../docs/DEPLOYMENT_ARCHITECTURE_V2.md)**
+
+### Setup
+
+- **[Schema Consolidation Summary](../docs/fixes/SCHEMA_CONSOLIDATION.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

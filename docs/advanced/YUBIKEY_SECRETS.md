@@ -516,3 +516,29 @@ Using Yubikey with TempleDB:
 *"Security is not a product, but a process."* - Bruce Schneier
 
 **TempleDB - Where your secrets stay secret**
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Logging Migration Guide](../../docs/implementation/LOGGING_MIGRATION_GUIDE.md)**
+- **[TempleDB TUI - Nix Package](../../docs/implementation/TUI_NIX_PACKAGE.md)**
+
+### Architecture
+
+- **[CathedralDB Design Document](../../docs/advanced/CATHEDRAL.md)**
+- **[TempleDB TUI - Build Guide](../../docs/advanced/BUILD.md)**
+- **[Advanced Topics](../../docs/advanced/README.md)**
+- **[Refactor: Remove SOPS, Use Age Directly](../../docs/implementation/REFACTOR_AGE_DIRECT.md)**
+
+### Deployment
+
+- **[TempleDB Performance Optimizations](../../docs/advanced/ADVANCED.md)**
+
+### Setup
+
+- **[Schema Consolidation Summary](../../docs/fixes/SCHEMA_CONSOLIDATION.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->

@@ -607,3 +607,26 @@ This avoids storing credentials entirely - GCP provides them automatically to ru
 ---
 
 **Related:** [BACKUP.md](BACKUP.md), [SECURITY_THREAT_MODEL.md](SECURITY_THREAT_MODEL.md)
+
+
+<!-- AUTO-GENERATED-INDEX:START -->
+## Related Documentation
+
+### Other
+
+- **[Multi-Key Secret Management](../docs/MULTI_KEY_SECRET_MANAGEMENT.md)**
+- **[Blob Storage](../docs/BLOB_STORAGE.md)**
+- **[Database Types Gap Analysis](../docs/implementation/DATABASE_TYPES_GAP_ANALYSIS.md)**
+- **[TTY Detection and Automatic PTY Wrapper](../docs/TTY_DETECTION.md)**
+- **[TempleDB Security Threat Model](../docs/SECURITY_THREAT_MODEL.md)**
+
+### Deployment
+
+- **[FHS First-Class Integration - Vision](../docs/FHS_FIRST_CLASS_VISION.md)**
+- **[Phase 1: Nix + systemd Deployment (IMPLEMENTED)](../docs/PHASE_1_NIX_DEPLOYMENT.md)**
+
+### Setup
+
+- **[TempleDB Installation Guide](../docs/INSTALL.md)**
+
+<!-- AUTO-GENERATED-INDEX:END -->
