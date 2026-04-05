@@ -473,7 +473,7 @@ templedb query-open myapp "test files" --limit 5
 templedb query-open myapp "database migrations" --no-select
 ```
 
-**From Emacs:**
+**From Emacs (⚠️ Experimental - needs testing):**
 
 ```elisp
 ;; Load TempleDB query integration
@@ -482,28 +482,34 @@ templedb query-open myapp "database migrations" --no-select
 ;; Query and open files interactively
 M-x templedb-query-open
 
-;; Quick helpers
+;; Quick helpers (if implemented)
 M-x templedb-find-config-files
 M-x templedb-find-tests
 M-x templedb-find-auth-code
 ```
 
-**From Claude in vterm:**
+> **Note:** Emacs integration is experimental and under active development.
+> Basic functionality works but helper commands and vterm integration need testing.
 
-Just use natural language - Claude automatically uses the query system:
+**From Claude in vterm (⚠️ Experimental):**
 
 ```
 You: "open the bza files with character analysis prompts"
 Claude: [finds and opens matching files in Emacs]
+# Note: Requires proper Emacs server setup and testing
 ```
 
 **How it works:**
 - Uses FTS5 full-text search with relevance ranking
-- Auto-detects Emacs and uses `emacsclient` for instant file opening
+- Can detect Emacs and use `emacsclient` for file opening (when configured)
 - Supports natural queries: "auth code", "config files", "database migrations"
 - Advanced syntax: boolean operators (AND/OR/NOT), phrases, prefix matching
 
 See [docs/QUERY_OPEN.md](docs/QUERY_OPEN.md) for complete guide and examples.
+
+> **Emacs Integration Status:** The query system works well from CLI. Emacs elisp
+> integration and vterm workflows are in early development and need thorough testing
+> before being considered stable.
 
 ### 10. **High Performance**
 

@@ -2,6 +2,9 @@
 
 Query your TempleDB projects using natural language and open matching files instantly in your editor.
 
+> **⚠️ Emacs Integration Status:** CLI query functionality is stable. Emacs elisp integration
+> and vterm workflows are experimental and need testing. Use at your own risk.
+
 ## Quick Start
 
 ### From Command Line

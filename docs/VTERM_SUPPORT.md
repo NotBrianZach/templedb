@@ -1,6 +1,9 @@
 # Emacs vterm Support
 
-TempleDB fully supports running Claude Code in Emacs vterm through automatic PTY (pseudo-TTY) wrapper detection!
+TempleDB supports running Claude Code in Emacs vterm through automatic PTY (pseudo-TTY) wrapper detection.
+
+> **⚠️ Experimental:** vterm integration is functional but needs thorough testing.
+> Some features may not work as expected. Please report issues!
 
 ## How It Works
 
