@@ -128,6 +128,14 @@ class DeploymentService(BaseService):
             work_dir = export_dir / "working"
             work_dir.mkdir(exist_ok=True)
 
+            # TempleDB-native workflow reminder
+            self.logger.info("")
+            self.logger.info("💡 TempleDB-native workflow:")
+            self.logger.info(f"   1. Edit files in FHS working directory")
+            self.logger.info(f"   2. Commit: ./templedb vcs commit {project_slug} -m 'message'")
+            self.logger.info(f"   3. Deploy: ./templedb deploy run {project_slug} --target <target>")
+            self.logger.info("")
+
             # First, we need to reconstruct to compute hash (lightweight operation)
             self.logger.info("Exporting project from TempleDB...")
             export_start = time.time()

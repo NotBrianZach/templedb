@@ -9,6 +9,45 @@ from typing import Callable, Dict, Any, Optional
 from pathlib import Path
 
 
+class TempleDBArgumentParser(argparse.ArgumentParser):
+    """Custom ArgumentParser with better error messages"""
+
+    def error(self, message):
+        """Override error to provide did-you-mean suggestions"""
+        # Check if this is an invalid choice error
+        if 'invalid choice:' in message and 'choose from' in message:
+            # Extract the invalid command
+            import re
+            match = re.search(r"invalid choice: '([^']+)'", message)
+            if match:
+                invalid_cmd = match.group(1)
+                # Get available commands
+                match_choices = re.search(r'choose from (.+)\)', message)
+                if match_choices:
+                    choices_str = match_choices.group(1)
+                    choices = [c.strip() for c in choices_str.split(',')]
+
+                    from cli.help_utils import did_you_mean
+                    suggestions = did_you_mean(invalid_cmd, choices)
+
+                    sys.stderr.write(f"❌ Unknown command: '{invalid_cmd}'\n\n")
+
+                    if suggestions:
+                        sys.stderr.write("💡 Did you mean?\n")
+                        for suggestion in suggestions:
+                            sys.stderr.write(f"   ./templedb {suggestion}\n")
+                        sys.stderr.write("\n")
+
+                    sys.stderr.write("📚 Available commands:\n")
+                    sys.stderr.write("   ./templedb --help\n\n")
+                    self.exit(2)
+
+        # Default error handling
+        self.print_usage(sys.stderr)
+        sys.stderr.write(f'{self.prog}: error: {message}\n')
+        self.exit(2)
+
+
 class TempleDBCLI:
     """
     Unified CLI for TempleDB using argparse.
@@ -18,7 +57,7 @@ class TempleDBCLI:
     """
 
     def __init__(self):
-        self.parser = argparse.ArgumentParser(
+        self.parser = TempleDBArgumentParser(
             prog="templedb",
             description="TempleDB - Database-native project management",
             epilog="""
@@ -158,7 +197,10 @@ New to TempleDB?
                         handler = self.commands.get(args.command)
 
                 if handler is None:
-                    self.parser.error(f"No handler registered for command: {args.command}")
+                    # Try to suggest similar commands
+                    from cli.help_utils import show_command_not_found
+                    available_commands = list(self.commands.keys())
+                    show_command_not_found(args.command, available_commands)
                     return 1
 
                 # Execute the command

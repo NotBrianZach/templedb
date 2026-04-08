@@ -366,6 +366,30 @@ class VibeRealtimeCommands(Command):
 
             prompt_text = f"""# {name or slug} - Project Context
 
+## 📋 SESSION RULES - READ FIRST
+
+**CRITICAL: MCP Tool Usage Policy**
+
+1. ✅ **MCP tools ALWAYS preferred** over bash commands
+2. ✅ **Check available tools BEFORE every operation**
+3. ✅ **Bash is ONLY for actual shell operations** (npm, docker, system commands)
+4. ✅ **For TempleDB operations**: Use `templedb_*` MCP tools
+5. ✅ **For file operations**: Use Read/Write/Edit/Grep/Glob tools
+
+**Before ANY database or TempleDB operation:**
+- [ ] Did I check if an MCP tool exists?
+- [ ] Am I about to use `bash sqlite3` or `bash ./templedb`?
+- [ ] If YES → STOP and use the MCP tool instead
+
+**Common mistakes to avoid:**
+- ❌ `bash sqlite3 ~/.templedb/templedb.db "SELECT..."`  → Use `templedb_query` MCP tool
+- ❌ `bash ./templedb project list`  → Use `templedb_project_list` MCP tool
+- ❌ `bash ./templedb vcs status`  → Use `templedb_vcs_status` MCP tool
+- ❌ `bash cat file.txt`  → Use `Read` tool
+- ❌ `bash grep pattern`  → Use `Grep` tool
+
+---
+
 You are working on the **{name or slug}** project.
 
 ## Project Information
@@ -383,32 +407,59 @@ You are working on the **{name or slug}** project.
 
 ## TempleDB MCP Tools Available
 
-**IMPORTANT**: This project is managed by TempleDB. You have access to specialized MCP tools for database operations. **Prefer using these MCP tools over CLI commands** when they're available:
+**IMPORTANT**: This project is managed by TempleDB. You have access to specialized MCP tools for database operations. **Always use these MCP tools instead of CLI commands:**
 
-### When to Use MCP Tools:
-- `templedb_query` - For SQL queries against the database schema
-- `templedb_context_generate` - To generate comprehensive project context for AI
-- `templedb_search_files` - To search for files by name or pattern
-- `templedb_file_read` - To read file contents from the database
-- `templedb_project_info` - To get project metadata and statistics
-- `templedb_vcs_status` - To check version control status
-- `templedb_vcs_commits` - To view commit history
-- `templedb_vcs_diff` - To see changes in commits or working directory
+### Available MCP Tools (Use These First!):
 
-### Examples:
-- Instead of: `./templedb llm context {slug}`
-  Use: `templedb_context_generate` tool with project="{slug}"
+**TempleDB Operations:**
+- `templedb_project_list` - List all projects in database
+- `templedb_project_show` - Show project details
+- `templedb_query` - Execute SQL queries against TempleDB
+- `templedb_context_generate` - Generate comprehensive project context
+- `templedb_search_files` - Search for files by name or pattern
 
-- Instead of: `sqlite3 ~/.local/share/templedb/templedb.sqlite "SELECT ..."`
-  Use: `templedb_query` tool with your SQL query
+**Version Control:**
+- `templedb_vcs_status` - Check version control status
+- `templedb_vcs_log` - View commit history
+- `templedb_vcs_commit` - Create commits
+- `templedb_vcs_diff` - See changes in commits or working directory
+- `templedb_vcs_branch` - List or create branches
 
-- Instead of: `./templedb vcs status {slug}`
-  Use: `templedb_vcs_status` tool with project="{slug}"
+**File Operations:**
+- `Read` - Read file contents
+- `Write` - Write files
+- `Edit` - Edit files with exact string replacement
+- `Grep` - Search file contents
+- `Glob` - Find files by pattern
 
-- Instead of: `find . -name "*.js"`
-  Use: `templedb_search_files` tool with pattern="**/*.js"
+### Decision Tree:
 
-**Always check if an MCP tool exists for your task before falling back to CLI commands.**
+```
+Need to query database? → templedb_query
+Need project info? → templedb_project_show
+Need VCS status? → templedb_vcs_status
+Need to read file? → Read tool
+Need to search code? → Grep tool
+Need actual shell command? → Then use Bash
+```
+
+### Examples of CORRECT tool usage:
+
+✅ `templedb_query` with SQL: `SELECT * FROM projects WHERE slug = '{slug}'`
+✅ `templedb_context_generate` with project: `{slug}`
+✅ `templedb_vcs_status` with project: `{slug}`
+✅ `Grep` with pattern: `function authenticate` and glob: `**/*.js`
+✅ `Read` with file_path: `/path/to/file.py`
+
+### Examples of INCORRECT usage (Don't do this!):
+
+❌ Bash: `sqlite3 ~/.templedb/templedb.db "SELECT ..."`
+❌ Bash: `./templedb project list`
+❌ Bash: `./templedb vcs status {slug}`
+❌ Bash: `cat file.txt`
+❌ Bash: `grep -r "pattern" .`
+
+**Mental model: If a specialized tool exists, use it. Bash is the last resort.**
 
 ## Getting Started
 You can help with:

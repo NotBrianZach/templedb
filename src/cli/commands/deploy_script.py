@@ -162,9 +162,33 @@ The script remains registered and can be re-enabled later.
 
     def register_script(self, args):
         """Register a deployment script"""
+        # Handle --examples flag
+        if hasattr(args, 'examples') and args.examples:
+            from cli.help_utils import CommandHelp, CommandExamples
+            CommandHelp.show_examples('deploy hooks register', CommandExamples.DEPLOY_HOOKS)
+            return 0
+
+        # Check if required arguments provided
+        if not args.project_slug or not args.script_path:
+            print("❌ Error: Project slug and script path are required", file=sys.stderr)
+            print("\nUsage: ./templedb deploy hooks register <project> <script_path>", file=sys.stderr)
+            print("       ./templedb deploy hooks register --examples  # Show examples", file=sys.stderr)
+            return 1
+
         project_slug = args.project_slug
         script_path = os.path.abspath(os.path.expanduser(args.script_path))
         description = args.description
+
+        # Load documentation if provided
+        documentation = None
+        if hasattr(args, 'docs') and args.docs:
+            docs_path = os.path.abspath(os.path.expanduser(args.docs))
+            if not os.path.exists(docs_path):
+                print(f"⚠️  Warning: Documentation file not found: {docs_path}")
+            else:
+                with open(docs_path, 'r') as f:
+                    documentation = f.read()
+                print(f"✅ Loaded documentation from {docs_path}")
 
         # Validate script exists
         if not os.path.exists(script_path):
@@ -195,23 +219,31 @@ The script remains registered and can be re-enabled later.
             # Update existing script
             db_utils.execute(
                 """UPDATE deployment_scripts
-                   SET script_path = ?, description = ?, enabled = 1
+                   SET script_path = ?, description = ?, documentation = ?, enabled = 1
                    WHERE project_slug = ?""",
-                (script_path, description, project_slug)
+                (script_path, description, documentation, project_slug)
             )
             print(f"✅ Updated deployment script for {project_slug}")
         else:
             # Insert new script
             db_utils.execute(
-                """INSERT INTO deployment_scripts (project_slug, script_path, description)
-                   VALUES (?, ?, ?)""",
-                (project_slug, script_path, description)
+                """INSERT INTO deployment_scripts (project_slug, script_path, description, documentation)
+                   VALUES (?, ?, ?, ?)""",
+                (project_slug, script_path, description, documentation)
             )
             print(f"✅ Registered deployment script for {project_slug}")
 
         print(f"   Script: {script_path}")
         if description:
             print(f"   Description: {description}")
+        if documentation:
+            print(f"   Documentation: {len(documentation)} characters")
+
+        # Show related commands
+        from cli.help_utils import CommandHelp, RelatedCommands
+        related = [(cmd.replace('<project>', project_slug), desc)
+                   for cmd, desc in RelatedCommands.AFTER_HOOK_REGISTER]
+        CommandHelp.show_related_commands(related)
 
         return 0
 
@@ -274,8 +306,37 @@ The script remains registered and can be re-enabled later.
 
         print(f"   Created: {script['created_at']}")
         print(f"   Updated: {script['updated_at']}")
+
+        if script.get('documentation'):
+            print(f"\n💡 Deployment documentation available")
+            print(f"   View with: ./templedb deploy docs {args.project_slug}")
+
         print()
 
+        return 0
+
+    def show_docs(self, args):
+        """Show deployment documentation"""
+        script = db_utils.query_one(
+            "SELECT documentation FROM deployment_scripts WHERE project_slug = ?",
+            (args.project_slug,)
+        )
+
+        if not script:
+            print(f"❌ No deployment script registered for {args.project_slug}")
+            print(f"\n💡 Register a hook first:")
+            print(f"   ./templedb deploy hooks register {args.project_slug} /path/to/deploy.sh")
+            return 1
+
+        if not script['documentation']:
+            print(f"⚠️  No deployment documentation for {args.project_slug}")
+            print(f"\n💡 Add documentation when registering:")
+            print(f"   ./templedb deploy hooks register {args.project_slug} /path/to/deploy.sh \\")
+            print(f"     --docs /path/to/DEPLOYMENT.md")
+            return 1
+
+        # Display documentation (it's markdown)
+        print(script['documentation'])
         return 0
 
     def enable_script(self, args):
@@ -393,7 +454,7 @@ See DEPLOYMENT_HOOKS.md for detailed documentation and examples.
         '''
     )
 
-    hooks_subparsers = hooks_parser.add_subparsers(dest='hooks_action', help='Hooks action')
+    hooks_subparsers = hooks_parser.add_subparsers(dest='hooks_command', help='Hooks action')
 
     # Register hook
     register_parser = hooks_subparsers.add_parser(
@@ -408,9 +469,11 @@ Your script receives the same arguments (--dry-run, --target, etc.) and
 can wrap the standard deployment or completely replace it.
         '''
     )
-    register_parser.add_argument('project_slug', help='Project slug to attach hook to')
-    register_parser.add_argument('script_path', help='Path to executable deployment script')
+    register_parser.add_argument('project_slug', nargs='?', help='Project slug to attach hook to')
+    register_parser.add_argument('script_path', nargs='?', help='Path to executable deployment script')
     register_parser.add_argument('--description', help='Human-readable description of what this hook does', default='')
+    register_parser.add_argument('--docs', help='Path to markdown file with deployment documentation', default=None)
+    register_parser.add_argument('--examples', action='store_true', help='Show usage examples')
 
     # List hooks
     list_parser = hooks_subparsers.add_parser(
@@ -456,6 +519,14 @@ The hook remains registered and can be re-enabled later.
     remove_parser.add_argument('project_slug', help='Project slug to remove hook from')
     remove_parser.add_argument('--force', action='store_true', help='Skip confirmation prompt')
 
+    # Docs command - show deployment documentation
+    docs_parser = hooks_subparsers.add_parser(
+        'docs',
+        help='Show deployment documentation for a project',
+        description='Display project-specific deployment instructions and usage guide.'
+    )
+    docs_parser.add_argument('project_slug', help='Project slug to show documentation for')
+
     # Register all handlers with 'deploy.hooks' prefix
     cli.commands['deploy.hooks.register'] = cmd.register_script
     cli.commands['deploy.hooks.list'] = cmd.list_scripts
@@ -463,3 +534,4 @@ The hook remains registered and can be re-enabled later.
     cli.commands['deploy.hooks.enable'] = cmd.enable_script
     cli.commands['deploy.hooks.disable'] = cmd.disable_script
     cli.commands['deploy.hooks.remove'] = cmd.remove_script
+    cli.commands['deploy.hooks.docs'] = cmd.show_docs

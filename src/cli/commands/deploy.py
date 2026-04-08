@@ -59,6 +59,19 @@ class DeployCommands(Command):
         from error_handler import ResourceNotFoundError, DeploymentError
         import os
 
+        # Handle --examples flag
+        if hasattr(args, 'examples') and args.examples:
+            from cli.help_utils import CommandHelp, CommandExamples
+            CommandHelp.show_examples('deploy run', CommandExamples.DEPLOY_RUN)
+            return 0
+
+        # Check if slug was provided
+        if not args.slug:
+            print("❌ Error: Project slug is required", file=sys.stderr)
+            print("\nUsage: ./templedb deploy run <project> [options]", file=sys.stderr)
+            print("       ./templedb deploy run --examples  # Show examples", file=sys.stderr)
+            return 1
+
         try:
             project_slug = args.slug
 
@@ -255,6 +268,13 @@ class DeployCommands(Command):
                             print(f"   💡 Deploy with --use-fhs for FHS environment")
                     else:
                         print(f"\n📁 Deployed to: {result.work_dir}")
+
+                    # Show related commands
+                    if not dry_run:
+                        from cli.help_utils import CommandHelp, RelatedCommands
+                        related = [(cmd.replace('<project>', project_slug), desc)
+                                   for cmd, desc in RelatedCommands.AFTER_DEPLOY_RUN]
+                        CommandHelp.show_related_commands(related)
 
                 return 0
             else:
@@ -1165,13 +1185,26 @@ class DeployCommands(Command):
 
     def exec_command(self, args) -> int:
         """Execute a command in the deployment environment (optionally in FHS)"""
+        # Handle --examples flag
+        if hasattr(args, 'examples') and args.examples:
+            from cli.help_utils import CommandHelp, CommandExamples
+            CommandHelp.show_examples('deploy exec', CommandExamples.DEPLOY_EXEC)
+            return 0
+
+        # Check if required arguments provided
+        if not args.slug or not args.exec_command:
+            print("❌ Error: Project slug and command are required", file=sys.stderr)
+            print("\nUsage: ./templedb deploy exec <project> '<command>'", file=sys.stderr)
+            print("       ./templedb deploy exec --examples  # Show examples", file=sys.stderr)
+            return 1
+
         try:
             from pathlib import Path
             from config import DEPLOYMENT_USE_FHS, DEPLOYMENT_FHS_DIR
             import shlex
 
             project_slug = args.slug
-            command = args.command
+            command = args.exec_command
 
             # Find deployment
             working_dir = None
@@ -1432,7 +1465,7 @@ def register(cli):
 
     # deploy run command
     run_parser = subparsers.add_parser('run', help='Deploy project (uses FHS isolation by default)')
-    run_parser.add_argument('slug', help='Project slug')
+    run_parser.add_argument('slug', nargs='?', help='Project slug')
     run_parser.add_argument('--target', default=None, help='Deployment target (shows available targets if not specified)')
     run_parser.add_argument('--dry-run', action='store_true', help='Show what would be deployed without deploying')
     run_parser.add_argument('--skip-validation', action='store_true', help='Skip environment variable validation')
@@ -1442,6 +1475,7 @@ def register(cli):
                            help='Disable FHS isolation completely (not recommended, uses system packages)')
     run_parser.add_argument('--no-script', action='store_true',
                            help='Skip custom deployment script and use standard deployment')
+    run_parser.add_argument('--examples', action='store_true', help='Show usage examples')
     cli.commands['deploy.run'] = deploy_handler.deploy
 
     # deploy status command
@@ -1520,8 +1554,9 @@ def register(cli):
 
     # deploy exec command
     exec_parser = subparsers.add_parser('exec', help='Execute command in deployment environment')
-    exec_parser.add_argument('slug', help='Project slug')
-    exec_parser.add_argument('command', help='Command to execute (quote if multiple words)')
+    exec_parser.add_argument('slug', nargs='?', help='Project slug')
+    exec_parser.add_argument('exec_command', nargs='?', metavar='command', help='Command to execute (quote if multiple words)')
+    exec_parser.add_argument('--examples', action='store_true', help='Show usage examples')
     cli.commands['deploy.exec'] = deploy_handler.exec_command
 
     # === Nested deployment backend commands ===

@@ -3,11 +3,17 @@
 Deployment Tracking Service - Records deployment history and health checks
 """
 import time
-import requests
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
+
+# Optional import - only needed for health checks
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
 
 from services.base import BaseService
 from logger import get_logger
@@ -149,6 +155,17 @@ class DeploymentTrackingService(BaseService):
         Returns:
             HealthCheckResult
         """
+        if not HAS_REQUESTS:
+            result = HealthCheckResult(
+                check_type='http',
+                check_name=check_name,
+                status='skip',
+                endpoint=url,
+                error_message="requests module not available (pip install requests)"
+            )
+            self.add_health_check(deployment_id, result)
+            return result
+
         start_time = time.time()
 
         try:

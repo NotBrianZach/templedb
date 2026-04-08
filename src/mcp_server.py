@@ -3855,15 +3855,9 @@ class MCPServer:
             logger.error(f"Fatal error: {e}", exc_info=True)
             sys.exit(1)
 
-
-def main():
-    """Entry point for MCP server"""
-    server = MCPServer()
-    server.run()
-
-
-if __name__ == "__main__":
-    main()
+    # ========================================================================
+    # File Operations Tools
+    # ========================================================================
 
     def tool_file_get(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Get file content"""
@@ -3931,18 +3925,18 @@ if __name__ == "__main__":
         """Scan project for README files and register them"""
         try:
             project_slug = args["project"]
-            
+
             # Run CLI command
             result = self._run_templedb_cli(["readme", "scan", project_slug])
-            
+
             if result["returncode"] != 0:
                 return self._error_response(
                     f"Failed to scan README files: {result['stderr']}",
                     ErrorCode.INTERNAL_ERROR
                 )
-            
+
             return self._success_response(result["stdout"], format_json=False)
-            
+
         except Exception as e:
             logger.error(f"Error scanning README files: {e}")
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
@@ -3956,21 +3950,21 @@ if __name__ == "__main__":
             content = args["content"]
             category = args.get("category")
             topics = args.get("topics", [])
-            
+
             # Build CLI command
-            cmd = ["readme", "create", project_slug, file_path, 
+            cmd = ["readme", "create", project_slug, file_path,
                    "--title", title]
-            
+
             if category:
                 cmd.extend(["--category", category])
-            
+
             for topic in topics:
                 cmd.extend(["--topic", topic])
-            
+
             # Use subprocess with stdin for content
             import subprocess
             full_cmd = [str(self.templedb_root / "templedb")] + cmd
-            
+
             result = subprocess.run(
                 full_cmd,
                 input=content,
@@ -3978,15 +3972,15 @@ if __name__ == "__main__":
                 text=True,
                 cwd=str(self.templedb_root)
             )
-            
+
             if result.returncode != 0:
                 return self._error_response(
                     f"Failed to create README: {result.stderr}",
                     ErrorCode.INTERNAL_ERROR
                 )
-            
+
             return self._success_response(result.stdout, format_json=False)
-            
+
         except Exception as e:
             logger.error(f"Error creating README: {e}")
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
@@ -3997,19 +3991,19 @@ if __name__ == "__main__":
             readme_id = args["readme_id"]
             topic = args["topic"]
             relevance = args.get("relevance", 1.0)
-            
+
             # Insert into database
             conn = self._get_db_connection()
             cursor = conn.cursor()
-            
+
             cursor.execute("""
                 INSERT OR REPLACE INTO readme_topics (readme_id, topic, relevance, source)
                 VALUES (?, ?, ?, 'manual')
             """, (readme_id, topic, relevance))
             conn.commit()
-            
+
             return self._success_response(f"Added topic '{topic}' to README {readme_id}")
-            
+
         except Exception as e:
             logger.error(f"Error adding topic: {e}")
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
@@ -4022,20 +4016,20 @@ if __name__ == "__main__":
             target_url = args.get("target_url")
             link_text = args["link_text"]
             section = args.get("section")
-            
+
             # Insert into database
             conn = self._get_db_connection()
             cursor = conn.cursor()
-            
+
             cursor.execute("""
-                INSERT INTO readme_references 
+                INSERT INTO readme_references
                 (source_readme_id, target_readme_id, target_external_url, link_text, section)
                 VALUES (?, ?, ?, ?, ?)
             """, (source_id, target_id, target_url, link_text, section))
             conn.commit()
-            
+
             return self._success_response(f"Added reference from README {source_id}")
-            
+
         except Exception as e:
             logger.error(f"Error adding reference: {e}")
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
@@ -4045,21 +4039,21 @@ if __name__ == "__main__":
         try:
             readme_id = args["readme_id"]
             template = args.get("template")
-            
+
             cmd = ["readme", "generate-index", str(readme_id)]
             if template:
                 cmd.extend(["--template", template])
-            
+
             result = self._run_templedb_cli(cmd)
-            
+
             if result["returncode"] != 0:
                 return self._error_response(
                     f"Failed to generate index: {result['stderr']}",
                     ErrorCode.INTERNAL_ERROR
                 )
-            
+
             return self._success_response(result["stdout"], format_json=False)
-            
+
         except Exception as e:
             logger.error(f"Error generating index: {e}")
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
@@ -4069,13 +4063,13 @@ if __name__ == "__main__":
         try:
             readme_id = args["readme_id"]
             limit = args.get("limit", 10)
-            
+
             conn = self._get_db_connection()
             cursor = conn.cursor()
-            
+
             # Use the related_readmes view
             cursor.execute("""
-                SELECT 
+                SELECT
                     rr.related_readme_id,
                     rf.title,
                     rf.file_path,
@@ -4089,10 +4083,10 @@ if __name__ == "__main__":
                 ORDER BY rr.relevance_score DESC
                 LIMIT ?
             """, (readme_id, limit))
-            
+
             results = [dict(row) for row in cursor.fetchall()]
             return self._success_response(results)
-            
+
         except Exception as e:
             logger.error(f"Error finding related READMEs: {e}")
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
@@ -4101,21 +4095,21 @@ if __name__ == "__main__":
         """Verify README links and report broken ones"""
         try:
             project_slug = args.get("project")
-            
+
             cmd = ["readme", "verify-links"]
             if project_slug:
                 cmd.append(project_slug)
-            
+
             result = self._run_templedb_cli(cmd)
-            
+
             if result["returncode"] != 0:
                 return self._error_response(
                     f"Failed to verify links: {result['stderr']}",
                     ErrorCode.INTERNAL_ERROR
                 )
-            
+
             return self._success_response(result["stdout"], format_json=False)
-            
+
         except Exception as e:
             logger.error(f"Error verifying links: {e}")
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
@@ -4126,33 +4120,43 @@ if __name__ == "__main__":
             project_slug = args.get("project")
             category = args.get("category")
             topic = args.get("topic")
-            
+
             conn = self._get_db_connection()
             cursor = conn.cursor()
-            
+
             # Build query with optional filters
             query = "SELECT * FROM readme_files_with_topics WHERE 1=1"
             params = []
-            
+
             if project_slug:
                 query += " AND project_slug = ?"
                 params.append(project_slug)
-            
+
             if category:
                 query += " AND category = ?"
                 params.append(category)
-            
+
             if topic:
                 query += " AND topics LIKE ?"
                 params.append(f"%{topic}%")
-            
+
             query += " ORDER BY index_priority DESC, title"
-            
+
             cursor.execute(query, params)
             results = [dict(row) for row in cursor.fetchall()]
-            
+
             return self._success_response(results)
-            
+
         except Exception as e:
             logger.error(f"Error listing READMEs: {e}")
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+
+def main():
+    """Entry point for MCP server"""
+    server = MCPServer()
+    server.run()
+
+
+if __name__ == "__main__":
+    main()
