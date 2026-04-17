@@ -9,13 +9,11 @@ from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
-from db_utils import DB_PATH
+from db_utils import DB_PATH, get_simple_connection
 
 def get_db_connection():
-    """Get database connection"""
-    import sqlite3
-    import os
-    return sqlite3.connect(os.path.expanduser(DB_PATH))
+    """Get database connection with WAL mode enabled"""
+    return get_simple_connection()
 
 
 class VibeCommands(Command):

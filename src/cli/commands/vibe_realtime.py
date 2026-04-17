@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
+from db_utils import get_simple_connection
 
 
 class VibeRealtimeCommands(Command):
@@ -320,7 +321,7 @@ class VibeRealtimeCommands(Command):
         import sqlite3
         from db_utils import DB_PATH
 
-        conn = sqlite3.connect(os.path.expanduser(DB_PATH))
+        conn = get_simple_connection()
         cursor = conn.cursor()
 
         try:
@@ -382,7 +383,7 @@ class VibeRealtimeCommands(Command):
 - [ ] If YES → STOP and use the MCP tool instead
 
 **Common mistakes to avoid:**
-- ❌ `bash sqlite3 ~/.templedb/templedb.db "SELECT..."`  → Use `templedb_query` MCP tool
+- ❌ `bash sqlite3 ~/.local/share/templedb/templedb.sqlite "SELECT..."`  → Use `templedb_query` MCP tool
 - ❌ `bash ./templedb project list`  → Use `templedb_project_list` MCP tool
 - ❌ `bash ./templedb vcs status`  → Use `templedb_vcs_status` MCP tool
 - ❌ `bash cat file.txt`  → Use `Read` tool
@@ -453,7 +454,7 @@ Need actual shell command? → Then use Bash
 
 ### Examples of INCORRECT usage (Don't do this!):
 
-❌ Bash: `sqlite3 ~/.templedb/templedb.db "SELECT ..."`
+❌ Bash: `sqlite3 ~/.local/share/templedb/templedb.sqlite "SELECT ..."`
 ❌ Bash: `./templedb project list`
 ❌ Bash: `./templedb vcs status {slug}`
 ❌ Bash: `cat file.txt`
@@ -521,7 +522,7 @@ What would you like to work on?
         print("❌ No project specified\n")
         print("Available projects:\n")
 
-        conn = sqlite3.connect(os.path.expanduser(DB_PATH))
+        conn = get_simple_connection()
         cursor = conn.cursor()
 
         try:

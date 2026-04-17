@@ -12,7 +12,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
-from db_utils import DB_PATH
+from db_utils import DB_PATH, get_simple_connection
 
 
 class VibeQueryCommands(Command):
@@ -25,8 +25,7 @@ class VibeQueryCommands(Command):
         limit = args.limit
         session_id = args.session
 
-        conn = sqlite3.connect(os.path.expanduser(DB_PATH))
-        conn.row_factory = sqlite3.Row
+        conn = get_simple_connection(row_factory=True)
         cursor = conn.cursor()
 
         try:
@@ -95,8 +94,7 @@ class VibeQueryCommands(Command):
         session_id = args.session_id
         output_format = args.format
 
-        conn = sqlite3.connect(os.path.expanduser(DB_PATH))
-        conn.row_factory = sqlite3.Row
+        conn = get_simple_connection(row_factory=True)
         cursor = conn.cursor()
 
         try:
@@ -201,8 +199,7 @@ class VibeQueryCommands(Command):
         project = args.project
         days = args.days
 
-        conn = sqlite3.connect(os.path.expanduser(DB_PATH))
-        conn.row_factory = sqlite3.Row
+        conn = get_simple_connection(row_factory=True)
         cursor = conn.cursor()
 
         try:
@@ -333,8 +330,7 @@ class VibeQueryCommands(Command):
         topic = args.topic
         limit = args.limit
 
-        conn = sqlite3.connect(os.path.expanduser(DB_PATH))
-        conn.row_factory = sqlite3.Row
+        conn = get_simple_connection(row_factory=True)
         cursor = conn.cursor()
 
         try:
@@ -406,8 +402,7 @@ class VibeQueryCommands(Command):
         output_file = args.output
         format_type = args.format
 
-        conn = sqlite3.connect(os.path.expanduser(DB_PATH))
-        conn.row_factory = sqlite3.Row
+        conn = get_simple_connection(row_factory=True)
         cursor = conn.cursor()
 
         try:

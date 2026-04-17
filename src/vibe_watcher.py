@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import requests
+from db_utils import get_simple_connection
 
 
 class VibeWatcher(FileSystemEventHandler):
@@ -45,7 +46,7 @@ class VibeWatcher(FileSystemEventHandler):
 
     def _get_project_root(self) -> Path:
         """Get project root directory from database"""
-        conn = sqlite3.connect(os.path.expanduser(self.db_path))
+        conn = get_simple_connection(self.db_path)
         cursor = conn.cursor()
         try:
             cursor.execute("""

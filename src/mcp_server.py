@@ -188,8 +188,14 @@ class MCPServer:
     def _get_db_connection(self):
         """Get or create database connection (reusable for queries)"""
         if self._db_conn is None:
-            self._db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            self._db_conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
             self._db_conn.row_factory = sqlite3.Row
+            # Enable WAL mode for concurrent access
+            self._db_conn.execute("PRAGMA journal_mode=WAL")
+            self._db_conn.execute("PRAGMA busy_timeout=30000")
+            self._db_conn.execute("PRAGMA synchronous=NORMAL")
+            self._db_conn.execute("PRAGMA cache_size=-64000")
+            self._db_conn.execute("PRAGMA foreign_keys=ON")
         return self._db_conn
 
     def _run_templedb_cli(self, args: List[str]) -> Dict[str, Any]:
@@ -1900,7 +1906,8 @@ class MCPServer:
 
             # Get commits
             import sqlite3
-            with sqlite3.connect(DB_PATH) as conn:
+            conn = self._get_db_connection()
+            with conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -1956,7 +1963,8 @@ class MCPServer:
             limit = args.get("limit", 50)
 
             import sqlite3
-            with sqlite3.connect(DB_PATH) as conn:
+            conn = self._get_db_connection()
+            with conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 

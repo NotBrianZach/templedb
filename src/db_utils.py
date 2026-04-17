@@ -45,7 +45,37 @@ def get_connection() -> sqlite3.Connection:
         _thread_local.connection.execute("PRAGMA cache_size=-64000")  # 64MB cache
         _thread_local.connection.execute("PRAGMA temp_store=MEMORY")
         _thread_local.connection.execute("PRAGMA mmap_size=268435456")  # 256MB mmap
+        _thread_local.connection.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
     return _thread_local.connection
+
+
+def get_simple_connection(db_path: str = None, row_factory: bool = False) -> sqlite3.Connection:
+    """
+    Get a simple non-pooled database connection with optimal concurrency settings.
+    Use this for short-lived operations or when you need a fresh connection.
+
+    Args:
+        db_path: Database path (defaults to DB_PATH)
+        row_factory: Enable Row factory for dict-like access (default: False)
+
+    Returns:
+        Configured SQLite connection with WAL mode and optimal settings
+    """
+    path = db_path or DB_PATH
+    conn = sqlite3.connect(path, timeout=30.0, isolation_level=None)
+
+    if row_factory:
+        conn.row_factory = sqlite3.Row
+
+    # CRITICAL: Enable WAL mode for concurrent access
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+    return conn
 
 
 def close_connection():
