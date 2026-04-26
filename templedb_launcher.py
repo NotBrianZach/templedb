@@ -104,7 +104,7 @@ try:
         def tool_var_tag_add(args):
             return _run_var(["tag", "add", args["tag_name"]] + args["projects"])
 
-        self.tool_handlers.update({
+        self.tools.update({
             "templedb_var_set":     tool_var_set,
             "templedb_var_get":     tool_var_get,
             "templedb_var_list":    tool_var_list,
