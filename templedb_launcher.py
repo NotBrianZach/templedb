@@ -152,12 +152,44 @@ try:
         def tool_var_tag_add(args):
             return _run_var(["tag", "add", args["tag_name"]] + args["projects"])
 
+        def _run_nixos(sub_args):
+            result = self._run_templedb_cli(["nixos"] + sub_args)
+            if result["returncode"] != 0:
+                err = _sanitize_stderr(result["stderr"] or result["stdout"])
+                return {"content": [{"type": "text", "text": err}], "isError": True}
+            return {"content": [{"type": "text", "text": result["stdout"].strip() or "done"}]}
+
+        def tool_nixos_status(args):
+            cmd = ["status"]
+            if args.get("slug"): cmd.append(args["slug"])
+            return _run_nixos(cmd)
+
+        def tool_nixos_config_list(args):
+            return _run_nixos(["config-list"])
+
+        def tool_nixos_config_get(args):
+            return _run_nixos(["config-get", args["key"]])
+
+        def tool_nixos_config_set(args):
+            cmd = ["config-set", args["key"], args["value"]]
+            return _run_nixos(cmd)
+
+        def tool_nixos_generate(args):
+            cmd = ["generate"]
+            if args.get("slug"): cmd.append(args["slug"])
+            return _run_nixos(cmd)
+
         self.tools.update({
-            "templedb_var_set":     tool_var_set,
-            "templedb_var_get":     tool_var_get,
-            "templedb_var_list":    tool_var_list,
-            "templedb_var_export":  tool_var_export,
-            "templedb_var_tag_add": tool_var_tag_add,
+            "templedb_var_set":          tool_var_set,
+            "templedb_var_get":          tool_var_get,
+            "templedb_var_list":         tool_var_list,
+            "templedb_var_export":       tool_var_export,
+            "templedb_var_tag_add":      tool_var_tag_add,
+            "templedb_nixos_status":     tool_nixos_status,
+            "templedb_nixos_config_list": tool_nixos_config_list,
+            "templedb_nixos_config_get": tool_nixos_config_get,
+            "templedb_nixos_config_set": tool_nixos_config_set,
+            "templedb_nixos_generate":   tool_nixos_generate,
         })
 
     _MCPServer.__init__ = _patched_mcp_init
@@ -216,6 +248,30 @@ try:
                  "tag_name": {"type": "string"},
                  "projects": {"type": "array", "items": {"type": "string"}},
              }, "required": ["tag_name", "projects"]}},
+            {"name": "templedb_nixos_status",
+             "description": "Show NixOS pipeline state: pending config changes, last generate, last rebuild, and what needs to run next.",
+             "inputSchema": {"type": "object", "properties": {
+                 "slug": {"type": "string", "description": "NixOS config project slug (auto-detects if only one exists)"},
+             }}},
+            {"name": "templedb_nixos_config_list",
+             "description": "List all NixOS system_config key-value pairs (woofs.*, nixos.*, git_server.*, etc.).",
+             "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "templedb_nixos_config_get",
+             "description": "Get a single NixOS system_config value by key.",
+             "inputSchema": {"type": "object", "properties": {
+                 "key": {"type": "string"},
+             }, "required": ["key"]}},
+            {"name": "templedb_nixos_config_set",
+             "description": "Set a NixOS system_config key. Marks config dirty (generate needed before next rebuild).",
+             "inputSchema": {"type": "object", "properties": {
+                 "key":   {"type": "string"},
+                 "value": {"type": "string"},
+             }, "required": ["key", "value"]}},
+            {"name": "templedb_nixos_generate",
+             "description": "Generate .nix modules from current system_config values and mark config clean.",
+             "inputSchema": {"type": "object", "properties": {
+                 "slug": {"type": "string", "description": "NixOS config project slug (auto-detects if only one exists)"},
+             }}},
         ]
 
     _MCPServer.get_tool_definitions = _patched_list_tools
