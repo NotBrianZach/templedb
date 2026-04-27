@@ -1,12 +1,15 @@
 """
 Patched cli.commands.nixos — loaded via LocalPatchFinder in templedb_launcher.py.
 
-Adds dirty-state tracking around generate and rebuild:
-- After a successful generate, records nixos.last_generated_at in system_config.
-- Before rebuild/system-switch, checks for ungenerated config changes and prompts.
+Adds:
+1. Dirty-state tracking around generate and rebuild.
+2. 'status' subcommand showing the full config → generate → rebuild pipeline.
+3. AUTO-GENERATED header in generated .nix files.
 """
+import json
 import sys
 import importlib.util
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Load the installed nixos module via the already-loaded cli.commands package
@@ -17,9 +20,12 @@ _inst_spec = importlib.util.spec_from_file_location(
 _installed = importlib.util.module_from_spec(_inst_spec)
 _inst_spec.loader.exec_module(_installed)
 
+# Keys that are never considered "pending changes" (they're tracking metadata)
+_TRACKING_KEYS = ("nixos.last_generated_at", "nixos.last_generated_snapshot")
+
 
 # ---------------------------------------------------------------------------
-# Dirty-state helpers (read/write system_config directly)
+# Dirty-state helpers
 # ---------------------------------------------------------------------------
 
 def _get_conn():
@@ -32,43 +38,61 @@ def _dirty_count(conn) -> int:
         row = conn.execute(
             "SELECT value FROM system_config WHERE key = 'nixos.last_generated_at'"
         ).fetchone()
+        placeholders = ",".join("?" * len(_TRACKING_KEYS))
         if not row:
             return conn.execute(
-                "SELECT COUNT(*) FROM system_config WHERE key != 'nixos.last_generated_at'"
+                f"SELECT COUNT(*) FROM system_config WHERE key NOT IN ({placeholders})",
+                _TRACKING_KEYS,
             ).fetchone()[0]
         return conn.execute(
-            "SELECT COUNT(*) FROM system_config "
-            "WHERE key != 'nixos.last_generated_at' AND updated_at > ?",
-            (row[0],),
+            f"SELECT COUNT(*) FROM system_config "
+            f"WHERE key NOT IN ({placeholders}) AND updated_at > ?",
+            (*_TRACKING_KEYS, row[0]),
         ).fetchone()[0]
     except Exception:
         return 0
 
 
 def _mark_clean():
-    """Record that generate just ran — clears dirty state."""
+    """Record that generate just ran — saves snapshot and clears dirty state."""
     try:
-        from db_utils import execute
-        execute("""
-            INSERT INTO system_config (key, value, description, updated_at)
-            VALUES ('nixos.last_generated_at', datetime('now'),
-                    'Timestamp of last successful nixos generate', datetime('now'))
-            ON CONFLICT(key) DO UPDATE SET
-                value = datetime('now'),
-                updated_at = datetime('now')
-        """)
+        from db_utils import execute, get_connection
+        conn = get_connection()
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Snapshot current system_config (excluding tracking keys)
+        placeholders = ",".join("?" * len(_TRACKING_KEYS))
+        rows = conn.execute(
+            f"SELECT key, value FROM system_config WHERE key NOT IN ({placeholders})",
+            _TRACKING_KEYS,
+        ).fetchall()
+        snapshot = {r[0]: r[1] for r in rows}
+
+        execute(
+            "INSERT INTO system_config (key, value, description, updated_at) "
+            "VALUES ('nixos.last_generated_at', ?, "
+            "        'Timestamp of last successful nixos generate', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (now, now),
+        )
+        execute(
+            "INSERT INTO system_config (key, value, description, updated_at) "
+            "VALUES ('nixos.last_generated_snapshot', ?, "
+            "        'system_config snapshot at last generate', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (json.dumps(snapshot), now),
+        )
     except Exception:
         pass
 
 
 def _check_dirty_and_prompt() -> bool:
-    """Return True if rebuild should proceed, False if aborted."""
+    """Return True if the caller should proceed, False if aborted."""
     conn = _get_conn()
     count = _dirty_count(conn)
     if count == 0:
         return True
 
-    # Find which project to generate
     try:
         row = conn.execute(
             "SELECT slug FROM projects WHERE project_type = 'nixos-config' LIMIT 1"
@@ -81,16 +105,15 @@ def _check_dirty_and_prompt() -> bool:
     print(f"⚠ {count} {noun} changed since last generate.", file=sys.stderr)
 
     try:
-        answer = input(f"Generate now? [Y/n] ").strip().lower()
+        answer = input("Generate now? [Y/n] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         print("\nCancelled.", file=sys.stderr)
         return False
 
     if answer in ("", "y", "yes"):
-        import subprocess, os
+        import subprocess
         launcher = Path(__file__).parent.parent.parent.parent / "templedb"
-        cmd = [str(launcher), "nixos", "generate", slug]
-        result = subprocess.run(cmd)
+        result = subprocess.run([str(launcher), "nixos", "generate", slug])
         if result.returncode != 0:
             print("⚠ Generate failed — continuing with rebuild anyway.", file=sys.stderr)
         else:
@@ -102,14 +125,175 @@ def _check_dirty_and_prompt() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Generated file header
+# ---------------------------------------------------------------------------
+
+_HEADER_TEMPLATE = """\
+# AUTO-GENERATED by TempleDB — do not edit manually.
+# Source: templedb nixos config keys (system_config table)
+# Generated: {timestamp}
+# To update:
+#   templedb var set <key> <value> --nixos
+#   templedb nixos generate {slug}
+"""
+
+
+def _with_header(text: str, slug: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    header = _HEADER_TEMPLATE.format(timestamp=timestamp, slug=slug)
+    # Strip any prior TempleDB header to avoid stacking
+    if "AUTO-GENERATED by TempleDB" in text:
+        lines = text.splitlines(keepends=True)
+        i = 0
+        in_header = False
+        while i < len(lines):
+            if "AUTO-GENERATED by TempleDB" in lines[i]:
+                in_header = True
+            if in_header and not lines[i].startswith("#") and lines[i].strip():
+                break
+            i += 1
+        text = "".join(lines[i:])
+    return header + "\n" + text
+
+
+# ---------------------------------------------------------------------------
+# Status command
+# ---------------------------------------------------------------------------
+
+def _fmt_ts(ts: str) -> str:
+    return ts[:16] if ts else "never"
+
+
+def _nixos_status(slug: str):
+    conn = _get_conn()
+
+    gen_row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'nixos.last_generated_at'"
+    ).fetchone()
+    last_gen = gen_row[0] if gen_row else None
+
+    snap_row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'nixos.last_generated_snapshot'"
+    ).fetchone()
+    snapshot = json.loads(snap_row[0]) if snap_row else {}
+
+    # Last successful rebuild for this project
+    last_rebuild = None
+    proj_row = conn.execute(
+        "SELECT id FROM projects WHERE slug = ?", (slug,)
+    ).fetchone()
+    if proj_row:
+        rb_row = conn.execute(
+            "SELECT deployed_at FROM system_deployments "
+            "WHERE project_id = ? AND exit_code = 0 "
+            "ORDER BY deployed_at DESC LIMIT 1",
+            (proj_row[0],),
+        ).fetchone()
+        if rb_row:
+            last_rebuild = rb_row[0]
+
+    # Pending changes (modified since last generate)
+    placeholders = ",".join("?" * len(_TRACKING_KEYS))
+    if last_gen:
+        pending_rows = conn.execute(
+            f"SELECT key, value FROM system_config "
+            f"WHERE key NOT IN ({placeholders}) AND updated_at > ? ORDER BY key",
+            (*_TRACKING_KEYS, last_gen),
+        ).fetchall()
+    else:
+        pending_rows = conn.execute(
+            f"SELECT key, value FROM system_config "
+            f"WHERE key NOT IN ({placeholders}) ORDER BY key",
+            _TRACKING_KEYS,
+        ).fetchall()
+
+    pending = [(r[0], r[1]) for r in pending_rows]
+    count = len(pending)
+
+    # Live system status
+    if last_gen is None:
+        live_status = "UNKNOWN (never generated)"
+    elif last_rebuild is None:
+        live_status = "BEHIND (never rebuilt)"
+    elif last_gen > last_rebuild:
+        live_status = "BEHIND (rebuild needed)"
+    else:
+        live_status = "UP TO DATE"
+
+    # --- output ---
+    print()
+    if count > 0:
+        noun = "change" if count == 1 else "changes"
+        since = f" since last generate ({_fmt_ts(last_gen)})" if last_gen else ""
+        print(f"  Config keys:   {count} pending {noun}{since}")
+    else:
+        print(f"  Config keys:   up to date")
+    print(f"  Last generate: {_fmt_ts(last_gen)}")
+    print(f"  Last rebuild:  {_fmt_ts(last_rebuild)}")
+    print(f"  Live system:   {live_status}")
+
+    if pending:
+        print()
+        print("  Pending changes:")
+        key_w = max(len(k) for k, _ in pending)
+        for key, new_val in pending:
+            old_val = snapshot.get(key)
+            if old_val is None:
+                change = f"(new) {new_val}"
+            elif old_val == new_val:
+                change = f"{old_val}  (touched)"
+            else:
+                change = f"{old_val} → {new_val}"
+            print(f"    {key:{key_w}}  {change}")
+
+    needs_generate = count > 0
+    needs_rebuild = last_gen is None or last_rebuild is None or last_gen > last_rebuild
+    if needs_generate or needs_rebuild:
+        print()
+        print("  Next steps:")
+        if needs_generate:
+            print(f"    templedb nixos generate {slug}")
+        if needs_rebuild:
+            print(f"    templedb nixos rebuild  {slug}")
+
+    print()
+
+
+# ---------------------------------------------------------------------------
 # Patched command class
 # ---------------------------------------------------------------------------
 
 class _PatchedNixOSCommand(_installed.NixOSCommand):
 
     def generate(self, args) -> int:
-        rc = super().generate(args)
-        if rc == 0 and getattr(args, 'slug', None):
+        slug = getattr(args, 'slug', None)
+
+        # Inject the TempleDB header into generated modules
+        if slug:
+            try:
+                from nixos_generator import NixOSGenerator
+                _orig_nix = NixOSGenerator.generate_nix_module
+                _orig_hm = NixOSGenerator.generate_home_manager_module
+
+                def _nix_with_header(self_gen, config):
+                    return _with_header(_orig_nix(self_gen, config), slug)
+
+                def _hm_with_header(self_gen, config):
+                    return _with_header(_orig_hm(self_gen, config), slug)
+
+                NixOSGenerator.generate_nix_module = _nix_with_header
+                NixOSGenerator.generate_home_manager_module = _hm_with_header
+                try:
+                    rc = super().generate(args)
+                finally:
+                    NixOSGenerator.generate_nix_module = _orig_nix
+                    NixOSGenerator.generate_home_manager_module = _orig_hm
+            except Exception:
+                rc = super().generate(args)
+        else:
+            rc = super().generate(args)
+
+        if rc == 0 and slug:
             _mark_clean()
         return rc
 
@@ -123,12 +307,45 @@ class _PatchedNixOSCommand(_installed.NixOSCommand):
             return 1
         return super().system_switch(args)
 
+    def nixos_status(self, args) -> int:
+        slug = getattr(args, 'slug', None)
+        if not slug:
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT slug FROM projects WHERE project_type = 'nixos-config' LIMIT 1"
+            ).fetchone()
+            if not row:
+                print("No nixos-config project found. Specify a project slug.", file=sys.stderr)
+                return 1
+            slug = row[0]
+        _nixos_status(slug)
+        return 0
+
 
 def register(cli):
     """Register patched NixOS commands with CLI."""
     _installed.register(cli)
     cmd = _PatchedNixOSCommand()
-    # Replace only the handlers that gain dirty tracking
+
     cli.commands["nixos.generate"] = cmd.generate
     cli.commands["nixos.rebuild"] = cmd.rebuild
     cli.commands["nixos.system-switch"] = cmd.system_switch
+    cli.commands["nixos.status"] = cmd.nixos_status
+
+    # Add 'status' to the nixos argparse subparsers
+    try:
+        nixos_parser = cli.subparsers.choices.get("nixos")
+        if nixos_parser:
+            for action in nixos_parser._actions:
+                if hasattr(action, 'choices') and "generate" in (action.choices or {}):
+                    p = action.add_parser(
+                        "status",
+                        help="Show full pipeline state: pending config, generate, and rebuild status",
+                    )
+                    p.add_argument(
+                        "slug", nargs="?",
+                        help="NixOS config project slug (default: auto-detect)",
+                    )
+                    break
+    except Exception:
+        pass  # Non-fatal — command still dispatches via cli.commands dict
