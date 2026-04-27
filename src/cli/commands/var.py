@@ -25,6 +25,7 @@ Usage examples:
   templedb var tag list
   templedb var tag list woofs_projects
 """
+import re
 import sys
 import os
 import json
@@ -44,6 +45,38 @@ except ImportError:
     from cli.core import Command
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Value masking
+# ---------------------------------------------------------------------------
+
+_SENSITIVE_KEY_RE = re.compile(
+    r'(key|token|password|secret|credential|private|auth|bearer)',
+    re.IGNORECASE,
+)
+
+
+def _should_mask(key_name: str, value: str) -> bool:
+    if not value:
+        return False
+    if _SENSITIVE_KEY_RE.search(key_name):
+        return True
+    # Long strings that look like API keys / JWTs
+    if len(value) > 32 and re.match(r'^[A-Za-z0-9\-_.=+/]+$', value):
+        return True
+    # JSON blobs that contain sensitive field names
+    if value.startswith('{') and _SENSITIVE_KEY_RE.search(value):
+        return True
+    return False
+
+
+def _mask_value(key_name: str, value: str) -> str:
+    if not _should_mask(key_name, value):
+        return value or ''
+    v = value or ''
+    if len(v) <= 8:
+        return '****'
+    return f"{v[:4]}...{v[-4:]}"
 
 
 # ---------------------------------------------------------------------------
@@ -492,36 +525,104 @@ class VarCommands(Command):
             return 0
 
         project = self._get_project(args.project)
-        print(f"\nVars for {args.project}:")
-        print("=" * 50)
+        self._print_project_structured(project, profile, target_filter)
+        return 0
 
-        # Global
-        global_rows = self.query_all("""
-            SELECT var_name, var_value FROM environment_variables
-            WHERE scope_type = 'global' AND scope_id IS NULL ORDER BY var_name
-        """)
-        if global_rows:
-            self._print_vars(global_rows, "  [global]", target_filter)
+    # ------------------------------------------------------------------
+    # Structured per-project display helpers
+    # ------------------------------------------------------------------
 
-        # Tag
+    def _nixos_keys_for_project(self, slug: str) -> list:
+        """Return [(key, value)] from system_config for this project."""
+        proj_row = self.query_one(
+            "SELECT project_type FROM projects WHERE slug = ?", (slug,)
+        )
+        if proj_row and proj_row.get('project_type') == 'nixos-config':
+            rows = self.query_all(
+                "SELECT key, value FROM system_config "
+                "WHERE key NOT LIKE 'nixos.last_generated_%' ORDER BY key"
+            )
+        else:
+            # Match prefix: woofs_projects → woofs., bza → bza.
+            prefix = slug.split('_')[0] + '.'
+            rows = self.query_all(
+                "SELECT key, value FROM system_config WHERE key LIKE ? ORDER BY key",
+                (prefix + '%',),
+            )
+        return [(r['key'], r['value']) for r in rows] if rows else []
+
+    def _print_project_structured(self, project, profile, target_filter):
+        """Print the three-section structured view for one project."""
+        slug = project['slug']
+        print(f"\n{slug}")
+        print("─" * max(len(slug), 40))
+
+        # --- BUILD-TIME (nixos config) ---
+        nixos = self._nixos_keys_for_project(slug)
+        if nixos:
+            print("\nBUILD-TIME (nixos config)")
+            kw = max(len(k) for k, _ in nixos)
+            for key, val in nixos:
+                print(f"  {key:{kw}}  {val or ''}")
+
+        # --- RUNTIME (env vars) ---
+        # Collect all vars for this project across scopes, keyed by (target, name)
+        # Project scope overrides tag, tag overrides global.
+        merged = {}  # (target, name) → (value, inherited_from)
+
+        def _add(rows, from_label):
+            for row in rows:
+                t, name = _parse_var_key(row['var_name'])
+                if (t, name) not in merged:
+                    merged[(t, name)] = (row['var_value'], from_label)
+
+        global_rows = self.query_all(
+            "SELECT var_name, var_value FROM environment_variables "
+            "WHERE scope_type = 'global' AND scope_id IS NULL ORDER BY var_name"
+        )
+        _add(global_rows, 'global')
+
         for tag_id in self._project_tag_ids(project['id']):
             tag_row = self.query_one("SELECT name FROM tags WHERE id = ?", (tag_id,))
-            tag_rows = self.query_all("""
-                SELECT var_name, var_value FROM environment_variables
-                WHERE scope_type = 'tag' AND scope_id = ? ORDER BY var_name
-            """, (tag_id,))
-            if tag_rows:
-                self._print_vars(tag_rows, f"  [tag:{tag_row['name']}]", target_filter)
+            tag_rows = self.query_all(
+                "SELECT var_name, var_value FROM environment_variables "
+                "WHERE scope_type = 'tag' AND scope_id = ? ORDER BY var_name",
+                (tag_id,),
+            )
+            _add(tag_rows, f"tag:{tag_row['name']}")
 
-        # Project
-        proj_rows = self.query_all("""
-            SELECT var_name, var_value FROM environment_variables
-            WHERE scope_type = 'project' AND scope_id = ? ORDER BY var_name
-        """, (project['id'],))
-        if proj_rows:
-            self._print_vars(proj_rows, f"  [project]", target_filter)
+        proj_rows = self.query_all(
+            "SELECT var_name, var_value FROM environment_variables "
+            "WHERE scope_type = 'project' AND scope_id = ? ORDER BY var_name",
+            (project['id'],),
+        )
+        _add(proj_rows, None)  # None = project-owned, no annotation needed
 
-        # Secret keys (names only — don't decrypt for list)
+        if merged:
+            # Group by target; default first, then alphabetically
+            by_target = {}
+            for (t, name), (val, from_label) in merged.items():
+                if target_filter and t not in (target_filter, 'default'):
+                    continue
+                by_target.setdefault(t, []).append((name, val, from_label))
+
+            for t in sorted(by_target, key=lambda x: ('0' if x == 'default' else '1') + x):
+                entries = sorted(by_target[t])
+                label = "RUNTIME (env vars)" if t == 'default' else f"RUNTIME / {t} (env vars)"
+                print(f"\n{label}")
+                nw = max(len(name) for name, _, _ in entries)
+                any_masked = False
+                for name, val, from_label in entries:
+                    display = _mask_value(name, val or '')
+                    masked = display != (val or '')
+                    if masked:
+                        any_masked = True
+                    inherited = f"  [{from_label}]" if from_label else ""
+                    print(f"  {name:{nw}}  {display}{inherited}")
+                if any_masked:
+                    print(f"  (masked values: templedb var get {slug} KEY to reveal)")
+
+        # --- SECRETS (encrypted) ---
         try:
             secret_rows = self.query_all("""
                 SELECT sb.secret_name
@@ -532,29 +633,15 @@ class VarCommands(Command):
                 ORDER BY sb.secret_name
             """, (project['id'], profile))
             if secret_rows:
-                print(f"\n  [secrets/{profile}]")
+                print(f"\nSECRETS (encrypted)")
+                nw = max(len(r['secret_name']) for r in secret_rows)
                 for r in secret_rows:
-                    print(f"    {r['secret_name']}=<encrypted>")
+                    print(f"  {r['secret_name']:{nw}}  [encrypted]")
+                print(f"  (to decrypt: templedb var get {slug} KEY --secret)")
         except Exception:
             pass
 
         print()
-        return 0
-
-    def _print_vars(self, rows, label, target_filter):
-        filtered = []
-        for row in rows:
-            t, name = _parse_var_key(row['var_name'])
-            if target_filter and t != target_filter and t != 'default':
-                continue
-            filtered.append((t, name, row['var_value']))
-        if not filtered:
-            return
-        print(f"\n{label}")
-        for t, name, value in filtered:
-            target_suffix = f" ({t})" if t != 'default' else ""
-            display = f"{value[:12]}...{value[-6:]}" if value and len(value) > 40 else (value or '')
-            print(f"    {name}{target_suffix}={display}")
 
     def _list_all(self, target_filter):
         rows = self.query_all("""
@@ -563,11 +650,12 @@ class VarCommands(Command):
             FROM environment_variables ev
             LEFT JOIN projects p ON ev.scope_type = 'project' AND ev.scope_id = p.id
             LEFT JOIN tags t ON ev.scope_type = 'tag' AND ev.scope_id = t.id
-            ORDER BY ev.scope_type, ev.scope_id, ev.var_name
+            ORDER BY p.slug NULLS FIRST, ev.scope_type, ev.var_name
         """)
+        any_masked = False
         for row in rows:
             t, name = _parse_var_key(row['var_name'])
-            if target_filter and t != target_filter and t != 'default':
+            if target_filter and t not in (target_filter, 'default'):
                 continue
             if row['scope_type'] == 'global':
                 scope = 'global'
@@ -578,7 +666,12 @@ class VarCommands(Command):
             else:
                 scope = row['scope_type']
             target_suffix = f" ({t})" if t != 'default' else ""
-            print(f"{scope}  {name}{target_suffix}={row['var_value'] or ''}")
+            display = _mask_value(name, row['var_value'] or '')
+            if display != (row['var_value'] or ''):
+                any_masked = True
+            print(f"{scope}  {name}{target_suffix}={display}")
+        if any_masked:
+            print("\n(sensitive values masked — use: templedb var get PROJECT KEY)")
 
     # ------------------------------------------------------------------
     # var export
