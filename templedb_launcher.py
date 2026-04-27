@@ -23,6 +23,11 @@ _cathedral_patch = _LOCAL / "src" / "cli" / "commands" / "cathedral.py"
 if _cathedral_patch.exists():
     _PATCHES["cli.commands.cathedral"] = str(_cathedral_patch)
 
+# Override nixos with local patch (adds dirty-state tracking for generate/rebuild)
+_nixos_patch = _LOCAL / "src" / "cli" / "commands" / "nixos.py"
+if _nixos_patch.exists():
+    _PATCHES["cli.commands.nixos"] = str(_nixos_patch)
+
 class LocalPatchFinder(MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         if fullname in _PATCHES:
@@ -102,7 +107,10 @@ try:
 
         def tool_var_set(args):
             cmd = ["set"]
-            if args.get("global_scope"):
+            if args.get("nixos"):
+                cmd += [args["key"], args["value"], "--nixos"]
+                if args.get("description"): cmd += ["--description", args["description"]]
+            elif args.get("global_scope"):
                 cmd += ["--global", args["key"], args["value"]]
             elif args.get("tag"):
                 cmd += ["--tag", args["tag"], args["key"], args["value"]]
@@ -171,6 +179,8 @@ try:
                  "secret":       {"type": "boolean"},
                  "keys":         {"type": "string", "description": "Comma-separated key names (required with secret=true)"},
                  "profile":      {"type": "string"},
+                 "nixos":        {"type": "boolean", "description": "Write to system NixOS config (no project needed)"},
+                 "description":  {"type": "string", "description": "Human-readable description for --nixos keys"},
              }, "required": ["key", "value"]}},
             {"name": "templedb_var_get",
              "description": "Get a variable with scope resolution (project+target > project > tag > global).",

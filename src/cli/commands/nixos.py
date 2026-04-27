@@ -1,878 +1,134 @@
-#!/usr/bin/env python3
 """
-NixOS integration commands for TempleDB
+Patched cli.commands.nixos — loaded via LocalPatchFinder in templedb_launcher.py.
+
+Adds dirty-state tracking around generate and rebuild:
+- After a successful generate, records nixos.last_generated_at in system_config.
+- Before rebuild/system-switch, checks for ungenerated config changes and prompts.
 """
 import sys
+import importlib.util
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from cli.core import Command
-from logger import get_logger
+# Load the installed nixos module via the already-loaded cli.commands package
+_cli_commands_dir = Path(sys.modules["cli.commands"].__file__).parent
+_inst_spec = importlib.util.spec_from_file_location(
+    "_nixos_installed", str(_cli_commands_dir / "nixos.py")
+)
+_installed = importlib.util.module_from_spec(_inst_spec)
+_inst_spec.loader.exec_module(_installed)
 
-logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Dirty-state helpers (read/write system_config directly)
+# ---------------------------------------------------------------------------
+
+def _get_conn():
+    from db_utils import get_connection
+    return get_connection()
 
 
-class NixOSCommand(Command):
-    """NixOS integration command handlers"""
+def _dirty_count(conn) -> int:
+    try:
+        row = conn.execute(
+            "SELECT value FROM system_config WHERE key = 'nixos.last_generated_at'"
+        ).fetchone()
+        if not row:
+            return conn.execute(
+                "SELECT COUNT(*) FROM system_config WHERE key != 'nixos.last_generated_at'"
+            ).fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM system_config "
+            "WHERE key != 'nixos.last_generated_at' AND updated_at > ?",
+            (row[0],),
+        ).fetchone()[0]
+    except Exception:
+        return 0
 
-    def __init__(self):
-        super().__init__()
+
+def _mark_clean():
+    """Record that generate just ran — clears dirty state."""
+    try:
+        from db_utils import execute
+        execute("""
+            INSERT INTO system_config (key, value, description, updated_at)
+            VALUES ('nixos.last_generated_at', datetime('now'),
+                    'Timestamp of last successful nixos generate', datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET
+                value = datetime('now'),
+                updated_at = datetime('now')
+        """)
+    except Exception:
+        pass
+
+
+def _check_dirty_and_prompt() -> bool:
+    """Return True if rebuild should proceed, False if aborted."""
+    conn = _get_conn()
+    count = _dirty_count(conn)
+    if count == 0:
+        return True
+
+    # Find which project to generate
+    try:
+        row = conn.execute(
+            "SELECT slug FROM projects WHERE project_type = 'nixos-config' LIMIT 1"
+        ).fetchone()
+        slug = row[0] if row else "system_config"
+    except Exception:
+        slug = "system_config"
+
+    noun = "config key" if count == 1 else "config keys"
+    print(f"⚠ {count} {noun} changed since last generate.", file=sys.stderr)
+
+    try:
+        answer = input(f"Generate now? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.", file=sys.stderr)
+        return False
+
+    if answer in ("", "y", "yes"):
+        import subprocess, os
+        launcher = Path(__file__).parent.parent.parent.parent / "templedb"
+        cmd = [str(launcher), "nixos", "generate", slug]
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            print("⚠ Generate failed — continuing with rebuild anyway.", file=sys.stderr)
+        else:
+            _mark_clean()
+    else:
+        print("Skipping generate — rebuild may use stale config.", file=sys.stderr)
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Patched command class
+# ---------------------------------------------------------------------------
+
+class _PatchedNixOSCommand(_installed.NixOSCommand):
 
     def generate(self, args) -> int:
-        """Generate NixOS modules from a project"""
-        try:
-            from nixos_generator import NixOSGenerator
-
-            project_slug = args.slug
-
-            # Auto-detect output directory for nixos-config projects
-            if args.output:
-                output_dir = Path(args.output)
-            else:
-                # Check if this is a nixos-config project
-                project = self.get_project_or_exit(project_slug)
-                if project['project_type'] == 'nixos-config' and project['repo_url']:
-                    # Use the project's repo path + modules directory
-                    config_path = Path(project['repo_url'])
-                    modules_dir = config_path / 'modules'
-                    modules_dir.mkdir(exist_ok=True)
-                    output_dir = modules_dir
-                    print(f"\n🔧 Generating NixOS configuration for {project_slug}...")
-                    print(f"   Auto-detected nixos-config project")
-                    print(f"   Output: {output_dir}\n")
-                else:
-                    output_dir = Path('/tmp/nixos-gen')
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    print(f"\n🔧 Generating NixOS configuration for {project_slug}...")
-                    print(f"   Output: {output_dir}\n")
-
-            with NixOSGenerator() as gen:
-                config = gen.generate_config(
-                    project_slug,
-                    cathedral_path=args.cathedral_path,
-                    include_home_manager=not args.no_home_manager,
-                    include_templedb=args.include_templedb
-                )
-
-                # For nixos-config projects, write to templedb-managed.nix
-                # For other projects, use project-specific names
-                if project['project_type'] == 'nixos-config':
-                    nixos_path = output_dir / "templedb-managed-system.nix"
-                    hm_path = output_dir / "templedb-managed.nix"
-                else:
-                    nixos_path = output_dir / f"{project_slug}-nixos.nix"
-                    hm_path = output_dir / f"{project_slug}-home.nix"
-
-                # Write NixOS module
-                nixos_module = gen.generate_nix_module(config)
-                nixos_path.write_text(nixos_module)
-                print(f"✓ NixOS module: {nixos_path}")
-
-                # Write Home Manager module
-                if not args.no_home_manager:
-                    hm_module = gen.generate_home_manager_module(config)
-                    hm_path.write_text(hm_module)
-                    print(f"✓ Home Manager module: {hm_path}")
-
-                # Show summary
-                print(f"\n📊 Configuration Summary:")
-                print(f"   System packages: {len(config.system_packages)}")
-                print(f"   Home packages: {len(config.home_packages)}")
-                print(f"   Environment vars: {len(config.environment_vars)}")
-                print(f"   Secrets: {len(config.secrets)}")
-
-                # Project-specific next steps
-                if project['project_type'] == 'nixos-config':
-                    # Auto-commit for nixos-config projects
-                    config_path = Path(project['repo_url'])
-                    try:
-                        import subprocess
-
-                        # Check if there are changes to commit
-                        result = subprocess.run(
-                            ['git', 'status', '--porcelain', 'modules/templedb-managed.nix', 'modules/templedb-managed-system.nix', 'flake.nix'],
-                            cwd=config_path,
-                            capture_output=True,
-                            text=True
-                        )
-
-                        if result.stdout.strip():
-                            # There are changes, commit them
-                            subprocess.run(['git', 'add', 'modules/templedb-managed.nix', 'modules/templedb-managed-system.nix'],
-                                         cwd=config_path, check=False)
-                            subprocess.run(['git', 'add', 'flake.nix'], cwd=config_path, check=False)
-
-                            commit_msg = f"Update TempleDB-managed packages\n\nAuto-generated by: ./templedb nixos generate {project_slug}"
-                            subprocess.run(['git', 'commit', '-m', commit_msg], cwd=config_path, check=True)
-                            print(f"\n✓ Changes committed to git (required for Nix to see them)")
-                        else:
-                            print(f"\n✓ No changes to commit (modules already up to date)")
-
-                    except subprocess.CalledProcessError as e:
-                        logger.warning(f"Failed to auto-commit: {e}")
-                        print(f"\n⚠️  Auto-commit failed - you may need to commit manually")
-                    except Exception as e:
-                        logger.warning(f"Git auto-commit error: {e}")
-                        print(f"\n⚠️  Could not auto-commit - you may need to commit manually")
-
-                    print(f"\n💡 Next steps:")
-                    print(f"   1. Module already installed at {output_dir}")
-                    print(f"   2. Run: sudo nixos-rebuild test")
-                    print(f"   3. If successful: sudo nixos-rebuild switch")
-                else:
-                    print(f"\n💡 Next steps:")
-                    print(f"   1. Review generated modules in {output_dir}")
-                    print(f"   2. Copy to /etc/nixos/")
-                    print(f"   3. Import in your flake.nix")
-                    print(f"   4. Run: sudo nixos-rebuild test")
-
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to generate NixOS config: {e}", exc_info=True)
-            return 1
-
-    def export(self, args) -> int:
-        """Export Cathedral package with NixOS modules"""
-        try:
-            from nixos_generator import NixOSGenerator
-
-            project_slug = args.slug
-            output_dir = Path(args.output) if args.output else Path('/tmp/nixos-gen')
-
-            print(f"\n📦 Exporting {project_slug} with NixOS integration...")
-            print(f"   Output: {output_dir}\n")
-
-            with NixOSGenerator() as gen:
-                nixos_path, hm_path = gen.export_cathedral_with_nix(
-                    project_slug,
-                    output_dir
-                )
-
-                print(f"\n✅ Export complete!")
-                print(f"\n📁 Generated files:")
-                print(f"   - Cathedral package: {project_slug}.cathedral.tar.zst")
-                print(f"   - NixOS module: {nixos_path.name}")
-                print(f"   - Home Manager module: {hm_path.name}")
-                print(f"   - Integration guide: {project_slug}-INTEGRATION.md")
-
-                print(f"\n💡 Read the integration guide:")
-                print(f"   cat {output_dir}/{project_slug}-INTEGRATION.md")
-
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to export: {e}", exc_info=True)
-            return 1
-
-    def detect(self, args) -> int:
-        """Detect dependencies and show what would be generated"""
-        try:
-            from nixos_generator import NixOSGenerator
-
-            project_slug = args.slug
-
-            print(f"\n🔍 Analyzing {project_slug}...\n")
-
-            with NixOSGenerator() as gen:
-                # Get file types
-                file_types = gen.get_project_file_types(project_slug)
-
-                print(f"📊 File Type Distribution:")
-                for ftype, count in sorted(file_types.items(), key=lambda x: x[1], reverse=True)[:10]:
-                    print(f"   {ftype}: {count} files")
-
-                # Detect packages
-                packages = gen.detect_system_packages(file_types)
-
-                print(f"\n📦 Detected Packages ({len(packages)}):")
-                for pkg in sorted(packages):
-                    print(f"   - {pkg}")
-
-                # Get environment variables
-                env_vars = gen.get_project_env_vars(project_slug)
-
-                print(f"\n🔐 Environment Variables ({len(env_vars)}):")
-                for key, value in list(env_vars.items())[:5]:
-                    display_value = value[:40] + '...' if len(value) > 40 else value
-                    print(f"   {key} = {display_value}")
-                if len(env_vars) > 5:
-                    print(f"   ... and {len(env_vars) - 5} more")
-
-                # Get secrets
-                secrets = gen.get_project_secrets(project_slug)
-
-                print(f"\n🔑 Secrets ({len(secrets)}):")
-                for secret in secrets[:5]:
-                    print(f"   - {secret['key_name']} ({secret.get('profile', 'default')})")
-                if len(secrets) > 5:
-                    print(f"   ... and {len(secrets) - 5} more")
-
-                print(f"\n💡 To generate NixOS modules:")
-                print(f"   ./templedb nixos generate {project_slug}")
-                print(f"\n💡 To export with Cathedral package:")
-                print(f"   ./templedb nixos export {project_slug}")
-
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to detect dependencies: {e}", exc_info=True)
-            return 1
-
-    def system_test(self, args) -> int:
-        """Test system configuration (nixos-rebuild test)"""
-        try:
-            from services.system_service import SystemService, SystemServiceError
-
-            service = SystemService()
-            print(f"🔧 Testing system configuration: {args.slug}")
-
-            if args.dry_run:
-                print("⚠️  DRY RUN MODE - No changes will be made")
-
-            result = service.test_system(args.slug, dry_run=args.dry_run)
-
-            if result['success']:
-                print("\n✅ Test successful!")
-                if result.get('nixos_generation'):
-                    print(f"   NixOS generation: {result['nixos_generation']}")
-                print("\n💡 To apply permanently: ./templedb nixos system-switch {args.slug}")
-            else:
-                print(f"\n❌ Test failed (exit code {result['exit_code']})")
-
-            if result['stdout']:
-                print("\n📋 Output:")
-                print(result['stdout'])
-
-            if result['stderr']:
-                print("\n⚠️  Errors/Warnings:")
-                print(result['stderr'])
-
-            return 0 if result['success'] else 1
-
-        except Exception as e:
-            logger.error(f"Failed to test system: {e}", exc_info=True)
-            return 1
-
-    def update_input(self, args) -> int:
-        """Update a flake input in a NixOS config project"""
-        try:
-            import subprocess
-            import os
-
-            project = self.get_project_or_exit(args.slug)
-
-            # Get checkout path using same logic as SystemService
-            sudo_user = os.environ.get('SUDO_USER')
-            if sudo_user:
-                real_home = Path(f'/home/{sudo_user}')
-            else:
-                real_home = Path.home()
-
-            # Standard checkout locations
-            checkout_paths = [
-                real_home / ".config" / "templedb" / "checkouts" / args.slug,
-                real_home / "projects" / args.slug,
-                Path("/tmp") / f"templedb_checkout_{args.slug}",
-            ]
-
-            checkout_path = None
-            for path in checkout_paths:
-                if path.exists():
-                    checkout_path = path
-                    break
-
-            if not checkout_path:
-                print(f"❌ No checkout found for {args.slug}")
-                print(f"   Run: tdb project checkout {args.slug}")
-                return 1
-
-            print(f"📦 Updating flake input '{args.input}' in {args.slug}")
-            print(f"   Location: {checkout_path}")
-
-            # Run nix flake update
-            cmd = ['nix', 'flake', 'update', args.input, '--flake', str(checkout_path)]
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True
-            )
-
-            if result.returncode == 0:
-                print(f"✓ Updated {args.input}")
-                print()
-                print("To apply changes:")
-                print(f"  tdb nixos rebuild {args.slug}")
-                return 0
-            else:
-                print(f"❌ Failed to update {args.input}")
-                if result.stderr:
-                    print(result.stderr)
-                return 1
-
-        except Exception as e:
-            logger.error(f"Failed to update input: {e}", exc_info=True)
-            print(f"❌ Error: {e}")
-            return 1
+        rc = super().generate(args)
+        if rc == 0 and getattr(args, 'slug', None):
+            _mark_clean()
+        return rc
 
     def rebuild(self, args) -> int:
-        """Rebuild NixOS system (convenience alias for system-switch)"""
-        # If --update-input is specified, update the input first
-        if hasattr(args, 'update_input') and args.update_input:
-            print(f"🔄 Updating flake input: {args.update_input}")
-            # Create a temporary args object for update_input
-            import argparse
-            update_args = argparse.Namespace(slug=args.slug, input=args.update_input)
-            result = self.update_input(update_args)
-            if result != 0:
-                print("❌ Failed to update input, aborting rebuild")
-                return result
-            print()
-
-        return self.system_switch(args)
+        if not _check_dirty_and_prompt():
+            return 1
+        return super().rebuild(args)
 
     def system_switch(self, args) -> int:
-        """Switch to system configuration (nixos-rebuild switch)"""
-        try:
-            from services.system_service import SystemService, SystemServiceError
-
-            service = SystemService()
-            print(f"🚀 Switching to system configuration: {args.slug}")
-
-            if args.with_home_manager:
-                print("   Including home-manager rebuild")
-
-            if args.dry_run:
-                print("⚠️  DRY RUN MODE - No changes will be made")
-            else:
-                print("⚠️  This will activate the configuration permanently!")
-                print("   Consider running 'nixos system-test' first.")
-                response = input("\nContinue? (yes/no): ")
-                if response.lower() != 'yes':
-                    print("Cancelled")
-                    return 0
-
-            result = service.switch_system(
-                args.slug,
-                dry_run=args.dry_run,
-                with_home_manager=args.with_home_manager
-            )
-
-            if result['success']:
-                print("\n✅ Switch successful!")
-                if result.get('nixos_generation'):
-                    print(f"   NixOS generation: {result['nixos_generation']}")
-
-                # Show home-manager results if applicable
-                if result.get('home_manager'):
-                    hm = result['home_manager']
-                    if hm['success']:
-                        print(f"   home-manager generation: {hm.get('generation', 'N/A')}")
-                    else:
-                        print(f"   ⚠️  home-manager rebuild failed")
-                        if hm.get('error'):
-                            print(f"      Error: {hm['error']}")
-
-                print("\n✨ System configuration is now active and will persist across reboots.")
-            else:
-                print(f"\n❌ Switch failed (exit code {result['exit_code']})")
-
-            if result['stdout']:
-                print("\n📋 Output:")
-                print(result['stdout'])
-
-            if result['stderr']:
-                print("\n⚠️  Errors/Warnings:")
-                print(result['stderr'])
-
-            return 0 if result['success'] else 1
-
-        except Exception as e:
-            logger.error(f"Failed to switch system: {e}", exc_info=True)
+        if not _check_dirty_and_prompt():
             return 1
-
-    def system_status(self, args) -> int:
-        """Show current system deployment status"""
-        try:
-            from services.system_service import SystemService
-
-            service = SystemService()
-            active = service.get_active_deployment()
-
-            if not active:
-                print("⚠️  No active system deployment found")
-                return 0
-
-            print("\n╔══════════════════════════════════════════════════════════╗")
-            print("║          Active System Deployment                       ║")
-            print("╚══════════════════════════════════════════════════════════╝")
-            print(f"\nProject:    {active['project_name']} ({active['project_slug']})")
-            print(f"Deployed:   {active['deployed_at']}")
-            print(f"Checkout:   {active['checkout_path']}")
-            print(f"Config:     {active['config_path']}")
-            print(f"Generation: {active['nixos_generation'] or 'N/A'}")
-            print(f"Command:    {active['command']}")
-            print()
-
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to get status: {e}", exc_info=True)
-            return 1
-
-    def system_history(self, args) -> int:
-        """Show deployment history"""
-        try:
-            from services.system_service import SystemService
-
-            service = SystemService()
-            history = service.get_deployment_history(
-                project_slug=args.project,
-                limit=args.limit
-            )
-
-            if not history:
-                print("⚠️  No deployment history found")
-                return 0
-
-            print("\n╔══════════════════════════════════════════════════════════╗")
-            print("║          System Deployment History                      ║")
-            print("╚══════════════════════════════════════════════════════════╝")
-            print()
-
-            for dep in history:
-                status = "✅ ACTIVE" if dep['is_active'] else ("✓" if dep['exit_code'] == 0 else "✗")
-                print(f"ID {dep['id']:>3} | {status} | {dep['project_slug']:15} | Gen {dep['nixos_generation'] or 'N/A':>3} | {dep['command']:15} | {dep['deployed_at'][:19]}")
-
-            print()
-            print("💡 To rollback: ./templedb nixos system-rollback <deployment_id>")
-            print()
-
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to get history: {e}", exc_info=True)
-            return 1
-
-    def system_rollback(self, args) -> int:
-        """Rollback to previous deployment"""
-        try:
-            from services.system_service import SystemService
-
-            service = SystemService()
-
-            if args.deployment_id:
-                print(f"⏪ Rolling back to deployment {args.deployment_id}")
-                deployment_id = args.deployment_id
-            else:
-                # Get previous non-active deployment
-                history = service.get_deployment_history(limit=2)
-                if len(history) < 2:
-                    print("❌ No previous deployment found to rollback to")
-                    return 1
-
-                deployment_id = history[1]['id']
-                print(f"⏪ Rolling back to previous deployment (ID: {deployment_id})")
-
-            result = service.rollback_to_deployment(deployment_id)
-
-            if result['success']:
-                print("\n✅ Rollback successful!")
-            else:
-                print(f"\n❌ Rollback failed (exit code {result['exit_code']})")
-
-            if result['stdout']:
-                print("\n📋 Output:")
-                print(result['stdout'])
-
-            if result['stderr']:
-                print("\n⚠️  Errors/Warnings:")
-                print(result['stderr'])
-
-            return 0 if result['success'] else 1
-
-        except Exception as e:
-            logger.error(f"Failed to rollback: {e}", exc_info=True)
-            return 1
-
-    def set_type(self, args) -> int:
-        """Set project type"""
-        try:
-            from services.system_service import SystemService
-
-            service = SystemService()
-            service.set_project_type(args.slug, args.type)
-            print(f"✅ Set {args.slug} type to {args.type}")
-
-            if args.type == 'nixos-config':
-                print("\n💡 You can now use:")
-                print(f"   ./templedb nixos system-test {args.slug}")
-                print(f"   ./templedb nixos system-switch {args.slug}")
-
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to set type: {e}", exc_info=True)
-            return 1
-
-    def list_configs(self, args) -> int:
-        """List all nixos-config projects"""
-        try:
-            from services.system_service import SystemService
-
-            service = SystemService()
-            projects = service.get_nixos_config_projects()
-
-            if not projects:
-                print("⚠️  No nixos-config projects found")
-                print("\n💡 To mark a project as nixos-config:")
-                print("   ./templedb nixos set-type <project> nixos-config")
-                return 0
-
-            print("\n╔══════════════════════════════════════════════════════════╗")
-            print("║          NixOS Configuration Projects                   ║")
-            print("╚══════════════════════════════════════════════════════════╝")
-            print()
-
-            for proj in projects:
-                print(f"  {proj['slug']:20} | {proj['project_type']:12} | {proj['created_at'][:10]}")
-
-            print()
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to list configs: {e}", exc_info=True)
-            return 1
-
-    def config_get(self, args) -> int:
-        """Get system configuration value"""
-        try:
-            from services.system_service import SystemService
-
-            service = SystemService()
-            value = service.get_system_config(args.key)
-
-            if value is None:
-                print(f"⚠️  Configuration key '{args.key}' not set (will auto-detect)")
-                return 0
-
-            print(f"{args.key} = {value}")
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to get config: {e}", exc_info=True)
-            return 1
-
-    def config_set(self, args) -> int:
-        """Set system configuration value"""
-        try:
-            from services.system_service import SystemService
-
-            service = SystemService()
-            service.set_system_config(args.key, args.value)
-
-            print(f"✅ Set {args.key} = {args.value}")
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to set config: {e}", exc_info=True)
-            return 1
-
-    def config_list(self, args) -> int:
-        """List all system configuration"""
-        try:
-            from services.system_service import SystemService
-
-            service = SystemService()
-            configs = service.list_system_config()
-
-            if not configs:
-                print("⚠️  No system configuration found")
-                return 0
-
-            print("\n╔══════════════════════════════════════════════════════════════════════╗")
-            print("║                    System Configuration                              ║")
-            print("╚══════════════════════════════════════════════════════════════════════╝")
-            print()
-
-            for cfg in configs:
-                value = cfg['value'] if cfg['value'] else '(auto-detect)'
-                print(f"  {cfg['key']:25} = {value}")
-                if cfg['description']:
-                    print(f"    └─ {cfg['description']}")
-                print()
-
-            print("\n💡 To set a value:")
-            print("   ./templedb nixos config-set <key> <value>")
-            print("\n💡 Common keys:")
-            print("   nixos.flake_output  - Flake output name (e.g., zMothership2)")
-            print("   nixos.hostname      - System hostname")
-            print("   nixos.username      - Username for home-manager")
-            print()
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to list config: {e}", exc_info=True)
-            return 1
-
-    # ========================================================================
-    # Package Management Commands
-    # ========================================================================
-
-    def add_package(self, args) -> int:
-        """Add CLI tool to NixOS managed packages"""
-        project_slug = args.slug
-
-        # Get project
-        project = self.get_project_or_exit(project_slug)
-        project_id = project['id']
-
-        # Check if flake.nix exists
-        git_path = Path(project['git_path'])
-        flake_path = git_path / "flake.nix"
-        if not flake_path.exists():
-            logger.error(f"No flake.nix found in {git_path}")
-            logger.info(f"Generate one first: ./templedb deploy-nix generate-flake {project_slug}")
-            return 1
-
-        # Args
-        scope = args.scope if hasattr(args, 'scope') and args.scope else 'user'
-        flake_uri = args.flake_uri if hasattr(args, 'flake_uri') and args.flake_uri else None
-        version = args.version if hasattr(args, 'version') and args.version else None
-        package_name = args.name if hasattr(args, 'name') and args.name else project_slug
-
-        print(f"📦 Adding {package_name} to NixOS managed packages...")
-        print(f"   Scope: {scope}")
-        print(f"   Flake URI: {flake_uri or f'path:{git_path}'}\n")
-
-        # Insert or update managed package
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO nixos_managed_packages
-                (project_id, package_type, install_scope, flake_uri, package_name, version)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(project_id, install_scope) DO UPDATE SET
-                    flake_uri = excluded.flake_uri,
-                    package_name = excluded.package_name,
-                    version = excluded.version,
-                    enabled = 1,
-                    updated_at = CURRENT_TIMESTAMP
-            """, (project_id, 'home' if scope == 'user' else 'system', scope, flake_uri, package_name, version))
-            self.conn.commit()
-
-            print(f"✅ {package_name} added to managed packages")
-            print(f"\n💡 Next steps:")
-            print(f"   1. Generate config: ./templedb nixos generate myconfig")
-            print(f"   2. Test: ./templedb nixos system-test myconfig")
-            print(f"   3. Apply: ./templedb nixos system-switch myconfig")
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to add package: {e}", exc_info=True)
-            return 1
-
-    def remove_package(self, args) -> int:
-        """Remove CLI tool from NixOS managed packages"""
-        project_slug = args.slug
-
-        # Get project
-        project = self.get_project_or_exit(project_slug)
-        project_id = project['id']
-
-        print(f"🗑️  Removing {project_slug} from managed packages...")
-
-        # Mark as disabled (soft delete)
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                UPDATE nixos_managed_packages
-                SET enabled = 0, updated_at = CURRENT_TIMESTAMP
-                WHERE project_id = ?
-            """, (project_id,))
-
-            if cursor.rowcount == 0:
-                print(f"⚠️  {project_slug} is not in managed packages")
-                return 1
-
-            self.conn.commit()
-
-            print(f"✅ {project_slug} removed from managed packages")
-            print(f"\n💡 Regenerate your NixOS config to apply changes:")
-            print(f"   ./templedb nixos generate myconfig")
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to remove package: {e}", exc_info=True)
-            return 1
-
-    def list_packages(self, args) -> int:
-        """List all NixOS managed packages"""
-        scope = args.scope if hasattr(args, 'scope') and args.scope else None
-
-        cursor = self.conn.cursor()
-        try:
-            if scope:
-                rows = cursor.execute("""
-                    SELECT * FROM nixos_managed_packages_view
-                    WHERE enabled = 1 AND install_scope = ?
-                    ORDER BY package_name
-                """, (scope,)).fetchall()
-            else:
-                rows = cursor.execute("""
-                    SELECT * FROM nixos_managed_packages_view
-                    WHERE enabled = 1
-                    ORDER BY install_scope, package_name
-                """).fetchall()
-
-            if not rows:
-                print("⚠️  No managed packages found")
-                print("\n💡 To add a package:")
-                print("   ./templedb nixos add-package <project-slug>")
-                return 0
-
-            print("\n╔════════════════════════════════════════════════════════════════════╗")
-            print("║              NixOS Managed Packages                                ║")
-            print("╚════════════════════════════════════════════════════════════════════╝")
-            print()
-
-            for row in rows:
-                scope_icon = "🖥️ " if row['install_scope'] == 'system' else "👤"
-                print(f"{scope_icon} {row['package_name']:20} | {row['install_scope']:8} | {row['project_slug']}")
-                if row['version']:
-                    print(f"   └─ Version: {row['version']}")
-                flake_uri = row['flake_uri'] or f"path:{row['git_path']}"
-                print(f"   └─ {flake_uri}")
-                print()
-
-            print(f"Total: {len(rows)} package(s)")
-            print("\n💡 To remove a package:")
-            print("   ./templedb nixos remove-package <project-slug>")
-            print()
-
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to list packages: {e}", exc_info=True)
-            return 1
+        return super().system_switch(args)
 
 
 def register(cli):
-    """Register NixOS commands with CLI"""
-    cmd = NixOSCommand()
-
-    # Create nixos command group
-    nixos_parser = cli.register_command('nixos', None, help_text='NixOS integration and module generation')
-    subparsers = nixos_parser.add_subparsers(dest='nixos_subcommand', required=True)
-
-    # nixos detect command
-    detect_parser = subparsers.add_parser('detect', help='Detect dependencies and show what would be generated')
-    detect_parser.add_argument('slug', help='Project slug')
-    cli.commands['nixos.detect'] = cmd.detect
-
-    # nixos generate command
-    gen_parser = subparsers.add_parser('generate', help='Generate NixOS modules')
-    gen_parser.add_argument('slug', help='Project slug')
-    gen_parser.add_argument('-o', '--output', help='Output directory (default: /tmp/nixos-gen)')
-    gen_parser.add_argument('--cathedral-path', help='Path to existing Cathedral package')
-    gen_parser.add_argument('--no-home-manager', action='store_true', help='Skip Home Manager module')
-    gen_parser.add_argument('--include-templedb', action='store_true', default=True,
-                           help='Include TempleDB itself as a dependency (default: true)')
-    gen_parser.add_argument('--no-templedb', dest='include_templedb', action='store_false',
-                           help='Do not include TempleDB as a dependency')
-    cli.commands['nixos.generate'] = cmd.generate
-
-    # nixos export command
-    export_parser = subparsers.add_parser('export', help='Export Cathedral package with NixOS modules')
-    export_parser.add_argument('slug', help='Project slug')
-    export_parser.add_argument('-o', '--output', help='Output directory (default: /tmp/nixos-gen)')
-    cli.commands['nixos.export'] = cmd.export
-
-    # nixos system-test command
-    test_parser = subparsers.add_parser('system-test', help='Test system configuration (nixos-rebuild test)')
-    test_parser.add_argument('slug', help='Project slug (must be nixos-config type)')
-    test_parser.add_argument('--dry-run', action='store_true', help='Show what would be done')
-    cli.commands['nixos.system-test'] = cmd.system_test
-
-    # nixos update-input command
-    update_input_parser = subparsers.add_parser('update-input', help='Update a flake input')
-    update_input_parser.add_argument('slug', help='Project slug (nixos-config managed by TempleDB)')
-    update_input_parser.add_argument('input', help='Flake input name (e.g., templedb, nixpkgs)')
-    cli.commands['nixos.update-input'] = cmd.update_input
-
-    # nixos rebuild command (convenience alias)
-    rebuild_parser = subparsers.add_parser('rebuild', help='Rebuild NixOS system (nixos-rebuild switch)')
-    rebuild_parser.add_argument('slug', help='Project slug (must be nixos-config type)')
-    rebuild_parser.add_argument('--dry-run', action='store_true', help='Show what would be done')
-    rebuild_parser.add_argument('--with-home-manager', action='store_true', help='Also rebuild home-manager after NixOS')
-    rebuild_parser.add_argument('--update-input', metavar='INPUT', help='Update flake input before rebuilding')
-    cli.commands['nixos.rebuild'] = cmd.rebuild
-
-    # nixos system-switch command
-    switch_parser = subparsers.add_parser('system-switch', help='Switch to system configuration (nixos-rebuild switch)')
-    switch_parser.add_argument('slug', help='Project slug (must be nixos-config type)')
-    switch_parser.add_argument('--dry-run', action='store_true', help='Show what would be done')
-    switch_parser.add_argument('--with-home-manager', action='store_true', help='Also rebuild home-manager after NixOS')
-    cli.commands['nixos.system-switch'] = cmd.system_switch
-
-    # nixos system-status command
-    status_parser = subparsers.add_parser('system-status', help='Show current system deployment status')
-    cli.commands['nixos.system-status'] = cmd.system_status
-
-    # nixos system-history command
-    history_parser = subparsers.add_parser('system-history', help='Show deployment history')
-    history_parser.add_argument('--project', help='Filter by project')
-    history_parser.add_argument('--limit', type=int, default=10, help='Number of records')
-    cli.commands['nixos.system-history'] = cmd.system_history
-
-    # nixos system-rollback command
-    rollback_parser = subparsers.add_parser('system-rollback', help='Rollback to previous deployment')
-    rollback_parser.add_argument('deployment_id', type=int, nargs='?', help='Deployment ID (default: previous)')
-    cli.commands['nixos.system-rollback'] = cmd.system_rollback
-
-    # nixos set-type command
-    set_type_parser = subparsers.add_parser('set-type', help='Set project type')
-    set_type_parser.add_argument('slug', help='Project slug')
-    set_type_parser.add_argument('type', choices=['regular', 'nixos-config', 'service', 'library'], help='Project type')
-    cli.commands['nixos.set-type'] = cmd.set_type
-
-    # nixos list-configs command
-    list_parser = subparsers.add_parser('list-configs', help='List all nixos-config projects')
-    cli.commands['nixos.list-configs'] = cmd.list_configs
-
-    # nixos config-get command
-    config_get_parser = subparsers.add_parser('config-get', help='Get system configuration value')
-    config_get_parser.add_argument('key', help='Configuration key (e.g., nixos.flake_output)')
-    cli.commands['nixos.config-get'] = cmd.config_get
-
-    # nixos config-set command
-    config_set_parser = subparsers.add_parser('config-set', help='Set system configuration value')
-    config_set_parser.add_argument('key', help='Configuration key')
-    config_set_parser.add_argument('value', help='Configuration value')
-    cli.commands['nixos.config-set'] = cmd.config_set
-
-    # nixos config-list command
-    config_list_parser = subparsers.add_parser('config-list', help='List all system configuration')
-    cli.commands['nixos.config-list'] = cmd.config_list
-
-    # Package management commands
-    # nixos add-package command
-    add_pkg_parser = subparsers.add_parser('add-package', help='Add CLI tool to managed packages')
-    add_pkg_parser.add_argument('slug', help='Project slug')
-    add_pkg_parser.add_argument('--scope', choices=['system', 'user'], default='user',
-                                help='Installation scope (default: user)')
-    add_pkg_parser.add_argument('--flake-uri', help='Flake URI (default: path to git repo)')
-    add_pkg_parser.add_argument('--name', help='Package name (default: project slug)')
-    add_pkg_parser.add_argument('--version', help='Version constraint')
-    cli.commands['nixos.add-package'] = cmd.add_package
-
-    # nixos remove-package command
-    remove_pkg_parser = subparsers.add_parser('remove-package', help='Remove CLI tool from managed packages')
-    remove_pkg_parser.add_argument('slug', help='Project slug')
-    cli.commands['nixos.remove-package'] = cmd.remove_package
-
-    # nixos list-packages command
-    list_pkg_parser = subparsers.add_parser('list-packages', help='List all managed packages')
-    list_pkg_parser.add_argument('--scope', choices=['system', 'user'], help='Filter by scope')
-    cli.commands['nixos.list-packages'] = cmd.list_packages
+    """Register patched NixOS commands with CLI."""
+    _installed.register(cli)
+    cmd = _PatchedNixOSCommand()
+    # Replace only the handlers that gain dirty tracking
+    cli.commands["nixos.generate"] = cmd.generate
+    cli.commands["nixos.rebuild"] = cmd.rebuild
+    cli.commands["nixos.system-switch"] = cmd.system_switch

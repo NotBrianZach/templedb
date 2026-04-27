@@ -47,6 +47,50 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# NixOS dirty-tracking helpers
+# ---------------------------------------------------------------------------
+
+def _nixos_config_project_slug(conn) -> str:
+    """Return the slug of the active nixos-config project, or 'system_config'."""
+    try:
+        row = conn.execute(
+            "SELECT slug FROM projects WHERE project_type = 'nixos-config' LIMIT 1"
+        ).fetchone()
+        return row[0] if row else "system_config"
+    except Exception:
+        return "system_config"
+
+
+def _nixos_dirty_count(conn) -> int:
+    """Count system_config keys changed since the last nixos generate."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM system_config WHERE key = 'nixos.last_generated_at'"
+        ).fetchone()
+        if not row:
+            # Never generated — every non-tracking key is dirty
+            return conn.execute(
+                "SELECT COUNT(*) FROM system_config WHERE key != 'nixos.last_generated_at'"
+            ).fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM system_config "
+            "WHERE key != 'nixos.last_generated_at' AND updated_at > ?",
+            (row[0],),
+        ).fetchone()[0]
+    except Exception:
+        return 0
+
+
+def _nixos_warn_if_dirty(conn):
+    """Print a warning when nixos-config has ungenerated changes."""
+    count = _nixos_dirty_count(conn)
+    if count > 0:
+        slug = _nixos_config_project_slug(conn)
+        print(f"⚠ {slug} has ungenerated changes — run: templedb nixos generate {slug}",
+              file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -283,6 +327,21 @@ class VarCommands(Command):
                 DO UPDATE SET var_value = excluded.var_value, updated_at = CURRENT_TIMESTAMP
             """, (tag_id, stored_name, value))
             print(f"set {key} [tag:{args.tag}]")
+            return 0
+
+        if getattr(args, 'nixos', False):
+            # Write to system_config (NixOS config key-value store)
+            description = getattr(args, 'description', None) or ''
+            self.execute("""
+                INSERT INTO system_config (key, value, description, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    description = CASE WHEN excluded.description != '' THEN excluded.description ELSE description END,
+                    updated_at = datetime('now')
+            """, (key, value, description))
+            print(f"✓ Set {key} = {value}", flush=True)
+            _nixos_warn_if_dirty(self.get_connection())
             return 0
 
         if not getattr(args, 'project', None):
@@ -736,6 +795,9 @@ def register(cli):
     p.add_argument('--global', dest='global_scope', action='store_true', help='Set at global scope')
     p.add_argument('--tag', default=None, help='Set at tag scope (creates tag if new)')
     p.add_argument('--profile', default='default', help='Secret profile (default: default)')
+    p.add_argument('--nixos', action='store_true',
+                   help='Write to system NixOS config (system_config table, no project needed)')
+    p.add_argument('--description', default=None, help='Description for --nixos keys')
     cli.commands['var.set'] = cmd.var_set
 
     # --- var get ---
