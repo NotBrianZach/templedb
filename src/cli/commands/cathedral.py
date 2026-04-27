@@ -2,6 +2,7 @@
 """
 Cathedral package management commands - Export/import projects as .cathedral packages
 """
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -12,6 +13,73 @@ from cli.core import Command
 from logger import get_logger
 
 logger = get_logger(__name__)
+
+_DATA_DIR = Path.home() / ".local" / "share" / "templedb"
+
+
+def _resolve_package(name_or_path: str) -> Path:
+    """Resolve a slug name or path to a .cathedral package.
+
+    If the literal path doesn't exist, search:
+      1. ~/.local/share/templedb/fhs-deployments/{name}/{name}.cathedral
+      2. ~/.local/share/templedb/fhs-deployments/{name}.cathedral
+      3. {cwd}/{name}.cathedral
+    """
+    p = Path(name_or_path)
+    if p.exists():
+        return p
+    for candidate in [
+        _DATA_DIR / "fhs-deployments" / name_or_path / f"{name_or_path}.cathedral",
+        _DATA_DIR / "fhs-deployments" / f"{name_or_path}.cathedral",
+        Path.cwd() / f"{name_or_path}.cathedral",
+    ]:
+        if candidate.exists():
+            print(f"Resolved '{name_or_path}' -> {candidate}", file=sys.stderr)
+            return candidate
+    return p  # not found — let the original error message fire
+
+
+def _show_post_import_hints(package_path: Path, slug: str):
+    """Show config keys the project needs after a successful import."""
+    # 1. Check manifest for declared required_vars (future-compatible)
+    required_vars = []
+    try:
+        manifest = json.loads((package_path / "manifest.json").read_text())
+        required_vars = manifest.get("required_vars") or []
+    except Exception:
+        pass
+
+    # 2. Fall back to whatever env vars are already in the DB for this project
+    if not required_vars:
+        try:
+            from config import DB_PATH
+            import sqlite3
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT id FROM projects WHERE slug = ?", (slug,)
+            ).fetchone()
+            if row:
+                rows = conn.execute(
+                    "SELECT DISTINCT var_name FROM environment_variables "
+                    "WHERE scope_type = 'project' AND scope_id = ?",
+                    (str(row["id"]),),
+                ).fetchall()
+                for r in rows:
+                    name = r["var_name"]
+                    required_vars.append(name.split(":", 1)[-1] if ":" in name else name)
+            conn.close()
+        except Exception:
+            pass
+
+    if required_vars:
+        print("\nConfiguration keys for this project:")
+        for key in sorted(set(required_vars)):
+            print(f"  templedb var set {slug} {key} <value>")
+    else:
+        print(f"\nNext steps:")
+        print(f"  templedb var list {slug}            # view vars")
+        print(f"  templedb var set {slug} KEY VALUE   # set a config value")
 
 
 class CathedralCommands(Command):
@@ -58,24 +126,29 @@ class CathedralCommands(Command):
         try:
             from cathedral_import import import_project
 
-            package_path = Path(args.package_path)
+            package_path = _resolve_package(args.package_path)
 
             if not package_path.exists():
-                logger.error(f"Package not found: {package_path}")
-                logger.info("Check that the path is correct and the package exists")
+                print(f"Error: Package not found: {args.package_path}", file=sys.stderr)
+                print("  Check the path or slug name is correct.", file=sys.stderr)
+                print(f"  Searched: {_DATA_DIR / 'fhs-deployments'}", file=sys.stderr)
                 return 1
 
+            new_slug = args.as_slug if hasattr(args, 'as_slug') else None
             success = import_project(
                 package_path=package_path,
                 overwrite=args.overwrite,
-                new_slug=args.as_slug if hasattr(args, 'as_slug') else None
+                new_slug=new_slug,
             )
+
+            if success:
+                slug = new_slug or package_path.name.removesuffix(".cathedral")
+                _show_post_import_hints(package_path, slug)
 
             return 0 if success else 1
 
         except Exception as e:
-            logger.error(f"Import failed: {e}")
-            logger.debug("Full traceback:", exc_info=True)
+            print(f"Error: Import failed: {e}", file=sys.stderr)
             return 1
 
     def inspect(self, args) -> int:
@@ -89,8 +162,7 @@ class CathedralCommands(Command):
             package_path = Path(args.package_path)
 
             if not package_path.exists():
-                logger.error(f"Package not found: {package_path}")
-                logger.info("Check that the path is correct and the package exists")
+                print(f"Error: Package not found: {package_path}", file=sys.stderr)
                 return 1
 
             # Get compression info
@@ -147,20 +219,17 @@ class CathedralCommands(Command):
                     if package.verify_integrity():
                         print("✅ Checksums valid")
                     else:
-                        logger.error("Checksum mismatch - package integrity verification failed")
-                        logger.info("The package may be corrupted or tampered with")
+                        print("Error: Checksum mismatch — package may be corrupted", file=sys.stderr)
                         return 1
 
                 return 0
 
             finally:
-                # Cleanup temp dir
                 if temp_dir and temp_dir.exists():
                     shutil.rmtree(temp_dir)
 
         except Exception as e:
-            logger.error(f"Inspection failed: {e}")
-            logger.debug("Full traceback:", exc_info=True)
+            print(f"Error: Inspection failed: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc()
             return 1

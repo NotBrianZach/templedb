@@ -18,6 +18,11 @@ _vibe_realtime_patch = _LOCAL / "vibe_realtime_patched.py"
 if _vibe_realtime_patch.exists():
     _PATCHES["cli.commands.vibe_realtime"] = str(_vibe_realtime_patch)
 
+# Override cathedral with local patch (adds name resolution + post-import hints)
+_cathedral_patch = _LOCAL / "src" / "cli" / "commands" / "cathedral.py"
+if _cathedral_patch.exists():
+    _PATCHES["cli.commands.cathedral"] = str(_cathedral_patch)
+
 class LocalPatchFinder(MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         if fullname in _PATCHES:
@@ -37,6 +42,28 @@ def _load_local(module_name, file_path):
     return mod
 
 
+import re as _re
+_NIX_STORE_LINE_RE = _re.compile(
+    r'^\s*File "[^"]*?/nix/store/[^"]+",\s*line \d+'
+)
+_NIX_STORE_PATH_RE = _re.compile(
+    r'/nix/store/[a-z0-9]+-[^/\s"\']+(?:/[^\s"\']+)*'
+)
+
+
+def _sanitize_stderr(text: str) -> str:
+    """Strip nix store internals from error output so users see clean messages."""
+    lines = []
+    for line in text.splitlines():
+        # Drop 'File "/nix/store/..." line N' traceback lines entirely
+        if _NIX_STORE_LINE_RE.match(line):
+            continue
+        # Shorten any remaining nix store paths
+        line = _NIX_STORE_PATH_RE.sub("<templedb>", line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
 try:
     from cli.core import cli as _templedb_cli
 
@@ -54,10 +81,23 @@ try:
     def _patched_mcp_init(self, *args, **kwargs):
         _orig_mcp_init(self, *args, **kwargs)
         self.templedb_root = _LOCAL          # fix broken PROJECT_ROOT path
+
+        # Sanitize nix store paths out of all CLI error output
+        _orig_run_cli = self._run_templedb_cli.__func__
+
+        def _clean_run_cli(inner_self, cli_args):
+            result = _orig_run_cli(inner_self, cli_args)
+            if result["returncode"] != 0:
+                result = dict(result, stderr=_sanitize_stderr(result["stderr"]))
+            return result
+
+        import types
+        self._run_templedb_cli = types.MethodType(_clean_run_cli, self)
         def _run_var(sub_args):
             result = self._run_templedb_cli(["var"] + sub_args)
             if result["returncode"] != 0:
-                return {"content": [{"type": "text", "text": result["stderr"] or result["stdout"]}], "isError": True}
+                err = _sanitize_stderr(result["stderr"] or result["stdout"])
+                return {"content": [{"type": "text", "text": err}], "isError": True}
             return {"content": [{"type": "text", "text": result["stdout"].strip() or "done"}]}
 
         def tool_var_set(args):
