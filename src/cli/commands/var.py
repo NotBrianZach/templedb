@@ -173,26 +173,71 @@ def _age_encrypt(plaintext: bytes, recipients: list) -> bytes:
 
 
 def _age_decrypt(encrypted: bytes) -> bytes:
-    """Decrypt using the key file from env."""
+    """Decrypt age-encrypted bytes, prompting the user for the decryption method."""
     key_file = (
         os.environ.get("TEMPLEDB_AGE_KEY_FILE")
         or os.environ.get("SOPS_AGE_KEY_FILE")
         or os.path.expanduser("~/.config/sops/age/keys.txt")
     )
-    if not os.path.exists(key_file):
-        print(f"error: age key file not found: {key_file}", file=sys.stderr)
-        sys.exit(1)
+
+    def _run_age(cmd):
+        try:
+            proc = subprocess.run(cmd, input=encrypted, capture_output=True, check=True)
+            return proc.stdout
+        except FileNotFoundError:
+            print("error: age not found on PATH", file=sys.stderr)
+            sys.exit(1)
+        except subprocess.CalledProcessError as e:
+            print(f"error: age decryption failed: {e.stderr.decode().strip()}", file=sys.stderr)
+            sys.exit(1)
+
+    if os.path.exists(key_file):
+        try:
+            answer = input(f"Decrypt using {key_file}? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.", file=sys.stderr)
+            sys.exit(1)
+        if answer in ("", "y", "yes"):
+            return _run_age(["age", "-d", "-i", key_file])
+        # User said no — fall through to YubiKey / passphrase
+
+    # Check for YubiKey
+    try:
+        yubi = subprocess.run(
+            ["age-plugin-yubikey", "--list"],
+            capture_output=True, timeout=5,
+        )
+        identities = yubi.stdout.decode().strip()
+    except Exception:
+        identities = ""
+
+    if identities:
+        print("YubiKey detected — touch to decrypt if prompted.", file=sys.stderr)
+        # Write identities to a temp file for age -i
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
+            tf.write(identities + "\n")
+            tmp_path = tf.name
+        try:
+            return _run_age(["age", "-d", "-i", tmp_path])
+        finally:
+            os.unlink(tmp_path)
+
+    # Fall back to passphrase — age prompts via /dev/tty itself
+    print("No key file or YubiKey found. Enter passphrase when prompted.", file=sys.stderr)
     try:
         proc = subprocess.run(
-            ["age", "-d", "-i", key_file],
-            input=encrypted, capture_output=True, check=True
+            ["age", "-d"],
+            input=encrypted,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
+        if proc.returncode != 0:
+            print(f"error: age decryption failed: {proc.stderr.decode().strip()}", file=sys.stderr)
+            sys.exit(1)
         return proc.stdout
     except FileNotFoundError:
         print("error: age not found on PATH", file=sys.stderr)
-        sys.exit(1)
-    except subprocess.CalledProcessError as e:
-        print(f"error: age decryption failed: {e.stderr.decode().strip()}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -754,6 +799,93 @@ class VarCommands(Command):
         return 0
 
     # ------------------------------------------------------------------
+    # var edit
+    # ------------------------------------------------------------------
+
+    def var_edit(self, args) -> int:
+        """Open a variable's current value in $EDITOR and save on exit."""
+        import tempfile, subprocess as _sp
+
+        key = args.key
+        editor = os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'nano'
+
+        if getattr(args, 'nixos', False):
+            row = self.query_one(
+                "SELECT value, description FROM system_config WHERE key = ?", (key,)
+            )
+            current = row['value'] if row else ''
+            desc = (row['description'] if row else '') or ''
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
+                if desc:
+                    tf.write(f"# {desc}\n")
+                tf.write(current)
+                if current and not current.endswith('\n'):
+                    tf.write('\n')
+                tmp = tf.name
+            try:
+                _sp.run([editor, tmp], check=True)
+                new_val = open(tmp).read().lstrip('').rstrip('\n')
+                # Strip leading comment lines
+                lines = new_val.splitlines()
+                lines = [l for l in lines if not l.startswith('#')]
+                new_val = '\n'.join(lines).strip()
+            finally:
+                os.unlink(tmp)
+
+            if new_val == current:
+                print("(no change)")
+                return 0
+            self.execute("""
+                INSERT INTO system_config (key, value, description, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = datetime('now')
+            """, (key, new_val, desc))
+            print(f"✓ Set {key} = {new_val}", flush=True)
+            _nixos_warn_if_dirty(self.get_connection())
+            return 0
+
+        if not getattr(args, 'project', None):
+            print("error: specify a project slug or --nixos", file=sys.stderr)
+            return 1
+
+        project = self._get_project(args.project)
+        target = getattr(args, 'target', None) or 'default'
+        stored_name = _var_key(target, key)
+
+        row = self.query_one("""
+            SELECT var_value FROM environment_variables
+            WHERE scope_type = 'project' AND scope_id = ? AND var_name = ?
+        """, (project['id'], stored_name))
+        current = row['var_value'] if row else ''
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
+            tf.write(current)
+            if current and not current.endswith('\n'):
+                tf.write('\n')
+            tmp = tf.name
+        try:
+            _sp.run([editor, tmp], check=True)
+            new_val = open(tmp).read().rstrip('\n')
+        finally:
+            os.unlink(tmp)
+
+        if new_val == current:
+            print("(no change)")
+            return 0
+        self.execute("""
+            INSERT INTO environment_variables (scope_type, scope_id, var_name, var_value)
+            VALUES ('project', ?, ?, ?)
+            ON CONFLICT(scope_type, scope_id, var_name)
+            DO UPDATE SET var_value = excluded.var_value, updated_at = CURRENT_TIMESTAMP
+        """, (project['id'], stored_name, new_val))
+        scope_label = args.project + (f" ({target})" if target != 'default' else "")
+        print(f"set {key} [{scope_label}]")
+        return 0
+
+    # ------------------------------------------------------------------
     # var unset
     # ------------------------------------------------------------------
 
@@ -922,6 +1054,14 @@ def register(cli):
     p.add_argument('--no-secrets', action='store_true', help='Skip secrets (no age key needed)')
     p.add_argument('--profile', default='default', help='Secret profile')
     cli.commands['var.export'] = cmd.var_export
+
+    # --- var edit ---
+    p = subparsers.add_parser('edit', help='Open a variable value in $EDITOR')
+    p.add_argument('project', nargs='?', help='Project slug (omit with --nixos)')
+    p.add_argument('key', help='Variable name')
+    p.add_argument('--target', '-t', default=None, help='Deployment target')
+    p.add_argument('--nixos', action='store_true', help='Edit a NixOS system_config key')
+    cli.commands['var.edit'] = cmd.var_edit
 
     # --- var unset ---
     p = subparsers.add_parser('unset', help='Delete a variable')

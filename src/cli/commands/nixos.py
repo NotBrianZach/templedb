@@ -260,6 +260,46 @@ def _nixos_status(slug: str):
 
 
 # ---------------------------------------------------------------------------
+# Slug resolution helpers
+# ---------------------------------------------------------------------------
+
+def _all_nixos_slugs(conn):
+    rows = conn.execute(
+        "SELECT slug FROM projects WHERE project_type = 'nixos-config' ORDER BY slug"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _resolve_slug(slug_arg) -> str | None:
+    """Return a resolved slug or None (printing guidance to stderr)."""
+    conn = _get_conn()
+    all_slugs = _all_nixos_slugs(conn)
+
+    if not all_slugs:
+        print("No nixos-config projects found. Register one with:", file=sys.stderr)
+        print("  templedb nixos set-type <project-slug>", file=sys.stderr)
+        return None
+
+    if slug_arg:
+        if slug_arg in all_slugs:
+            return slug_arg
+        print(f"Unknown nixos-config project: '{slug_arg}'", file=sys.stderr)
+        print("Available projects:", file=sys.stderr)
+        for s in all_slugs:
+            print(f"  {s}", file=sys.stderr)
+        return None
+
+    if len(all_slugs) == 1:
+        return all_slugs[0]
+
+    # Multiple projects — can't auto-detect
+    print("Multiple nixos-config projects found. Specify one:", file=sys.stderr)
+    for s in all_slugs:
+        print(f"  {s}", file=sys.stderr)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Patched command class
 # ---------------------------------------------------------------------------
 
@@ -308,17 +348,42 @@ class _PatchedNixOSCommand(_installed.NixOSCommand):
         return super().system_switch(args)
 
     def nixos_status(self, args) -> int:
-        slug = getattr(args, 'slug', None)
+        slug = _resolve_slug(getattr(args, 'slug', None))
         if not slug:
-            conn = _get_conn()
-            row = conn.execute(
-                "SELECT slug FROM projects WHERE project_type = 'nixos-config' LIMIT 1"
-            ).fetchone()
-            if not row:
-                print("No nixos-config project found. Specify a project slug.", file=sys.stderr)
-                return 1
-            slug = row[0]
+            return 1
         _nixos_status(slug)
+        return 0
+
+    def nixos_edit_template(self, args) -> int:
+        import os, subprocess as _sp
+
+        editor = os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'nano'
+
+        slug = _resolve_slug(getattr(args, 'slug', None))
+        if not slug:
+            return 1
+
+        conn = _get_conn()
+        proj = conn.execute(
+            "SELECT repo_url FROM projects WHERE slug = ?", (slug,)
+        ).fetchone()
+        if not proj or not proj[0]:
+            print(f"Project '{slug}' has no repo_url set.", file=sys.stderr)
+            return 1
+
+        repo = Path(proj[0])
+        templates = sorted(repo.rglob("*.nix.template"))
+
+        if not templates:
+            print(f"No .nix.template files found under {repo}", file=sys.stderr)
+            print(f"  Tip: create a <name>.nix.template file in {repo}/modules/", file=sys.stderr)
+            return 1
+
+        print(f"Opening {len(templates)} template(s) in {editor}:")
+        for t in templates:
+            print(f"  {t.relative_to(repo)}")
+
+        _sp.run([editor] + [str(t) for t in templates])
         return 0
 
 
@@ -331,8 +396,9 @@ def register(cli):
     cli.commands["nixos.rebuild"] = cmd.rebuild
     cli.commands["nixos.system-switch"] = cmd.system_switch
     cli.commands["nixos.status"] = cmd.nixos_status
+    cli.commands["nixos.edit-template"] = cmd.nixos_edit_template
 
-    # Add 'status' to the nixos argparse subparsers
+    # Add 'status' and 'edit-template' to the nixos argparse subparsers
     try:
         nixos_parser = cli.subparsers.choices.get("nixos")
         if nixos_parser:
@@ -341,6 +407,14 @@ def register(cli):
                     p = action.add_parser(
                         "status",
                         help="Show full pipeline state: pending config, generate, and rebuild status",
+                    )
+                    p.add_argument(
+                        "slug", nargs="?",
+                        help="NixOS config project slug (default: auto-detect)",
+                    )
+                    p = action.add_parser(
+                        "edit-template",
+                        help="Open .nix.template files for a project in $EDITOR",
                     )
                     p.add_argument(
                         "slug", nargs="?",
