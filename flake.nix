@@ -8,7 +8,7 @@
     nixops4.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, nixops4 }:
     let
       # Build the templedb package for a given pkgs
       mkPackage = pkgs:

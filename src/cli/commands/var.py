@@ -688,6 +688,25 @@ class VarCommands(Command):
 
         print()
 
+    def _print_vars(self, rows, label: str, target_filter):
+        """Simple masked print for global/tag scope listings."""
+        any_masked = False
+        printed = False
+        for row in rows:
+            t, name = _parse_var_key(row['var_name'])
+            if target_filter and t not in (target_filter, 'default'):
+                continue
+            target_suffix = f" ({t})" if t != 'default' else ""
+            display = _mask_value(name, row['var_value'] or '')
+            if display != (row['var_value'] or ''):
+                any_masked = True
+            print(f"  {name}{target_suffix} = {display}")
+            printed = True
+        if not printed:
+            print(f"  (no vars)")
+        if any_masked:
+            print("  (sensitive values masked — use: templedb var get KEY)")
+
     def _list_all(self, target_filter):
         rows = self.query_all("""
             SELECT ev.scope_type, ev.scope_id, ev.var_name, ev.var_value,
