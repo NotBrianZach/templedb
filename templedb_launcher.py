@@ -28,6 +28,26 @@ _nixos_patch = _LOCAL / "src" / "cli" / "commands" / "nixos.py"
 if _nixos_patch.exists():
     _PATCHES["cli.commands.nixos"] = str(_nixos_patch)
 
+# Override backup with local patch (adds backup gcs command)
+_backup_patch = _LOCAL / "src" / "cli" / "commands" / "backup.py"
+if _backup_patch.exists():
+    _PATCHES["cli.commands.backup"] = str(_backup_patch)
+
+# Override project with local patch (adds project set-category command)
+_project_patch = _LOCAL / "src" / "cli" / "commands" / "project.py"
+if _project_patch.exists():
+    _PATCHES["cli.commands.project"] = str(_project_patch)
+
+# Override main.py with local patch (fixes secret_blobs query to use junction table)
+_main_patch = _LOCAL / "src" / "main.py"
+if _main_patch.exists():
+    _PATCHES["main"] = str(_main_patch)
+
+# Override vcs with local patch (fixes commit query: content_text is in content_blobs, not file_contents)
+_vcs_patch = _LOCAL / "src" / "cli" / "commands" / "vcs.py"
+if _vcs_patch.exists():
+    _PATCHES["cli.commands.vcs"] = str(_vcs_patch)
+
 class LocalPatchFinder(MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         if fullname in _PATCHES:
@@ -179,6 +199,97 @@ try:
             if args.get("slug"): cmd.append(args["slug"])
             return _run_nixos(cmd)
 
+        def _gcs_get_token(creds: dict) -> str:
+            """Mint a short-lived OAuth2 access token from a service-account JSON dict."""
+            import base64, time, json as _json
+            import requests as _req
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding
+
+            now = int(time.time())
+            header  = base64.urlsafe_b64encode(_json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).rstrip(b"=").decode()
+            claim   = base64.urlsafe_b64encode(_json.dumps({
+                "iss":   creds["client_email"],
+                "scope": "https://www.googleapis.com/auth/devstorage.read_write",
+                "aud":   "https://oauth2.googleapis.com/token",
+                "iat":   now, "exp": now + 3600,
+            }).encode()).rstrip(b"=").decode()
+            priv = serialization.load_pem_private_key(creds["private_key"].encode(), None)
+            sig  = base64.urlsafe_b64encode(
+                priv.sign(f"{header}.{claim}".encode(), padding.PKCS1v15(), hashes.SHA256())
+            ).rstrip(b"=").decode()
+            jwt  = f"{header}.{claim}.{sig}"
+
+            resp = _req.post("https://oauth2.googleapis.com/token", data={
+                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                "assertion":  jwt,
+            })
+            resp.raise_for_status()
+            return resp.json()["access_token"]
+
+        def _gcs_backup_push(bucket="templedb-backups-poink"):
+            """Create a local backup then upload it to GCS using the stored service account."""
+            import tempfile, os as _os, subprocess as _sp, json as _json
+            import requests as _req
+            from datetime import datetime, timezone
+
+            # --- 1. Decrypt credentials from DB ---
+            try:
+                from db_utils import get_connection as _gc
+                conn = _gc()
+                # Load var.py locally to access _age_decrypt
+                import importlib.util as _ilu
+                _spec = _ilu.spec_from_file_location("_var_local", str(_LOCAL / "src/cli/commands/var.py"))
+                _vm = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_vm)
+                row = conn.execute("""
+                    SELECT sb.secret_blob FROM secret_blobs sb
+                    WHERE sb.secret_name = 'GOOGLE_APPLICATION_CREDENTIALS'
+                      AND sb.profile = 'default'
+                      AND NOT EXISTS (SELECT 1 FROM project_secret_blobs psb WHERE psb.secret_blob_id = sb.id)
+                """).fetchone()
+                if not row:
+                    return {"content": [{"type": "text",
+                        "text": "GOOGLE_APPLICATION_CREDENTIALS not found in global secrets.\n"
+                                "Store with: templedb var set --global --secret GOOGLE_APPLICATION_CREDENTIALS <json> --keys templedb-primary,age-key"}],
+                        "isError": True}
+                creds = _json.loads(_vm._age_decrypt(row[0]))
+            except Exception as e:
+                return {"content": [{"type": "text", "text": f"Failed to load credentials: {e}"}], "isError": True}
+
+            # --- 2. Create local backup ---
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            backup_path = _os.path.expanduser(f"~/.local/share/templedb/backups/templedb_backup_{ts}.sqlite")
+            result = _sp.run([str(_LOCAL / "templedb"), "backup", "local", backup_path],
+                             capture_output=True, text=True)
+            if result.returncode != 0:
+                return {"content": [{"type": "text", "text": f"Local backup failed:\n{result.stderr}"}], "isError": True}
+
+            # --- 3. Upload to GCS ---
+            try:
+                token   = _gcs_get_token(creds)
+                obj     = _os.path.basename(backup_path)
+                size    = _os.path.getsize(backup_path)
+                with open(backup_path, "rb") as fh:
+                    resp = _req.put(
+                        f"https://storage.googleapis.com/{bucket}/{obj}",
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Content-Type":  "application/octet-stream",
+                            "Content-Length": str(size),
+                        },
+                        data=fh,
+                        timeout=600,
+                    )
+                resp.raise_for_status()
+            except Exception as e:
+                return {"content": [{"type": "text", "text": f"GCS upload failed: {e}"}], "isError": True}
+
+            return {"content": [{"type": "text",
+                "text": f"✓ Backup uploaded to gs://{bucket}/{obj} ({size // 1024 // 1024} MB)"}]}
+
+        def tool_backup_gcs(args):
+            return _gcs_backup_push()
+
         self.tools.update({
             "templedb_var_set":          tool_var_set,
             "templedb_var_get":          tool_var_get,
@@ -190,6 +301,7 @@ try:
             "templedb_nixos_config_get": tool_nixos_config_get,
             "templedb_nixos_config_set": tool_nixos_config_set,
             "templedb_nixos_generate":   tool_nixos_generate,
+            "templedb_backup_gcs":       tool_backup_gcs,
         })
 
     _MCPServer.__init__ = _patched_mcp_init
@@ -272,6 +384,9 @@ try:
              "inputSchema": {"type": "object", "properties": {
                  "slug": {"type": "string", "description": "NixOS config project slug (auto-detects if only one exists)"},
              }}},
+            {"name": "templedb_backup_gcs",
+             "description": "Push a fresh templedb backup to Google Cloud Storage using credentials stored in the DB.",
+             "inputSchema": {"type": "object", "properties": {}}},
         ]
 
     _MCPServer.get_tool_definitions = _patched_list_tools

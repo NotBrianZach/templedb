@@ -493,7 +493,7 @@ class MCPServer:
                         "files": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of file paths to stage (use '.' for all)"
+                            "description": "List of file paths to stage. Pass an empty array or [\".\"] to stage all changes."
                         }
                     },
                     "required": ["project", "files"]
@@ -2067,7 +2067,11 @@ class MCPServer:
             files = args["files"]
 
             import subprocess
-            cmd = ["./templedb", "vcs", "add", "-p", project_name] + files
+            # Use --all flag when files is ["."] or empty rather than passing "." as a path
+            if not files or files == ["."]:
+                cmd = ["./templedb", "vcs", "add", "-p", project_name, "--all"]
+            else:
+                cmd = ["./templedb", "vcs", "add", "-p", project_name] + files
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:
@@ -2115,10 +2119,17 @@ class MCPServer:
             commit_all = args.get("all", False)
 
             import subprocess
-            cmd = ["./templedb", "vcs", "commit", "-p", project_name, "-m", message, "-a", author]
+            # Stage all files first if requested (commit has no --all flag; add does)
             if commit_all:
-                cmd.append("--all")
+                add_cmd = ["./templedb", "vcs", "add", "-p", project_name, "--all"]
+                add_result = subprocess.run(add_cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
+                if add_result.returncode != 0:
+                    return {
+                        "content": [{"type": "text", "text": f"Commit failed (staging step): {add_result.stderr}"}],
+                        "isError": True
+                    }
 
+            cmd = ["./templedb", "vcs", "commit", "-p", project_name, "-m", message, "-a", author]
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
             if result.returncode != 0:

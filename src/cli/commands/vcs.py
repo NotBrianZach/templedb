@@ -356,10 +356,12 @@ class VCSCommands(Command):
             return 1
 
         # Get staged files with content info
+        # content_text lives in content_blobs (CAS), not file_contents
         staged = self.vcs_repo.query_all("""
-            SELECT ws.*, fc.content_text, fc.file_size_bytes, fc.line_count
+            SELECT ws.*, cb.content_text, fc.file_size_bytes, fc.line_count
             FROM vcs_working_state ws
-            LEFT JOIN file_contents fc ON ws.file_id = fc.file_id
+            LEFT JOIN file_contents fc ON ws.file_id = fc.file_id AND fc.is_current = 1
+            LEFT JOIN content_blobs cb ON fc.content_hash = cb.hash_sha256
             WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged = 1
         """, (project['id'], branch['id']))
 
