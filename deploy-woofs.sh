@@ -1,1 +1,0 @@
-/home/zach/.local/share/templedb/fhs-deployments/woofs_projects/working/deploy.sh

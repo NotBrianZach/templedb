@@ -1,7 +1,10 @@
 # TempleDB Documentation
 
+<iframe src="schema-diagram.html" width="100%" height="520" style="border:none;border-radius:8px;display:block;margin-bottom:16px"></iframe>
+
 ## Quick Links
 
+- **[Schema Diagram](schema-diagram.html)** - Interactive explorable schema with commentary (open standalone for best experience)
 - **[Workflows](WORKFLOWS.md)** - Execute multi-phase operations with code intelligence
 - **[Getting Started](../GETTING_STARTED.md)** - Install and basic usage
 - **[MCP Integration](MCP_INTEGRATION.md)** - Use with Claude Code and AI agents
