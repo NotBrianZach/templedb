@@ -53,6 +53,11 @@ _system_service_patch = _LOCAL / "src" / "services" / "system_service.py"
 if _system_service_patch.exists():
     _PATCHES["services.system_service"] = str(_system_service_patch)
 
+# Override nixos_generator with local patch (use python3 not python311 for detected packages)
+_nixos_generator_patch = _LOCAL / "src" / "nixos_generator.py"
+if _nixos_generator_patch.exists():
+    _PATCHES["nixos_generator"] = str(_nixos_generator_patch)
+
 class LocalPatchFinder(MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         if fullname in _PATCHES:
