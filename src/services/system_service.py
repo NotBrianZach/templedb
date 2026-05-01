@@ -78,32 +78,50 @@ class SystemService:
         return None
 
     def update_system_symlink(self, config_path: Path, dry_run: bool = False) -> bool:
-        """Update /etc/nixos symlink to point to config
+        """Update /etc/nixos symlinks to point to checkout config files.
+
+        Always symlinks flake.nix/configuration.nix. Also symlinks home.nix
+        and any other .nix files that /etc/nixos currently tracks (i.e. already
+        has a symlink for), so the checkout stays the single source of truth.
 
         Args:
-            config_path: Path to flake.nix or configuration.nix
+            config_path: Path to flake.nix or configuration.nix in the checkout
             dry_run: If True, only show what would be done
 
         Returns:
-            True if successful or would be successful
+            True if all symlinks were created successfully
         """
-        # Determine symlink target based on config type
+        checkout_dir = config_path.parent
+        etc_nixos = Path("/etc/nixos")
+
+        # Build the list of (source, target) pairs to symlink.
+        # Always include the primary config file.
         if config_path.name == "flake.nix":
-            symlink_path = Path("/etc/nixos/flake.nix")
+            pairs = [(config_path, etc_nixos / "flake.nix")]
         else:
-            symlink_path = Path("/etc/nixos/configuration.nix")
+            pairs = [(config_path, etc_nixos / "configuration.nix")]
+
+        # Add every .nix file in the checkout that either:
+        #   a) already has a symlink in /etc/nixos (repair/update it), or
+        #   b) is home.nix (always managed by templedb)
+        for src in sorted(checkout_dir.glob("*.nix")):
+            if src == config_path:
+                continue  # already added above
+            target = etc_nixos / src.name
+            if src.name == "home.nix" or (target.exists() or target.is_symlink()):
+                pairs.append((src, target))
 
         if dry_run:
-            print(f"Would update symlink:")
-            print(f"  {symlink_path} -> {config_path}")
+            print("Would update /etc/nixos symlinks:")
+            for src, target in pairs:
+                print(f"  {target} -> {src}")
             return True
 
         try:
-            # Create symlink (requires sudo)
-            # Don't capture output so user can enter sudo password interactively
-            cmd = ["sudo", "ln", "-sf", str(config_path), str(symlink_path)]
-            result = subprocess.run(cmd, check=True)
-            logger.info(f"Updated symlink: {symlink_path} -> {config_path}")
+            for src, target in pairs:
+                cmd = ["sudo", "ln", "-sf", str(src), str(target)]
+                subprocess.run(cmd, check=True)
+                logger.info(f"Updated symlink: {target} -> {src}")
             return True
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to update symlink: {e}")

@@ -48,6 +48,11 @@ _vcs_patch = _LOCAL / "src" / "cli" / "commands" / "vcs.py"
 if _vcs_patch.exists():
     _PATCHES["cli.commands.vcs"] = str(_vcs_patch)
 
+# Override system_service with local patch (symlinks home.nix alongside flake/configuration.nix)
+_system_service_patch = _LOCAL / "src" / "services" / "system_service.py"
+if _system_service_patch.exists():
+    _PATCHES["services.system_service"] = str(_system_service_patch)
+
 class LocalPatchFinder(MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         if fullname in _PATCHES:
