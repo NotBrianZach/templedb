@@ -13,7 +13,7 @@
       # Build the templedb package for a given pkgs
       mkPackage = pkgs:
         let
-          python = pkgs.python313;
+          python = pkgs.python3;
           pythonEnv = python.withPackages (ps: with ps; [
             pyyaml
             textual
