@@ -10,6 +10,12 @@ from pathlib import Path
 
 _LOCAL = Path(__file__).parent
 
+# Prepend local src/ so new modules (repositories, checkout, etc.) and patched
+# modules are found before the installed Nix store version.
+_src = _LOCAL / "src"
+if _src.exists() and str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
+
 # Map module names to local patched files
 _PATCHES = {}
 
@@ -106,6 +112,11 @@ try:
     _var_py = _LOCAL / "src" / "cli" / "commands" / "var.py"
     if _var_py.exists():
         _load_local("templedb_local_var", _var_py).register(_templedb_cli)
+
+    # Register llm command from local source
+    _llm_py = _LOCAL / "src" / "cli" / "commands" / "llm.py"
+    if _llm_py.exists():
+        _load_local("templedb_local_llm", _llm_py).register(_templedb_cli)
 
     # Fix MCP server: templedb_root pointed to the wrong nix-store path;
     # also add templedb_var_* tools.

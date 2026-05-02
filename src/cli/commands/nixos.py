@@ -12,11 +12,19 @@ import importlib.util
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Load the installed nixos module via the already-loaded cli.commands package
-_cli_commands_dir = Path(sys.modules["cli.commands"].__file__).parent
-_inst_spec = importlib.util.spec_from_file_location(
-    "_nixos_installed", str(_cli_commands_dir / "nixos.py")
-)
+# Load the installed (Nix store) nixos module.
+# Skip any sys.path entry that resolves to this file itself — prevents infinite
+# recursion when src/ is prepended to sys.path by the launcher.
+_this_file = Path(__file__).resolve()
+_installed_nixos = None
+for _p in sys.path:
+    _candidate = Path(_p) / "cli" / "commands" / "nixos.py"
+    if _candidate.exists() and _candidate.resolve() != _this_file:
+        _installed_nixos = _candidate
+        break
+if _installed_nixos is None:
+    raise ImportError("Cannot find installed nixos.py (Nix store version not found in sys.path)")
+_inst_spec = importlib.util.spec_from_file_location("_nixos_installed", str(_installed_nixos))
 _installed = importlib.util.module_from_spec(_inst_spec)
 _inst_spec.loader.exec_module(_installed)
 
