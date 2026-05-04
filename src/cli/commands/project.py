@@ -325,6 +325,42 @@ class ProjectCommands(Command):
                 logger.info(f"{e.solution}")
             return 1
 
+    def set_category(self, args) -> int:
+        """Set project category and Nix flags"""
+        from db_utils import get_connection
+
+        conn = get_connection()
+        row = conn.execute("SELECT id, slug, project_category, is_nix_project, flake_check_status FROM projects WHERE slug = ?", (args.slug,)).fetchone()
+        if not row:
+            print(f"Project '{args.slug}' not found", file=sys.stderr)
+            return 1
+
+        updates = {}
+        if args.category:
+            updates['project_category'] = args.category
+            # home-module and nixos-module imply is_nix_project
+            if args.category in ('home-module', 'nixos-module', 'service') and not args.no_nix:
+                updates['is_nix_project'] = 1
+        if args.nix:
+            updates['is_nix_project'] = 1
+        if args.no_nix:
+            updates['is_nix_project'] = 0
+        if args.flake_status:
+            updates['flake_check_status'] = args.flake_status
+
+        if not updates:
+            print("Nothing to update. Specify --category, --nix/--no-nix, or --flake-status.", file=sys.stderr)
+            return 1
+
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        conn.execute(f"UPDATE projects SET {set_clause} WHERE slug = ?", list(updates.values()) + [args.slug])
+        conn.commit()
+
+        print(f"Updated '{args.slug}':")
+        for k, v in updates.items():
+            print(f"  {k} = {v}")
+        return 0
+
     def generate_envrc(self, args) -> int:
         """Generate .envrc file for a project"""
         project = self.project_repo.get_by_slug(args.slug)
@@ -414,6 +450,20 @@ def register(cli):
     sync_parser = subparsers.add_parser('sync', help='Re-import project from filesystem')
     sync_parser.add_argument('slug', nargs='?', help='Project slug (optional, uses CWD if omitted)')
     cli.commands['project.sync'] = cmd.sync_project
+
+    # project set-category
+    set_cat_parser = subparsers.add_parser('set-category', help='Set project category and Nix flags')
+    set_cat_parser.add_argument('slug', help='Project slug')
+    set_cat_parser.add_argument('--category', '-c',
+                                choices=['package', 'service', 'desktop-app', 'nixos-module', 'home-module'],
+                                help='Project category')
+    set_cat_parser.add_argument('--nix', action='store_true', help='Mark as a Nix project (is_nix_project=1)')
+    set_cat_parser.add_argument('--no-nix', action='store_true', dest='no_nix', help='Unmark as Nix project')
+    set_cat_parser.add_argument('--flake-status',
+                                choices=['valid', 'invalid', 'unknown'],
+                                dest='flake_status',
+                                help='Set flake_check_status')
+    cli.commands['project.set-category'] = cmd.set_category
 
     # project rm
     rm_parser = subparsers.add_parser('rm', help='Remove project from database')

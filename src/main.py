@@ -979,7 +979,9 @@ def cmd_direnv(conn: sqlite3.Connection, slug: Optional[str], profile: str, load
     # Load and export secrets if available
     emit("# --- Secrets (from SOPS-encrypted store) ---")
     secret_row = conn.execute(
-        "SELECT secret_blob FROM secret_blobs WHERE project_id=? AND profile=?",
+        """SELECT sb.secret_blob FROM secret_blobs sb
+           JOIN project_secret_blobs psb ON psb.secret_blob_id = sb.id
+           WHERE psb.project_id = ? AND psb.profile = ?""",
         (pid, profile),
     ).fetchone()
 

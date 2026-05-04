@@ -5,6 +5,7 @@ Manages NixOS system configuration deployments
 """
 
 import os
+import sys
 import subprocess
 import logging
 from pathlib import Path
@@ -131,7 +132,9 @@ class SystemService:
         self,
         command: str,
         flake_path: Optional[Path] = None,
-        dry_run: bool = False
+        dry_run: bool = False,
+        verbose: bool = False,
+        show_trace: bool = False,
     ) -> Dict[str, Any]:
         """Run nixos-rebuild command
 
@@ -139,6 +142,8 @@ class SystemService:
             command: One of 'test', 'switch', 'boot', 'build', 'dry-build', 'dry-activate'
             flake_path: Path to flake directory (for flake-based configs)
             dry_run: If True, use 'dry-activate' command instead
+            verbose: If True, pass --print-build-logs to nixos-rebuild
+            show_trace: If True, pass --show-trace for full Nix eval stack traces
 
         Returns:
             Dict with exit_code, stdout, stderr, and nixos_generation (if applicable)
@@ -153,30 +158,62 @@ class SystemService:
 
         if flake_path:
             cmd.extend(["--flake", str(flake_path)])
+        if verbose:
+            cmd.append("--print-build-logs")
+        if show_trace:
+            cmd.append("--show-trace")
 
         logger.info(f"Running: {' '.join(cmd)}")
         print(f"Running: {' '.join(cmd)}")
 
         try:
-            result = subprocess.run(
+            # Stream output live so the user can see progress and sudo prompts.
+            # Capture into buffers simultaneously for post-processing.
+            import io, threading
+
+            stdout_buf = io.StringIO()
+            stderr_buf = io.StringIO()
+
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=600  # 10 minute timeout
             )
 
-            # Try to extract generation number from output
-            generation = self._extract_generation_number(result.stdout + result.stderr)
+            def _tee(src, buf, dest):
+                for line in src:
+                    buf.write(line)
+                    dest.write(line)
+                    dest.flush()
+
+            t_out = threading.Thread(target=_tee, args=(proc.stdout, stdout_buf, sys.stdout))
+            t_err = threading.Thread(target=_tee, args=(proc.stderr, stderr_buf, sys.stderr))
+            t_out.start()
+            t_err.start()
+
+            try:
+                proc.wait(timeout=1800)  # 30-minute timeout
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                raise SystemServiceError("nixos-rebuild command timed out after 30 minutes")
+            finally:
+                t_out.join()
+                t_err.join()
+
+            out = stdout_buf.getvalue()
+            err = stderr_buf.getvalue()
+            generation = self._extract_generation_number(out + err)
 
             return {
-                'exit_code': result.returncode,
-                'stdout': result.stdout,
-                'stderr': result.stderr,
+                'exit_code': proc.returncode,
+                'stdout': out,
+                'stderr': err,
                 'nixos_generation': generation,
-                'success': result.returncode == 0
+                'success': proc.returncode == 0
             }
-        except subprocess.TimeoutExpired:
-            raise SystemServiceError("nixos-rebuild command timed out after 10 minutes")
+        except SystemServiceError:
+            raise
         except Exception as e:
             raise SystemServiceError(f"Failed to run nixos-rebuild: {e}")
 
@@ -453,7 +490,7 @@ class SystemService:
 
         return result
 
-    def switch_system(self, project_slug: str, dry_run: bool = False, with_home_manager: bool = False) -> Dict[str, Any]:
+    def switch_system(self, project_slug: str, dry_run: bool = False, with_home_manager: bool = False, verbose: bool = False, show_trace: bool = False) -> Dict[str, Any]:
         """Switch to system configuration (permanent)
 
         This activates the configuration and adds it to boot menu.
@@ -499,7 +536,7 @@ class SystemService:
 
         # Run switch
         flake_path = checkout_path if config_path.name == "flake.nix" else None
-        result = self.run_nixos_rebuild("switch", flake_path=flake_path, dry_run=dry_run)
+        result = self.run_nixos_rebuild("switch", flake_path=flake_path, dry_run=dry_run, verbose=verbose, show_trace=show_trace)
 
         # If home-manager rebuild requested and nixos-rebuild succeeded
         if with_home_manager and result['success'] and not dry_run:

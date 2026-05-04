@@ -61,8 +61,8 @@ class NixOSGenerator:
     # Mapping of file types to Nix packages
     FILE_TYPE_TO_PACKAGE = {
         # Languages
-        'python': ['python3', 'python3Packages.pip'],
-        'python_script': ['python3'],
+        'python': [],
+        'python_script': [],
         'javascript': ['nodejs_20'],
         'typescript': ['nodejs_20', 'nodePackages.typescript'],
         'rust': ['rustc', 'cargo'],

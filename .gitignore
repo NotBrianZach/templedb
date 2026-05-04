@@ -160,3 +160,6 @@ dev*.sqlite
 .cache/
 projdb.db
 __pycache__/
+
+# Generated symlinks pointing outside the repo
+deploy-woofs.sh

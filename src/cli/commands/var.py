@@ -193,7 +193,9 @@ def _age_decrypt(encrypted: bytes) -> bytes:
 
     if os.path.exists(key_file):
         try:
-            answer = input(f"Decrypt using {key_file}? [Y/n] ").strip().lower()
+            sys.stderr.write(f"Decrypt using {key_file}? [Y/n] ")
+            sys.stderr.flush()
+            answer = sys.stdin.readline().strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\nCancelled.", file=sys.stderr)
             sys.exit(1)
@@ -360,6 +362,63 @@ class VarCommands(Command):
                 logger.warning(f"Failed to decrypt {row['secret_name']}")
         return result
 
+    def _global_secret_set(self, profile: str, secret_name: str,
+                           value: str, key_names: list):
+        """Store a secret in secret_blobs with no project association (global scope)."""
+        key_ids, recipients = [], []
+        for kn in key_names:
+            kid, rec = _get_age_recipient(kn)
+            key_ids.append(kid)
+            recipients.append(rec)
+
+        encrypted = _age_encrypt(value.encode('utf-8'), recipients)
+        actor = os.environ.get('USER', 'unknown')
+
+        existing = self.query_one("""
+            SELECT sb.id FROM secret_blobs sb
+            WHERE sb.secret_name = ? AND sb.profile = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_secret_blobs psb WHERE psb.secret_blob_id = sb.id
+              )
+        """, (secret_name, profile))
+
+        if existing:
+            self.execute("""
+                UPDATE secret_blobs SET secret_blob = ?, updated_at = datetime('now')
+                WHERE id = ?
+            """, (encrypted, existing['id']))
+            self.execute("DELETE FROM secret_key_assignments WHERE secret_blob_id = ?",
+                         (existing['id'],))
+            for kid in key_ids:
+                self.execute("""
+                    INSERT INTO secret_key_assignments (secret_blob_id, key_id, added_by)
+                    VALUES (?, ?, ?)
+                """, (existing['id'], kid, actor))
+        else:
+            self.execute("""
+                INSERT INTO secret_blobs (profile, secret_name, secret_blob, content_type)
+                VALUES (?, ?, ?, 'application/text')
+            """, (profile, secret_name, encrypted))
+            row = self.query_one("SELECT id FROM secret_blobs WHERE id = last_insert_rowid()")
+            for kid in key_ids:
+                self.execute("""
+                    INSERT INTO secret_key_assignments (secret_blob_id, key_id, added_by)
+                    VALUES (?, ?, ?)
+                """, (row['id'], kid, actor))
+
+    def _global_secret_get(self, profile: str, secret_name: str):
+        """Retrieve and decrypt a global (project-less) secret. Returns str or None."""
+        row = self.query_one("""
+            SELECT sb.secret_blob FROM secret_blobs sb
+            WHERE sb.secret_name = ? AND sb.profile = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_secret_blobs psb WHERE psb.secret_blob_id = sb.id
+              )
+        """, (secret_name, profile))
+        if not row:
+            return None
+        return _age_decrypt(row['secret_blob']).decode('utf-8')
+
     def _secret_unset(self, project_id: int, profile: str, secret_name: str):
         existing = self.query_one("""
             SELECT sb.id
@@ -384,6 +443,14 @@ class VarCommands(Command):
         profile = getattr(args, 'profile', 'default') or 'default'
 
         if args.global_scope:
+            if getattr(args, 'secret', False):
+                if not getattr(args, 'keys', None):
+                    print("error: --secret requires --keys (e.g. --keys age-key)", file=sys.stderr)
+                    return 1
+                key_names = [k.strip() for k in args.keys.split(',')]
+                self._global_secret_set(profile, key, value, key_names)
+                print(f"set secret {key} [global/{profile}]")
+                return 0
             stored_name = _var_key(target, key)
             self.execute("""
                 INSERT INTO environment_variables (scope_type, scope_id, var_name, var_value)
@@ -458,6 +525,13 @@ class VarCommands(Command):
         profile = getattr(args, 'profile', 'default') or 'default'
 
         if getattr(args, 'global_scope', False):
+            if getattr(args, 'secret', False):
+                val = self._global_secret_get(profile, key)
+                if val is None:
+                    print(f"error: secret {key} not found [global/{profile}]", file=sys.stderr)
+                    return 1
+                print(val)
+                return 0
             stored_name = _var_key(target, key)
             row = self.query_one("""
                 SELECT var_value FROM environment_variables

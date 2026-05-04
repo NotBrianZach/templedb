@@ -353,6 +353,24 @@ class _PatchedNixOSCommand(_installed.NixOSCommand):
     def system_switch(self, args) -> int:
         if not _check_dirty_and_prompt():
             return 1
+        verbose    = getattr(args, 'verbose', False)
+        show_trace = getattr(args, 'show_trace', False)
+        if verbose or show_trace:
+            # Patch switch_system call to forward the flags into run_nixos_rebuild
+            try:
+                from services.system_service import SystemService, SystemServiceError
+                _orig_switch = SystemService.switch_system
+                def _patched_switch(self_svc, project_slug, dry_run=False, with_home_manager=False, **kw):
+                    return _orig_switch(self_svc, project_slug, dry_run=dry_run,
+                                        with_home_manager=with_home_manager,
+                                        verbose=verbose, show_trace=show_trace)
+                SystemService.switch_system = _patched_switch
+                try:
+                    return super().system_switch(args)
+                finally:
+                    SystemService.switch_system = _orig_switch
+            except Exception:
+                pass
         return super().system_switch(args)
 
     def nixos_status(self, args) -> int:
@@ -406,7 +424,7 @@ def register(cli):
     cli.commands["nixos.status"] = cmd.nixos_status
     cli.commands["nixos.edit-template"] = cmd.nixos_edit_template
 
-    # Add 'status' and 'edit-template' to the nixos argparse subparsers
+    # Add 'status', 'edit-template', and verbose flags to the nixos argparse subparsers
     try:
         nixos_parser = cli.subparsers.choices.get("nixos")
         if nixos_parser:
@@ -428,6 +446,18 @@ def register(cli):
                         "slug", nargs="?",
                         help="NixOS config project slug (default: auto-detect)",
                     )
+                    # Add --verbose / --show-trace to rebuild and system-switch
+                    for subcmd in ("rebuild", "system-switch"):
+                        sub = action.choices.get(subcmd)
+                        if sub:
+                            sub.add_argument(
+                                "--verbose", "-v", action="store_true", default=False,
+                                help="Stream build logs (--print-build-logs)",
+                            )
+                            sub.add_argument(
+                                "--show-trace", action="store_true", default=False,
+                                help="Show full Nix evaluation stack traces on error",
+                            )
                     break
     except Exception:
         pass  # Non-fatal — command still dispatches via cli.commands dict

@@ -47,7 +47,7 @@ class TemplateRenderer:
         prefix = f"{template_name}."
         system_configs = query_all(
             "SELECT key, value FROM system_config WHERE key LIKE ? AND key NOT LIKE ?",
-            (f"{prefix}%", "%.%.%")  # Exclude machine-specific (has 2+ dots)
+            (f"{prefix}%", f"%.{prefix}%")  # Exclude machine-prefixed keys (e.g. web1.woofs.*)
         )
 
         for config in system_configs:

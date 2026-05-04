@@ -381,6 +381,136 @@ class BackupCommands(Command):
         return 0
 
 
+    def gcs_push(self, args) -> int:
+        """Upload backup to GCS using credentials stored in the DB."""
+        import os, json, base64, time, subprocess
+        import sqlite3 as _sqlite3
+        try:
+            import requests as _req
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding
+        except ImportError as e:
+            print(f"Missing dependency: {e}", file=sys.stderr)
+            return 1
+
+        # --- load credentials from global secret_blobs ---
+        try:
+            conn = _sqlite3.connect(str(DB_PATH))
+            row = conn.execute("""
+                SELECT sb.secret_blob FROM secret_blobs sb
+                WHERE sb.secret_name = 'GOOGLE_APPLICATION_CREDENTIALS'
+                  AND sb.profile = 'default'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM project_secret_blobs psb WHERE psb.secret_blob_id = sb.id
+                  )
+            """).fetchone()
+            conn.close()
+        except Exception as e:
+            print(f"Error reading credentials from DB: {e}", file=sys.stderr)
+            return 1
+
+        if not row:
+            print("GOOGLE_APPLICATION_CREDENTIALS not found in global secrets.", file=sys.stderr)
+            print("Store with: templedb var set --global --secret GOOGLE_APPLICATION_CREDENTIALS <json>", file=sys.stderr)
+            return 1
+
+        # Decrypt with age
+        blob = row[0]
+        creds_json = None
+        for keyfile in ['~/.age/key.txt', '~/.config/sops/age/keys.txt']:
+            result = subprocess.run(
+                ['age', '-d', '-i', os.path.expanduser(keyfile)],
+                input=blob if isinstance(blob, bytes) else blob.encode(),
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                creds_json = result.stdout
+                break
+        if not creds_json:
+            print("Failed to decrypt GOOGLE_APPLICATION_CREDENTIALS", file=sys.stderr)
+            return 1
+        creds = json.loads(creds_json)
+
+        # --- get bucket ---
+        bucket = getattr(args, 'bucket', None)
+        if not bucket:
+            try:
+                conn2 = _sqlite3.connect(str(DB_PATH))
+                brow = conn2.execute("""
+                    SELECT sv.value FROM system_vars sv WHERE sv.key = 'gcs.backup_bucket'
+                """).fetchone()
+                conn2.close()
+                bucket = brow[0] if brow else None
+            except Exception:
+                pass
+        if not bucket:
+            bucket = "templedb-backups-poink"
+
+        # --- create local backup ---
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_dir = Path.home() / ".local" / "share" / "templedb" / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / f"templedb_backup_{ts}.sqlite"
+        print(f"Creating local backup: {backup_path}")
+        result2 = subprocess.run(
+            [sys.executable, "-m", "cli", "backup", "local", str(backup_path)],
+            capture_output=True, text=True,
+        )
+        if result2.returncode != 0 or not backup_path.exists():
+            # try direct copy as fallback
+            try:
+                shutil.copy2(str(DB_PATH), str(backup_path))
+            except Exception as e:
+                print(f"Backup creation failed: {e}", file=sys.stderr)
+                return 1
+
+        size = backup_path.stat().st_size
+        print(f"Backup size: {size // 1024 // 1024} MB")
+
+        # --- mint GCS OAuth2 token via JWT ---
+        now = int(time.time())
+        header = base64.urlsafe_b64encode(
+            json.dumps({"alg": "RS256", "typ": "JWT"}).encode()
+        ).rstrip(b"=").decode()
+        claim = base64.urlsafe_b64encode(json.dumps({
+            "iss": creds["client_email"],
+            "scope": "https://www.googleapis.com/auth/devstorage.read_write",
+            "aud": "https://oauth2.googleapis.com/token",
+            "iat": now, "exp": now + 3600,
+        }).encode()).rstrip(b"=").decode()
+        priv = serialization.load_pem_private_key(creds["private_key"].encode(), None)
+        sig = base64.urlsafe_b64encode(
+            priv.sign(f"{header}.{claim}".encode(), padding.PKCS1v15(), hashes.SHA256())
+        ).rstrip(b"=").decode()
+        resp = _req.post("https://oauth2.googleapis.com/token", data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": f"{header}.{claim}.{sig}",
+        })
+        resp.raise_for_status()
+        token = resp.json()["access_token"]
+
+        # --- upload via GCS XML API ---
+        obj = backup_path.name
+        print(f"Uploading to gs://{bucket}/{obj} ...")
+        with open(backup_path, "rb") as fh:
+            up = _req.put(
+                f"https://storage.googleapis.com/{bucket}/{obj}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type":  "application/octet-stream",
+                    "Content-Length": str(size),
+                },
+                data=fh,
+                timeout=600,
+            )
+        if up.status_code == 200:
+            print(f"✅ Backup uploaded to gs://{bucket}/{obj} ({size // 1024 // 1024} MB)")
+            return 0
+        else:
+            print(f"GCS upload failed: HTTP {up.status_code}: {up.text[:200]}", file=sys.stderr)
+            return 1
+
+
 def register(cli):
     """Register unified backup commands"""
     cmd = BackupCommands()
@@ -451,6 +581,11 @@ def register(cli):
     test_parser.add_argument('-p', '--provider', required=True, help='Backup provider')
     test_parser.add_argument('--config', type=str, help='Provider configuration file')
     cli.commands['backup.cloud.test'] = cmd.cloud_test
+
+    # backup gcs - direct GCS push using DB-stored credentials
+    gcs_parser = subparsers.add_parser('gcs', help='Upload backup to GCS (uses credentials from DB)')
+    gcs_parser.add_argument('--bucket', help='GCS bucket name (default: from gcs.backup_bucket system var)')
+    cli.commands['backup.gcs'] = cmd.gcs_push
 
     # Create wrapper handler for cloud subcommands
     def cloud_handler(args):
