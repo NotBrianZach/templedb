@@ -188,6 +188,10 @@ class ProjectRepository(BaseRepository):
             WHERE vb.project_id = ?
         """, (project_id,))
 
+    def list_projects(self) -> List[Dict[str, Any]]:
+        """Alias for get_all() — compatibility with VCS and fuzzy_matcher callers."""
+        return self.get_all()
+
     def exists(self, slug: str) -> bool:
         """
         Check if a project exists by slug.

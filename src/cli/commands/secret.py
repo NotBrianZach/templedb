@@ -279,34 +279,55 @@ class SecretV2Commands(Command):
         return 0
 
     def secret_list(self, args) -> int:
-        """List all secrets for a project"""
-        slug = args.slug
+        """List all secrets for a project (or all projects if no slug given)"""
+        slug = getattr(args, 'slug', None) or None
         profile = args.profile
         show_values = args.values
 
-        project_id = self._get_project_id(slug)
-
-        # Get all secrets for this project
-        secrets = self.secret_repo.query_all("""
-            SELECT sb.id, sb.secret_name, sb.created_at, sb.updated_at,
-                   sb.content_type, psb.secret_blob_id,
-                   (SELECT COUNT(*) FROM project_secret_blobs psb2
-                    WHERE psb2.secret_blob_id = sb.id) as share_count
-            FROM project_secret_blobs psb
-            JOIN secret_blobs sb ON psb.secret_blob_id = sb.id
-            WHERE psb.project_id = ? AND psb.profile = ?
-            ORDER BY sb.secret_name
-        """, (project_id, profile))
+        if slug:
+            project_id = self._get_project_id(slug)
+            secrets = self.secret_repo.query_all("""
+                SELECT sb.id, sb.secret_name, sb.created_at, sb.updated_at,
+                       sb.content_type, psb.secret_blob_id, p.slug as project_slug,
+                       (SELECT COUNT(*) FROM project_secret_blobs psb2
+                        WHERE psb2.secret_blob_id = sb.id) as share_count
+                FROM project_secret_blobs psb
+                JOIN secret_blobs sb ON psb.secret_blob_id = sb.id
+                JOIN projects p ON psb.project_id = p.id
+                WHERE psb.project_id = ? AND psb.profile = ?
+                ORDER BY sb.secret_name
+            """, (project_id, profile))
+        else:
+            secrets = self.secret_repo.query_all("""
+                SELECT sb.id, sb.secret_name, sb.created_at, sb.updated_at,
+                       sb.content_type, psb.secret_blob_id, p.slug as project_slug,
+                       (SELECT COUNT(*) FROM project_secret_blobs psb2
+                        WHERE psb2.secret_blob_id = sb.id) as share_count
+                FROM project_secret_blobs psb
+                JOIN secret_blobs sb ON psb.secret_blob_id = sb.id
+                JOIN projects p ON psb.project_id = p.id
+                WHERE psb.profile = ?
+                ORDER BY p.slug, sb.secret_name
+            """, (profile,))
 
         if not secrets:
-            logger.info(f"No secrets found for {slug} (profile: {profile})")
-            logger.info(f"Set a secret with: templedb secret set {slug} <name> <value> --keys <key>")
+            label = slug or "any project"
+            logger.info(f"No secrets found for {label} (profile: {profile})")
+            if slug:
+                logger.info(f"Set a secret with: templedb secret set {slug} <name> <value> --keys <key>")
             return 0
 
-        print(f"\nSecrets for {slug} (profile: {profile}):")
+        label = slug or "all projects"
+        print(f"\nSecrets for {label} (profile: {profile}):")
         print("=" * 60)
 
+        current_project = None
         for secret in secrets:
+            # Print project header when listing across all projects
+            if not slug and secret['project_slug'] != current_project:
+                current_project = secret['project_slug']
+                print(f"\n  [{current_project}]")
+
             shared = " (shared)" if secret['share_count'] > 1 else ""
             print(f"\n{secret['secret_name']}{shared}")
             print(f"  Created: {secret['created_at']}")
@@ -631,8 +652,8 @@ def register(cli):
     cli.commands['secret.get'] = cmd.secret_get
 
     # secret list
-    list_parser = subparsers.add_parser('list', help='List all secrets for a project')
-    list_parser.add_argument('slug', help='Project slug')
+    list_parser = subparsers.add_parser('list', help='List secrets (all projects if no slug given)')
+    list_parser.add_argument('slug', nargs='?', help='Project slug (omit to list all projects)')
     list_parser.add_argument('--profile', default='default', help='Secret profile')
     list_parser.add_argument('--values', action='store_true',
                             help='Show decrypted values (use with caution)')
