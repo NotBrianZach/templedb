@@ -175,10 +175,9 @@ if [ "$PROFILE_BEHAVIOR" = "production" ] && command -v supabase &> /dev/null; t
 
     header "Applying Supabase Migrations"
     echo
-    info "Pushing migrations to $PROJECT_REF..."
+    info "Running migrations against $PROJECT_REF..."
     cd /tmp/bza
-    supabase link --project-ref "$PROJECT_REF" 2>/dev/null || true
-    supabase db push
+    bash scripts/db-migrate.sh
     success "Migrations applied"
     echo
 
