@@ -198,6 +198,22 @@ class MCPServer:
             self._db_conn.execute("PRAGMA foreign_keys=ON")
         return self._db_conn
 
+    def _release_db_connection(self):
+        """Commit (or rollback on failure) any open transaction on the shared connection.
+
+        Called after every request handler so long-lived MCP server sessions never
+        hold an uncommitted write transaction between requests — which would block
+        all writers in other processes indefinitely.
+        """
+        if self._db_conn is not None:
+            try:
+                self._db_conn.commit()
+            except Exception:
+                try:
+                    self._db_conn.rollback()
+                except Exception:
+                    pass
+
     def _run_templedb_cli(self, args: List[str]) -> Dict[str, Any]:
         """Run templedb CLI command and return result.
 
@@ -1833,6 +1849,8 @@ class MCPServer:
             cursor = conn.cursor()
             cursor.execute(query)
             rows = cursor.fetchall()
+            # Commit so write queries don't hold an open transaction
+            conn.commit()
 
             results = [dict(row) for row in rows]
 
@@ -3788,7 +3806,10 @@ class MCPServer:
                         }
                     }
 
-                result = self.read_resource(uri)
+                try:
+                    result = self.read_resource(uri)
+                finally:
+                    self._release_db_connection()
                 return {
                     "jsonrpc": "2.0",
                     "id": msg_id,
@@ -3810,7 +3831,11 @@ class MCPServer:
                     }
 
                 tool_func = self.tools[tool_name]
-                result = tool_func(tool_args)
+                try:
+                    result = tool_func(tool_args)
+                finally:
+                    # Ensure no open transaction lingers between requests
+                    self._release_db_connection()
 
                 return {
                     "jsonrpc": "2.0",
