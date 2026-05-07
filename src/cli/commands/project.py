@@ -153,17 +153,17 @@ class ProjectCommands(Command):
             # Default: show all projects
             projects = self.service.get_all()
 
-            if not projects:
+        from cli.json_output import emit_list
+        fields = ['slug', 'name', 'file_count', 'total_lines']
+        items = [{k: p.get(k) for k in fields} for p in (projects or [])]
+
+        def _human(items):
+            if not items:
                 print("No projects found")
-                return 0
+                return
+            print(self.format_table(items, fields, title="Projects"))
 
-            print(self.format_table(
-                projects,
-                ['slug', 'name', 'file_count', 'total_lines'],
-                title="Projects"
-            ))
-
-        return 0
+        return emit_list(args, items, human_fn=_human)
 
     def show_project(self, args) -> int:
         """Show detailed project information"""
@@ -281,24 +281,35 @@ class ProjectCommands(Command):
 
         logger.info(f"Syncing {slug} from {repo_path}...")
 
-        # Use Python importer
         try:
             from importer import ProjectImporter
+            from cli.json_output import emit, emit_error
 
             importer = ProjectImporter(slug, repo_path, dry_run=False)
             stats = importer.import_files()
 
-            print(f"\n📈 Import Statistics:")
-            print(f"   Files scanned: {stats.total_files_scanned}")
-            print(f"   Files imported: {stats.files_imported}")
-            print(f"   Content stored: {stats.content_stored}")
-            print(f"   Versions created: {stats.versions_created}")
-            print(f"   SQL objects: {stats.sql_objects_found}")
+            data = {
+                "project": slug,
+                "path": repo_path,
+                "files_scanned": stats.total_files_scanned,
+                "files_imported": stats.files_imported,
+                "content_stored": stats.content_stored,
+                "versions_created": stats.versions_created,
+                "sql_objects": stats.sql_objects_found,
+            }
 
-            return 0
+            def _human(d):
+                print(f"Synced {d['project']} from {d['path']}")
+                print(f"  Files scanned:    {d['files_scanned']}")
+                print(f"  Files imported:   {d['files_imported']}")
+                print(f"  Content stored:   {d['content_stored']}")
+                print(f"  Versions created: {d['versions_created']}")
+                print(f"  SQL objects:      {d['sql_objects']}")
+
+            return emit(args, data, human_fn=_human)
         except Exception as e:
-            logger.error(f"Sync failed: {e}", exc_info=True)
-            return 1
+            from cli.json_output import emit_error
+            return emit_error(args, "SYNC_FAILED", f"Sync failed: {e}")
 
     def remove_project(self, args) -> int:
         """Remove a project from database"""

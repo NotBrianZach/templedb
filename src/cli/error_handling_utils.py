@@ -56,14 +56,16 @@ def handle_errors(command_name: str):
             try:
                 return func(self, args)
             except Exception as e:
-                # Extract context from args if available
+                solution = getattr(e, 'solution', None)
+
+                if getattr(args, 'json', False):
+                    from cli.json_output import emit_error
+                    code = type(e).__name__.upper().replace('ERROR', '_ERROR')
+                    return emit_error(args, code, str(e), solution=solution)
+
                 context = {}
                 if hasattr(args, 'project'):
                     context['slug'] = args.project
-                if hasattr(args, 'file_path'):
-                    context['file_path'] = args.file_path
-
-                # Use centralized error handler
                 return ErrorHandler.handle_command_error(e, command_name, context)
 
         return wrapper

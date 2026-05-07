@@ -70,6 +70,8 @@ New to TempleDB?
             formatter_class=argparse.RawDescriptionHelpFormatter
         )
         self.parser.add_argument('--version', action='version', version='TempleDB 0.7.0')
+        self.parser.add_argument('--json', '-j', action='store_true', default=False,
+                                help='Output results as JSON (for scripting and agent use)')
         self.parser.add_argument('-C', dest='project_dir', metavar='PATH',
                                 help='Run as if templedb was started in PATH instead of CWD')
         self.subparsers = self.parser.add_subparsers(dest="command", required=True)

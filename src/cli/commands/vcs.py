@@ -419,152 +419,160 @@ class VCSCommands(Command):
             WHERE project_id = ? AND branch_id = ? AND staged = 1
         """, (project['id'], branch['id']))
 
-        print(f"✓ Created commit {commit_hash}")
-        print(f"  Project: {project['slug']}")
-        print(f"  Branch: {branch['branch_name']}")
-        print(f"  Author: {author}")
-        print(f"  Files: {len(staged)}")
-        print(f"  Message: {args.message}")
-
         # If in edit mode, make read-only and end session
         from sync import SyncManager, make_readonly
+        readonly_updated = False
         try:
             sync_mgr = SyncManager(project['slug'])
             checkout_path = sync_mgr.get_checkout_path()
 
             if sync_mgr.get_edit_session():
-                # Update sync cache with current state
                 hashes = sync_mgr.compute_checkout_hashes()
                 sync_mgr.save_sync_cache(hashes)
-
-                # Back to read-only
                 if checkout_path.exists():
                     make_readonly(checkout_path)
-
-                # End edit session
                 sync_mgr.end_edit_session()
-
-                print(f"✓ Checkout is now read-only")
+                readonly_updated = True
         except Exception as e:
             logger.debug(f"Could not update read-only status: {e}")
 
-        return 0
+        from cli.json_output import emit
+        result = {
+            "hash": commit_hash,
+            "project": project['slug'],
+            "branch": branch['branch_name'],
+            "author": author,
+            "files": len(staged),
+            "message": args.message,
+            "readonly_updated": readonly_updated,
+        }
+        return emit(args, result, human_fn=lambda d: (
+            print(f"Created commit {d['hash']}"),
+            print(f"  Project: {d['project']}"),
+            print(f"  Branch: {d['branch']}"),
+            print(f"  Author: {d['author']}"),
+            print(f"  Files: {d['files']}"),
+            print(f"  Message: {d['message']}"),
+            print(f"  Checkout is now read-only") if d['readonly_updated'] else None,
+        ) and None)
 
     def status(self, args) -> int:
         """Show working directory status"""
         from error_handler import ResourceNotFoundError
         from sync import SyncManager, is_writable
+        from cli.json_output import emit, emit_error
 
         try:
-            # Fuzzy match project
             project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
-                logger.error(f"Project '{args.project}' not found")
-                return 1
+                return emit_error(args, "NOT_FOUND", f"Project '{args.project}' not found")
 
-            # Get sync manager to check edit status
             sync_mgr = SyncManager(project['slug'])
             checkout_path = sync_mgr.get_checkout_path()
             edit_session = sync_mgr.get_edit_session()
 
-            # Show checkout mode (read-only vs writable)
+            checkout_info = None
             if checkout_path.exists():
                 writable = is_writable(checkout_path)
-                mode_str = "writable (edit mode)" if writable else "read-only"
-                print(f"Checkout: {checkout_path}")
-                print(f"Mode: {mode_str}")
-                if edit_session:
-                    print(f"Edit session started: {edit_session['started_at']}")
-                    if edit_session.get('reason'):
-                        print(f"Reason: {edit_session['reason']}")
-                print()
+                checkout_info = {
+                    "path": str(checkout_path),
+                    "writable": writable,
+                    "edit_session_started": edit_session['started_at'] if edit_session else None,
+                }
 
-            # Auto-detect changes if requested or if working state is empty
             if hasattr(args, 'refresh') and args.refresh:
                 self._refresh_working_state(project)
             else:
-                # Check if working state is populated
                 existing = self.vcs_repo.query_one("""
                     SELECT COUNT(*) as count FROM vcs_working_state
                     WHERE project_id = ?
                 """, (project['id'],))
-
                 if not existing or existing['count'] == 0:
-                    print("🔄 Detecting changes (first time)...")
+                    if not getattr(args, 'json', False):
+                        print("Detecting changes (first time)...")
                     self._refresh_working_state(project)
 
-            # Get status from service
             status = self.service.get_status(project['slug'])
 
             if not status['has_branch']:
-                print("No VCS branch initialized")
-                print("Use: templedb vcs init <project>")
-                return 0
+                return emit_error(args, "NO_BRANCH", "No VCS branch initialized",
+                                  solution="templedb vcs init <project>")
 
-            print(f"On branch: {status['branch']}")
+            data = {
+                "project": project['slug'],
+                "branch": status['branch'],
+                "staged": status.get('staged', []),
+                "modified": status.get('modified', []),
+                "untracked": status.get('untracked', []),
+                "clean": not (status.get('staged') or status.get('modified') or status.get('untracked')),
+                "checkout": checkout_info,
+            }
 
-            # Check if any changes
-            if not status['staged'] and not status['modified'] and not status['untracked']:
-                print("No changes")
-                return 0
+            def _human(d):
+                print(f"On branch: {d['branch']}")
+                if d['checkout']:
+                    c = d['checkout']
+                    mode = "writable (edit mode)" if c['writable'] else "read-only"
+                    print(f"Checkout: {c['path']}  [{mode}]")
+                if d['clean']:
+                    print("No changes")
+                    return
+                if d['staged']:
+                    print("\nChanges to be committed:")
+                    for f in d['staged']:
+                        print(f"  staged    {f}")
+                if d['modified']:
+                    print("\nChanges not staged for commit:")
+                    for f in d['modified']:
+                        print(f"  modified  {f}")
+                if d['untracked']:
+                    print("\nUntracked files:")
+                    for f in d['untracked']:
+                        print(f"  untracked {f}")
+                print()
 
-            # Display staged changes
-            if status['staged']:
-                print("\nChanges to be committed:")
-                for file_path in status['staged']:
-                    print(f"  📝 staged      {file_path}")
-
-            # Display modified changes
-            if status['modified']:
-                print("\nChanges not staged for commit:")
-                for file_path in status['modified']:
-                    print(f"  📝 modified    {file_path}")
-
-            # Display untracked
-            if status['untracked']:
-                print("\nUntracked files:")
-                for file_path in status['untracked']:
-                    print(f"  ❓ untracked   {file_path}")
-
-            print()
-            return 0
+            return emit(args, data, human_fn=_human)
 
         except ResourceNotFoundError as e:
-            logger.error(f"{e}")
-            if e.solution:
-                logger.info(f"💡 {e.solution}")
-            return 1
-
+            return emit_error(args, "NOT_FOUND", str(e), solution=getattr(e, 'solution', None))
         except Exception as e:
-            logger.error(f"Failed to get status: {e}")
-            logger.debug("Full error:", exc_info=True)
-            return 1
+            return emit_error(args, "INTERNAL_ERROR", f"Failed to get status: {e}")
 
     def log(self, args) -> int:
         """Show commit history"""
-        # Fuzzy match project
+        from cli.json_output import emit_list, emit_error
+
         project = fuzzy_match_project(args.project, show_matched=False)
         if not project:
-            logger.error(f"Project '{args.project}' not found")
-            return 1
-        limit = args.n if hasattr(args, 'n') and args.n else 10
+            return emit_error(args, "NOT_FOUND", f"Project '{args.project}' not found")
 
-        # Use VCSRepository's get_commit_history method
+        limit = args.n if hasattr(args, 'n') and args.n else 10
         commits = self.vcs_repo.get_commit_history(project['id'], branch_name=None, limit=limit)
 
-        if not commits:
-            print("No commits found")
-            return 0
+        items = [
+            {
+                "hash": c['commit_hash'],
+                "branch": c.get('branch_name', 'N/A'),
+                "author": c['author'],
+                "date": c['commit_timestamp'],
+                "message": c['commit_message'],
+            }
+            for c in (commits or [])
+        ]
 
-        print(f"\nCommit log for {project['slug']}\n")
-        for commit in commits:
-            print(f"commit {commit['commit_hash']}")
-            print(f"Branch: {commit.get('branch_name', 'N/A')}")
-            print(f"Author: {commit['author']}")
-            print(f"Date:   {commit['commit_timestamp']}")
-            print(f"\n    {commit['commit_message']}\n")
+        def _human(items):
+            if not items:
+                print("No commits found")
+                return
+            print(f"\nCommit log for {project['slug']}\n")
+            for c in items:
+                print(f"commit {c['hash']}")
+                print(f"Branch: {c['branch']}")
+                print(f"Author: {c['author']}")
+                print(f"Date:   {c['date']}")
+                print(f"\n    {c['message']}\n")
 
-        return 0
+        return emit_list(args, items, human_fn=_human)
 
     def branch(self, args) -> int:
         """List or create branches"""

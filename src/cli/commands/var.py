@@ -619,6 +619,37 @@ class VarCommands(Command):
     # ------------------------------------------------------------------
 
     def var_list(self, args) -> int:
+        # Fast JSON path: flat list of all vars for the requested scope
+        if getattr(args, 'json', False):
+            from cli.json_output import emit_list
+            project_slug = getattr(args, 'project', None)
+            if project_slug:
+                project = self._get_project(project_slug)
+                rows = self.query_all("""
+                    SELECT var_name, var_value, is_secret, description
+                    FROM environment_variables
+                    WHERE scope_type = 'project' AND scope_id = ?
+                    ORDER BY var_name
+                """, (project['id'],))
+            else:
+                rows = self.query_all("""
+                    SELECT var_name, var_value, is_secret, description,
+                           scope_type, scope_id
+                    FROM environment_variables
+                    ORDER BY scope_type, var_name
+                """)
+            items = [
+                {
+                    "name": r['var_name'],
+                    "value": "[secret]" if r['is_secret'] else r['var_value'],
+                    "secret": bool(r['is_secret']),
+                    "description": r.get('description'),
+                    "scope": r.get('scope_type', 'project'),
+                }
+                for r in (rows or [])
+            ]
+            return emit_list(args, items)
+
         target_filter = getattr(args, 'target', None)
         profile = getattr(args, 'profile', 'default') or 'default'
 

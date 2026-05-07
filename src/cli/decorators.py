@@ -36,20 +36,16 @@ def safe_command(command_name: str = None):
         @wraps(func)
         def wrapper(*args, **kwargs) -> int:
             cmd_name = command_name or func.__name__
+            # args[1] is the argparse Namespace when called as self.method(args)
+            ns = args[1] if len(args) > 1 else None
+
             try:
                 return func(*args, **kwargs)
 
-            except ImportError as e:
-                # Handle import errors separately
-                from error_handler import ResourceNotFoundError
-                from error_handler import ValidationError
-                from error_handler import DeploymentError
-
-                # Re-raise to be caught below
+            except ImportError:
                 raise
 
             except Exception as e:
-                # Import here to avoid circular imports
                 from error_handler import (
                     TempleDBError,
                     ResourceNotFoundError,
@@ -57,27 +53,45 @@ def safe_command(command_name: str = None):
                     DeploymentError
                 )
 
-                # Handle typed exceptions
-                if isinstance(e, (ResourceNotFoundError, ValidationError, DeploymentError)):
-                    logger.error(f"{e}")
-                    if hasattr(e, 'solution') and e.solution:
-                        logger.info(f"💡 {e.solution}")
+                solution = getattr(e, 'solution', None)
+
+                if isinstance(e, ResourceNotFoundError):
+                    _safe_emit_error(ns, "NOT_FOUND", str(e), solution)
                     return 1
 
-                # Handle generic TempleDBError
+                if isinstance(e, ValidationError):
+                    _safe_emit_error(ns, "VALIDATION_ERROR", str(e), solution)
+                    return 1
+
+                if isinstance(e, DeploymentError):
+                    _safe_emit_error(ns, "DEPLOYMENT_ERROR", str(e), solution)
+                    return 1
+
                 if isinstance(e, TempleDBError):
-                    logger.error(f"{cmd_name} failed: {e}")
-                    if hasattr(e, 'solution') and e.solution:
-                        logger.info(f"💡 {e.solution}")
+                    _safe_emit_error(ns, "TEMPLEDB_ERROR", f"{cmd_name} failed: {e}", solution)
                     return 1
 
-                # Handle unexpected errors
-                logger.error(f"{cmd_name} failed: {e}")
+                _safe_emit_error(ns, "INTERNAL_ERROR", f"{cmd_name} failed: {e}", solution)
                 logger.debug("Full error details:", exc_info=True)
                 return 1
 
         return wrapper
     return decorator
+
+
+def _safe_emit_error(ns, code: str, message: str, solution=None) -> None:
+    """Emit error as JSON or log it, depending on --json flag."""
+    try:
+        import argparse
+        from cli.json_output import emit_error
+        if ns is not None and isinstance(ns, argparse.Namespace):
+            emit_error(ns, code, message, solution=solution)
+            return
+    except Exception:
+        pass
+    logger.error(message)
+    if solution:
+        logger.info(f"Hint: {solution}")
 
 
 def require_project(func: Callable) -> Callable:
