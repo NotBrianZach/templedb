@@ -901,7 +901,7 @@ class VarCommands(Command):
             apply_rows_target(p_rows)
 
         # Secrets
-        if not getattr(args, 'no_secrets', False):
+        if getattr(args, 'secrets', False):
             try:
                 for k, v in self._secrets_export(project['id'], profile).items():
                     merged[k] = v
@@ -1175,7 +1175,7 @@ def register(cli):
     p.add_argument('project', help='Project slug')
     p.add_argument('--target', '-t', default=None, help='Deployment target')
     p.add_argument('--format', default='shell', choices=['shell', 'dotenv', 'json'])
-    p.add_argument('--no-secrets', action='store_true', help='Skip secrets (no age key needed)')
+    p.add_argument('--secrets', action='store_true', help='Include encrypted secrets (requires age key)')
     p.add_argument('--profile', default='default', help='Secret profile')
     cli.commands['var.export'] = cmd.var_export
 
