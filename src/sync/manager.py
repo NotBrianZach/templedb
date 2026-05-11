@@ -35,7 +35,7 @@ class SyncManager:
 
         # Get project
         project = self.db.execute(
-            "SELECT id, slug FROM projects WHERE slug = ?",
+            "SELECT id, slug, repo_url FROM projects WHERE slug = ?",
             [project_slug]
         ).fetchone()
 
@@ -43,6 +43,7 @@ class SyncManager:
             raise ValueError(f"Project not found: {project_slug}")
 
         self.project_id = project['id']
+        self.repo_url = project['repo_url']
 
     def compute_file_hash(self, file_path: Path) -> str:
         """Compute SHA256 hash of file content"""
@@ -56,13 +57,19 @@ class SyncManager:
         return hasher.hexdigest()
 
     def get_checkout_path(self) -> Path:
-        """Get checkout path for this project"""
+        """Get checkout path for this project.
+
+        Prefers an explicit checkout record; falls back to repo_url for projects
+        whose working directory IS the repo (no separate checkout needed).
+        """
         from repositories.checkout_repository import CheckoutRepository
         checkout_repo = CheckoutRepository()
         checkout = checkout_repo.get_active_for_project(self.project_id)
-        if not checkout:
-            raise ValueError(f"No active checkout found for project {self.project_slug}")
-        return Path(checkout['checkout_path'])
+        if checkout:
+            return Path(checkout['checkout_path'])
+        if self.repo_url:
+            return Path(self.repo_url)
+        raise ValueError(f"No active checkout found for project {self.project_slug}")
 
     def save_sync_cache(self, file_hashes: Dict[str, str]) -> None:
         """

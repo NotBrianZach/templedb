@@ -22,11 +22,20 @@ for _p in sys.path:
     if _candidate.exists() and _candidate.resolve() != _this_file:
         _installed_nixos = _candidate
         break
-if _installed_nixos is None:
-    raise ImportError("Cannot find installed nixos.py (Nix store version not found in sys.path)")
-_inst_spec = importlib.util.spec_from_file_location("_nixos_installed", str(_installed_nixos))
-_installed = importlib.util.module_from_spec(_inst_spec)
-_inst_spec.loader.exec_module(_installed)
+
+_installed = None
+if _installed_nixos is not None:
+    _inst_spec = importlib.util.spec_from_file_location("_nixos_installed", str(_installed_nixos))
+    _installed = importlib.util.module_from_spec(_inst_spec)
+    _inst_spec.loader.exec_module(_installed)
+else:
+    import warnings
+    warnings.warn(
+        "TempleDB nixos patch: installed nixos.py not found in sys.path — "
+        "nixos commands unavailable until nix package is installed.",
+        RuntimeWarning,
+        stacklevel=1,
+    )
 
 # Keys that are never considered "pending changes" (they're tracking metadata)
 _TRACKING_KEYS = ("nixos.last_generated_at", "nixos.last_generated_snapshot")
@@ -311,7 +320,10 @@ def _resolve_slug(slug_arg) -> str | None:
 # Patched command class
 # ---------------------------------------------------------------------------
 
-class _PatchedNixOSCommand(_installed.NixOSCommand):
+_NixOSBase = _installed.NixOSCommand if _installed is not None else object
+
+
+class _PatchedNixOSCommand(_NixOSBase):
 
     def generate(self, args) -> int:
         slug = getattr(args, 'slug', None)
@@ -415,6 +427,18 @@ class _PatchedNixOSCommand(_installed.NixOSCommand):
 
 def register(cli):
     """Register patched NixOS commands with CLI."""
+    if _installed is None:
+        # Nix store version not available — register a stub that prints a clear error
+        def _nixos_unavailable(args) -> int:
+            print(
+                "nixos commands are unavailable: TempleDB nix package not installed.\n"
+                "Run install.sh or add templedb to your NixOS packages.",
+                file=sys.stderr,
+            )
+            return 1
+        nixos_parser = cli.register_command('nixos', _nixos_unavailable,
+                                            help_text='NixOS system configuration (unavailable — nix package not installed)')
+        return
     _installed.register(cli)
     cmd = _PatchedNixOSCommand()
 

@@ -21,6 +21,24 @@ class VCSRepository(BaseRepository):
     - Getting version history
     """
 
+    def get_commit_by_hash(self, project_id: int, commit_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a commit by its hash for a given project.
+
+        Args:
+            project_id: Project ID
+            commit_hash: Commit hash to look up
+
+        Returns:
+            Commit dictionary or None
+        """
+        logger.debug(f"Looking up commit {commit_hash[:8]} for project {project_id}")
+        return self.query_one("""
+            SELECT id, commit_hash, author, commit_message, commit_timestamp, branch_id, parent_commit_id
+            FROM vcs_commits
+            WHERE project_id = ? AND commit_hash = ?
+        """, (project_id, commit_hash))
+
     def get_or_create_branch(self, project_id: int, branch_name: str = 'main') -> int:
         """
         Get existing branch or create it if it doesn't exist.
@@ -54,7 +72,8 @@ class VCSRepository(BaseRepository):
         return branch_id
 
     def create_commit(self, project_id: int, branch_id: int, commit_hash: str,
-                     author: str, message: str) -> int:
+                     author: str, message: str,
+                     parent_hash: Optional[str] = None) -> int:
         """
         Create a new commit record.
 
@@ -64,16 +83,26 @@ class VCSRepository(BaseRepository):
             commit_hash: Commit hash (SHA-256)
             author: Commit author
             message: Commit message
+            parent_hash: Optional hash of the parent commit
 
         Returns:
             Commit ID
         """
         logger.info(f"Creating commit for project {project_id} on branch {branch_id}")
+
+        parent_commit_id = None
+        if parent_hash:
+            parent = self.get_commit_by_hash(project_id, parent_hash)
+            if parent:
+                parent_commit_id = parent['id']
+            else:
+                logger.debug(f"Parent commit {parent_hash[:8]} not yet in DB, skipping parent link")
+
         commit_id = self.execute("""
             INSERT INTO vcs_commits
-            (project_id, branch_id, commit_hash, author, commit_message, commit_timestamp)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-        """, (project_id, branch_id, commit_hash, author, message), commit=False)
+            (project_id, branch_id, commit_hash, author, commit_message, commit_timestamp, parent_commit_id)
+            VALUES (?, ?, ?, ?, ?, datetime('now'), ?)
+        """, (project_id, branch_id, commit_hash, author, message, parent_commit_id), commit=False)
 
         logger.info(f"Created commit {commit_id} with hash {commit_hash[:8]}")
         return commit_id

@@ -70,6 +70,10 @@ class FileRepository(BaseRepository):
                 ORDER BY pf.file_path
             """, (project_id,))
 
+    def get_by_path(self, project_id: int, file_path: str) -> Optional[Dict[str, Any]]:
+        """Alias for get_file_by_path for compatibility."""
+        return self.get_file_by_path(project_id, file_path)
+
     def get_file_by_path(self, project_id: int, file_path: str) -> Optional[Dict[str, Any]]:
         """
         Get a specific file by its path within a project.

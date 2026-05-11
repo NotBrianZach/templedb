@@ -62,6 +62,24 @@ class CheckoutRepository(BaseRepository):
             WHERE project_id = ? AND checkout_path = ?
         """, (project_id, checkout_path))
 
+    def get_active_for_project(self, project_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get the active checkout for a project.
+
+        Args:
+            project_id: Project ID
+
+        Returns:
+            Checkout dictionary or None
+        """
+        logger.debug(f"Getting active checkout for project {project_id}")
+        return self.query_one("""
+            SELECT id, project_id, checkout_path, branch_name, checkout_at, last_sync_at, is_active
+            FROM checkouts
+            WHERE project_id = ? AND is_active = 1
+            ORDER BY checkout_at DESC
+        """, (project_id,))
+
     def get_all_for_project(self, project_id: int) -> List[Dict[str, Any]]:
         """
         Get all checkouts for a project.

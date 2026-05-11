@@ -226,7 +226,7 @@ class FileFuzzyMatcher:
 
         cursor.execute("""
             SELECT id, file_path
-            FROM files
+            FROM project_files
             WHERE project_id = ?
             ORDER BY file_path
         """, (self.project_id,))
@@ -284,7 +284,7 @@ class SymbolFuzzyMatcher:
             cursor.execute("""
                 SELECT id, qualified_name, symbol_type, file_path
                 FROM code_symbols cs
-                JOIN files f ON cs.file_id = f.id
+                JOIN project_files f ON cs.file_id = f.id
                 WHERE f.project_id = ?
                 AND cs.symbol_type = ?
                 ORDER BY qualified_name
@@ -293,7 +293,7 @@ class SymbolFuzzyMatcher:
             cursor.execute("""
                 SELECT id, qualified_name, symbol_type, file_path
                 FROM code_symbols cs
-                JOIN files f ON cs.file_id = f.id
+                JOIN project_files f ON cs.file_id = f.id
                 WHERE f.project_id = ?
                 ORDER BY qualified_name
             """, (self.project_id,))
