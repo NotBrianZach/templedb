@@ -365,25 +365,59 @@ class _PatchedNixOSCommand(_NixOSBase):
     def system_switch(self, args) -> int:
         if not _check_dirty_and_prompt():
             return 1
+        # --yes: bypass the "Continue? (yes/no)" prompt by monkey-patching input()
+        if getattr(args, 'yes', False):
+            import builtins
+            _orig_input = builtins.input
+            builtins.input = lambda _prompt='': 'yes'
+        else:
+            _orig_input = None
+
+        no_update_lock = getattr(args, 'no_update_lock_file', False)
+        if no_update_lock:
+            # Patch run_nixos_rebuild to append --no-update-lock-file
+            try:
+                from services.system_service import SystemService
+                _orig_rebuild = SystemService.run_nixos_rebuild
+                def _patched_rebuild(self_svc, command, flake_path=None, dry_run=False, **kw):
+                    result = _orig_rebuild(self_svc, command, flake_path=flake_path, dry_run=dry_run)
+                    return result
+                # Inject flag via cmd extension
+                import subprocess as _sp
+                _orig_run = _sp.run
+                def _patched_run(cmd, **kw):
+                    if isinstance(cmd, list) and 'nixos-rebuild' in cmd:
+                        cmd = list(cmd) + ['--no-update-lock-file']
+                    return _orig_run(cmd, **kw)
+                _sp.run = _patched_run
+            except Exception:
+                _orig_run = None
+        else:
+            _orig_run = None
+
         verbose    = getattr(args, 'verbose', False)
         show_trace = getattr(args, 'show_trace', False)
-        if verbose or show_trace:
-            # Patch switch_system call to forward the flags into run_nixos_rebuild
-            try:
-                from services.system_service import SystemService, SystemServiceError
+        _orig_switch = None
+        try:
+            if verbose or show_trace:
+                from services.system_service import SystemService
                 _orig_switch = SystemService.switch_system
                 def _patched_switch(self_svc, project_slug, dry_run=False, with_home_manager=False, **kw):
                     return _orig_switch(self_svc, project_slug, dry_run=dry_run,
                                         with_home_manager=with_home_manager,
                                         verbose=verbose, show_trace=show_trace)
                 SystemService.switch_system = _patched_switch
-                try:
-                    return super().system_switch(args)
-                finally:
-                    SystemService.switch_system = _orig_switch
-            except Exception:
-                pass
-        return super().system_switch(args)
+            return super().system_switch(args)
+        finally:
+            if _orig_input is not None:
+                import builtins
+                builtins.input = _orig_input
+            if _orig_run is not None:
+                import subprocess as _sp
+                _sp.run = _orig_run
+            if _orig_switch is not None:
+                from services.system_service import SystemService
+                SystemService.switch_system = _orig_switch
 
     def nixos_status(self, args) -> int:
         slug = _resolve_slug(getattr(args, 'slug', None))
@@ -470,7 +504,7 @@ def register(cli):
                         "slug", nargs="?",
                         help="NixOS config project slug (default: auto-detect)",
                     )
-                    # Add --verbose / --show-trace to rebuild and system-switch
+                    # Add --verbose / --show-trace / --yes / --no-update-lock-file to rebuild and system-switch
                     for subcmd in ("rebuild", "system-switch"):
                         sub = action.choices.get(subcmd)
                         if sub:
@@ -481,6 +515,15 @@ def register(cli):
                             sub.add_argument(
                                 "--show-trace", action="store_true", default=False,
                                 help="Show full Nix evaluation stack traces on error",
+                            )
+                            sub.add_argument(
+                                "--yes", "-y", action="store_true", default=False,
+                                help="Skip confirmation prompt",
+                            )
+                            sub.add_argument(
+                                "--no-update-lock-file", dest="no_update_lock_file",
+                                action="store_true", default=False,
+                                help="Pass --no-update-lock-file to nixos-rebuild (skip flake input updates)",
                             )
                     break
     except Exception:
