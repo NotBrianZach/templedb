@@ -374,40 +374,20 @@ class _PatchedNixOSCommand(_NixOSBase):
             _orig_input = None
 
         no_update_lock = getattr(args, 'no_update_lock_file', False)
-        if no_update_lock:
-            # Patch run_nixos_rebuild to append --no-update-lock-file
-            try:
-                from services.system_service import SystemService
-                _orig_rebuild = SystemService.run_nixos_rebuild
-                def _patched_rebuild(self_svc, command, flake_path=None, dry_run=False, **kw):
-                    result = _orig_rebuild(self_svc, command, flake_path=flake_path, dry_run=dry_run)
-                    return result
-                # Inject flag via cmd extension
-                import subprocess as _sp
-                _orig_run = _sp.run
-                def _patched_run(cmd, **kw):
-                    if isinstance(cmd, list) and any(
-                        x in ('nix', 'nixos-rebuild') for x in cmd
-                    ) and '--no-update-lock-file' not in cmd:
-                        cmd = list(cmd) + ['--no-update-lock-file']
-                    return _orig_run(cmd, **kw)
-                _sp.run = _patched_run
-            except Exception:
-                _orig_run = None
-        else:
-            _orig_run = None
+        _orig_run = None
 
         verbose    = getattr(args, 'verbose', False)
         show_trace = getattr(args, 'show_trace', False)
         _orig_switch = None
         try:
-            if verbose or show_trace:
+            if verbose or show_trace or no_update_lock:
                 from services.system_service import SystemService
                 _orig_switch = SystemService.switch_system
                 def _patched_switch(self_svc, project_slug, dry_run=False, with_home_manager=False, **kw):
                     return _orig_switch(self_svc, project_slug, dry_run=dry_run,
                                         with_home_manager=with_home_manager,
-                                        verbose=verbose, show_trace=show_trace)
+                                        verbose=verbose, show_trace=show_trace,
+                                        no_update_lock_file=no_update_lock)
                 SystemService.switch_system = _patched_switch
             return super().system_switch(args)
         finally:

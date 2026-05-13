@@ -135,6 +135,7 @@ class SystemService:
         dry_run: bool = False,
         verbose: bool = False,
         show_trace: bool = False,
+        no_update_lock_file: bool = False,
     ) -> Dict[str, Any]:
         """Run nixos-rebuild command
 
@@ -162,6 +163,8 @@ class SystemService:
             cmd.append("--print-build-logs")
         if show_trace:
             cmd.append("--show-trace")
+        if no_update_lock_file:
+            cmd.append("--no-update-lock-file")
 
         logger.info(f"Running: {' '.join(cmd)}")
         print(f"Running: {' '.join(cmd)}")
@@ -490,7 +493,7 @@ class SystemService:
 
         return result
 
-    def switch_system(self, project_slug: str, dry_run: bool = False, with_home_manager: bool = False, verbose: bool = False, show_trace: bool = False) -> Dict[str, Any]:
+    def switch_system(self, project_slug: str, dry_run: bool = False, with_home_manager: bool = False, verbose: bool = False, show_trace: bool = False, no_update_lock_file: bool = False) -> Dict[str, Any]:
         """Switch to system configuration (permanent)
 
         This activates the configuration and adds it to boot menu.
@@ -536,7 +539,7 @@ class SystemService:
 
         # Run switch
         flake_path = checkout_path if config_path.name == "flake.nix" else None
-        result = self.run_nixos_rebuild("switch", flake_path=flake_path, dry_run=dry_run, verbose=verbose, show_trace=show_trace)
+        result = self.run_nixos_rebuild("switch", flake_path=flake_path, dry_run=dry_run, verbose=verbose, show_trace=show_trace, no_update_lock_file=no_update_lock_file)
 
         # If home-manager rebuild requested and nixos-rebuild succeeded
         if with_home_manager and result['success'] and not dry_run:
