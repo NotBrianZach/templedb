@@ -386,7 +386,9 @@ class _PatchedNixOSCommand(_NixOSBase):
                 import subprocess as _sp
                 _orig_run = _sp.run
                 def _patched_run(cmd, **kw):
-                    if isinstance(cmd, list) and 'nixos-rebuild' in cmd:
+                    if isinstance(cmd, list) and any(
+                        x in ('nix', 'nixos-rebuild') for x in cmd
+                    ) and '--no-update-lock-file' not in cmd:
                         cmd = list(cmd) + ['--no-update-lock-file']
                     return _orig_run(cmd, **kw)
                 _sp.run = _patched_run
