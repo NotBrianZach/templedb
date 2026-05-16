@@ -586,8 +586,6 @@ class WorkingStateDetector:
         for rel_path, scanned_file in current_by_path.items():
             if rel_path not in tracked_by_path:
                 # New file - create project_files entry first
-                state = 'added'
-                changes['added'] += 1
 
                 # Read file content
                 file_path = self.project_root / rel_path
@@ -596,11 +594,14 @@ class WorkingStateDetector:
                 if not file_content:
                     continue
 
-                # Get file type
-                file_type_id = self._get_file_type_id(rel_path)
-                if not file_type_id:
-                    # Skip files with unknown type
+                # Use the file_type already detected by the scanner (full mapping)
+                file_type_name = scanned_file.file_type
+                file_type_row = query_one(
+                    "SELECT id FROM file_types WHERE type_name = ?", (file_type_name,)
+                )
+                if not file_type_row:
                     continue
+                file_type_id = file_type_row['id']
 
                 # Extract file name
                 file_name = Path(rel_path).name
@@ -620,6 +621,8 @@ class WorkingStateDetector:
                 if new_file:
                     file_id = new_file['id']
                     tracked_by_path[rel_path] = file_id
+                    state = 'added'
+                    changes['added'] += 1
 
                     records.append((
                         self.project_id,
@@ -633,10 +636,17 @@ class WorkingStateDetector:
                 # Check if modified
                 file_id = tracked_by_path[rel_path]
 
-                # Get last committed content hash
-                last_content = query_one("""
-                    SELECT content_hash FROM file_contents
-                    WHERE file_id = ?
+                # Get last *committed* content hash (not just stored/imported content)
+                # file_contents is updated by project sync, so comparing against it
+                # always shows "unmodified". We need the last VCS commit hash.
+                # The CLI commit stores per-file state in vcs_file_states.
+                last_committed = query_one("""
+                    SELECT vfs.content_hash
+                    FROM vcs_file_states vfs
+                    JOIN vcs_commits vc ON vc.id = vfs.commit_id
+                    WHERE vfs.file_id = ? AND vfs.change_type != 'deleted'
+                    ORDER BY vc.commit_timestamp DESC
+                    LIMIT 1
                 """, (file_id,))
 
                 # Read current content hash
@@ -646,9 +656,13 @@ class WorkingStateDetector:
                 if not file_content:
                     continue
 
-                if last_content and last_content['content_hash'] == file_content.hash_sha256:
+                if last_committed and last_committed['content_hash'] == file_content.hash_sha256:
                     state = 'unmodified'
                     changes['unmodified'] += 1
+                elif not last_committed:
+                    # File is tracked in project_files but never committed — treat as added
+                    state = 'added'
+                    changes['added'] += 1
                 else:
                     state = 'modified'
                     changes['modified'] += 1

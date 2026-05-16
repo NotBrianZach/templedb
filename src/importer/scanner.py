@@ -4,8 +4,9 @@ File scanner and type detector for project import
 """
 import os
 import re
+import subprocess
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Set
 from dataclasses import dataclass
 
 
@@ -218,6 +219,28 @@ class FileScanner:
 
     def __init__(self, project_root: str):
         self.project_root = Path(project_root).resolve()
+        self._git_files: Optional[Set[str]] = self._load_git_files()
+
+    def _load_git_files(self) -> Optional[Set[str]]:
+        """
+        Get the set of files git would include (tracked + untracked but not ignored).
+        Returns None if not a git repo or git unavailable.
+        """
+        if not (self.project_root / '.git').exists():
+            return None
+        try:
+            result = subprocess.run(
+                ['git', 'ls-files', '--cached', '--others', '--exclude-standard'],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                return set(result.stdout.strip().splitlines())
+        except Exception:
+            pass
+        return None
 
     def get_file_type(self, file_path: Path) -> Optional[str]:
         """Detect file type based on patterns"""
@@ -318,6 +341,12 @@ class FileScanner:
                 if not file_path.exists():
                     continue
 
+                rel_path = str(file_path.relative_to(self.project_root))
+
+                # If in a git repo, respect .gitignore by filtering against git's file list
+                if self._git_files is not None and rel_path not in self._git_files:
+                    continue
+
                 # Detect file type
                 file_type = self.get_file_type(file_path)
                 if not file_type:
@@ -333,7 +362,6 @@ class FileScanner:
                 # Extract metadata
                 component_name = self.extract_component_name(file_path, content)
                 lines_of_code = self.count_lines(content)
-                rel_path = str(file_path.relative_to(self.project_root))
 
                 scanned_files.append(ScannedFile(
                     absolute_path=str(file_path),
