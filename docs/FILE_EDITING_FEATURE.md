@@ -190,6 +190,32 @@ Claude:
 4. Calls templedb_vcs_commit("woofs_projects", ...)
 ```
 
+### 5. External Editor / Claude Code Native Tools (--refresh workflow)
+
+When files are edited **outside** TempleDB's session tracking (e.g., using Claude Code's
+native `Edit`/`Write` tools, a terminal editor, or an IDE), TempleDB's working state won't
+automatically detect the changes. Use `--refresh` to re-scan the filesystem:
+
+```bash
+# After external edits, detect changes via filesystem re-scan
+templedb vcs status woofs_projects --refresh
+
+# Stage all detected changes
+templedb vcs add woofs_projects --all
+
+# Commit
+templedb vcs commit -p woofs_projects -m "Update UI components" -a "Author Name"
+```
+
+**Why `--refresh` is needed:** `templedb project sync` updates `file_contents` to match
+disk, so a plain `vcs status` compares against the already-synced content and shows nothing
+changed. The `--refresh` flag re-runs the `WorkingStateDetector`, which compares disk hashes
+against `vcs_file_states` (last committed hash) rather than `file_contents`.
+
+**`.gitignore` support:** The `FileScanner` respects `.gitignore` by running
+`git ls-files --cached --others --exclude-standard` when inside a git repository. Files
+excluded by `.gitignore` are not scanned or tracked.
+
 ## Benefits
 
 1. **Unified Interface** - Same operations available in CLI, MCP, and Emacs

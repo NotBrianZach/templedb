@@ -6,6 +6,20 @@ All notable changes to TempleDB are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **VCS working state detection** - `vcs status --refresh` and `vcs add --all` now correctly
+  detect externally-edited files (commit `596cf16`)
+  - `WorkingStateDetector.detect_changes()` now queries `vcs_file_states` for last committed
+    hash instead of `file_contents` (which is overwritten by `project sync`, causing all files
+    to appear unmodified)
+  - New files are now correctly reported as `added` instead of `modified`
+  - File type lookup for new files now uses the scanner's full `FILE_TYPE_PATTERNS` list
+    (100+ types) instead of the 8-type legacy lookup, preventing silent skip of `.jsx`, `.mjs`,
+    `.css`, and other common file types
+- **FileScanner `.gitignore` support** - Scanner now respects `.gitignore` by running
+  `git ls-files --cached --others --exclude-standard` when inside a git repository, ensuring
+  `node_modules`, `dist`, and other ignored files are never tracked
+
 ### Added
 - **Extended File Type Support** - Track 100+ file types and dotfiles
   - Migration 017: Adds 95+ new file types to database
