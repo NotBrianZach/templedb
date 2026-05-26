@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cli.commands import (
     project, vcs, env, search, system, cathedral, deploy, migration,
-    target, secret, tui_launcher, config, workitem, mcp, direnv, merge,
+    target, secret, gui_launcher, config, workitem, mcp, direnv, merge,
     blob, domain, backup, claude, prompt, vibe, nixos, key, cache, nixops4,
     deploy_nix, file, tutorial, git_server_commands, query_open, dev, deploy_history,
     schema, new_machine,
@@ -38,7 +38,7 @@ def main():
     migration.register(cli)
     target.register(cli)
     secret.register(cli)
-    tui_launcher.register(cli)
+    gui_launcher.register(cli)
     config.register(cli)
     workitem.register(cli)
     mcp.register(cli)

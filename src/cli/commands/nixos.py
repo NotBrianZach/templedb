@@ -13,29 +13,44 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Load the installed (Nix store) nixos module.
-# Skip any sys.path entry that resolves to this file itself — prevents infinite
-# recursion when src/ is prepended to sys.path by the launcher.
-_this_file = Path(__file__).resolve()
-_installed_nixos = None
-for _p in sys.path:
-    _candidate = Path(_p) / "cli" / "commands" / "nixos.py"
-    if _candidate.exists() and _candidate.resolve() != _this_file:
-        _installed_nixos = _candidate
-        break
-
+#
+# The nix build copies this same file into site-packages, so both src/ and
+# the nix store have an identical copy. Two guards prevent mutual recursion:
+#
+#  1. _in_nix_store: if we ARE the installed version, skip loading entirely.
+#  2. _SENTINEL: if a src/ copy is already loading (nix store copy found src/
+#     and called us again), skip loading to break the cycle.
+#
+# Avoid Path.resolve() here — use str(__file__) directly to sidestep any
+# pathlib compatibility issues in the nix store's Python build.
+_SENTINEL = "_nixos_patch_loading"
+_in_nix_store = "/nix/store/" in str(__file__)
 _installed = None
-if _installed_nixos is not None:
-    _inst_spec = importlib.util.spec_from_file_location("_nixos_installed", str(_installed_nixos))
-    _installed = importlib.util.module_from_spec(_inst_spec)
-    _inst_spec.loader.exec_module(_installed)
-else:
-    import warnings
-    warnings.warn(
-        "TempleDB nixos patch: installed nixos.py not found in sys.path — "
-        "nixos commands unavailable until nix package is installed.",
-        RuntimeWarning,
-        stacklevel=1,
-    )
+
+if not _in_nix_store and _SENTINEL not in sys.modules:
+    sys.modules[_SENTINEL] = True  # type: ignore[assignment]
+    try:
+        _installed_nixos = None
+        for _p in sys.path:
+            _candidate = Path(_p) / "cli" / "commands" / "nixos.py"
+            if _candidate.exists() and "/nix/store/" in str(_candidate):
+                _installed_nixos = _candidate
+                break
+
+        if _installed_nixos is not None:
+            _inst_spec = importlib.util.spec_from_file_location("_nixos_installed", str(_installed_nixos))
+            _installed = importlib.util.module_from_spec(_inst_spec)
+            _inst_spec.loader.exec_module(_installed)
+        else:
+            import warnings
+            warnings.warn(
+                "TempleDB nixos patch: installed nixos.py not found in sys.path — "
+                "nixos commands unavailable until nix package is installed.",
+                RuntimeWarning,
+                stacklevel=1,
+            )
+    finally:
+        sys.modules.pop(_SENTINEL, None)
 
 # Keys that are never considered "pending changes" (they're tracking metadata)
 _TRACKING_KEYS = ("nixos.last_generated_at", "nixos.last_generated_snapshot")

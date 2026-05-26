@@ -19,11 +19,6 @@ if _src.exists() and str(_src) not in sys.path:
 # Map module names to local patched files
 _PATCHES = {}
 
-# Override vibe_realtime if a patched version exists locally
-_vibe_realtime_patch = _LOCAL / "vibe_realtime_patched.py"
-if _vibe_realtime_patch.exists():
-    _PATCHES["cli.commands.vibe_realtime"] = str(_vibe_realtime_patch)
-
 # Override cathedral with local patch (adds name resolution + post-import hints)
 _cathedral_patch = _LOCAL / "src" / "cli" / "commands" / "cathedral.py"
 if _cathedral_patch.exists():

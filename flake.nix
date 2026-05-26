@@ -16,13 +16,11 @@
           python = pkgs.python3;
           pythonEnv = python.withPackages (ps: with ps; [
             pyyaml
-            textual
             rich
-            aiohttp
-            watchdog
-            websockets
             requests
             cryptography
+            fastapi
+            uvicorn
           ]);
         in
         pkgs.stdenv.mkDerivation {
@@ -46,7 +44,7 @@
               [ -f "$f" ] && cp "$f" "$SITE/"
             done
 
-            # Install root-level Python modules (vibe_server, mcp_server, etc.)
+            # Install root-level Python modules (gui, mcp_server, etc.)
             for f in *.py; do
               [ -f "$f" ] && cp "$f" "$SITE/" || true
             done
@@ -116,11 +114,16 @@
 
             # NixOps4 for deployment orchestration
             nixops4.packages.${system}.default
+
+            # Python env with all templedb dependencies
+            (python3.withPackages (ps: with ps; [
+              pyyaml rich requests cryptography fastapi uvicorn
+            ]))
           ];
           shellHook = ''
             export RUST_BACKTRACE=1
             echo "templedb dev shell loaded"
-            echo "TUI available: python3 src/tui.py"
+            echo "GUI available: templedb gui"
           '';
         };
       }
