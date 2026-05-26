@@ -157,6 +157,7 @@ def projects_list():
         SELECT p.slug, p.name, p.repo_url, p.updated_at,
                (SELECT COUNT(*) FROM project_files WHERE project_id = p.id) AS files,
                (SELECT COALESCE(SUM(lines_of_code),0) FROM project_files WHERE project_id = p.id) AS loc,
+               (SELECT checkout_path FROM checkouts c WHERE c.project_id = p.id AND c.is_active=1 ORDER BY last_sync_at DESC LIMIT 1) AS checkout_path,
                (SELECT MAX(last_sync_at) FROM checkouts c WHERE c.project_id = p.id AND c.is_active=1) AS last_synced,
                (SELECT vc.commit_hash FROM vcs_commits vc WHERE vc.project_id = p.id ORDER BY vc.commit_timestamp DESC LIMIT 1) AS last_commit_hash,
                (SELECT vc.commit_message FROM vcs_commits vc WHERE vc.project_id = p.id ORDER BY vc.commit_timestamp DESC LIMIT 1) AS last_commit_msg,
@@ -171,7 +172,11 @@ def projects_list():
             f'{r["loc"]:,}',
             html.escape(r["repo_url"] or ""),
             html.escape((r["updated_at"] or "")[:10]),
-            html.escape((r["last_synced"] or "")[:10]) if r["last_synced"] else '<span class="muted">—</span>',
+            (
+                f'{html.escape((r["last_synced"] or "")[:10])} <span class="muted">{html.escape(r["checkout_path"] or "")}</span>'
+                if r["last_synced"] else
+                (f'<span class="muted">{html.escape(r["checkout_path"])}</span>' if r["checkout_path"] else '<span class="muted">—</span>')
+            ),
             (
                 f'<a href="/vcs/{html.escape(r["slug"])}/commits/{html.escape(r["last_commit_hash"])}" title="{html.escape((r["last_commit_msg"] or "")[:80])}">'
                 f'{html.escape(r["last_commit_hash"][:8])} '
@@ -326,10 +331,10 @@ def vcs_index():
 @app.get("/vcs/{slug}", response_class=HTMLResponse)
 def vcs_project(slug: str):
     commits = query_all("""
-        SELECT SUBSTR(commit_hash,1,8) AS short, branch_name, author, commit_message, created_at, commit_hash
+        SELECT SUBSTR(commit_hash,1,8) AS short, branch_name, author, commit_message, commit_timestamp, commit_hash
         FROM vcs_commit_history_view
         WHERE project_slug = ?
-        ORDER BY created_at DESC LIMIT 50
+        ORDER BY commit_timestamp DESC LIMIT 50
     """, (slug,))
 
     rows = [
@@ -339,7 +344,7 @@ def vcs_project(slug: str):
             f'<span class="badge blue">{html.escape(r["branch_name"] or "")}</span>',
             html.escape(r["author"] or ""),
             html.escape((r["commit_message"] or "")[:72]),
-            html.escape((r["created_at"] or "")[:10]),
+            html.escape((r["commit_timestamp"] or "")[:10]),
         ]
         for r in commits
     ]
@@ -362,7 +367,7 @@ def vcs_project(slug: str):
 @app.get("/vcs/{slug}/commits/{commit_hash}", response_class=HTMLResponse)
 def vcs_commit_detail(slug: str, commit_hash: str):
     commit = query_one("""
-        SELECT commit_hash, branch_name, author, commit_message, created_at
+        SELECT commit_hash, branch_name, author, commit_message, commit_timestamp
         FROM vcs_commit_history_view
         WHERE project_slug = ? AND commit_hash LIKE ?
         LIMIT 1
@@ -398,7 +403,7 @@ def vcs_commit_detail(slug: str, commit_hash: str):
   <tr><td class="muted" style="width:80px">Hash</td><td><code>{html.escape(commit["commit_hash"][:16])}</code></td></tr>
   <tr><td class="muted">Branch</td><td><span class="badge blue">{html.escape(commit["branch_name"] or "")}</span></td></tr>
   <tr><td class="muted">Author</td><td>{html.escape(commit["author"] or "")}</td></tr>
-  <tr><td class="muted">Date</td><td>{html.escape(commit["created_at"] or "")}</td></tr>
+  <tr><td class="muted">Date</td><td>{html.escape(commit["commit_timestamp"] or "")}</td></tr>
   <tr><td class="muted">Message</td><td>{html.escape(commit["commit_message"] or "")}</td></tr>
 </table>
 <h3>Changed Files ({len(files)})</h3>
@@ -412,7 +417,7 @@ def vcs_commit_detail(slug: str, commit_hash: str):
 @app.get("/vcs/{slug}/branches", response_class=HTMLResponse)
 def vcs_branches(slug: str):
     branches = query_all("""
-        SELECT branch_name, is_default, commit_count, created_at
+        SELECT branch_name, is_default, total_commits, last_commit_time
         FROM vcs_branch_summary_view
         WHERE project_slug = ?
         ORDER BY is_default DESC, branch_name
@@ -422,15 +427,15 @@ def vcs_branches(slug: str):
         [
             html.escape(r["branch_name"]),
             '<span class="badge green">default</span>' if r["is_default"] else "",
-            str(r["commit_count"] or 0),
-            html.escape((r["created_at"] or "")[:10]),
+            str(r["total_commits"] or 0),
+            html.escape((r["last_commit_time"] or "")[:10]),
         ]
         for r in branches
     ]
 
     body = f"""
 <h2><a href="/vcs">VCS</a> / <a href="/vcs/{html.escape(slug)}">{html.escape(slug)}</a> / Branches</h2>
-{_table(["Branch", "Default", "Commits", "Created"], rows, "No branches.")}
+{_table(["Branch", "Default", "Commits", "Last Commit"], rows, "No branches.")}
 """
     return _base(f"Branches: {slug}", body, "vcs")
 
