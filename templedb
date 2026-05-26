@@ -9,7 +9,7 @@
 #   cat $(which templedb)   # find new PYTHON path
 #   update SYSTEM_SITE below if the system package hash changed
 
-PYTHON="/nix/store/r3s7zfg534lcxilryfbp15j90jwn1i06-python3-3.13.13-env/bin/python3"
+PYTHON="/nix/store/y54m7d1kw30kj93wpsaiyk6gmd7qhlkd-python3-3.13.13-env/bin/python3"
 SYSTEM_SITE="/nix/store/3pldkw59m4n8p6dlpajhpa30s79libp5-templedb-0.1.0/lib/python3.13/site-packages"
 
 exec env PYTHONPATH="$SYSTEM_SITE" PYTHONNOUSERSITE=true \
