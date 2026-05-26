@@ -154,9 +154,13 @@ def root():
 @app.get("/projects", response_class=HTMLResponse)
 def projects_list():
     rows_data = query_all("""
-        SELECT slug, name,
+        SELECT p.slug, p.name, p.repo_url, p.updated_at,
                (SELECT COUNT(*) FROM project_files WHERE project_id = p.id) AS files,
-               (SELECT COALESCE(SUM(lines_of_code),0) FROM project_files WHERE project_id = p.id) AS loc
+               (SELECT COALESCE(SUM(lines_of_code),0) FROM project_files WHERE project_id = p.id) AS loc,
+               (SELECT MAX(last_sync_at) FROM checkouts c WHERE c.project_id = p.id AND c.is_active=1) AS last_synced,
+               (SELECT vc.commit_hash FROM vcs_commits vc WHERE vc.project_id = p.id ORDER BY vc.commit_timestamp DESC LIMIT 1) AS last_commit_hash,
+               (SELECT vc.commit_message FROM vcs_commits vc WHERE vc.project_id = p.id ORDER BY vc.commit_timestamp DESC LIMIT 1) AS last_commit_msg,
+               (SELECT vc.commit_timestamp FROM vcs_commits vc WHERE vc.project_id = p.id ORDER BY vc.commit_timestamp DESC LIMIT 1) AS last_commit_at
         FROM projects p ORDER BY slug
     """)
     rows = [
@@ -165,6 +169,14 @@ def projects_list():
             html.escape(r["name"] or ""),
             f'{r["files"]:,}',
             f'{r["loc"]:,}',
+            html.escape(r["repo_url"] or ""),
+            html.escape((r["updated_at"] or "")[:10]),
+            html.escape((r["last_synced"] or "")[:10]) if r["last_synced"] else '<span class="muted">—</span>',
+            (
+                f'<a href="/vcs/{html.escape(r["slug"])}/commits/{html.escape(r["last_commit_hash"])}" title="{html.escape((r["last_commit_msg"] or "")[:80])}">'
+                f'{html.escape(r["last_commit_hash"][:8])} '
+                f'<span class="muted">{html.escape((r["last_commit_at"] or "")[:10])}</span></a>'
+            ) if r["last_commit_hash"] else '<span class="muted">—</span>',
         ]
         for r in rows_data
     ]
@@ -190,7 +202,7 @@ def projects_list():
 """
     body = f"""
 <h2>Projects</h2>
-{_table(["Slug", "Name", "Files", "LOC"], rows, "No projects found.")}
+{_table(["Slug", "Name", "Files", "LOC", "Location", "Updated", "Synced", "Latest Commit"], rows, "No projects found.")}
 {import_form}
 """
     return _base("Projects", body, "projects")
