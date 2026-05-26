@@ -239,14 +239,14 @@ def project_files_search(slug: str, q: str = Query(default="")):
 def _file_rows(slug: str, q: str) -> str:
     if q:
         data = query_all("""
-            SELECT file_path, type_name, lines_of_code, size
+            SELECT file_path, type_name, lines_of_code
             FROM files_with_types_view
             WHERE project_slug = ? AND file_path LIKE ?
             ORDER BY file_path LIMIT 500
         """, (slug, f"%{q}%"))
     else:
         data = query_all("""
-            SELECT file_path, type_name, lines_of_code, size
+            SELECT file_path, type_name, lines_of_code
             FROM files_with_types_view
             WHERE project_slug = ?
             ORDER BY file_path LIMIT 500
@@ -257,12 +257,11 @@ def _file_rows(slug: str, q: str) -> str:
             f'<a href="/projects/{html.escape(slug)}/file?path={html.escape(r["file_path"])}">{html.escape(r["file_path"])}</a>',
             html.escape(r["type_name"] or ""),
             f'{r["lines_of_code"] or 0:,}',
-            f'{r["size"] or 0:,}',
         ]
         for r in data
     ]
     count = f'<p class="muted" style="margin-bottom:0.5rem">{len(data)} file{"s" if len(data) != 1 else ""}</p>'
-    return count + _table(["Path", "Type", "LOC", "Bytes"], rows, "No files found.")
+    return count + _table(["Path", "Type", "LOC"], rows, "No files found.")
 
 
 @app.get("/projects/{slug}/file", response_class=HTMLResponse)
@@ -588,10 +587,11 @@ def vcs_commit(slug: str, message: str = Form(...), author: str = Form(""), stag
 @app.get("/secrets", response_class=HTMLResponse)
 def secrets_list():
     secrets = query_all("""
-        SELECT p.slug AS project_slug, sb.profile, sb.created_at, sb.updated_at
-        FROM secret_blobs sb
-        JOIN projects p ON sb.project_id = p.id
-        ORDER BY p.slug, sb.profile
+        SELECT p.slug AS project_slug, psb.profile, sb.created_at, sb.updated_at
+        FROM project_secret_blobs psb
+        JOIN projects p ON psb.project_id = p.id
+        JOIN secret_blobs sb ON psb.secret_blob_id = sb.id
+        ORDER BY p.slug, psb.profile
     """)
     rows = [
         [
