@@ -24,11 +24,6 @@ _cathedral_patch = _LOCAL / "src" / "cli" / "commands" / "cathedral.py"
 if _cathedral_patch.exists():
     _PATCHES["cli.commands.cathedral"] = str(_cathedral_patch)
 
-# Override nixos with local patch (adds dirty-state tracking for generate/rebuild)
-_nixos_patch = _LOCAL / "src" / "cli" / "commands" / "nixos.py"
-if _nixos_patch.exists():
-    _PATCHES["cli.commands.nixos"] = str(_nixos_patch)
-
 # Override backup with local patch (adds backup gcs command)
 _backup_patch = _LOCAL / "src" / "cli" / "commands" / "backup.py"
 if _backup_patch.exists():
