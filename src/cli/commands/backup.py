@@ -23,6 +23,30 @@ logger = get_logger(__name__)
 DEFAULT_DB_PATH = Path.home() / '.local' / 'share' / 'templedb' / 'templedb.sqlite'
 
 
+def _record_backup(backup_path: Path, provider: str, size_bytes: int):
+    """Write a row to backup_history after a successful backup."""
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(str(DB_PATH))
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS backup_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                backed_up_at TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                backup_path TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO backup_history (backed_up_at, provider, backup_path, size_bytes) VALUES (?,?,?,?)",
+            (datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), provider, str(backup_path), size_bytes),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Failed to record backup history: {e}")
+
+
 class BackupCommands(Command):
     """Unified backup command handlers"""
 
@@ -55,8 +79,10 @@ class BackupCommands(Command):
             dest.close()
 
             # Get size
-            size_mb = backup_path.stat().st_size / (1024 * 1024)
+            size_bytes = backup_path.stat().st_size
+            size_mb = size_bytes / (1024 * 1024)
             print(f"✅ Backup complete: {backup_path} ({size_mb:.2f} MB)")
+            _record_backup(backup_path, "local", size_bytes)
             return 0
         except Exception as e:
             logger.error(f"Backup failed: {e}")
@@ -505,6 +531,7 @@ class BackupCommands(Command):
             )
         if up.status_code == 200:
             print(f"✅ Backup uploaded to gs://{bucket}/{obj} ({size // 1024 // 1024} MB)")
+            _record_backup(backup_path, f"gcs:{bucket}", size)
             return 0
         else:
             print(f"GCS upload failed: HTTP {up.status_code}: {up.text[:200]}", file=sys.stderr)

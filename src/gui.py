@@ -161,7 +161,9 @@ def projects_list():
                (SELECT MAX(last_sync_at) FROM checkouts c WHERE c.project_id = p.id AND c.is_active=1) AS last_synced,
                (SELECT vc.commit_hash FROM vcs_commits vc WHERE vc.project_id = p.id ORDER BY vc.commit_timestamp DESC LIMIT 1) AS last_commit_hash,
                (SELECT vc.commit_message FROM vcs_commits vc WHERE vc.project_id = p.id ORDER BY vc.commit_timestamp DESC LIMIT 1) AS last_commit_msg,
-               (SELECT vc.commit_timestamp FROM vcs_commits vc WHERE vc.project_id = p.id ORDER BY vc.commit_timestamp DESC LIMIT 1) AS last_commit_at
+               (SELECT vc.commit_timestamp FROM vcs_commits vc WHERE vc.project_id = p.id ORDER BY vc.commit_timestamp DESC LIMIT 1) AS last_commit_at,
+               (SELECT backed_up_at FROM backup_history ORDER BY backed_up_at DESC LIMIT 1) AS last_backed_up,
+               (SELECT provider FROM backup_history ORDER BY backed_up_at DESC LIMIT 1) AS last_backup_provider
         FROM projects p ORDER BY slug
     """)
     rows = [
@@ -182,9 +184,45 @@ def projects_list():
                 f'{html.escape(r["last_commit_hash"][:8])} '
                 f'<span class="muted">{html.escape((r["last_commit_at"] or "")[:10])}</span></a>'
             ) if r["last_commit_hash"] else '<span class="muted">—</span>',
+            (
+                f'{html.escape((r["last_backed_up"] or "")[:10])} <span class="muted">{html.escape(r["last_backup_provider"] or "")}</span>'
+            ) if r["last_backed_up"] else '<span class="muted">—</span>',
+            f'<form style="display:inline" hx-post="/projects/{html.escape(r["slug"])}/sync" hx-target="#sync-result-{html.escape(r["slug"])}" hx-swap="innerHTML">'
+            f'<button type="submit" style="padding:0.15rem 0.4rem;font-size:0.75rem">Sync</button></form>'
+            f'<span id="sync-result-{html.escape(r["slug"])}"></span>',
         ]
         for r in rows_data
     ]
+
+    # Backup history table
+    backups = query_all("""
+        SELECT backed_up_at, provider, backup_path, size_bytes
+        FROM backup_history ORDER BY backed_up_at DESC LIMIT 10
+    """) if _backup_history_exists() else []
+    backup_rows = [
+        [
+            html.escape((r["backed_up_at"] or "")[:16]),
+            html.escape(r["provider"] or ""),
+            f'<span class="muted" style="font-size:0.75rem">{html.escape(r["backup_path"] or "")}</span>',
+            f'{r["size_bytes"] // 1024 // 1024} MB' if r["size_bytes"] else "—",
+        ]
+        for r in backups
+    ]
+    backup_section = f"""
+<hr class="sep">
+<h3>Backup History</h3>
+<div class="row">
+  <form hx-post="/backup/local" hx-target="#backup-result" hx-swap="innerHTML">
+    <button type="submit">Backup Now (local)</button>
+  </form>
+  <form hx-post="/backup/gcs" hx-target="#backup-result" hx-swap="innerHTML">
+    <button type="submit">Backup to GCS</button>
+  </form>
+  <span id="backup-result"></span>
+</div>
+{_table(["Time", "Provider", "Path", "Size"], backup_rows, "No backups recorded yet.")}
+"""
+
     import_form = """
 <hr class="sep">
 <h3>Import Project</h3>
@@ -205,12 +243,32 @@ def projects_list():
 </form>
 <div id="import-result"></div>
 """
+
+    sync_all_btn = """
+<div class="row" style="margin-bottom:0.5rem">
+  <form hx-post="/projects/sync-all" hx-target="#sync-all-result" hx-swap="innerHTML">
+    <button type="submit" class="primary">Sync All Projects</button>
+  </form>
+  <span id="sync-all-result" class="muted"></span>
+</div>
+"""
+
     body = f"""
 <h2>Projects</h2>
-{_table(["Slug", "Name", "Files", "LOC", "Location", "Updated", "Synced", "Latest Commit"], rows, "No projects found.")}
+{sync_all_btn}
+{_table(["Slug", "Name", "Files", "LOC", "Location", "Updated", "Synced", "Latest Commit", "Last Backup", ""], rows, "No projects found.")}
+{backup_section}
 {import_form}
 """
     return _base("Projects", body, "projects")
+
+
+def _backup_history_exists() -> bool:
+    try:
+        query_one("SELECT 1 FROM backup_history LIMIT 1")
+        return True
+    except Exception:
+        return False
 
 
 @app.post("/projects/import", response_class=HTMLResponse)
@@ -221,6 +279,42 @@ def projects_import(path: str = Form(...), slug: str = Form("")):
     rc, out, err = _run(*cmd)
     msg = out or err or "Done"
     return HTMLResponse(_msg(msg, ok=rc == 0))
+
+
+@app.post("/projects/{slug}/sync", response_class=HTMLResponse)
+def project_sync(slug: str):
+    rc, out, err = _run("project", "sync", slug)
+    text = (out or err or "Done").split("\n")[0][:80]
+    ok_cls = "color:#4a9a6a" if rc == 0 else "color:#e94560"
+    return HTMLResponse(f' <span style="{ok_cls};font-size:0.75rem">{html.escape(text)}</span>')
+
+
+@app.post("/projects/sync-all", response_class=HTMLResponse)
+def projects_sync_all():
+    import os
+    projects = query_all("SELECT slug, repo_url FROM projects WHERE repo_url IS NOT NULL AND repo_url != ''")
+    results = []
+    for p in projects:
+        if not os.path.isdir(p["repo_url"]):
+            results.append(f'{p["slug"]}: skipped (path missing)')
+            continue
+        rc, out, err = _run("project", "sync", p["slug"])
+        status = "ok" if rc == 0 else "failed"
+        results.append(f'{p["slug"]}: {status}')
+    summary = ", ".join(results)
+    return HTMLResponse(f'<span class="muted" style="font-size:0.8rem">{html.escape(summary)}</span>')
+
+
+@app.post("/backup/local", response_class=HTMLResponse)
+def backup_local():
+    rc, out, err = _run("backup", "local")
+    return HTMLResponse(_msg(out or err or "Done", ok=rc == 0))
+
+
+@app.post("/backup/gcs", response_class=HTMLResponse)
+def backup_gcs():
+    rc, out, err = _run("backup", "gcs")
+    return HTMLResponse(_msg(out or err or "Done", ok=rc == 0))
 
 
 @app.get("/projects/{slug}", response_class=HTMLResponse)
