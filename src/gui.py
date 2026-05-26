@@ -79,7 +79,7 @@ label { display: block; color: #808098; font-size: 0.8rem; margin-bottom: 0.25re
 
 def _base(title: str, body: str, active: str = "") -> HTMLResponse:
     nav = "\n".join(
-        f'<a href="{href}" class="{"active" if active == k}">{label}</a>'
+        f'<a href="{href}" class="{"active" if active == k else ""}">{label}</a>'
         for k, href, label in [
             ("projects", "/projects", "Projects"),
             ("vcs",      "/vcs",      "VCS"),
