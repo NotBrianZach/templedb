@@ -2,9 +2,9 @@
 # templedb dev wrapper
 #
 # PYTHON:       resolved from ./result (nix build output — has fastapi/uvicorn/python-multipart)
-# SYSTEM_SITE:  resolved from ~/.nix-profile/bin/templedb (home-manager install — has real NixOSCommand)
+# PYTHONPATH:   from ~/.nix-profile/bin/templedb if available, else ./result (fallback)
 #
-# After a nix build or home-manager switch, no manual path editing is needed.
+# Works without home-manager installed. After a nix build, no manual path editing needed.
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 RESULT="$DIR/result"
@@ -21,13 +21,15 @@ if [ -z "$PYTHON" ] || [ ! -x "$PYTHON" ]; then
   exit 1
 fi
 
-# PYTHONPATH from the home-manager-installed templedb (has the real NixOSCommand base class)
-PROFILE_TEMPLEDB="$(readlink -f /home/zach/.nix-profile/bin/templedb 2>/dev/null)"
-if [ -z "$PROFILE_TEMPLEDB" ]; then
-  echo "Error: ~/.nix-profile/bin/templedb not found (run home-manager switch)" >&2
-  exit 1
+# PYTHONPATH: prefer home-manager install (may have extra modules), fall back to ./result
+PROFILE_TEMPLEDB="$(readlink -f ~/.nix-profile/bin/templedb 2>/dev/null)"
+if [ -n "$PROFILE_TEMPLEDB" ] && [ -f "$PROFILE_TEMPLEDB" ]; then
+  SYSTEM_SITE="$(grep -m1 'PYTHONPATH=' "$PROFILE_TEMPLEDB" | sed "s|.*PYTHONPATH='\\(.*\\)'.*|\\1|")"
 fi
-SYSTEM_SITE="$(grep -m1 'PYTHONPATH=' "$PROFILE_TEMPLEDB" | sed "s|.*PYTHONPATH='\\(.*\\)'.*|\\1|")"
+if [ -z "$SYSTEM_SITE" ]; then
+  # Fall back to ./result site-packages (works when home-manager not yet switched)
+  SYSTEM_SITE="$(grep -m1 'PYTHONPATH=' "$RESULT/bin/templedb" | sed "s|.*PYTHONPATH='\\(.*\\)'.*|\\1|")"
+fi
 
 exec env PYTHONPATH="$SYSTEM_SITE" PYTHONNOUSERSITE=true \
   "$PYTHON" "$DIR/templedb_launcher.py" "$@"
