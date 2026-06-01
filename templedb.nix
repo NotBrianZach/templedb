@@ -6,7 +6,8 @@
 
 pkgs.python3Packages.buildPythonApplication rec {
   pname = "templedb";
-  version = "0.1.0";
+  # Keep in sync with src/cli/_version.py (pyproject reads the version from there).
+  version = "0.7.0";
 
   pyproject = true;
   build-system = with pkgs.python3Packages; [ setuptools ];
@@ -54,6 +55,13 @@ pkgs.python3Packages.buildPythonApplication rec {
     sqlite
     git
     age  # For secret management
+  ];
+
+  # Runtime tools the CLI shells out to (git auto-commit during `nixos generate`,
+  # age/sops for secrets, sqlite for the DB). buildInputs alone only makes these
+  # available at build time, so put them on the wrapped CLI's runtime PATH.
+  makeWrapperArgs = [
+    "--prefix" "PATH" ":" "${lib.makeBinPath (with pkgs; [ git age sqlite sops ])}"
   ];
 
   # Don't run tests during build (for now)
