@@ -11,6 +11,7 @@ Generates NixOS modules from TempleDB projects, including:
 """
 
 import os
+import re
 import sys
 import json
 import sqlite3
@@ -20,6 +21,38 @@ from dataclasses import dataclass, field
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
+
+# A Nix attribute name is "bare" only if it matches this; anything else
+# (e.g. a key containing a dot like "git_server.url") MUST be quoted, otherwise
+# Nix parses the dot as a nested attribute path and the value's type no longer
+# matches the option (e.g. environment.variables wants a string, not an attrset).
+_NIX_BARE_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_'-]*$")
+
+# POSIX-portable environment variable name.
+_POSIX_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def nix_attr_key(key: str) -> str:
+    """Return a key safe to use as a Nix attribute name, quoting if needed."""
+    if _NIX_BARE_IDENT.match(key):
+        return key
+    escaped = key.replace('\\', '\\\\').replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def warn_if_bad_env_name(key: str) -> None:
+    """Warn (to stderr) if a key can't be a real shell environment variable.
+
+    Such keys still produce valid Nix once quoted, but shells can't reference a
+    variable whose name contains e.g. a dot, so the value is effectively unusable
+    as an env var.
+    """
+    if not _POSIX_ENV_NAME.match(key):
+        print(
+            f"warning: environment variable name {key!r} is not a valid POSIX "
+            f"name; it will be quoted in Nix but shells cannot reference it",
+            file=sys.stderr,
+        )
 
 from nix_env_generator import NixEnvGenerator
 
@@ -330,9 +363,10 @@ class NixOSGenerator:
     environment.variables = {{
 '''
             for key, value in sorted(config.environment_vars.items()):
+                warn_if_bad_env_name(key)
                 # Escape special characters
                 escaped_value = value.replace('"', '\\"').replace('$', '\\$')
-                module += f'      {key} = "{escaped_value}";\n'
+                module += f'      {nix_attr_key(key)} = "{escaped_value}";\n'
 
             module += '    };\n\n'
 
@@ -428,8 +462,9 @@ class NixOSGenerator:
   home.sessionVariables = {{
 '''
             for key, value in sorted(config.environment_vars.items()):
+                warn_if_bad_env_name(key)
                 escaped_value = value.replace('"', '\\"').replace('$', '\\$')
-                module += f'    {key} = "{escaped_value}";\n'
+                module += f'    {nix_attr_key(key)} = "{escaped_value}";\n'
 
             module += '  };\n\n'
 
