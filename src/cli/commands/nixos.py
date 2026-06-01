@@ -283,11 +283,16 @@ class NixOSCommand(Command):
 
             project_slug = args.slug
 
+            # Always resolve the project first: it is referenced later regardless
+            # of whether an explicit output dir was given via -o/--output.
+            project = self.get_project_or_exit(project_slug)
+
             # Auto-detect output directory for nixos-config projects
             if args.output:
                 output_dir = Path(args.output)
+                output_dir.mkdir(parents=True, exist_ok=True)
             else:
-                project = self.get_project_or_exit(project_slug)
+                # Check if this is a nixos-config project
                 if project['project_type'] == 'nixos-config' and project['repo_url']:
                     config_path = Path(project['repo_url'])
                     modules_dir = config_path / 'modules'
@@ -764,6 +769,148 @@ class NixOSCommand(Command):
         _sp.run([editor] + [str(t) for t in templates])
         return 0
 
+    def doctor(self, args) -> int:
+        """Diagnose common NixOS-config activation problems (read-only).
+
+        Checks the templedb CLI symlinks, the database, each nixos-config
+        project's checkout/modules, generated modules for the unquoted
+        dotted-key bug, and whether /etc/nixos actually imports them.
+        """
+        import os
+        import re as _re
+        from services.system_service import SystemService
+
+        problems = 0
+        warnings = 0
+
+        def ok(msg):
+            print(f"  ✓ {msg}")
+
+        def warn(msg):
+            nonlocal warnings
+            warnings += 1
+            print(f"  ⚠ {msg}")
+
+        def err(msg):
+            nonlocal problems
+            problems += 1
+            print(f"  ✗ {msg}")
+
+        print("\n\U0001f489 TempleDB NixOS doctor\n")
+
+        # 1. CLI launcher symlinks (the templedb vs templeDB casing trap)
+        print("CLI launchers:")
+        home = Path.home()
+        for name in ("templedb", "tdb"):
+            link = home / ".local" / "bin" / name
+            if not link.exists() and not link.is_symlink():
+                warn(f"~/.local/bin/{name} not installed")
+            elif link.is_symlink() and not link.resolve().exists():
+                err(f"~/.local/bin/{name} is a dangling symlink -> {os.readlink(link)}")
+            else:
+                ok(f"~/.local/bin/{name} -> {link.resolve()}")
+
+        # 2. Database
+        print("\nDatabase:")
+        db_path = Path(getattr(self, 'db_path', '') or
+                       os.environ.get('DB_PATH', '') or
+                       (home / ".local/share/templedb/templedb.sqlite"))
+        if db_path.exists():
+            ok(f"{db_path} ({db_path.stat().st_size // (1024*1024)} MB)")
+        else:
+            err(f"database not found at {db_path}")
+
+        # 3. nixos-config projects
+        service = SystemService()
+        projects = service.get_nixos_config_projects()
+        if args.slug:
+            projects = [p for p in projects if p['slug'] == args.slug]
+            if not projects:
+                err(f"no nixos-config project named '{args.slug}'")
+                return 1
+        if not projects:
+            warn("no nixos-config projects (templedb nixos set-type <slug> nixos-config)")
+
+        # What `nixos generate` writes for a nixos-config project today:
+        generated_names = {"templedb-managed-system.nix", "templedb-managed.nix"}
+        # Read /etc/nixos config text once for drift detection.
+        etc_text = ""
+        for f in (Path("/etc/nixos/configuration.nix"), Path("/etc/nixos/flake.nix")):
+            try:
+                etc_text += f.read_text()
+            except OSError:
+                pass
+
+        # A dotted attr key like `git_server.url = ...`. Only a problem *inside*
+        # a string-valued attrset (environment.variables / home.sessionVariables),
+        # where Nix would read the dot as a nested attrset and break the type.
+        dotted_key = _re.compile(r"^\s*([A-Za-z_][\w'-]*(?:\.[A-Za-z_][\w'-]*)+)\s*=")
+        env_block = _re.compile(r"\b(?:environment\.variables|home\.sessionVariables)\s*=\s*\{")
+
+        def find_bad_env_keys(text):
+            bad, depth, in_env = [], 0, False
+            for line in text.splitlines():
+                if not in_env:
+                    if env_block.search(line):
+                        in_env = True
+                        depth = line.count("{") - line.count("}")
+                    continue
+                m = dotted_key.match(line)
+                if m:
+                    bad.append(m.group(1))
+                depth += line.count("{") - line.count("}")
+                if depth <= 0:
+                    in_env = False
+            return bad
+
+        for proj in projects:
+            slug = proj['slug']
+            print(f"\nProject '{slug}':")
+            repo = proj.get('repo_url')
+            if not repo:
+                err("no repo_url set (templedb has nowhere to write modules)")
+                continue
+            checkout = Path(repo)
+            if not checkout.exists():
+                err(f"checkout missing: {checkout}")
+                continue
+            ok(f"checkout: {checkout}")
+
+            modules_dir = checkout / "modules"
+            module_files = sorted(modules_dir.glob("*.nix")) if modules_dir.exists() else []
+            if not module_files:
+                warn(f"no generated modules in {modules_dir} (run: templedb nixos generate {slug})")
+            for mf in module_files:
+                text = mf.read_text()
+                # Unquoted dotted attr keys -> Nix reads them as nested attrsets,
+                # which breaks environment.variables / home.sessionVariables.
+                bad = find_bad_env_keys(text)
+                if bad:
+                    err(f"{mf.name}: unquoted dotted key(s) {bad} - will fail eval; "
+                        f"regenerate with a fixed templedb or quote them")
+                else:
+                    ok(f"{mf.name}: no unquoted dotted keys")
+
+                # Drift: is this file actually imported by /etc/nixos?
+                if etc_text and mf.name in etc_text:
+                    ok(f"{mf.name}: imported by /etc/nixos")
+                elif etc_text:
+                    warn(f"{mf.name}: not referenced in /etc/nixos (won't take effect)")
+
+            # Naming drift between what's deployed and what generate produces now.
+            deployed = {mf.name for mf in module_files}
+            if deployed and not (deployed & generated_names) and \
+                    any(n in etc_text for n in deployed):
+                warn(f"deployed module names {sorted(deployed)} differ from what "
+                     f"`nixos generate` now writes {sorted(generated_names)} - "
+                     f"regeneration will not overwrite the imported files")
+
+        # Summary
+        print(f"\n─────\nSummary: {problems} error(s), {warnings} warning(s)")
+        if problems == 0 and warnings == 0:
+            print("All checks passed ✨")
+        return 1 if problems else 0
+
 
 # ── Register ──────────────────────────────────────────────────────────────────
 
@@ -854,6 +1001,11 @@ def register(cli):
     # list-configs
     subparsers.add_parser('list-configs', help='List all nixos-config projects')
     cli.commands['nixos.list-configs'] = cmd.list_configs
+
+    # nixos doctor command
+    doctor_parser = subparsers.add_parser('doctor', help='Diagnose NixOS-config activation problems')
+    doctor_parser.add_argument('slug', nargs='?', help='Limit checks to one project slug')
+    cli.commands['nixos.doctor'] = cmd.doctor
 
     # config-get / config-set / config-list
     cg = subparsers.add_parser('config-get', help='Get system configuration value')
