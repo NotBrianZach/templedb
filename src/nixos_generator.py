@@ -40,19 +40,31 @@ def nix_attr_key(key: str) -> str:
     return f'"{escaped}"'
 
 
-def warn_if_bad_env_name(key: str) -> None:
-    """Warn (to stderr) if a key can't be a real shell environment variable.
+def is_valid_env_name(key: str) -> bool:
+    """Whether ``key`` can be a real shell environment variable name.
 
-    Such keys still produce valid Nix once quoted, but shells can't reference a
-    variable whose name contains e.g. a dot, so the value is effectively unusable
-    as an env var.
+    A name that isn't POSIX-valid (e.g. contains a dot, like the internal
+    ``git_server.url`` config key) is useless as an env var: NixOS would emit
+    ``export git_server.url=...`` into /etc/set-environment, which every shell
+    rejects as "not a valid identifier". Such keys are skipped, not exported.
     """
-    if not _POSIX_ENV_NAME.match(key):
-        print(
-            f"warning: environment variable name {key!r} is not a valid POSIX "
-            f"name; it will be quoted in Nix but shells cannot reference it",
-            file=sys.stderr,
-        )
+    return bool(_POSIX_ENV_NAME.match(key))
+
+
+def env_vars_for_nix(environment_vars):
+    """Return only the env vars safe to export, warning about any skipped."""
+    valid = {}
+    for key, value in environment_vars.items():
+        if is_valid_env_name(key):
+            valid[key] = value
+        else:
+            print(
+                f"warning: skipping environment variable {key!r}: not a valid "
+                f"POSIX name (shells cannot reference it). If this is internal "
+                f"TempleDB config, it stays in the database and is not exported.",
+                file=sys.stderr,
+            )
+    return valid
 
 from nix_env_generator import NixEnvGenerator
 
@@ -357,13 +369,13 @@ class NixOSGenerator:
 
 '''
 
-        # Environment variables (system-wide)
-        if config.environment_vars:
+        # Environment variables (system-wide); skip names shells can't use.
+        sys_env = env_vars_for_nix(config.environment_vars)
+        if sys_env:
             module += f'''    # System environment variables
     environment.variables = {{
 '''
-            for key, value in sorted(config.environment_vars.items()):
-                warn_if_bad_env_name(key)
+            for key, value in sorted(sys_env.items()):
                 # Escape special characters
                 escaped_value = value.replace('"', '\\"').replace('$', '\\$')
                 module += f'      {nix_attr_key(key)} = "{escaped_value}";\n'
@@ -456,13 +468,13 @@ class NixOSGenerator:
 
         module += ';\n\n'
 
-        # Environment variables (user-level)
-        if config.environment_vars:
+        # Environment variables (user-level); skip names shells can't use.
+        user_env = env_vars_for_nix(config.environment_vars)
+        if user_env:
             module += f'''  # User environment variables
   home.sessionVariables = {{
 '''
-            for key, value in sorted(config.environment_vars.items()):
-                warn_if_bad_env_name(key)
+            for key, value in sorted(user_env.items()):
                 escaped_value = value.replace('"', '\\"').replace('$', '\\$')
                 module += f'    {nix_attr_key(key)} = "{escaped_value}";\n'
 
