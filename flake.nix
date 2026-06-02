@@ -38,12 +38,12 @@
             SITE="$out/${python.sitePackages}"
             mkdir -p "$SITE" "$out/bin"
 
-            # Install packages and modules from src/
-            cp -r src/cli "$SITE/"
-            cp -r src/importer "$SITE/" 2>/dev/null || true
-            for f in src/*.py; do
-              [ -f "$f" ] && cp "$f" "$SITE/"
-            done
+            # Install all Python packages and modules from src/. Copying the
+            # whole tree avoids silently dropping subpackages: besides cli and
+            # importer, the CLI imports services, repositories, backup, exporter,
+            # dns_providers, git_server and sync, plus top-level modules such as
+            # nixos_generator.py.
+            cp -r src/. "$SITE/"
 
             # Install root-level Python modules (gui, mcp_server, etc.)
             for f in *.py; do
