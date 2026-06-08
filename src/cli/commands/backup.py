@@ -116,6 +116,18 @@ class BackupCommands(Command):
             # Restore
             shutil.copy2(backup_path, DB_PATH)
             print(f"✅ Database restored from {backup_path}")
+
+            # Stamp migrations for restored DB (it predates tracking)
+            try:
+                from migrator import Migrator
+                m = Migrator(DB_PATH)
+                stamped = m.stamp_existing()
+                if stamped:
+                    print(f"📋 Stamped {stamped} migration(s) as pre-existing")
+            except Exception as e:
+                print(f"⚠  Could not stamp migrations: {e}")
+                print(f"   Run: templedb db stamp")
+
             return 0
         except Exception as e:
             logger.error(f"Restore failed: {e}")

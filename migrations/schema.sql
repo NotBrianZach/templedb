@@ -57,7 +57,7 @@ CREATE TABLE shared_file_references (
 
     UNIQUE(source_file_id, using_project_id)
 );
-CREATE TABLE sqlite_sequence(name,seq);
+-- sqlite_sequence is auto-created by SQLite for AUTOINCREMENT columns
 CREATE INDEX idx_shared_file_refs_source ON shared_file_references(source_file_id);
 CREATE INDEX idx_shared_file_refs_using ON shared_file_references(using_project_id);
 CREATE INDEX idx_content_blobs_size ON "content_blobs"(file_size_bytes);

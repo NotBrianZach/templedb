@@ -302,6 +302,8 @@ class Command:
         project = self.get_project_by_slug(slug)
         if not project:
             print(f"Error: Project '{slug}' not found", file=sys.stderr)
+            print(f"  Run 'templedb project list' to see available projects", file=sys.stderr)
+            print(f"  Or import one: templedb project import /path/to/repo --slug {slug}", file=sys.stderr)
             sys.exit(1)
         return project
 

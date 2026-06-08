@@ -231,7 +231,23 @@ def _nixos_status(slug: str):
     else:
         live_status = "UP TO DATE"
 
+    # Migration status
+    migration_status = "?"
+    try:
+        from migrator import Migrator
+        from db_utils import DB_PATH
+        m = Migrator(DB_PATH)
+        status_entries = m.status()
+        pending_migrations = sum(1 for s in status_entries if not s["applied"])
+        if pending_migrations == 0:
+            migration_status = "OK"
+        else:
+            migration_status = f"{pending_migrations} PENDING — run: templedb db migrate"
+    except Exception:
+        migration_status = "unknown"
+
     print()
+    print(f"  Migrations:    {migration_status}")
     if count > 0:
         noun = "change" if count == 1 else "changes"
         since = f" since last generate ({_fmt_ts(last_gen)})" if last_gen else ""
@@ -478,6 +494,18 @@ class NixOSCommand(Command):
 
     def rebuild(self, args) -> int:
         """Rebuild NixOS system"""
+        # Check for pending migrations before rebuilding
+        try:
+            from migrator import Migrator
+            from db_utils import DB_PATH
+            m = Migrator(DB_PATH)
+            pending = sum(1 for s in m.status() if not s["applied"])
+            if pending > 0:
+                print(f"⚠ {pending} pending database migration(s)")
+                print(f"  Run: templedb db migrate\n")
+        except Exception:
+            pass
+
         if not _check_dirty_and_prompt():
             return 1
 
@@ -820,6 +848,21 @@ class NixOSCommand(Command):
         else:
             err(f"database not found at {db_path}")
 
+        # 2b. Migration status
+        print("\nMigrations:")
+        try:
+            from migrator import Migrator
+            m = Migrator(str(db_path))
+            status = m.status()
+            pending = sum(1 for s in status if not s["applied"])
+            applied = sum(1 for s in status if s["applied"])
+            if pending == 0:
+                ok(f"all {applied} migrations applied")
+            else:
+                warn(f"{pending} pending migration(s) — run: templedb db migrate")
+        except Exception as e:
+            warn(f"could not check migrations: {e}")
+
         # 3. nixos-config projects
         service = SystemService()
         projects = service.get_nixos_config_projects()
@@ -910,6 +953,152 @@ class NixOSCommand(Command):
         if problems == 0 and warnings == 0:
             print("All checks passed ✨")
         return 1 if problems else 0
+
+
+    # ── Dotfiles ──────────────────────────────────────────────────────────────
+
+    def dotfiles_apply(self, args) -> int:
+        """Apply dotfile symlinks from the system_config dotfiles manifest."""
+        conn = _get_conn()
+        manifest = self._get_dotfiles_manifest(conn)
+
+        if not manifest:
+            print("No dotfiles configured.")
+            print("Add entries with: templedb nixos dotfiles-add <project> <source> <target>")
+            return 0
+
+        from repositories import ConfigLinkRepository
+        config_repo = ConfigLinkRepository()
+
+        created = 0
+        skipped = 0
+        already_ok = 0
+
+        for entry in manifest:
+            project_slug = entry['project']
+            source_rel = entry['source']
+            target_path = Path(entry['target']).expanduser()
+
+            checkout_dir = Path.home() / '.config' / 'templedb' / 'checkouts' / project_slug
+            source_abs = checkout_dir / source_rel
+
+            if not source_abs.exists():
+                print(f"  SKIP {source_rel} (source missing: {source_abs})")
+                skipped += 1
+                continue
+
+            if target_path.is_symlink() and target_path.resolve() == source_abs.resolve():
+                if args.verbose:
+                    print(f"  OK   {target_path} -> {source_abs}")
+                already_ok += 1
+                continue
+
+            # Back up existing file if not a symlink
+            backup_path = None
+            if target_path.exists() and not target_path.is_symlink():
+                if not args.force:
+                    print(f"  SKIP {target_path} (exists, use --force to replace)")
+                    skipped += 1
+                    continue
+                backup_path = str(target_path) + '.templedb-backup'
+                import shutil
+                shutil.move(str(target_path), backup_path)
+                print(f"  BACKUP {target_path} -> {backup_path}")
+            elif target_path.is_symlink():
+                target_path.unlink()
+
+            # Create parent dirs and symlink
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.symlink_to(source_abs)
+            print(f"  LINK {target_path} -> {source_abs}")
+            created += 1
+
+        print(f"\nDotfiles: {created} created, {already_ok} already OK, {skipped} skipped")
+        return 0
+
+    def dotfiles_add(self, args) -> int:
+        """Add a dotfile mapping to the manifest."""
+        conn = _get_conn()
+        manifest = self._get_dotfiles_manifest(conn)
+
+        # Check for duplicate
+        for entry in manifest:
+            if entry['project'] == args.project and entry['source'] == args.source:
+                print(f"Already mapped: {args.source} -> {entry['target']}")
+                return 0
+
+        manifest.append({
+            'project': args.project,
+            'source': args.source,
+            'target': args.target,
+        })
+
+        self._set_dotfiles_manifest(conn, manifest)
+        conn.commit()
+        print(f"Added: {args.project}:{args.source} -> {args.target}")
+        return 0
+
+    def dotfiles_remove(self, args) -> int:
+        """Remove a dotfile mapping from the manifest."""
+        conn = _get_conn()
+        manifest = self._get_dotfiles_manifest(conn)
+
+        new_manifest = [
+            e for e in manifest
+            if not (e['project'] == args.project and e['source'] == args.source)
+        ]
+
+        if len(new_manifest) == len(manifest):
+            print(f"No mapping found for {args.project}:{args.source}")
+            return 1
+
+        self._set_dotfiles_manifest(conn, new_manifest)
+        conn.commit()
+        print(f"Removed: {args.project}:{args.source}")
+        return 0
+
+    def dotfiles_list(self, args) -> int:
+        """List all dotfile mappings."""
+        conn = _get_conn()
+        manifest = self._get_dotfiles_manifest(conn)
+
+        if not manifest:
+            print("No dotfiles configured.")
+            return 0
+
+        checkout_base = Path.home() / '.config' / 'templedb' / 'checkouts'
+
+        for entry in manifest:
+            source_abs = checkout_base / entry['project'] / entry['source']
+            target = Path(entry['target']).expanduser()
+
+            if target.is_symlink() and target.resolve() == source_abs.resolve():
+                status = "OK"
+            elif target.exists():
+                status = "CONFLICT"
+            elif not source_abs.exists():
+                status = "NO SOURCE"
+            else:
+                status = "NOT LINKED"
+
+            print(f"  [{status:>10}] {entry['project']}:{entry['source']} -> {entry['target']}")
+
+        return 0
+
+    def _get_dotfiles_manifest(self, conn) -> list:
+        row = conn.execute(
+            "SELECT value FROM system_config WHERE key = 'nixos.dotfiles'"
+        ).fetchone()
+        if row:
+            return json.loads(row[0])
+        return []
+
+    def _set_dotfiles_manifest(self, conn, manifest: list):
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES ('nixos.dotfiles', ?, datetime('now'))",
+            (json.dumps(manifest),)
+        )
 
 
 # ── Register ──────────────────────────────────────────────────────────────────
@@ -1046,3 +1235,26 @@ def register(cli):
     et = subparsers.add_parser('edit-template', help='Open .nix.template files in $EDITOR')
     et.add_argument('slug', nargs='?', help='NixOS config project slug (auto-detect)')
     cli.commands['nixos.edit-template'] = cmd.nixos_edit_template
+
+    # dotfiles-apply
+    da = subparsers.add_parser('dotfiles-apply', help='Apply dotfile symlinks from manifest')
+    da.add_argument('--force', '-f', action='store_true', help='Replace existing files')
+    da.add_argument('--verbose', '-v', action='store_true', help='Show already-OK links')
+    cli.commands['nixos.dotfiles-apply'] = cmd.dotfiles_apply
+
+    # dotfiles-add
+    dadd = subparsers.add_parser('dotfiles-add', help='Add dotfile mapping')
+    dadd.add_argument('project', help='Project slug (e.g. system_config)')
+    dadd.add_argument('source', help='Relative path in checkout (e.g. .spacemacs)')
+    dadd.add_argument('target', help='Target path (e.g. ~/.spacemacs)')
+    cli.commands['nixos.dotfiles-add'] = cmd.dotfiles_add
+
+    # dotfiles-remove
+    drm = subparsers.add_parser('dotfiles-remove', help='Remove dotfile mapping')
+    drm.add_argument('project', help='Project slug')
+    drm.add_argument('source', help='Relative path in checkout')
+    cli.commands['nixos.dotfiles-remove'] = cmd.dotfiles_remove
+
+    # dotfiles-list
+    dl = subparsers.add_parser('dotfiles-list', help='List dotfile mappings and status')
+    cli.commands['nixos.dotfiles-list'] = cmd.dotfiles_list

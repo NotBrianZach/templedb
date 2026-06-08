@@ -137,6 +137,9 @@ class FuzzyMatcher:
 
         if len(matches) == 0:
             logger.error(f"No {entity_name} matches '{pattern}'")
+            if entity_name == "project":
+                logger.info(f"  Run 'templedb project list' to see available projects")
+                logger.info(f"  Or import one: templedb project import /path/to/repo")
             return None
 
         if len(matches) == 1:

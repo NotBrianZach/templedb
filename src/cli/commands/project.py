@@ -102,7 +102,12 @@ class ProjectCommands(Command):
                 logger.info(f"{e.solution}")
             return 1
         except Exception as e:
-            logger.error(f"Import failed: {e}", exc_info=True)
+            logger.error(f"Import failed: {e}")
+            logger.debug("Full error:", exc_info=True)
+            logger.info("  Common fixes:")
+            logger.info("    - Ensure the path exists and is a directory")
+            logger.info("    - Add --allow-non-nix if the project has no flake.nix")
+            logger.info("    - Use --slug <name> if the directory name isn't a valid slug")
             return 1
 
     def list_projects(self, args) -> int:

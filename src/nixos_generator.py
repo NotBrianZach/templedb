@@ -311,7 +311,14 @@ class NixOSGenerator:
             managed_pkgs = self.get_managed_packages()
             for pkg in managed_pkgs:
                 # Get flake URI (defaults to local path if not specified)
-                flake_uri = pkg.get('flake_uri') or f"path:{pkg['git_path']}"
+                # Prefer checkout path for portability across machines
+                checkout_path = Path.home() / ".config/templedb/checkouts" / pkg['project_slug']
+                if pkg.get('flake_uri'):
+                    flake_uri = pkg['flake_uri']
+                elif checkout_path.exists():
+                    flake_uri = f"path:{checkout_path}"
+                else:
+                    flake_uri = f"path:{pkg['git_path']}"
                 pkg_ref = f"inputs.{pkg['package_name']}.packages.${{pkgs.system}}.default"
 
                 if pkg['install_scope'] == 'system':

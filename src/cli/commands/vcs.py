@@ -18,6 +18,17 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
+def _project_not_found(name: str):
+    """Standard error + guidance when a project slug doesn't resolve.
+
+    Note: when called after fuzzy_match_project(), the fuzzy matcher
+    already prints guidance, so this is a no-op in that path.
+    Kept for direct lookups that bypass fuzzy matching.
+    """
+    # fuzzy_match_project already prints guidance via fuzzy_matcher.py
+    pass
+
+
 class VCSCommands(Command):
     """VCS command handlers"""
 
@@ -69,7 +80,7 @@ class VCSCommands(Command):
             # Fuzzy match project
             project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
-                logger.error(f"Project '{args.project}' not found")
+                _project_not_found(args.project)
                 return 1
 
             # Determine what to stage
@@ -131,7 +142,7 @@ class VCSCommands(Command):
             # Fuzzy match project
             project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
-                logger.error(f"Project '{args.project}' not found")
+                _project_not_found(args.project)
                 return 1
 
             # Determine what to unstage
@@ -194,7 +205,7 @@ class VCSCommands(Command):
             # Fuzzy match project
             project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
-                logger.error(f"Project '{args.project}' not found")
+                _project_not_found(args.project)
                 return 1
 
             # Initialize sync manager
@@ -252,7 +263,7 @@ class VCSCommands(Command):
             # Fuzzy match project
             project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
-                logger.error(f"Project '{args.project}' not found")
+                _project_not_found(args.project)
                 return 1
 
             # Initialize sync manager
@@ -340,7 +351,7 @@ class VCSCommands(Command):
         # Fuzzy match project
         project = fuzzy_match_project(args.project, show_matched=False)
         if not project:
-            logger.error(f"Project '{args.project}' not found")
+            _project_not_found(args.project)
             return 1
 
         # Get branch
@@ -353,6 +364,8 @@ class VCSCommands(Command):
 
         if not branch:
             logger.error("Branch not found")
+            logger.info(f"  List branches: templedb vcs branch {project['slug']}")
+            logger.info(f"  Create one:    templedb vcs branch {project['slug']} --create main")
             return 1
 
         # Get staged files with content info
@@ -367,6 +380,8 @@ class VCSCommands(Command):
 
         if not staged:
             print("No changes staged for commit")
+            print(f"  Check status:  templedb vcs status {project['slug']} --refresh")
+            print(f"  Stage files:   templedb vcs add -p {project['slug']} --all")
             return 1
 
         # Get author
@@ -579,7 +594,7 @@ class VCSCommands(Command):
         # Fuzzy match project
         project = fuzzy_match_project(args.project, show_matched=False)
         if not project:
-            logger.error(f"Project '{args.project}' not found")
+            _project_not_found(args.project)
             return 1
 
         if hasattr(args, 'name') and args.name:
@@ -623,7 +638,7 @@ class VCSCommands(Command):
         # Fuzzy match project
         project = fuzzy_match_project(args.project, show_matched=False)
         if not project:
-            logger.error(f"Project '{args.project}' not found")
+            _project_not_found(args.project)
             return 1
 
         # Handle --staged flag (show staged changes)
@@ -912,7 +927,7 @@ class VCSCommands(Command):
         # Fuzzy match project
         project = fuzzy_match_project(args.project, show_matched=False)
         if not project:
-            logger.error(f"Project '{args.project}' not found")
+            _project_not_found(args.project)
             return 1
 
         # Find commit
@@ -980,15 +995,18 @@ class VCSCommands(Command):
         repo_url = project.get('repo_url')
         if not repo_url:
             logger.error(f"Project has no repo_url set")
+            logger.info(f"  Set it with: templedb project sync {project['slug']}")
             return 1
 
         repo_path = Path(repo_url)
         if not repo_path.exists():
             logger.error(f"Repository path does not exist: {repo_path}")
+            logger.info(f"  Check path or re-import: templedb project import /path/to/repo --slug {project['slug']}")
             return 1
 
         if not (repo_path / '.git').exists():
             logger.error(f"Not a git repository: {repo_path}")
+            logger.info(f"  Initialize with: cd {repo_path} && git init")
             return 1
 
         print(f"📦 Importing git history for {args.project}")
@@ -1029,15 +1047,18 @@ class VCSCommands(Command):
         repo_url = project.get('repo_url')
         if not repo_url:
             logger.error(f"Project has no repo_url set")
+            logger.info(f"  Set it with: templedb project sync {project['slug']}")
             return 1
 
         repo_path = Path(repo_url)
         if not repo_path.exists():
             logger.error(f"Repository path does not exist: {repo_path}")
+            logger.info(f"  Check path or re-import: templedb project import /path/to/repo --slug {project['slug']}")
             return 1
 
         if not (repo_path / '.git').exists():
             logger.error(f"Not a git repository: {repo_path}")
+            logger.info(f"  Initialize with: cd {repo_path} && git init")
             return 1
 
         print(f"📤 Exporting commits from {args.project} to git")

@@ -40,7 +40,7 @@ class DirenvCommand(Command):
 
             try:
                 # Generate to temp file
-                from main import cmd_direnv
+                from direnv_generator import cmd_direnv
                 conn = self.get_connection()
                 try:
                     # Redirect stdout to temp file
@@ -100,7 +100,7 @@ class DirenvCommand(Command):
             current_content = envrc_path.read_text()
 
             # Generate expected content
-            from main import cmd_direnv
+            from direnv_generator import cmd_direnv
             import io
             import sys
 
@@ -141,8 +141,8 @@ class DirenvCommand(Command):
     def generate(self, args) -> int:
         """Generate direnv-compatible output for a project"""
         try:
-            # Import the actual implementation from main.py
-            from main import cmd_direnv
+            # Import the direnv generator
+            from direnv_generator import cmd_direnv
 
             # Get connection using the base class method
             conn = self.get_connection()
