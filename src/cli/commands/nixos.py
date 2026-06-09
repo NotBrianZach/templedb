@@ -1100,6 +1100,224 @@ class NixOSCommand(Command):
             (json.dumps(manifest),)
         )
 
+    # ── Import / Generate-All ────────────────────────────────────────────
+
+    def import_config(self, args) -> int:
+        """Import existing NixOS config let-bindings into system_config table."""
+        import re as _re
+
+        slug = _resolve_slug(getattr(args, 'slug', None))
+        if not slug:
+            return 1
+
+        conn = _get_conn()
+        proj = conn.execute("SELECT repo_url FROM projects WHERE slug = ?", (slug,)).fetchone()
+        if not proj or not proj[0]:
+            print(f"Project '{slug}' has no repo_url set.", file=sys.stderr)
+            return 1
+
+        repo = Path(proj[0])
+        nix_files = ['home.nix', 'configuration.nix']
+        imported = 0
+
+        for nix_file in nix_files:
+            fpath = repo / nix_file
+            if not fpath.exists():
+                continue
+
+            content = fpath.read_text()
+
+            # Only extract let bindings from the "Portable path definitions" block
+            # Look for the section between "Portable path definitions" and the next blank line or non-let code
+            let_section = _re.search(
+                r'# === Portable path definitions ===\n(.*?)(?=\n\n|\n  \w+\s*=\s*pkgs\.)',
+                content, _re.DOTALL
+            )
+            if not let_section:
+                print(f"  {nix_file}: no portable path definitions block found, skipping")
+                continue
+
+            let_block = let_section.group(1)
+            prefix = "nixos.let." + nix_file.replace('.nix', '') + "."
+
+            # Extract: varName = "/some/path"; (only absolute paths or simple values)
+            let_pattern = _re.compile(
+                r'^\s+(\w+)\s*=\s*"(/[^"]*)";\s*$', _re.MULTILINE
+            )
+
+            for match in let_pattern.finditer(let_block):
+                var_name = match.group(1)
+                var_value = match.group(2)
+
+                key = prefix + var_name
+                conn.execute(
+                    "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                    "VALUES (?, ?, datetime('now'))",
+                    (key, var_value)
+                )
+                print(f"  {key} = {var_value}")
+                imported += 1
+
+        # Also extract flake.nix inputs
+        flake_path = repo / 'flake.nix'
+        if flake_path.exists():
+            content = flake_path.read_text()
+            input_pattern = _re.compile(
+                r'^\s+(\S+)\.url\s*=\s*"([^"]+)";\s*$', _re.MULTILINE
+            )
+            for match in input_pattern.finditer(content):
+                input_name = match.group(1)
+                input_url = match.group(2)
+                key = f"nixos.flake.input.{input_name}"
+                conn.execute(
+                    "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                    "VALUES (?, ?, datetime('now'))",
+                    (key, input_url)
+                )
+                print(f"  {key} = {input_url}")
+                imported += 1
+
+        # Store host configurations
+        hosts_dir = repo / 'hosts'
+        if hosts_dir.exists():
+            for host_file in hosts_dir.glob('*.nix'):
+                host_name = host_file.stem
+                key = f"nixos.host.{host_name}"
+                conn.execute(
+                    "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                    "VALUES (?, ?, datetime('now'))",
+                    (key, str(host_file.relative_to(repo)))
+                )
+                print(f"  {key} = {host_file.relative_to(repo)}")
+                imported += 1
+
+        conn.commit()
+        print(f"\nImported {imported} config values from {slug}")
+        print(f"  View with: templedb nixos config-list")
+        print(f"  Generate:  templedb nixos generate-all {slug}")
+        return 0
+
+    def generate_all(self, args) -> int:
+        """Generate all NixOS config from DB: render templates + generate managed modules."""
+        slug = _resolve_slug(getattr(args, 'slug', None))
+        if not slug:
+            return 1
+
+        conn = _get_conn()
+        proj = conn.execute("SELECT id, repo_url FROM projects WHERE slug = ?", (slug,)).fetchone()
+        if not proj or not proj[1]:
+            print(f"Project '{slug}' has no repo_url set.", file=sys.stderr)
+            return 1
+
+        repo = Path(proj[1])
+        dry_run = getattr(args, 'dry_run', False)
+
+        print(f"Generating all NixOS config for {slug}")
+        print(f"  Config dir: {repo}\n")
+
+        # Step 1: Update let-bindings in nix files from system_config
+        nix_files = {'home': 'home.nix', 'configuration': 'configuration.nix'}
+        let_updated = 0
+
+        for prefix_name, nix_file in nix_files.items():
+            fpath = repo / nix_file
+            if not fpath.exists():
+                continue
+
+            content = fpath.read_text()
+            db_prefix = f"nixos.let.{prefix_name}."
+
+            # Get all let-binding values from DB
+            rows = conn.execute(
+                "SELECT key, value FROM system_config WHERE key LIKE ?",
+                (f"{db_prefix}%",)
+            ).fetchall()
+
+            if not rows:
+                continue
+
+            for row in rows:
+                var_name = row[0][len(db_prefix):]
+                new_value = row[1]
+
+                # Replace in content: varName = "old_value"; → varName = "new_value";
+                import re as _re
+                pattern = _re.compile(
+                    rf'(\s+{_re.escape(var_name)}\s*=\s*)"[^"]*"(;\s*$)',
+                    _re.MULTILINE
+                )
+                new_content = pattern.sub(rf'\1"{new_value}"\2', content)
+                if new_content != content:
+                    content = new_content
+                    let_updated += 1
+
+            if not dry_run:
+                fpath.write_text(content)
+                print(f"  Updated {nix_file} ({let_updated} bindings)")
+            else:
+                print(f"  [DRY RUN] Would update {nix_file} ({let_updated} bindings)")
+
+        # Step 2: Render .nix.template files
+        try:
+            from template_renderer import TemplateRenderer
+            renderer = TemplateRenderer()
+            machine_name = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+            ).fetchone()
+            machine = machine_name[0] if machine_name else None
+
+            if not dry_run:
+                count = renderer.render_project_templates(
+                    slug, repo, machine_name=machine
+                )
+                print(f"  Rendered {count} template(s)")
+            else:
+                templates = list(repo.rglob("*.template"))
+                print(f"  [DRY RUN] Would render {len(templates)} template(s)")
+        except Exception as e:
+            print(f"  Template rendering: {e}")
+
+        # Step 3: Run generate-templedb-inputs.py if it exists
+        inputs_script = repo / 'generate-templedb-inputs.py'
+        if inputs_script.exists():
+            if not dry_run:
+                import subprocess
+                result = subprocess.run(
+                    [sys.executable, str(inputs_script)],
+                    cwd=str(repo), capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    print(f"  Updated flake inputs")
+                else:
+                    print(f"  Flake inputs update failed: {result.stderr[:200]}")
+            else:
+                print(f"  [DRY RUN] Would run generate-templedb-inputs.py")
+
+        # Step 4: Generate managed modules (existing generate logic)
+        if not dry_run:
+            import argparse
+            gen_args = argparse.Namespace(
+                slug=slug, output=None, cathedral_path=None,
+                no_home_manager=False, include_templedb=True
+            )
+            print()
+            self.generate(gen_args)
+        else:
+            print(f"  [DRY RUN] Would generate managed modules")
+
+        # Step 5: Git stage generated files for nix eval
+        if not dry_run:
+            import subprocess
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=str(repo), capture_output=True
+            )
+            print(f"\n  Staged all generated files for nix evaluation")
+
+        print(f"\nNext steps:")
+        print(f"  templedb nixos rebuild {slug}")
+        return 0
+
 
 # ── Register ──────────────────────────────────────────────────────────────────
 
@@ -1258,3 +1476,14 @@ def register(cli):
     # dotfiles-list
     dl = subparsers.add_parser('dotfiles-list', help='List dotfile mappings and status')
     cli.commands['nixos.dotfiles-list'] = cmd.dotfiles_list
+
+    # import-config
+    ic = subparsers.add_parser('import-config', help='Import existing NixOS config into DB')
+    ic.add_argument('slug', nargs='?', help='NixOS config project slug')
+    cli.commands['nixos.import-config'] = cmd.import_config
+
+    # generate-all
+    ga = subparsers.add_parser('generate-all', help='Generate all NixOS config from DB (templates + modules + inputs)')
+    ga.add_argument('slug', nargs='?', help='NixOS config project slug')
+    ga.add_argument('--dry-run', action='store_true', help='Show what would be generated')
+    cli.commands['nixos.generate-all'] = cmd.generate_all
