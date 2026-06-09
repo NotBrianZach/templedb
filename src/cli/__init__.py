@@ -16,7 +16,7 @@ from cli.commands import (
     target, secret, gui_launcher, config, workitem, mcp, direnv, merge,
     blob, domain, backup, claude, prompt, vibe, nixos, key, cache, nixops4,
     deploy_nix, file, tutorial, git_server_commands, query_open, dev, deploy_history,
-    schema, new_machine, db,
+    schema, new_machine, db, mount,
     # Note: code module not imported - functionality available via MCP tools
 )
 from cli.core import cli
@@ -75,6 +75,7 @@ def main():
     schema.register(cli)
     new_machine.register(cli)
     db.register(cli)
+    mount.register(cli)  # FUSE mount + git export
 
     # Execute
     exit_code = cli.execute()

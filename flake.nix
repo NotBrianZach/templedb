@@ -22,6 +22,7 @@
             fastapi
             uvicorn
             python-multipart
+            fusepy
           ]);
         in
         pkgs.stdenv.mkDerivation {
@@ -118,7 +119,7 @@
 
             # Python env with all templedb dependencies
             (python3.withPackages (ps: with ps; [
-              pyyaml rich requests cryptography fastapi uvicorn python-multipart
+              pyyaml rich requests cryptography fastapi uvicorn python-multipart fusepy
             ]))
           ];
           shellHook = ''
