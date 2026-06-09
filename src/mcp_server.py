@@ -183,6 +183,12 @@ class MCPServer:
             "templedb_readme_find_related": self.tool_readme_find_related,
             "templedb_readme_verify_links": self.tool_readme_verify_links,
             "templedb_readme_list": self.tool_readme_list,
+            "templedb_mount_status": self.tool_mount_status,
+            "templedb_db_status": self.tool_db_status,
+            "templedb_db_migrate": self.tool_db_migrate,
+            "templedb_git_export": self.tool_git_export,
+            "templedb_dotfiles_list": self.tool_dotfiles_list,
+            "templedb_bootstrap_status": self.tool_bootstrap_status,
         }
 
     def _get_db_connection(self):
@@ -711,6 +717,11 @@ class MCPServer:
                         "dry_run": {
                             "type": "boolean",
                             "description": "If true, show what would be deployed without executing (default: false)"
+                        },
+                        "only": {
+                            "type": "string",
+                            "enum": ["frontend", "functions", "migrations", "secrets"],
+                            "description": "Deploy only a specific component instead of the full stack"
                         }
                     },
                     "required": ["project"]
@@ -1573,6 +1584,78 @@ class MCPServer:
                     },
                     "required": []
                 }
+            },
+            {
+                "name": "templedb_mount_status",
+                "description": "Check if TempleDB FUSE filesystem is mounted and show mount points.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_db_status",
+                "description": "Show database migration status — applied and pending migrations.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_db_migrate",
+                "description": "Apply pending database migrations.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "If true, show what would be applied without applying"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_git_export",
+                "description": "Export a TempleDB project's VCS history as a git repository for GitHub.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug to export"
+                        },
+                        "output_dir": {
+                            "type": "string",
+                            "description": "Output directory for git repo (default: /tmp/templedb-git-<slug>)"
+                        },
+                        "remote_url": {
+                            "type": "string",
+                            "description": "GitHub remote URL to set as origin"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_dotfiles_list",
+                "description": "List all registered dotfile symlink mappings and their current status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_bootstrap_status",
+                "description": "Check bootstrap readiness: age key, checkouts, migrations, dotfiles.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
             }
         ]
 
@@ -2296,6 +2379,7 @@ class MCPServer:
             project_name = args["project"]
             target = args.get("target", "default")
             dry_run = args.get("dry_run", False)
+            only = args.get("only", None)
 
             import subprocess
             cmd = ["./templedb", "deploy", "run", project_name]
@@ -2303,6 +2387,8 @@ class MCPServer:
                 cmd.extend(["--target", target])
             if dry_run:
                 cmd.append("--dry-run")
+            if only:
+                cmd.extend(["--only", only])
 
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
 
@@ -4193,6 +4279,143 @@ class MCPServer:
 
         except Exception as e:
             logger.error(f"Error listing READMEs: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    # ── New tools: mount, db, git-export, dotfiles, bootstrap ─────────
+
+    def tool_mount_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Check FUSE mount status"""
+        try:
+            mounts = []
+            with open("/proc/mounts") as f:
+                for line in f:
+                    if "fuse" in line.lower() and "temple" in line.lower():
+                        parts = line.split()
+                        mounts.append({"mountpoint": parts[1], "type": parts[2]})
+            return self._success_response({
+                "mounted": len(mounts) > 0,
+                "mounts": mounts,
+                "hint": "Mount with: templedb mount ~/temple" if not mounts else None,
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_db_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show migration status"""
+        try:
+            from migrator import Migrator
+            m = Migrator(DB_PATH)
+            status = m.status()
+            return self._success_response({
+                "applied": sum(1 for s in status if s["applied"]),
+                "pending": sum(1 for s in status if not s["applied"]),
+                "migrations": status,
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_db_migrate(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply pending migrations"""
+        try:
+            from migrator import Migrator
+            dry_run = args.get("dry_run", False)
+            m = Migrator(DB_PATH)
+            applied, skipped = m.migrate(dry_run=dry_run)
+            return self._success_response({
+                "applied": applied,
+                "skipped": skipped,
+                "dry_run": dry_run,
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_git_export(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Export VCS history as git repo"""
+        try:
+            from git_export import export_to_git
+            project = args["project"]
+            output_dir = args.get("output_dir", f"/tmp/templedb-git-{project}")
+            remote_url = args.get("remote_url")
+            result = export_to_git(
+                project_slug=project,
+                output_dir=output_dir,
+                remote_url=remote_url,
+            )
+            return self._success_response(result)
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_dotfiles_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List dotfile mappings and status"""
+        try:
+            import json
+            from pathlib import Path
+            conn = self._get_db_connection()
+            row = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.dotfiles'"
+            ).fetchone()
+            if not row:
+                return self._success_response({"dotfiles": [], "count": 0})
+
+            manifest = json.loads(row[0])
+            checkouts = Path.home() / ".config/templedb/checkouts"
+            result = []
+            for entry in manifest:
+                src = checkouts / entry["project"] / entry["source"]
+                tgt = Path(entry["target"]).expanduser()
+                if tgt.is_symlink() and tgt.resolve() == src.resolve():
+                    status = "linked"
+                elif tgt.exists():
+                    status = "conflict"
+                elif not src.exists():
+                    status = "no_source"
+                else:
+                    status = "not_linked"
+                result.append({**entry, "status": status})
+            return self._success_response({"dotfiles": result, "count": len(result)})
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_bootstrap_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Check bootstrap readiness"""
+        try:
+            import json
+            from pathlib import Path
+            from migrator import Migrator
+            home = Path.home()
+
+            # Age key
+            age_paths = [home / ".age/key.txt", home / ".config/sops/age/keys.txt"]
+            age_ok = any(p.exists() for p in age_paths)
+
+            # Migrations
+            m = Migrator(DB_PATH)
+            status = m.status()
+            mig_pending = sum(1 for s in status if not s["applied"])
+
+            # Checkouts
+            co_dir = home / ".config/templedb/checkouts"
+            checkouts = sum(1 for p in co_dir.iterdir() if p.is_dir()) if co_dir.exists() else 0
+
+            # Dotfiles
+            conn = self._get_db_connection()
+            df_row = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.dotfiles'"
+            ).fetchone()
+            dotfiles_count = len(json.loads(df_row[0])) if df_row else 0
+
+            # Projects
+            proj_count = conn.execute("SELECT COUNT(*) as n FROM projects").fetchone()[0]
+
+            return self._success_response({
+                "age_key_found": age_ok,
+                "migrations_pending": mig_pending,
+                "checkouts": checkouts,
+                "projects": proj_count,
+                "dotfiles_configured": dotfiles_count,
+                "ready": age_ok and mig_pending == 0,
+            })
+        except Exception as e:
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
 

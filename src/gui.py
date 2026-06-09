@@ -2183,6 +2183,12 @@ templedb nixos dotfiles-apply [--force]</pre>
 templedb bootstrap --from-backup &lt;path&gt;
 templedb bootstrap --from-gcs &lt;bucket&gt;</pre>
 
+<h3 style="margin-top:1rem">FUSE &amp; Git Export</h3>
+<pre style="font-size:0.78rem">templedb mount [~/temple]
+templedb unmount [~/temple]
+templedb mount-status
+templedb git-export &lt;project&gt; [--remote &lt;url&gt;]</pre>
+
 <h3 style="margin-top:1rem">Config &amp; Secrets</h3>
 <pre style="font-size:0.78rem">templedb config link &lt;project&gt; [--force]
 templedb config list
@@ -2662,14 +2668,36 @@ def status():
         checkout_dir = Path.home() / ".config" / "templedb" / "checkouts"
         checkout_count = sum(1 for p in checkout_dir.iterdir() if p.is_dir()) if checkout_dir.exists() else 0
 
+        # FUSE mount status
+        fuse_mounts = []
+        try:
+            with open("/proc/mounts") as fm:
+                for line in fm:
+                    if "fuse" in line.lower() and "temple" in line.lower():
+                        parts = line.split()
+                        fuse_mounts.append(parts[1])
+        except Exception:
+            pass
+
+        fuse_cell = (
+            f'<span style="color:#4a9a6a">mounted at {", ".join(fuse_mounts)}</span>'
+            if fuse_mounts
+            else '<span class="muted">not mounted</span>'
+        )
+
         bootstrap_html = f"""
 <h3 style="margin-top:1.5rem">Bootstrap Readiness</h3>
 <table>
 <tr><td style="width:180px">Age key</td><td>{age_cell}</td></tr>
 <tr><td>Project checkouts</td><td>{checkout_count} checked out</td></tr>
+<tr><td>FUSE mount</td><td>{fuse_cell}</td></tr>
 <tr><td>Database</td><td>{db_info}</td></tr>
 </table>
-<p class="muted" style="font-size:0.8rem;margin-top:0.5rem">Full bootstrap: <code>templedb bootstrap [--from-backup PATH] [--from-gcs BUCKET]</code></p>
+<p class="muted" style="font-size:0.8rem;margin-top:0.5rem">
+  Bootstrap: <code>templedb bootstrap [--from-backup PATH]</code><br>
+  FUSE mount: <code>templedb mount ~/temple</code><br>
+  Git export: <code>templedb git-export &lt;project&gt; --remote &lt;github-url&gt;</code>
+</p>
 """
     except Exception:
         pass
