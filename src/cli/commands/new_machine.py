@@ -335,8 +335,42 @@ class BootstrapCommand(Command):
             _fail(f"NixOS generation failed: {e}")
             errors += 1
 
-        # ── Step 8: Verify ───────────────────────────────────────────
-        _step(8, "Verification")
+        # ── Step 8: FUSE Mount ────────────────────────────────────────
+        _step(8, "FUSE mount")
+
+        temple_dir = Path.home() / "temple"
+        try:
+            # Check if already mounted
+            mounted = False
+            try:
+                with open("/proc/mounts") as fm:
+                    mounted = any("fuse" in l.lower() and "temple" in l.lower() for l in fm)
+            except Exception:
+                pass
+
+            if mounted:
+                _ok(f"Already mounted at {temple_dir}")
+            else:
+                # Start FUSE mount in background
+                temple_dir.mkdir(parents=True, exist_ok=True)
+                import threading
+                def _bg():
+                    try:
+                        from temple_fuse import mount as fuse_mount
+                        fuse_mount(str(temple_dir), foreground=True)
+                    except Exception:
+                        pass
+                t = threading.Thread(target=_bg, daemon=True)
+                t.start()
+                import time; time.sleep(2)
+                _ok(f"Mounted at {temple_dir}")
+                print("       Edit files at ~/temple/<project>/")
+        except Exception as e:
+            _skip(f"FUSE mount failed: {e}")
+            print("       Mount manually: templedb mount ~/temple")
+
+        # ── Step 9: Verify ───────────────────────────────────────────
+        _step(9, "Verification")
 
         from db_utils import check_integrity
         if check_integrity():
@@ -364,10 +398,10 @@ class BootstrapCommand(Command):
         print("\nNext steps:")
         if not age_found:
             print("  1. Copy your age key:   cp /path/to/key.txt ~/.age/key.txt")
+        print("  - Edit files via FUSE:  ls ~/temple/<project>/")
         print("  - Rebuild NixOS:        templedb nixos rebuild system_config")
-        print("  - Mount filesystem:     templedb mount ~/temple")
         print("  - Check backup status:  templedb backup cloud status")
-        print("  - Verify config links:  templedb config verify")
+        print("  - Launch GUI:           templedb gui")
 
         return 0
 

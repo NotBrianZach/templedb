@@ -120,14 +120,13 @@ You are working on the **{name or slug}** project.
 - Total files: {file_count}
 
 ## File Locations
-- TempleDB checkout: `{checkout_dir}`{' (exists)' if checkout_exists else ' (not checked out)'}
+{f'- FUSE mount: `{fuse_path}` (PRIMARY — read/write, auto-stages)' if fuse_mounted else '- FUSE mount: not mounted (run: templedb mount ~/temple)'}
 {f'- Git repo: `{repo_url}`' if repo_url else ''}
-{f'- FUSE mount: `{fuse_path}` (read/write, auto-stages)' if fuse_mounted else ''}
-- All TempleDB checkouts: `~/.config/templedb/checkouts/`
-- FUSE mount point: `~/temple/` (if mounted via `templedb mount`)
+- Internal checkout: `{checkout_dir}` (auto-materialized for nix eval)
 
-When looking for project files, check the checkout directory first:
-  `{checkout_dir}/`
+**Use the FUSE mount (`~/temple/{slug}/`) as the primary file access path.**
+Edits through FUSE go directly to the database and auto-stage for VCS commit.
+The checkout dir at `~/.config/templedb/checkouts/` is auto-generated for nix eval.
 
 ## Primary file types
 {', '.join(sorted(extensions)[:10]) if extensions else 'Unknown'}
