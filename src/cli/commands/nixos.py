@@ -1743,7 +1743,7 @@ def register(cli):
 
     # host subcommands
     hl = subparsers.add_parser('host', help='Manage NixOS host configurations')
-    host_sub = hl.add_subparsers(dest='host_subcommand', required=True)
+    host_sub = hl.add_subparsers(dest='host_command', required=True)
 
     hlist = host_sub.add_parser('list', help='List all hosts')
     cli.commands['nixos.host.list'] = cmd.host_list
