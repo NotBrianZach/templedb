@@ -1100,6 +1100,231 @@ class NixOSCommand(Command):
             (json.dumps(manifest),)
         )
 
+    # ── Host Management ────────────────────────────────────────────────
+
+    def host_list(self, args) -> int:
+        """List all registered NixOS hosts."""
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT key, value FROM system_config WHERE key LIKE 'nixos.host.%' ORDER BY key"
+        ).fetchall()
+
+        if not rows:
+            print("No hosts registered.")
+            print("  Import with: templedb nixos host import <hostname>")
+            return 0
+
+        current = conn.execute(
+            "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+        ).fetchone()
+        active_host = current[0] if current else None
+
+        print(f"\nNixOS Hosts ({len(rows)}):\n")
+        for r in rows:
+            hostname = r[0].replace("nixos.host.", "")
+            active = " (active)" if hostname == active_host else ""
+            host_file = r[1]
+
+            # Count host-scoped config keys
+            count = conn.execute(
+                "SELECT COUNT(*) FROM system_config WHERE key LIKE ?",
+                (f"{hostname}.%",)
+            ).fetchone()[0]
+
+            print(f"  {hostname:30s} {host_file:40s} {count} overrides{active}")
+
+        return 0
+
+    def host_show(self, args) -> int:
+        """Show host-specific configuration."""
+        conn = _get_conn()
+        hostname = args.hostname
+
+        # Get host-scoped overrides
+        overrides = conn.execute(
+            "SELECT key, value FROM system_config WHERE key LIKE ? ORDER BY key",
+            (f"{hostname}.%",)
+        ).fetchall()
+
+        # Get host file
+        host_file = conn.execute(
+            "SELECT value FROM system_config WHERE key = ?",
+            (f"nixos.host.{hostname}",)
+        ).fetchone()
+
+        print(f"\nHost: {hostname}")
+        if host_file:
+            print(f"  Config file: {host_file[0]}")
+
+        if overrides:
+            print(f"\n  Host-scoped overrides ({len(overrides)}):")
+            for r in overrides:
+                key = r[0][len(hostname) + 1:]  # strip hostname prefix
+                print(f"    {key:40s} {r[1][:60]}")
+        else:
+            print(f"\n  No host-scoped overrides.")
+            print(f"  Set with: templedb nixos host set {hostname} <key> <value>")
+
+        # Show what this host would inherit (non-host-scoped keys)
+        defaults = conn.execute(
+            "SELECT key, value FROM system_config "
+            "WHERE key LIKE 'nixos.let.%' ORDER BY key"
+        ).fetchall()
+        if defaults:
+            print(f"\n  Inherited defaults (from system-wide config):")
+            for r in defaults:
+                print(f"    {r[0]:40s} {r[1][:60]}")
+
+        return 0
+
+    def host_set(self, args) -> int:
+        """Set a host-scoped config override."""
+        conn = _get_conn()
+        hostname = args.hostname
+        key = f"{hostname}.{args.key}"
+        value = args.value
+
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now'))", (key, value)
+        )
+        conn.commit()
+        print(f"Set {key} = {value}")
+        return 0
+
+    def host_import(self, args) -> int:
+        """Import host-specific values from an existing host .nix file."""
+        import re as _re
+
+        conn = _get_conn()
+        hostname = args.hostname
+
+        slug = _resolve_slug(getattr(args, 'slug', None))
+        if not slug:
+            return 1
+
+        proj = conn.execute("SELECT repo_url FROM projects WHERE slug = ?", (slug,)).fetchone()
+        if not proj or not proj[0]:
+            print(f"Project '{slug}' has no repo_url set.", file=sys.stderr)
+            return 1
+
+        repo = Path(proj[0])
+
+        # Find host file
+        host_file = repo / "hosts" / f"{hostname}.nix"
+        if not host_file.exists():
+            print(f"Host file not found: {host_file}")
+            print(f"  Available: {', '.join(f.stem for f in (repo / 'hosts').glob('*.nix'))}")
+            return 1
+
+        content = host_file.read_text()
+        imported = 0
+
+        # Extract key values
+        # hostname
+        m = _re.search(r'hostName\s*=\s*"([^"]+)"', content)
+        if m:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"{hostname}.networking.hostName", m.group(1))
+            )
+            print(f"  {hostname}.networking.hostName = {m.group(1)}")
+            imported += 1
+
+        # Video drivers
+        m = _re.search(r'videoDrivers\s*=\s*\[\s*"([^"]+)"', content)
+        if m:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"{hostname}.videoDriver", m.group(1))
+            )
+            print(f"  {hostname}.videoDriver = {m.group(1)}")
+            imported += 1
+
+        # Boot loader type
+        if "systemd-boot.enable = true" in content:
+            boot_type = "systemd-boot"
+        elif "grub.enable = true" in content:
+            boot_type = "grub"
+        else:
+            boot_type = "unknown"
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (f"{hostname}.bootLoader", boot_type)
+        )
+        print(f"  {hostname}.bootLoader = {boot_type}")
+        imported += 1
+
+        # GRUB device
+        m = _re.search(r'grub\.device\s*=\s*"([^"]+)"', content)
+        if m:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"{hostname}.grubDevice", m.group(1))
+            )
+            print(f"  {hostname}.grubDevice = {m.group(1)}")
+            imported += 1
+
+        # Location
+        m = _re.search(r'location\.latitude\s*=\s*([0-9.]+)', content)
+        if m:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"{hostname}.location.latitude", m.group(1))
+            )
+            print(f"  {hostname}.location.latitude = {m.group(1)}")
+            imported += 1
+
+        m = _re.search(r'location\.longitude\s*=\s*(-?[0-9.]+)', content)
+        if m:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"{hostname}.location.longitude", m.group(1))
+            )
+            print(f"  {hostname}.location.longitude = {m.group(1)}")
+            imported += 1
+
+        # Register the host file
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (f"nixos.host.{hostname}", f"hosts/{hostname}.nix")
+        )
+
+        conn.commit()
+        print(f"\nImported {imported} host-specific values for {hostname}")
+        return 0
+
+    def host_activate(self, args) -> int:
+        """Set which host this machine is (sets nixos.flake_output)."""
+        conn = _get_conn()
+        hostname = args.hostname
+
+        # Verify host exists
+        host = conn.execute(
+            "SELECT value FROM system_config WHERE key = ?",
+            (f"nixos.host.{hostname}",)
+        ).fetchone()
+        if not host:
+            print(f"Host '{hostname}' not registered.")
+            print(f"  Available hosts: templedb nixos host list")
+            return 1
+
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES ('nixos.flake_output', ?, datetime('now'))", (hostname,)
+        )
+        conn.commit()
+        print(f"Activated host: {hostname}")
+        print(f"  Rebuild with: templedb nixos rebuild system_config")
+        return 0
+
     # ── Import / Generate-All ────────────────────────────────────────────
 
     def import_config(self, args) -> int:
@@ -1212,10 +1437,22 @@ class NixOSCommand(Command):
         repo = Path(proj[1])
         dry_run = getattr(args, 'dry_run', False)
 
+        # Determine active host
+        host = getattr(args, 'host', None)
+        if not host:
+            host_row = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+            ).fetchone()
+            host = host_row[0] if host_row else None
+
         print(f"Generating all NixOS config for {slug}")
-        print(f"  Config dir: {repo}\n")
+        print(f"  Config dir: {repo}")
+        if host:
+            print(f"  Host: {host}")
+        print()
 
         # Step 1: Update let-bindings in nix files from system_config
+        # Host-scoped keys override system-wide keys
         nix_files = {'home': 'home.nix', 'configuration': 'configuration.nix'}
         let_updated = 0
 
@@ -1227,18 +1464,33 @@ class NixOSCommand(Command):
             content = fpath.read_text()
             db_prefix = f"nixos.let.{prefix_name}."
 
-            # Get all let-binding values from DB
+            # Get all let-binding values from DB (system-wide defaults)
             rows = conn.execute(
                 "SELECT key, value FROM system_config WHERE key LIKE ?",
                 (f"{db_prefix}%",)
             ).fetchall()
 
-            if not rows:
-                continue
-
+            # Build var map with host overrides
+            var_map = {}
             for row in rows:
                 var_name = row[0][len(db_prefix):]
-                new_value = row[1]
+                var_map[var_name] = row[1]
+
+            # Apply host-scoped overrides (e.g., zStation.nixos.let.home.homeDir)
+            if host:
+                host_prefix = f"{host}.{db_prefix}"
+                host_rows = conn.execute(
+                    "SELECT key, value FROM system_config WHERE key LIKE ?",
+                    (f"{host_prefix}%",)
+                ).fetchall()
+                for row in host_rows:
+                    var_name = row[0][len(host_prefix):]
+                    var_map[var_name] = row[1]
+
+            if not var_map:
+                continue
+
+            for var_name, new_value in var_map.items():
 
                 # Replace in content: varName = "old_value"; → varName = "new_value";
                 import re as _re
@@ -1485,5 +1737,32 @@ def register(cli):
     # generate-all
     ga = subparsers.add_parser('generate-all', help='Generate all NixOS config from DB (templates + modules + inputs)')
     ga.add_argument('slug', nargs='?', help='NixOS config project slug')
+    ga.add_argument('--host', help='Generate for specific host (default: active host from nixos.flake_output)')
     ga.add_argument('--dry-run', action='store_true', help='Show what would be generated')
     cli.commands['nixos.generate-all'] = cmd.generate_all
+
+    # host subcommands
+    hl = subparsers.add_parser('host', help='Manage NixOS host configurations')
+    host_sub = hl.add_subparsers(dest='host_subcommand', required=True)
+
+    hlist = host_sub.add_parser('list', help='List all hosts')
+    cli.commands['nixos.host.list'] = cmd.host_list
+
+    hshow = host_sub.add_parser('show', help='Show host-specific config')
+    hshow.add_argument('hostname', help='Host name')
+    cli.commands['nixos.host.show'] = cmd.host_show
+
+    hset = host_sub.add_parser('set', help='Set host-scoped config override')
+    hset.add_argument('hostname', help='Host name')
+    hset.add_argument('key', help='Config key (will be prefixed with hostname.)')
+    hset.add_argument('value', help='Config value')
+    cli.commands['nixos.host.set'] = cmd.host_set
+
+    himp = host_sub.add_parser('import', help='Import host-specific values from .nix file')
+    himp.add_argument('hostname', help='Host name')
+    himp.add_argument('slug', nargs='?', help='NixOS config project slug')
+    cli.commands['nixos.host.import'] = cmd.host_import
+
+    hact = host_sub.add_parser('activate', help='Set this machine to a host')
+    hact.add_argument('hostname', help='Host name to activate')
+    cli.commands['nixos.host.activate'] = cmd.host_activate
