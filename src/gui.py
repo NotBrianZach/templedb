@@ -81,6 +81,18 @@ label { display: block; color: #808098; font-size: 0.8rem; margin-bottom: 0.25re
 .stat .key { font-size: 0.75rem; color: #606080; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.2rem; }
 .sep { border: none; border-top: 1px solid #1e1e3a; margin: 1rem 0; }
 #search-input { width: 320px; }
+.help-tip { display: inline-block; width: 16px; height: 16px; border-radius: 50%; background: #1e1e3a; color: #808098; text-align: center; font-size: 11px; line-height: 16px; cursor: help; margin-left: 4px; border: 1px solid #2a2a4a; }
+.help-tip:hover { background: #282848; color: #d0d0e8; }
+.help-tip .tip { display: none; position: absolute; background: #1a1a30; border: 1px solid #2a2a4a; padding: 0.5rem; border-radius: 4px; font-size: 0.78rem; color: #d0d0e8; max-width: 300px; z-index: 100; white-space: normal; margin-top: 4px; }
+.help-tip:hover .tip { display: block; }
+.inline-edit { background: none; border: none; border-bottom: 1px dashed #2a2a4a; color: #d0d0e8; font-family: monospace; font-size: 0.85rem; padding: 0.1rem 0.3rem; cursor: text; width: 100%; }
+.inline-edit:focus { outline: none; border-bottom-color: #4a9eff; background: #13131f; }
+.inline-edit:hover { border-bottom-color: #4a9eff; }
+button.sm { padding: 0.15rem 0.4rem; font-size: 0.72rem; }
+button.danger { background: #3a1a1a; border-color: #e94560; color: #e94560; }
+button.danger:hover { background: #4a2222; }
+#global-search { position: fixed; top: 0; left: 180px; right: 0; background: #0f0f1a; border-bottom: 1px solid #1e1e3a; padding: 0.5rem 2rem; z-index: 50; display: none; }
+#global-search.active { display: flex; align-items: center; gap: 0.75rem; }
 """
 
 
@@ -97,6 +109,7 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("domains",  "/domains",  "Domains"),
             ("docs",     "/docs",     "Docs"),
             ("code",     "/code",     "Code"),
+            ("settings", "/settings", "Settings"),
             ("status",   "/status",   "Status"),
         ]
     )
@@ -121,13 +134,46 @@ function tFilter(id,q){{
     s.style.display=Array.from(rows).some(function(r){{return r.style.display!=='none';}})?'':'none';
   }});
 }}
+function fuzzyMatch(t,q){{
+  t=t.toLowerCase();q=q.toLowerCase();var qi=0;
+  for(var i=0;i<t.length&&qi<q.length;i++){{if(t[i]===q[qi])qi++;}}
+  return qi===q.length;
+}}
+function gSearch(q){{
+  q=q.trim();
+  document.querySelectorAll('table tbody tr').forEach(function(r){{
+    if(!q){{r.style.display='';return;}}
+    r.style.display=fuzzyMatch(r.textContent,q)?'':'none';
+  }});
+}}
+document.addEventListener('keydown',function(e){{
+  if(e.key==='/'&&!e.target.matches('input,textarea')){{
+    e.preventDefault();
+    var s=document.getElementById('gsearch');
+    if(s){{s.parentElement.classList.add('active');s.focus();}}
+  }}
+  if(e.key==='Escape'){{
+    var s=document.getElementById('gsearch');
+    if(s){{s.parentElement.classList.remove('active');s.value='';gSearch('');}}
+  }}
+}});
 </script>
 </head>
 <body>
 <nav>
   <h1>TempleDB</h1>
   {nav}
+  <div style="margin-top:auto;padding-top:1rem;border-top:1px solid #1e1e3a">
+    <span class="muted" style="font-size:0.7rem">Press / to search</span>
+  </div>
 </nav>
+<div id="global-search">
+  <span style="color:#808098;font-size:0.85rem">Search:</span>
+  <input id="gsearch" type="search" placeholder="Fuzzy search across all tables..." oninput="gSearch(this.value)"
+    style="flex:1;max-width:500px;background:#13131f;border:1px solid #2a2a4a;color:#d0d0e8;padding:0.35rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.85rem"
+    autocomplete="off">
+  <span class="muted" style="font-size:0.75rem">Esc to close</span>
+</div>
 <main>
 {body}
 </main>
@@ -308,6 +354,7 @@ def projects_list():
 <div class="row" style="margin-bottom:0.5rem">
   <form hx-post="/projects/sync-all" hx-target="#sync-all-result" hx-swap="innerHTML">
     <button type="submit" class="primary">Sync All Projects</button>
+    <span class="help-tip" style="position:relative">?<span class="tip">Re-imports all project files from disk into the database. Run this after editing files outside TempleDB (e.g. with your editor).</span></span>
   </form>
   <span id="sync-all-result" class="muted"></span>
 </div>
@@ -394,6 +441,68 @@ def nixos_dotfiles_apply():
 def db_migrate():
     rc, out, err = _run("db", "migrate")
     return HTMLResponse(_msg(out or err or "Done", ok=rc == 0))
+
+
+# ── CRUD: system_config ───────────────────────────────────────────────────────
+
+@app.post("/config/set", response_class=HTMLResponse)
+def config_set(key: str = Form(...), value: str = Form(...)):
+    """Set a system_config key."""
+    from db_utils import execute
+    execute(
+        "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+        "VALUES (?, ?, datetime('now'))", (key, value)
+    )
+    return HTMLResponse(_msg(f"Set {key}", ok=True))
+
+
+@app.post("/config/delete", response_class=HTMLResponse)
+def config_delete(key: str = Form(...)):
+    """Delete a system_config key."""
+    from db_utils import execute
+    execute("DELETE FROM system_config WHERE key = ?", (key,))
+    return HTMLResponse(_msg(f"Deleted {key}", ok=True))
+
+
+# ── CRUD: environment variables ──────────────────────────────────────────────
+
+@app.post("/env/set", response_class=HTMLResponse)
+def env_var_set(project: str = Form(...), var_name: str = Form(...), var_value: str = Form(...)):
+    """Set an environment variable."""
+    rc, out, err = _run("env", "set", project, var_name, var_value)
+    return HTMLResponse(_msg(out or err or f"Set {var_name}", ok=rc == 0))
+
+
+@app.post("/env/delete", response_class=HTMLResponse)
+def env_var_delete(project: str = Form(...), var_name: str = Form(...)):
+    """Delete an environment variable."""
+    rc, out, err = _run("env", "rm", project, var_name)
+    return HTMLResponse(_msg(out or err or f"Deleted {var_name}", ok=rc == 0))
+
+
+# ── CRUD: dotfiles ───────────────────────────────────────────────────────────
+
+@app.post("/dotfiles/add", response_class=HTMLResponse)
+def dotfiles_add(project: str = Form(...), source: str = Form(...), target: str = Form(...)):
+    """Add a dotfile mapping."""
+    rc, out, err = _run("nixos", "dotfiles-add", project, source, target)
+    return HTMLResponse(_msg(out or err or f"Added {source}", ok=rc == 0))
+
+
+@app.post("/dotfiles/remove", response_class=HTMLResponse)
+def dotfiles_remove(project: str = Form(...), source: str = Form(...)):
+    """Remove a dotfile mapping."""
+    rc, out, err = _run("nixos", "dotfiles-remove", project, source)
+    return HTMLResponse(_msg(out or err or f"Removed {source}", ok=rc == 0))
+
+
+# ── CRUD: project settings ──────────────────────────────────────────────────
+
+@app.post("/projects/{slug}/set-type", response_class=HTMLResponse)
+def project_set_type(slug: str, project_type: str = Form(...)):
+    """Set project type."""
+    rc, out, err = _run("nixos", "set-type", slug, project_type)
+    return HTMLResponse(_msg(out or err or f"Set type to {project_type}", ok=rc == 0))
 
 
 @app.post("/mount/toggle", response_class=HTMLResponse)
@@ -2585,6 +2694,156 @@ def code_list(project: str = Query(""), kind: str = Query("")):
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(q: str = Query("")):
+    # ── System Config ─────────────────────────────────────────────────────────
+    configs = query_all("SELECT key, value, updated_at FROM system_config ORDER BY key")
+
+    config_rows = []
+    for c in configs:
+        key = html.escape(c["key"])
+        val = html.escape(c["value"] or "")
+        # Truncate long JSON values for display
+        display_val = val[:80] + ("..." if len(val) > 80 else "")
+
+        edit_form = (
+            f'<form hx-post="/config/set" hx-swap="outerHTML" style="display:inline">'
+            f'<input type="hidden" name="key" value="{key}">'
+            f'<input type="text" name="value" value="{val}" class="inline-edit" '
+            f'style="width:400px" onchange="this.form.requestSubmit()">'
+            f'</form>'
+        )
+        del_btn = (
+            f'<form hx-post="/config/delete" hx-swap="outerHTML" hx-confirm="Delete {key}?" style="display:inline">'
+            f'<input type="hidden" name="key" value="{key}">'
+            f'<button class="sm danger" type="submit">x</button>'
+            f'</form>'
+        )
+        config_rows.append([
+            f'<code style="font-size:0.78rem">{key}</code>',
+            edit_form,
+            html.escape((c["updated_at"] or "")[:10]),
+            del_btn,
+        ])
+
+    config_table = _table(["Key", "Value", "Updated", ""], config_rows, "No config keys.", "config-tbl")
+
+    # Add config form
+    add_config = """
+<details style="margin-top:0.5rem">
+<summary style="cursor:pointer;color:#a0a0c0;font-size:0.85rem">+ Add config key</summary>
+<form hx-post="/config/set" hx-swap="outerHTML" style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center">
+  <input type="text" name="key" placeholder="key.name" style="width:200px" required>
+  <input type="text" name="value" placeholder="value" style="width:300px" required>
+  <button type="submit" class="sm primary">Add</button>
+</form>
+</details>
+"""
+
+    # ── Dotfiles ──────────────────────────────────────────────────────────────
+    dotfiles_html = ""
+    try:
+        df_row = query_one("SELECT value FROM system_config WHERE key = 'nixos.dotfiles'")
+        if df_row and df_row["value"]:
+            manifest = json.loads(df_row["value"])
+            checkouts_dir = Path.home() / ".config" / "templedb" / "checkouts"
+            df_rows = []
+            for entry in manifest:
+                source_abs = checkouts_dir / entry["project"] / entry["source"]
+                target = Path(entry["target"]).expanduser()
+                if target.is_symlink() and target.resolve() == source_abs.resolve():
+                    st = '<span style="color:#4a9a6a">linked</span>'
+                elif target.exists():
+                    st = '<span style="color:#e9a045">conflict</span>'
+                else:
+                    st = '<span class="muted">not linked</span>'
+
+                rm_form = (
+                    f'<form hx-post="/dotfiles/remove" hx-swap="outerHTML" style="display:inline">'
+                    f'<input type="hidden" name="project" value="{html.escape(entry["project"])}">'
+                    f'<input type="hidden" name="source" value="{html.escape(entry["source"])}">'
+                    f'<button class="sm danger" type="submit">x</button>'
+                    f'</form>'
+                )
+                df_rows.append([
+                    f'<code>{html.escape(entry["source"])}</code>',
+                    f'<span class="badge">{html.escape(entry["project"])}</span>',
+                    f'<code class="muted" style="font-size:0.78rem">{html.escape(entry["target"])}</code>',
+                    st, rm_form,
+                ])
+            dotfiles_html = _table(["Source", "Project", "Target", "Status", ""], df_rows, "No dotfiles.", "df-tbl")
+        else:
+            dotfiles_html = '<p class="muted">No dotfiles configured.</p>'
+    except Exception:
+        dotfiles_html = '<p class="muted">Could not load dotfiles.</p>'
+
+    add_dotfile = """
+<details style="margin-top:0.5rem">
+<summary style="cursor:pointer;color:#a0a0c0;font-size:0.85rem">+ Add dotfile mapping</summary>
+<form hx-post="/dotfiles/add" hx-swap="outerHTML" style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center">
+  <input type="text" name="project" placeholder="project slug" style="width:150px" required>
+  <input type="text" name="source" placeholder="source (e.g. .spacemacs)" style="width:200px" required>
+  <input type="text" name="target" placeholder="target (e.g. ~/.spacemacs)" style="width:200px" required>
+  <button type="submit" class="sm primary">Add</button>
+</form>
+</details>
+"""
+
+    # ── Help text ─────────────────────────────────────────────────────────────
+    help_html = """
+<details style="margin-top:1.5rem;border:1px solid #1e1e3a;border-radius:6px;padding:1rem">
+<summary style="cursor:pointer;color:#a0a0c0;font-size:0.85rem">Help: What do these settings control?</summary>
+<div style="margin-top:0.75rem;font-size:0.8rem;color:#a0a0c0;line-height:1.6">
+<p><strong>System Config</strong> — key-value pairs that control TempleDB behavior and NixOS generation.</p>
+<table style="margin:0.5rem 0">
+<tr><td style="width:250px"><code>nixos.username</code></td><td>Your username (used in generated NixOS config)</td></tr>
+<tr><td><code>nixos.flake_output</code></td><td>NixOS hostname for <code>nixos-rebuild switch --flake .#&lt;hostname&gt;</code></td></tr>
+<tr><td><code>nixos.let.home.homeDir</code></td><td>Home directory path (portable across machines)</td></tr>
+<tr><td><code>nixos.dotfiles</code></td><td>JSON manifest of dotfile symlink mappings</td></tr>
+<tr><td><code>woofs.*</code></td><td>Woofs deployment service configuration</td></tr>
+<tr><td><code>gcs.backup_bucket</code></td><td>GCS bucket name for cloud backups</td></tr>
+</table>
+<p><strong>Dotfiles</strong> — symlinks from TempleDB checkouts to your home directory. Managed by <code>templedb nixos dotfiles-*</code>.</p>
+<p><strong>Actions</strong></p>
+<table style="margin:0.5rem 0">
+<tr><td style="width:180px"><strong>Sync</strong></td><td>Re-import project files from disk into the database</td></tr>
+<tr><td><strong>Mount ~/temple</strong></td><td>Mount the database as a FUSE filesystem (read/write, auto-stages changes)</td></tr>
+<tr><td><strong>Generate NixOS</strong></td><td>Regenerate all NixOS config from DB: let-bindings, templates, modules, flake inputs</td></tr>
+<tr><td><strong>Apply Dotfiles</strong></td><td>Create/update symlinks from checkout files to home directory</td></tr>
+<tr><td><strong>Backup to GCS</strong></td><td>Upload database to Google Cloud Storage bucket</td></tr>
+</table>
+</div>
+</details>
+"""
+
+    body = f"""
+<h2>Settings</h2>
+
+<h3>System Config ({len(configs)} keys)
+  <span class="help-tip" style="position:relative">?<span class="tip">Key-value pairs stored in system_config table. Edit inline — changes save on blur. Used by NixOS generation, dotfiles, backups.</span></span>
+</h3>
+{_search_bar("config-tbl", "Filter config keys...", "360px")}
+{config_table}
+{add_config}
+
+<hr class="sep">
+
+<h3>Dotfiles
+  <span class="help-tip" style="position:relative">?<span class="tip">Symlinks from TempleDB project checkouts to your home directory. Apply with: templedb nixos dotfiles-apply</span></span>
+</h3>
+{dotfiles_html}
+{add_dotfile}
+<div style="margin-top:0.5rem">
+  <button hx-post="/nixos/dotfiles-apply" hx-swap="outerHTML" class="sm">Apply All Dotfiles</button>
+</div>
+
+{help_html}
+"""
+    return _base("Settings", body, "settings")
+
 
 @app.get("/status", response_class=HTMLResponse)
 def status():
