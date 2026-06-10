@@ -80,6 +80,18 @@ class VibeCommands(Command):
             """, (project_id,))
             extensions = {Path(row[0]).suffix for row in cursor.fetchall() if Path(row[0]).suffix}
 
+            # Get checkout path and repo_url
+            cursor.execute("SELECT repo_url FROM projects WHERE id = ?", (project_id,))
+            repo_row = cursor.fetchone()
+            repo_url = repo_row[0] if repo_row else None
+
+            checkout_dir = Path.home() / ".config" / "templedb" / "checkouts" / slug
+            checkout_exists = checkout_dir.exists()
+
+            # Check for FUSE mount
+            fuse_path = Path.home() / "temple" / slug
+            fuse_mounted = fuse_path.exists()
+
             prompt_text = f"""# {name or slug} - Project Context
 
 ## Session Rules
@@ -107,6 +119,16 @@ You are working on the **{name or slug}** project.
 - Project slug: {slug}
 - Total files: {file_count}
 
+## File Locations
+- TempleDB checkout: `{checkout_dir}`{' (exists)' if checkout_exists else ' (not checked out)'}
+{f'- Git repo: `{repo_url}`' if repo_url else ''}
+{f'- FUSE mount: `{fuse_path}` (read/write, auto-stages)' if fuse_mounted else ''}
+- All TempleDB checkouts: `~/.config/templedb/checkouts/`
+- FUSE mount point: `~/temple/` (if mounted via `templedb mount`)
+
+When looking for project files, check the checkout directory first:
+  `{checkout_dir}/`
+
 ## Primary file types
 {', '.join(sorted(extensions)[:10]) if extensions else 'Unknown'}
 
@@ -115,6 +137,19 @@ You are working on the **{name or slug}** project.
 - When asked about files, refer to files in this project
 - Use project-specific context when answering questions
 - This is NOT the TempleDB project itself - this is a separate project tracked by TempleDB
+
+## TempleDB VCS Workflow
+After editing files, commit changes:
+```bash
+templedb vcs status {slug} --refresh    # detect changes
+templedb vcs add -p {slug} --all        # stage all
+templedb vcs commit -p {slug} -m "msg"  # commit
+```
+
+To export to git for GitHub:
+```bash
+templedb git-export {slug} --remote <github-url>
+```
 
 ## Getting Started
 You can help with:

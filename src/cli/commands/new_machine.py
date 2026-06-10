@@ -249,8 +249,94 @@ class BootstrapCommand(Command):
             _fail(f"Dotfile linking failed: {e}")
             errors += 1
 
-        # ── Step 6: Verify ───────────────────────────────────────────
-        _step(6, "Verification")
+        # ── Step 6: Configure identity ─────────────────────────────
+        _step(6, "Machine identity")
+
+        from db_utils import get_connection
+        try:
+            conn = get_connection()
+            current_user = os.environ.get("USER", "zach")
+            current_home = str(Path.home())
+
+            # Determine username and homeDir
+            username = getattr(args, 'username', None) or current_user
+            home_dir = f"/home/{username}"
+
+            # Check if DB has different values
+            db_user = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.username'"
+            ).fetchone()
+            db_home = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.let.home.homeDir'"
+            ).fetchone()
+
+            old_user = db_user[0] if db_user else None
+            old_home = db_home[0] if db_home else None
+
+            if old_user and old_user != username:
+                print(f"  Updating username: {old_user} -> {username}")
+            if old_home and old_home != home_dir:
+                print(f"  Updating homeDir: {old_home} -> {home_dir}")
+
+            # Update identity keys
+            for key, value in [
+                ("nixos.username", username),
+                ("nixos.let.home.homeDir", home_dir),
+                ("nixos.let.configuration.homeDir", home_dir),
+            ]:
+                conn.execute(
+                    "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                    "VALUES (?, ?, datetime('now'))", (key, value)
+                )
+            conn.commit()
+
+            # Update hostname if provided
+            hostname = getattr(args, 'hostname', None)
+            if hostname:
+                conn.execute(
+                    "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                    "VALUES ('nixos.flake_output', ?, datetime('now'))", (hostname,)
+                )
+                conn.commit()
+                _ok(f"Hostname: {hostname}")
+
+            _ok(f"Username: {username}, homeDir: {home_dir}")
+
+        except Exception as e:
+            _fail(f"Identity config failed: {e}")
+            errors += 1
+
+        # ── Step 7: Generate NixOS config ─────────────────────────────
+        _step(7, "NixOS config generation")
+
+        try:
+            # Check if system_config project exists
+            conn = get_connection()
+            sc = conn.execute(
+                "SELECT slug FROM projects WHERE slug = 'system_config' AND project_type = 'nixos-config'"
+            ).fetchone()
+
+            if sc:
+                # Run generate-all
+                result = _run([
+                    sys.executable, "-m", "cli",
+                    "nixos", "generate-all", "system_config"
+                ], cwd=str(Path(__file__).parent.parent.parent.parent))
+
+                if result.returncode == 0:
+                    _ok("Generated NixOS config from DB")
+                else:
+                    print(f"  WARN  generate-all had issues: {result.stderr[:200]}")
+            else:
+                _skip("No system_config nixos-config project found")
+                print("       Import one: templedb project import /path/to/system_config")
+
+        except Exception as e:
+            _fail(f"NixOS generation failed: {e}")
+            errors += 1
+
+        # ── Step 8: Verify ───────────────────────────────────────────
+        _step(8, "Verification")
 
         from db_utils import check_integrity
         if check_integrity():
@@ -279,6 +365,7 @@ class BootstrapCommand(Command):
         if not age_found:
             print("  1. Copy your age key:   cp /path/to/key.txt ~/.age/key.txt")
         print("  - Rebuild NixOS:        templedb nixos rebuild system_config")
+        print("  - Mount filesystem:     templedb mount ~/temple")
         print("  - Check backup status:  templedb backup cloud status")
         print("  - Verify config links:  templedb config verify")
 
@@ -318,6 +405,14 @@ def register(cli):
     bootstrap_parser.add_argument(
         '--verbose', '-v', action='store_true',
         help='Show detailed progress'
+    )
+    bootstrap_parser.add_argument(
+        '--username', metavar='USER',
+        help='Username on new machine (default: $USER)'
+    )
+    bootstrap_parser.add_argument(
+        '--hostname', metavar='HOST',
+        help='NixOS hostname / flake output (e.g. zMothership2)'
     )
     cli.commands['bootstrap'] = cmd.bootstrap
 

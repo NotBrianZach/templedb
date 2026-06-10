@@ -63,12 +63,49 @@ class TempleDBCLI:
             prog="templedb",
             description="TempleDB - Database-native project management",
             epilog="""
-Use 'templedb <command> --help' for command-specific help
+command groups:
 
-New to TempleDB?
-  templedb tutorial        - Interactive tutorials and guides
-  templedb tutorial basics - Start here for an introduction
-            """,
+  Getting Started
+    bootstrap          Set up TempleDB on a new machine (restore, migrate, checkout, dotfiles)
+    tutorial           Interactive tutorials and onboarding
+    status             Show database and system status
+
+  Projects & Files
+    project            Import, list, show, sync, checkout projects
+    file               File management commands
+    search             Search files and content
+    vcs                Version control (status, add, commit, log, diff, branch)
+    git-export         Export VCS history as a git repo for GitHub
+
+  NixOS Integration
+    nixos              Generate modules, rebuild, doctor, dotfiles, import/generate-all
+    config             Manage configuration symlinks (link, unlink, verify)
+
+  Secrets & Environment
+    secret             Manage encrypted secrets (age/sops)
+    env                Environment variables per project/target
+    key                Manage encryption keys
+
+  Deployment
+    deploy             Deploy projects (run, status, history, rollback, shell, exec)
+    target             Manage deployment targets
+
+  Storage & Sync
+    mount              Mount DB as FUSE filesystem (read/write, auto-stage)
+    unmount            Unmount FUSE filesystem
+    backup             Local and cloud (GCS) database backups
+    cathedral          Export/import portable project bundles
+    db                 Database migrations, integrity checks
+
+  Advanced
+    mcp                Start Model Context Protocol server
+    gui                Launch web GUI dashboard
+    claude / vibe      AI-assisted development sessions
+    domain             DNS and domain management
+    query              Natural language file queries
+
+Use 'templedb <command> --help' for details on any command.
+""",
             formatter_class=argparse.RawDescriptionHelpFormatter
         )
         self.parser.add_argument('--version', action='version', version=f'TempleDB {__version__}')

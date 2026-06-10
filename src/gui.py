@@ -378,6 +378,50 @@ def backup_gcs():
     return HTMLResponse(_msg(out or err or "Done", ok=rc == 0))
 
 
+@app.post("/nixos/generate-all", response_class=HTMLResponse)
+def nixos_generate_all():
+    rc, out, err = _run("nixos", "generate-all")
+    return HTMLResponse(_msg(out or err or "Generated", ok=rc == 0))
+
+
+@app.post("/nixos/dotfiles-apply", response_class=HTMLResponse)
+def nixos_dotfiles_apply():
+    rc, out, err = _run("nixos", "dotfiles-apply", "--force")
+    return HTMLResponse(_msg(out or err or "Applied", ok=rc == 0))
+
+
+@app.post("/db/migrate", response_class=HTMLResponse)
+def db_migrate():
+    rc, out, err = _run("db", "migrate")
+    return HTMLResponse(_msg(out or err or "Done", ok=rc == 0))
+
+
+@app.post("/mount/toggle", response_class=HTMLResponse)
+def mount_toggle():
+    # Check if mounted
+    try:
+        with open("/proc/mounts") as f:
+            mounted = any("fuse" in l.lower() and "temple" in l.lower() for l in f)
+    except Exception:
+        mounted = False
+
+    if mounted:
+        rc, out, err = _run("unmount")
+        return HTMLResponse(_msg("Unmounted" if rc == 0 else err, ok=rc == 0))
+    else:
+        # Mount in background (FUSE blocks)
+        import subprocess, threading
+        def _bg_mount():
+            subprocess.run(
+                [TEMPLEDB, "mount", str(Path.home() / "temple"), "--foreground"],
+                capture_output=True
+            )
+        t = threading.Thread(target=_bg_mount, daemon=True)
+        t.start()
+        import time; time.sleep(1)
+        return HTMLResponse(_msg("Mounting at ~/temple...", ok=True))
+
+
 @app.get("/projects/{slug}", response_class=HTMLResponse)
 def project_detail(slug: str, q: str = Query(default=""), tab: str = Query(default="files")):
     proj = query_one("SELECT id, name FROM projects WHERE slug = ?", (slug,))
@@ -2144,57 +2188,89 @@ def domains_list():
 # ── Docs ──────────────────────────────────────────────────────────────────────
 
 CLI_REFERENCE = """
-<details style="margin-bottom:1.5rem;border:1px solid #1e1e3a;border-radius:6px;padding:1rem">
+<details open style="margin-bottom:1.5rem;border:1px solid #1e1e3a;border-radius:6px;padding:1rem">
 <summary style="cursor:pointer;color:#e94560;font-weight:bold;font-size:0.9rem">CLI Quick Reference</summary>
-<div style="margin-top:0.75rem;display:grid;grid-template-columns:1fr 1fr;gap:1.5rem">
+<div style="margin-top:0.75rem;display:grid;grid-template-columns:1fr 1fr 1fr;gap:1.5rem;font-size:0.8rem">
 
 <div>
-<h3>Project Lifecycle</h3>
-<pre style="font-size:0.78rem">templedb project import /path --slug name
-templedb project checkout &lt;slug&gt; &lt;dir&gt;
-templedb project sync &lt;slug&gt;
-templedb project list</pre>
+<h3>Getting Started</h3>
+<pre style="font-size:0.75rem">templedb bootstrap                        # new machine setup
+templedb bootstrap --from-backup &lt;path&gt;   # restore from backup
+templedb bootstrap --from-gcs &lt;bucket&gt;    # restore from GCS
+templedb bootstrap --username &lt;user&gt;      # set identity
+templedb bootstrap --hostname &lt;host&gt;      # set NixOS hostname
+templedb tutorial                          # interactive guides
+templedb status                            # system overview</pre>
 
-<h3 style="margin-top:1rem">VCS</h3>
-<pre style="font-size:0.78rem">templedb vcs status &lt;project&gt; --refresh
-templedb vcs add -p &lt;project&gt; --all
-templedb vcs commit -p &lt;project&gt; -m "msg"
-templedb vcs log &lt;project&gt;</pre>
+<h3 style="margin-top:1rem">Projects</h3>
+<pre style="font-size:0.75rem">templedb project import &lt;path&gt; [--slug x]  # import project
+templedb project list                      # list all projects
+templedb project show &lt;slug&gt;              # project details
+templedb project checkout &lt;slug&gt; &lt;dir&gt;    # checkout to filesystem
+templedb project sync &lt;slug&gt;              # re-scan from disk</pre>
 
-<h3 style="margin-top:1rem">Database</h3>
-<pre style="font-size:0.78rem">templedb db status
-templedb db migrate [--dry-run]
-templedb db stamp
-templedb db integrity</pre>
+<h3 style="margin-top:1rem">Version Control</h3>
+<pre style="font-size:0.75rem">templedb vcs status &lt;proj&gt; --refresh       # detect changes
+templedb vcs add -p &lt;proj&gt; --all          # stage all
+templedb vcs commit -p &lt;proj&gt; -m "msg"    # commit
+templedb vcs log &lt;proj&gt;                   # history
+templedb vcs diff &lt;proj&gt;                  # show changes
+templedb vcs branch &lt;proj&gt;                # list branches
+templedb git-export &lt;proj&gt; --remote &lt;url&gt; # export to git</pre>
 </div>
 
 <div>
 <h3>NixOS</h3>
-<pre style="font-size:0.78rem">templedb nixos status
-templedb nixos generate &lt;slug&gt;
-templedb nixos rebuild &lt;slug&gt;
-templedb nixos doctor [slug]
-templedb nixos dotfiles-list
-templedb nixos dotfiles-add &lt;proj&gt; &lt;src&gt; &lt;target&gt;
-templedb nixos dotfiles-apply [--force]</pre>
+<pre style="font-size:0.75rem">templedb nixos status                      # pipeline state
+templedb nixos doctor                      # diagnose problems
+templedb nixos import-config               # import config to DB
+templedb nixos generate-all                # generate everything
+templedb nixos generate &lt;slug&gt;            # generate modules only
+templedb nixos rebuild &lt;slug&gt;             # nixos-rebuild switch
+templedb nixos config-set &lt;key&gt; &lt;val&gt;    # set config value
+templedb nixos config-list                 # list all config</pre>
 
-<h3 style="margin-top:1rem">Bootstrap</h3>
-<pre style="font-size:0.78rem">templedb bootstrap
-templedb bootstrap --from-backup &lt;path&gt;
-templedb bootstrap --from-gcs &lt;bucket&gt;</pre>
+<h3 style="margin-top:1rem">Dotfiles</h3>
+<pre style="font-size:0.75rem">templedb nixos dotfiles-list               # show all mappings
+templedb nixos dotfiles-add &lt;p&gt; &lt;s&gt; &lt;t&gt;  # add mapping
+templedb nixos dotfiles-remove &lt;p&gt; &lt;s&gt;   # remove mapping
+templedb nixos dotfiles-apply [--force]    # create symlinks</pre>
 
-<h3 style="margin-top:1rem">FUSE &amp; Git Export</h3>
-<pre style="font-size:0.78rem">templedb mount [~/temple]
-templedb unmount [~/temple]
-templedb mount-status
-templedb git-export &lt;project&gt; [--remote &lt;url&gt;]</pre>
+<h3 style="margin-top:1rem">FUSE Filesystem</h3>
+<pre style="font-size:0.75rem">templedb mount [~/temple]                  # mount DB as filesystem
+templedb mount -r                          # read-only mount
+templedb unmount [~/temple]                # unmount
+templedb mount-status                      # check mount state</pre>
+</div>
 
-<h3 style="margin-top:1rem">Config &amp; Secrets</h3>
-<pre style="font-size:0.78rem">templedb config link &lt;project&gt; [--force]
-templedb config list
-templedb config verify
-templedb secret list
-templedb backup gcs</pre>
+<div>
+<h3>Secrets &amp; Environment</h3>
+<pre style="font-size:0.75rem">templedb secret list                       # list secrets
+templedb secret set &lt;proj&gt; &lt;key&gt;          # set secret
+templedb secret export &lt;proj&gt;             # export as dotenv
+templedb env set &lt;proj&gt; &lt;key&gt; &lt;val&gt;      # set env var
+templedb env list &lt;proj&gt;                  # list env vars
+templedb key list                          # list encryption keys</pre>
+
+<h3 style="margin-top:1rem">Deployment</h3>
+<pre style="font-size:0.75rem">templedb deploy run &lt;proj&gt;                # deploy project
+templedb deploy list                       # list deployments
+templedb deploy history &lt;proj&gt;            # deployment history
+templedb deploy shell &lt;proj&gt;              # enter deploy shell
+templedb deploy rollback &lt;proj&gt;           # rollback deploy</pre>
+
+<h3 style="margin-top:1rem">Database &amp; Backup</h3>
+<pre style="font-size:0.75rem">templedb db status                         # migration status
+templedb db migrate                        # apply migrations
+templedb db integrity                      # integrity check
+templedb backup local                      # local backup
+templedb backup gcs                        # backup to GCS
+templedb backup restore &lt;path&gt;            # restore from backup</pre>
+
+<h3 style="margin-top:1rem">Config Links</h3>
+<pre style="font-size:0.75rem">templedb config link &lt;proj&gt; [--force]      # symlink config files
+templedb config list                       # list all links
+templedb config verify                     # check link status</pre>
 </div>
 
 </div>
@@ -2693,11 +2769,13 @@ def status():
 <tr><td>FUSE mount</td><td>{fuse_cell}</td></tr>
 <tr><td>Database</td><td>{db_info}</td></tr>
 </table>
-<p class="muted" style="font-size:0.8rem;margin-top:0.5rem">
-  Bootstrap: <code>templedb bootstrap [--from-backup PATH]</code><br>
-  FUSE mount: <code>templedb mount ~/temple</code><br>
-  Git export: <code>templedb git-export &lt;project&gt; --remote &lt;github-url&gt;</code>
-</p>
+<div style="display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap">
+  <button hx-post="/mount/toggle" hx-swap="outerHTML" style="font-size:0.78rem">{'Unmount' if fuse_mounts else 'Mount'} ~/temple</button>
+  <button hx-post="/db/migrate" hx-swap="outerHTML" style="font-size:0.78rem">Run Migrations</button>
+  <button hx-post="/nixos/dotfiles-apply" hx-swap="outerHTML" style="font-size:0.78rem">Apply Dotfiles</button>
+  <button hx-post="/nixos/generate-all" hx-swap="outerHTML" style="font-size:0.78rem">Generate NixOS</button>
+  <button hx-post="/backup/gcs" hx-swap="outerHTML" style="font-size:0.78rem">Backup to GCS</button>
+</div>
 """
     except Exception:
         pass
