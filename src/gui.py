@@ -19,13 +19,33 @@ from fastapi.responses import HTMLResponse
 
 app = FastAPI(title="TempleDB")
 
-TEMPLEDB = str(Path(__file__).parent.parent / "templedb")
+def _find_templedb() -> str:
+    """Find the templedb binary — works in both dev and nix-installed contexts."""
+    import shutil
+    # 1. Check if templedb is on PATH (nix-installed)
+    on_path = shutil.which("templedb")
+    if on_path:
+        return on_path
+    # 2. Check relative to this file (dev mode: src/gui.py -> ../templedb)
+    dev_path = Path(__file__).parent.parent / "templedb"
+    if dev_path.exists():
+        return str(dev_path)
+    # 3. Fallback: use python -m cli
+    return sys.executable + " -m cli"
+
+TEMPLEDB = _find_templedb()
 
 
 # ── CLI helpers ───────────────────────────────────────────────────────────────
 
 def _run(*args: str) -> tuple[int, str, str]:
-    r = subprocess.run([TEMPLEDB] + list(args), capture_output=True, text=True)
+    cmd = TEMPLEDB
+    if " -m " in cmd:
+        # python3 -m cli form: split into list
+        parts = cmd.split() + list(args)
+    else:
+        parts = [cmd] + list(args)
+    r = subprocess.run(parts, capture_output=True, text=True)
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
 
