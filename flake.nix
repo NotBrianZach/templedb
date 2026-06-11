@@ -10,10 +10,31 @@
 
   outputs = { self, nixpkgs, flake-utils, nixops4 }:
     let
+      # cr-sqlite pre-built extension, patched for NixOS
+      mkCrsqlite = pkgs: pkgs.stdenv.mkDerivation {
+        pname = "crsqlite";
+        version = "0.16.3";
+
+        src = pkgs.fetchzip {
+          url = "https://github.com/vlcn-io/cr-sqlite/releases/download/v0.16.3/crsqlite-linux-x86_64.zip";
+          hash = "sha256-F9uTWLanDAjL4btdEHtmNnc1SdHAzbAOYBTPCa4BqJI=";
+          stripRoot = false;
+        };
+
+        nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+        buildInputs = [ pkgs.stdenv.cc.cc.lib ];
+
+        installPhase = ''
+          mkdir -p $out/lib
+          cp crsqlite.so $out/lib/
+        '';
+      };
+
       # Build the templedb package for a given pkgs
       mkPackage = pkgs:
         let
           python = pkgs.python3;
+          crsqlite = mkCrsqlite pkgs;
           pythonEnv = python.withPackages (ps: with ps; [
             pyyaml
             rich
@@ -37,13 +58,9 @@
             runHook preInstall
 
             SITE="$out/${python.sitePackages}"
-            mkdir -p "$SITE" "$out/bin"
+            mkdir -p "$SITE" "$out/bin" "$out/lib"
 
-            # Install all Python packages and modules from src/. Copying the
-            # whole tree avoids silently dropping subpackages: besides cli and
-            # importer, the CLI imports services, repositories, backup, exporter,
-            # dns_providers, git_server and sync, plus top-level modules such as
-            # nixos_generator.py.
+            # Install all Python packages and modules from src/.
             cp -r src/. "$SITE/"
 
             # Install root-level Python modules (gui, mcp_server, etc.)
@@ -51,10 +68,14 @@
               [ -f "$f" ] && cp "$f" "$SITE/" || true
             done
 
+            # Install cr-sqlite extension
+            cp ${crsqlite}/lib/crsqlite.so "$out/lib/"
+
             # templedb entry point: python -m cli
             makeWrapper ${pythonEnv}/bin/python3 "$out/bin/templedb" \
               --add-flags "-m cli" \
-              --set PYTHONPATH "$SITE"
+              --set PYTHONPATH "$SITE" \
+              --set TEMPLEDB_CRSQLITE_PATH "$out/lib/crsqlite"
 
             ln -s "$out/bin/templedb" "$out/bin/tdb"
 
@@ -101,6 +122,7 @@
         packages = {
           templedb = mkPackage pkgs;
           default = mkPackage pkgs;
+          crsqlite = mkCrsqlite pkgs;
         };
 
         devShells.default = pkgs.mkShell {
@@ -112,7 +134,7 @@
             age
             git
             just
-            google-cloud-sdk  # gcloud CLI for GCS management
+            google-cloud-sdk
 
             # NixOps4 for deployment orchestration
             nixops4.packages.${system}.default
@@ -124,6 +146,7 @@
           ];
           shellHook = ''
             export RUST_BACKTRACE=1
+            export TEMPLEDB_CRSQLITE_PATH="${(mkCrsqlite pkgs)}/lib/crsqlite"
             echo "templedb dev shell loaded"
             echo "GUI available: templedb gui"
           '';

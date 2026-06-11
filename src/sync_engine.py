@@ -93,7 +93,18 @@ SHADOW_TO_MAIN = {
     "sync_nixos_config": ("system_config", "key"),
 }
 
-CRSQLITE_PATH = str(Path(__file__).parent.parent / "lib" / "crsqlite")
+def _find_crsqlite():
+    """Find the crsqlite extension — checks env var, then lib/ dir."""
+    env_path = os.environ.get('TEMPLEDB_CRSQLITE_PATH')
+    if env_path:
+        return env_path
+    # Fallback: lib/crsqlite.so relative to repo root
+    local = Path(__file__).parent.parent / "lib" / "crsqlite"
+    if Path(str(local) + ".so").exists():
+        return str(local)
+    return "crsqlite"  # hope it's on the search path
+
+CRSQLITE_PATH = _find_crsqlite()
 
 
 def _get_db_path():
