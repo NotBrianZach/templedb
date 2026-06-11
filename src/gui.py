@@ -467,14 +467,31 @@ def db_migrate():
 # ── CRUD: system_config ───────────────────────────────────────────────────────
 
 @app.post("/config/set", response_class=HTMLResponse)
-def config_set(key: str = Form(...), value: str = Form(...)):
-    """Set a system_config key."""
-    from db_utils import execute
+def config_set(key: str = Form(...), value: str = Form(...), hostname: str = Form("")):
+    """Set a system_config key (hostname-aware)."""
+    import socket
+    from db_utils import execute, query_all
+    host = hostname or ""
+    # Auto-detect host from key pattern: nixos.host.<hostname> or <hostname>.* prefix
+    if not host:
+        if key.startswith("nixos.host."):
+            host = key.split(".")[2]
+        else:
+            # Check known hosts from existing nixos.host.* entries
+            known = {r["key"].split(".")[2] for r in query_all(
+                "SELECT key FROM system_config WHERE key LIKE 'nixos.host.%'"
+            )}
+            for h in known:
+                if key.startswith(h + "."):
+                    host = h
+                    break
+    if not host:
+        host = socket.gethostname()
     execute(
-        "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
-        "VALUES (?, ?, datetime('now'))", (key, value)
+        "INSERT OR REPLACE INTO system_config (key, value, hostname, updated_at) "
+        "VALUES (?, ?, ?, datetime('now'))", (key, value, host)
     )
-    return HTMLResponse(_msg(f"Set {key}", ok=True))
+    return HTMLResponse(_msg(f"Set {key} ({host})", ok=True))
 
 
 @app.post("/config/delete", response_class=HTMLResponse)
@@ -1244,15 +1261,16 @@ def secret_detail(slug: str, profile: str):
 # ── Vars ──────────────────────────────────────────────────────────────────────
 
 @app.get("/vars", response_class=HTMLResponse)
-def vars_list(project: str = Query(""), env: str = Query("")):
+def vars_list(project: str = Query(""), env: str = Query(""), host: str = Query("")):
     rows = query_all("""
         SELECT ev.id, ev.scope_type, ev.scope_id,
                p.slug,
                ev.var_name, ev.var_value, ev.value_type, ev.template,
-               ev.is_secret, ev.description, ev.updated_at
+               ev.is_secret, ev.description, ev.updated_at,
+               ev.hostname
         FROM environment_variables ev
         LEFT JOIN projects p ON p.id = ev.scope_id AND ev.scope_type = 'project'
-        ORDER BY p.slug NULLS LAST, ev.var_name
+        ORDER BY ev.hostname, p.slug NULLS LAST, ev.var_name
     """)
 
     def parse_name(var_name):
@@ -1267,7 +1285,11 @@ def vars_list(project: str = Query(""), env: str = Query("")):
     # Collect unique values for dropdowns before filtering
     all_slugs = sorted({r["slug"] for r in parsed if r["slug"]})
     all_env_prefixes = sorted({r["env_prefix"] for r in parsed if r["env_prefix"]})
+    all_hosts = sorted({r["hostname"] or "(untagged)" for r in parsed})
 
+    if host:
+        filter_host = None if host == "(untagged)" else host
+        parsed = [r for r in parsed if (r["hostname"] or "(untagged)") == (host or "(untagged)")]
     if project:
         parsed = [r for r in parsed if (r["slug"] or "") == project]
     if env:
@@ -1284,6 +1306,7 @@ def vars_list(project: str = Query(""), env: str = Query("")):
 
     filter_bar = f"""
 <form method="get" action="/vars" class="row" style="margin-bottom:1rem">
+  {_select("host", all_hosts, host, "All hosts")}
   {_select("project", all_slugs, project, "All projects")}
   {_select("env", all_env_prefixes, env, "All envs")}
   <span class="muted">{len(parsed)} var{"s" if len(parsed) != 1 else ""}</span>
@@ -1305,12 +1328,20 @@ def vars_list(project: str = Query(""), env: str = Query("")):
         cls = " blue" if vtype != "static" else ""
         return f'<span class="badge{cls}">{html.escape(vtype)}</span>'
 
+    def _host_badge(hostname):
+        import socket
+        h = hostname or "(untagged)"
+        is_local = h == socket.gethostname()
+        color = "#4a9a6a" if is_local else "#7a7a9a"
+        return f'<span style="font-size:0.72rem;color:{color}">{html.escape(h)}</span>'
+
     def _make_table(var_rows):
         trs = [
-            [f'<code>{html.escape(r["key"])}</code>', _render_value(r), _type_badge(r["value_type"]), html.escape((r["updated_at"] or "")[:10])]
+            [f'<code>{html.escape(r["key"])}</code>', _render_value(r), _type_badge(r["value_type"]),
+             _host_badge(r.get("hostname")), html.escape((r["updated_at"] or "")[:10])]
             for r in var_rows
         ]
-        return _table(["Key", "Value", "Type", "Updated"], trs)
+        return _table(["Key", "Value", "Type", "Host", "Updated"], trs)
 
     by_project = defaultdict(list)
     for r in parsed:
@@ -1325,8 +1356,9 @@ def vars_list(project: str = Query(""), env: str = Query("")):
             key_cell = f'<code>{html.escape(r["key"])}</code>'
             if r["env_prefix"]:
                 key_cell += f' <span class="muted" style="font-size:0.75rem">[{html.escape(r["env_prefix"])}]</span>'
-            trs.append([key_cell, _render_value(r), _type_badge(r["value_type"]), html.escape((r["updated_at"] or "")[:10])])
-        sections_html += f'<div class="fsec"><h3>Global</h3>{_table(["Key", "Value", "Type", "Updated"], trs)}</div>'
+            trs.append([key_cell, _render_value(r), _type_badge(r["value_type"]),
+                        _host_badge(r.get("hostname")), html.escape((r["updated_at"] or "")[:10])])
+        sections_html += f'<div class="fsec"><h3>Global</h3>{_table(["Key", "Value", "Type", "Host", "Updated"], trs)}</div>'
 
     for slug in sorted(k for k in by_project if k != "__global__"):
         proj_rows = by_project[slug]
@@ -3042,46 +3074,108 @@ def graph_project(slug: str):
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 @app.get("/settings", response_class=HTMLResponse)
-def settings_page(q: str = Query("")):
-    # ── System Config ─────────────────────────────────────────────────────────
-    configs = query_all("SELECT key, value, updated_at FROM system_config ORDER BY key")
+def settings_page(q: str = Query(""), host: str = Query("")):
+    import socket
+    current_host = socket.gethostname()
 
-    config_rows = []
+    # ── System Config (grouped by host) ──────────────────────────────────────
+    configs = query_all(
+        "SELECT key, value, hostname, updated_at FROM system_config ORDER BY hostname, key"
+    )
+
+    # Collect unique hostnames for filter
+    all_hosts = sorted({c["hostname"] or "(untagged)" for c in configs})
+
+    # Filter by host if specified
+    if host:
+        filter_host = None if host == "(untagged)" else host
+        configs = [c for c in configs if (c["hostname"] or "(untagged)") == (host or "(untagged)")]
+
+    # Group by hostname
+    by_host = defaultdict(list)
     for c in configs:
-        key = html.escape(c["key"])
-        val = html.escape(c["value"] or "")
-        # Truncate long JSON values for display
-        display_val = val[:80] + ("..." if len(val) > 80 else "")
+        h = c["hostname"] or "(untagged)"
+        by_host[h].append(c)
 
-        edit_form = (
-            f'<form hx-post="/config/set" hx-swap="outerHTML" style="display:inline">'
-            f'<input type="hidden" name="key" value="{key}">'
-            f'<input type="text" name="value" value="{val}" class="inline-edit" '
-            f'style="width:400px" onchange="this.form.requestSubmit()">'
-            f'</form>'
+    # Host filter bar
+    host_options = ''.join(
+        f'<option value="{html.escape(h)}"{" selected" if h == host else ""}>{html.escape(h)}'
+        f'{"  (this machine)" if h == current_host else ""}</option>'
+        for h in all_hosts
+    )
+    host_filter = f"""
+<form method="get" action="/settings" style="margin-bottom:1rem;display:flex;gap:0.5rem;align-items:center">
+  <select name="host" onchange="this.form.submit()"
+    style="background:#13131f;border:1px solid #2a2a4a;color:#d0d0e8;padding:0.3rem 0.5rem;border-radius:4px;font-family:monospace;font-size:0.85rem">
+    <option value="">All hosts ({len(configs)} keys)</option>
+    {host_options}
+  </select>
+  <span class="muted" style="font-size:0.8rem">Current: <strong>{html.escape(current_host)}</strong></span>
+</form>
+"""
+
+    # Build grouped config sections
+    config_sections_html = ""
+    for hostname in sorted(by_host.keys(), key=lambda h: (h != current_host, h)):
+        host_configs = by_host[hostname]
+        is_current = hostname == current_host
+        host_badge = (
+            f'<span style="color:{"#4a9a6a" if is_current else "#a0a0c0"};font-weight:600">'
+            f'{html.escape(hostname)}</span>'
+            f'{"  <span class=\"badge\" style=\"font-size:0.7rem\">this machine</span>" if is_current else ""}'
         )
-        del_btn = (
-            f'<form hx-post="/config/delete" hx-swap="outerHTML" hx-confirm="Delete {key}?" style="display:inline">'
-            f'<input type="hidden" name="key" value="{key}">'
-            f'<button class="sm danger" type="submit">x</button>'
-            f'</form>'
-        )
-        config_rows.append([
-            f'<code style="font-size:0.78rem">{key}</code>',
-            edit_form,
-            html.escape((c["updated_at"] or "")[:10]),
-            del_btn,
-        ])
 
-    config_table = _table(["Key", "Value", "Updated", ""], config_rows, "No config keys.", "config-tbl")
+        config_rows = []
+        for c in host_configs:
+            key = html.escape(c["key"])
+            val = html.escape(c["value"] or "")
 
-    # Add config form
-    add_config = """
+            edit_form = (
+                f'<form hx-post="/config/set" hx-swap="outerHTML" style="display:inline">'
+                f'<input type="hidden" name="key" value="{key}">'
+                f'<input type="hidden" name="hostname" value="{html.escape(hostname)}">'
+                f'<input type="text" name="value" value="{val}" class="inline-edit" '
+                f'style="width:350px" onchange="this.form.requestSubmit()">'
+                f'</form>'
+            )
+            del_btn = (
+                f'<form hx-post="/config/delete" hx-swap="outerHTML" hx-confirm="Delete {key}?" style="display:inline">'
+                f'<input type="hidden" name="key" value="{key}">'
+                f'<button class="sm danger" type="submit">x</button>'
+                f'</form>'
+            )
+            config_rows.append([
+                f'<code style="font-size:0.78rem">{key}</code>',
+                edit_form,
+                html.escape((c["updated_at"] or "")[:10]),
+                del_btn,
+            ])
+
+        config_table = _table(["Key", "Value", "Updated", ""], config_rows, "No config keys.", f"config-tbl-{hostname}")
+        config_sections_html += f"""
+<details {"open" if is_current or len(by_host) == 1 else ""} style="margin-bottom:1rem;border:1px solid {"#2a4a3a" if is_current else "#1e1e3a"};border-radius:6px;padding:0.75rem">
+  <summary style="cursor:pointer;font-size:0.9rem">{host_badge} <span class="muted">({len(host_configs)} keys)</span></summary>
+  <div style="margin-top:0.5rem">
+    {_search_bar(f"config-tbl-{hostname}", "Filter keys...", "300px")}
+    {config_table}
+  </div>
+</details>
+"""
+
+    # Add config form (with hostname)
+    host_opts_for_add = ''.join(
+        f'<option value="{html.escape(h)}"{" selected" if h == current_host else ""}>{html.escape(h)}</option>'
+        for h in all_hosts if h != "(untagged)"
+    )
+    add_config = f"""
 <details style="margin-top:0.5rem">
 <summary style="cursor:pointer;color:#a0a0c0;font-size:0.85rem">+ Add config key</summary>
 <form hx-post="/config/set" hx-swap="outerHTML" style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center">
+  <select name="hostname" style="background:#13131f;border:1px solid #2a2a4a;color:#d0d0e8;padding:0.3rem 0.5rem;border-radius:4px;font-size:0.85rem">
+    {host_opts_for_add}
+  </select>
   <input type="text" name="key" placeholder="key.name" style="width:200px" required>
-  <input type="text" name="value" placeholder="value" style="width:300px" required>
+  <input type="text" name="value" placeholder="value" style="width:250px" required>
   <button type="submit" class="sm primary">Add</button>
 </form>
 </details>
@@ -3163,15 +3257,123 @@ def settings_page(q: str = Query("")):
 </details>
 """
 
+    # ── NixOS Host Configs (parsed from nix files) ─────────────────────────────
+    nixos_hosts_html = ""
+    try:
+        sys_proj = query_one("SELECT id FROM projects WHERE slug = 'system_config'")
+        if sys_proj:
+            sys_pid = sys_proj["id"]
+            host_files = query_all("""
+                SELECT pf.file_path, cb.content_text
+                FROM project_files pf
+                JOIN file_contents fc ON fc.file_id = pf.id
+                JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+                WHERE pf.project_id = ? AND (
+                    pf.file_path LIKE 'hosts/%.nix'
+                    OR pf.file_path = 'configuration.nix'
+                    OR pf.file_path = 'home.nix'
+                )
+                ORDER BY pf.file_path
+            """, (sys_pid,))
+
+            for hf in host_files:
+                fpath = hf["file_path"]
+                content = hf["content_text"] or ""
+                lines = content.split("\n")
+
+                # Derive host from filename
+                if fpath.startswith("hosts/"):
+                    file_host = fpath.replace("hosts/", "").replace(".nix", "")
+                elif fpath == "configuration.nix":
+                    file_host = "(shared)"
+                elif fpath == "home.nix":
+                    file_host = "(home-manager)"
+                else:
+                    file_host = fpath
+
+                # Parse packages, services, and key settings
+                packages = []
+                services = []
+                other_settings = []
+                in_packages = False
+                in_block = None
+                brace_depth = 0
+
+                for i, line in enumerate(lines):
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+
+                    # Track package blocks
+                    if any(kw in stripped for kw in ["systemPackages", "home.packages", "withPackages", "extraPackages"]):
+                        in_packages = True
+                        continue
+                    if in_packages:
+                        if "];" in stripped or stripped == "];":
+                            in_packages = False
+                        elif stripped and not stripped.startswith("(") and not stripped.startswith(")"):
+                            pkg = stripped.rstrip(";").strip()
+                            if pkg and pkg not in ["with pkgs;", "[", "]"]:
+                                packages.append(pkg)
+                        continue
+
+                    # Track services
+                    if stripped.startswith("services.") and "=" in stripped:
+                        services.append(stripped.rstrip(";"))
+                    # Track networking, boot, hardware
+                    elif any(stripped.startswith(pf) for pf in ["networking.", "boot.", "hardware.", "programs."]):
+                        if "=" in stripped:
+                            other_settings.append(stripped.rstrip(";"))
+
+                # Build section
+                is_current_host = file_host == current_host
+                host_color = "#4a9a6a" if is_current_host else "#a0a0c0"
+
+                pkg_html = ""
+                if packages:
+                    pkg_list = "".join(f"<li><code>{html.escape(p)}</code></li>" for p in sorted(set(packages))[:50])
+                    pkg_html = f'<div style="margin:0.5rem 0"><strong style="font-size:0.8rem;color:#a0a0c0">Packages ({len(set(packages))})</strong><ul style="columns:3;font-size:0.78rem;margin:0.3rem 0">{pkg_list}</ul></div>'
+
+                svc_html = ""
+                if services:
+                    svc_list = "".join(f"<li><code>{html.escape(s[:60])}</code></li>" for s in services[:20])
+                    svc_html = f'<div style="margin:0.5rem 0"><strong style="font-size:0.8rem;color:#a0a0c0">Services ({len(services)})</strong><ul style="font-size:0.78rem;margin:0.3rem 0">{svc_list}</ul></div>'
+
+                settings_html = ""
+                if other_settings:
+                    set_list = "".join(f"<li><code>{html.escape(s[:70])}</code></li>" for s in other_settings[:20])
+                    settings_html = f'<div style="margin:0.5rem 0"><strong style="font-size:0.8rem;color:#a0a0c0">Settings ({len(other_settings)})</strong><ul style="font-size:0.78rem;margin:0.3rem 0">{set_list}</ul></div>'
+
+                if packages or services or other_settings:
+                    badge = f'{"  <span class=\"badge\" style=\"font-size:0.7rem\">this machine</span>" if is_current_host else ""}'
+                    nixos_hosts_html += f"""
+<details {"open" if is_current_host else ""} style="margin-bottom:0.75rem;border:1px solid {"#2a4a3a" if is_current_host else "#1e1e3a"};border-radius:6px;padding:0.75rem">
+  <summary style="cursor:pointer;font-size:0.9rem">
+    <span style="color:{host_color};font-weight:600">{html.escape(file_host)}</span>{badge}
+    <span class="muted" style="font-size:0.78rem">— {html.escape(fpath)}</span>
+  </summary>
+  {pkg_html}{svc_html}{settings_html}
+</details>
+"""
+    except Exception as e:
+        nixos_hosts_html = f'<p class="muted">Could not parse NixOS configs: {html.escape(str(e))}</p>'
+
     body = f"""
 <h2>Settings</h2>
 
-<h3>System Config ({len(configs)} keys)
-  <span class="help-tip" style="position:relative">?<span class="tip">Key-value pairs stored in system_config table. Edit inline — changes save on blur. Used by NixOS generation, dotfiles, backups.</span></span>
+<h3>System Config
+  <span class="help-tip" style="position:relative">?<span class="tip">Key-value pairs stored in system_config table, grouped by host. Edit inline — changes save on blur. Used by NixOS generation, dotfiles, backups.</span></span>
 </h3>
-{_search_bar("config-tbl", "Filter config keys...", "360px")}
-{config_table}
+{host_filter}
+{config_sections_html}
 {add_config}
+
+<hr class="sep">
+
+<h3>NixOS Host Configs
+  <span class="help-tip" style="position:relative">?<span class="tip">Parsed from configuration.nix, home.nix, and hosts/*.nix in the system_config project. Shows packages, services, and key settings per host.</span></span>
+</h3>
+{nixos_hosts_html if nixos_hosts_html else '<p class="muted">No NixOS config files found in system_config project.</p>'}
 
 <hr class="sep">
 
@@ -3391,5 +3593,86 @@ def status():
 {dotfiles_html}
 {config_links_html}
 {bootstrap_html}
+
+<h3 style="margin-top:1.5rem">Third-Party Services &amp; APIs
+  <span class="help-tip" style="position:relative">?<span class="tip">External services TempleDB integrates with. Not all are required — most are optional depending on your workflow.</span></span>
+</h3>
+<table>
+<thead><tr><th>Service</th><th>Used For</th><th>Required?</th><th>Config</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>SQLite</strong></td>
+  <td>Core database — all project data, VCS, config, secrets stored here</td>
+  <td><span class="badge green">core</span></td>
+  <td><code>~/.local/share/templedb/templedb.sqlite</code></td>
+</tr>
+<tr>
+  <td><strong>cr-sqlite</strong></td>
+  <td>CRDT sync between machines — conflict-free replication of DB tables</td>
+  <td><span class="badge">optional</span></td>
+  <td><code>templedb sync init</code></td>
+</tr>
+<tr>
+  <td><strong>Git</strong></td>
+  <td>Project checkout management, git daemon (port 9419) for LAN flake inputs, git-export for GitHub</td>
+  <td><span class="badge green">core</span></td>
+  <td>Built-in</td>
+</tr>
+<tr>
+  <td><strong>Nix / NixOS</strong></td>
+  <td>System config generation, managed packages, flake inputs, <code>nixos-rebuild switch</code></td>
+  <td><span class="badge green">core</span></td>
+  <td><code>templedb nixos status</code></td>
+</tr>
+<tr>
+  <td><strong>FUSE</strong> (fusepy)</td>
+  <td>Mount DB as filesystem at <code>~/temple/</code> — primary file access, auto-stages writes</td>
+  <td><span class="badge blue">recommended</span></td>
+  <td><code>templedb mount ~/temple</code></td>
+</tr>
+<tr>
+  <td><strong>SOPS / Age</strong></td>
+  <td>Secret encryption — age keys for encrypt/decrypt, SOPS for YAML secret management</td>
+  <td><span class="badge blue">recommended</span></td>
+  <td><code>~/.age/key.txt</code> or <code>~/.config/sops/age/keys.txt</code></td>
+</tr>
+<tr>
+  <td><strong>Google Cloud Storage</strong></td>
+  <td>Cloud backup — upload/download DB snapshots to GCS bucket</td>
+  <td><span class="badge">optional</span></td>
+  <td><code>gcs.backup_bucket</code> in system_config</td>
+</tr>
+<tr>
+  <td><strong>Tailscale</strong></td>
+  <td>VPN for machine-to-machine sync — peer discovery, direct TCP sync over Tailnet</td>
+  <td><span class="badge">optional</span></td>
+  <td><code>templedb sync peers</code></td>
+</tr>
+<tr>
+  <td><strong>GitHub</strong></td>
+  <td>Flake inputs (<code>github:user/repo</code>), <code>git-export --remote</code>, project hosting</td>
+  <td><span class="badge">optional</span></td>
+  <td><code>gh</code> CLI or git credentials</td>
+</tr>
+<tr>
+  <td><strong>Cloudflare</strong></td>
+  <td>DNS management — create/update DNS records for project domains</td>
+  <td><span class="badge">optional</span></td>
+  <td><code>CF_API_TOKEN</code> env var</td>
+</tr>
+<tr>
+  <td><strong>Supabase</strong></td>
+  <td>Used by projects (bza, woofs) — not TempleDB itself. Env vars/secrets managed by TempleDB</td>
+  <td><span class="badge">project-specific</span></td>
+  <td>Per-project env vars</td>
+</tr>
+<tr>
+  <td><strong>Claude / Anthropic</strong></td>
+  <td>AI-assisted coding via <code>templedb vibe start</code>, MCP server for Claude Code integration</td>
+  <td><span class="badge">optional</span></td>
+  <td><code>claude</code> CLI installed</td>
+</tr>
+</tbody>
+</table>
 """
     return _base("Status", body, "status")
