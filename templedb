@@ -31,5 +31,12 @@ if [ -z "$SYSTEM_SITE" ]; then
   SYSTEM_SITE="$(grep -m1 'PYTHONPATH=' "$RESULT/bin/templedb" | sed "s|.*PYTHONPATH='\\(.*\\)'.*|\\1|")"
 fi
 
+# cr-sqlite extension path (from nix build)
+CRSQLITE="$(grep -m1 'TEMPLEDB_CRSQLITE_PATH=' "$RESULT/bin/templedb" 2>/dev/null | sed "s|.*TEMPLEDB_CRSQLITE_PATH='\\(.*\\)'.*|\\1|")"
+if [ -z "$CRSQLITE" ]; then
+  CRSQLITE="$RESULT/lib/crsqlite"
+fi
+
 exec env PYTHONPATH="$SYSTEM_SITE" PYTHONNOUSERSITE=true \
+  TEMPLEDB_CRSQLITE_PATH="$CRSQLITE" \
   "$PYTHON" "$DIR/templedb_launcher.py" "$@"
