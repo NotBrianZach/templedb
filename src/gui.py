@@ -480,6 +480,12 @@ def nixos_generate_all():
     return HTMLResponse(_msg(out or err or "Generated", ok=rc == 0))
 
 
+@app.post("/nixos/host-clone", response_class=HTMLResponse)
+def nixos_host_clone(source: str = Form(...), target: str = Form(...)):
+    rc, out, err = _run("nixos", "host", "clone", source, target)
+    return HTMLResponse(_msg(out or err or f"Cloned {source} → {target}", ok=rc == 0))
+
+
 @app.post("/nixos/dotfiles-apply", response_class=HTMLResponse)
 def nixos_dotfiles_apply():
     rc, out, err = _run("nixos", "dotfiles-apply", "--force")
@@ -1915,6 +1921,58 @@ def nix_list():
     except Exception:
         pass
 
+    # ── Host Management ───────────────────────────────────────────────────────
+    hosts_section = ""
+    try:
+        host_rows = query_all(
+            "SELECT key, value FROM system_config WHERE key LIKE 'nixos.host.%' ORDER BY key"
+        )
+        active_row = query_one("SELECT value FROM system_config WHERE key = 'nixos.flake_output'")
+        active_host = active_row["value"] if active_row else None
+
+        if host_rows:
+            h_rows = []
+            for h in host_rows:
+                hostname = h["key"].replace("nixos.host.", "")
+                override_count = query_one(
+                    "SELECT COUNT(*) as n FROM system_config WHERE key LIKE ?",
+                    (f"{hostname}.%",)
+                )
+                count = override_count["n"] if override_count else 0
+                active = '<span class="badge green">active</span>' if hostname == active_host else ""
+                h_rows.append([
+                    f'<strong>{html.escape(hostname)}</strong> {active}',
+                    html.escape(h["value"]),
+                    str(count),
+                    f'<a href="/graph/{html.escape(hostname)}" style="font-size:0.78rem">view</a>',
+                ])
+
+            # Host select dropdown for project selector
+            host_opts = "".join(
+                f'<option value="{html.escape(h["key"].replace("nixos.host.", ""))}">'
+                f'{html.escape(h["key"].replace("nixos.host.", ""))}</option>'
+                for h in host_rows
+            )
+
+            hosts_section = f"""
+<h3 style="margin-top:1.5rem">Hosts ({len(host_rows)})
+  <span class="help-tip" style="position:relative">?<span class="tip">NixOS host configurations. Each host can have overrides (GPU, boot, network). Clone a host to create a similar config for a new machine.</span></span>
+</h3>
+{_table(["Host", "Config File", "Overrides", ""], h_rows)}
+<details style="margin-top:0.5rem">
+<summary style="cursor:pointer;color:#a0a0c0;font-size:0.85rem">+ Clone host to new machine</summary>
+<form hx-post="/nixos/host-clone" hx-swap="outerHTML" style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center">
+  <label style="font-size:0.8rem;color:#808098">From:</label>
+  <select name="source" style="font-size:0.85rem;padding:0.25rem;background:#13131f;border:1px solid #2a2a4a;color:#d0d0e8;border-radius:4px">{host_opts}</select>
+  <label style="font-size:0.8rem;color:#808098">To:</label>
+  <input type="text" name="target" placeholder="new-hostname" style="width:150px" required>
+  <button type="submit" class="sm primary">Clone</button>
+</form>
+</details>
+"""
+    except Exception:
+        pass
+
     # ── Dotfiles ──────────────────────────────────────────────────────────────
     dotfiles_section = ""
     try:
@@ -1955,6 +2013,7 @@ def nix_list():
 <h2>Nix</h2>
 
 {"<h3>NixOS Pipeline</h3>" + pipeline_html if pipeline_html else ""}
+{hosts_section}
 
 <h3 style="margin-top:1.5rem">Flake Configs</h3>
 {config_sections or '<p class="muted">No flake configs stored.</p>'}

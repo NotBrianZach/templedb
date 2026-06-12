@@ -1325,6 +1325,70 @@ class NixOSCommand(Command):
         print(f"  Rebuild with: templedb nixos rebuild system_config")
         return 0
 
+    def host_clone(self, args) -> int:
+        """Clone an existing host config to a new hostname."""
+        conn = _get_conn()
+        source = args.source
+        target = args.target
+
+        # Verify source exists
+        source_keys = conn.execute(
+            "SELECT key, value FROM system_config WHERE key LIKE ?",
+            (f"{source}.%",)
+        ).fetchall()
+
+        if not source_keys:
+            print(f"Source host '{source}' has no config keys.")
+            print(f"  Import first: templedb nixos host import {source}")
+            return 1
+
+        # Check source host registration
+        source_host = conn.execute(
+            "SELECT value FROM system_config WHERE key = ?",
+            (f"nixos.host.{source}",)
+        ).fetchone()
+
+        # Clone all host-scoped keys
+        cloned = 0
+        for row in source_keys:
+            old_key = row[0]
+            new_key = old_key.replace(f"{source}.", f"{target}.", 1)
+            new_value = row[1]
+
+            # Update hostname references in values
+            if source in str(new_value):
+                new_value = new_value.replace(source, target)
+
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))", (new_key, new_value)
+            )
+            cloned += 1
+
+        # Register the new host
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (f"nixos.host.{target}", f"hosts/{target}.nix")
+        )
+
+        conn.commit()
+
+        print(f"Cloned {source} → {target} ({cloned} keys)")
+        print(f"\n  Host-specific overrides for {target}:")
+        new_keys = conn.execute(
+            "SELECT key, value FROM system_config WHERE key LIKE ? ORDER BY key",
+            (f"{target}.%",)
+        ).fetchall()
+        for r in new_keys:
+            k = r[0][len(target) + 1:]
+            print(f"    {k:40s} {r[1][:60]}")
+
+        print(f"\n  Customize: templedb nixos host set {target} <key> <value>")
+        print(f"  Activate:  templedb nixos host activate {target}")
+        print(f"  Generate:  templedb nixos generate-all --host {target}")
+        return 0
+
     # ── Import / Generate-All ────────────────────────────────────────────
 
     def import_config(self, args) -> int:
@@ -1896,3 +1960,8 @@ def register(cli):
     hact = host_sub.add_parser('activate', help='Set this machine to a host')
     hact.add_argument('hostname', help='Host name to activate')
     cli.commands['nixos.host.activate'] = cmd.host_activate
+
+    hclone = host_sub.add_parser('clone', help='Clone host config to a new hostname')
+    hclone.add_argument('source', help='Source host to clone from')
+    hclone.add_argument('target', help='New host name')
+    cli.commands['nixos.host.clone'] = cmd.host_clone
