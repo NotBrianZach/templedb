@@ -2590,8 +2590,57 @@ def docs_list(project: str = Query(""), category: str = Query("")):
   </form>
 </div>
 <div id="docs-content">{sections_html or '<p class="muted">No docs found.</p>'}</div>
+
+<h3 style="margin-top:1.5rem">Project Config Files
+  <span class="help-tip" style="position:relative">?<span class="tip">Quick access to key configuration files across projects. Click to view file contents.</span></span>
+</h3>
+{_project_config_links()}
 """
     return _base("Docs", body, "docs")
+
+
+def _project_config_links() -> str:
+    """Generate quick links to key config files across projects."""
+    config_patterns = [
+        ("NixOS", ["flake.nix", "home.nix", "configuration.nix"]),
+        ("Project", ["package.json", "Cargo.toml", "flake.nix", "shell.nix", "default.nix"]),
+        ("Docs", ["README.md", "CHANGELOG.md", "CLAUDE.md", "AGENTS.md"]),
+        ("CI/Deploy", [".github/workflows/test.yml", "deploy.sh", "Dockerfile"]),
+    ]
+
+    projects = query_all("SELECT slug FROM projects ORDER BY slug")
+    if not projects:
+        return '<p class="muted">No projects.</p>'
+
+    rows = []
+    for proj in projects:
+        slug = proj["slug"]
+        # Find which config files exist for this project
+        files = query_all(
+            "SELECT file_path FROM project_files WHERE project_id = "
+            "(SELECT id FROM projects WHERE slug = ?) AND status = 'active' "
+            "AND (file_path IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "OR file_path LIKE '%README%' OR file_path LIKE '%CLAUDE%')"
+            "ORDER BY file_path LIMIT 10",
+            (slug, "flake.nix", "home.nix", "configuration.nix",
+             "package.json", "Cargo.toml", "shell.nix", "default.nix",
+             "README.md", "CHANGELOG.md", "AGENTS.md", "Dockerfile")
+        )
+        if files:
+            links = " ".join(
+                f'<a href="/projects/{html.escape(slug)}/file?path={html.escape(f["file_path"])}" '
+                f'style="font-size:0.75rem">{html.escape(f["file_path"].split("/")[-1])}</a>'
+                for f in files
+            )
+            rows.append([
+                f'<a href="/projects/{html.escape(slug)}">{html.escape(slug)}</a>',
+                links,
+            ])
+
+    if not rows:
+        return '<p class="muted">No config files found.</p>'
+
+    return _table(["Project", "Config Files"], rows)
 
 
 # ── Code Intelligence ─────────────────────────────────────────────────────────
@@ -3775,6 +3824,115 @@ def status():
     except Exception:
         pass
 
+    # ── Daemon Status ─────────────────────────────────────────────────────
+    daemon_html = ""
+    try:
+        import subprocess as _sp
+
+        # Services to check: from DB + known TempleDB services
+        service_checks = []
+
+        # User services from DB
+        db_user_svcs = query_all(
+            "SELECT key FROM system_config WHERE key LIKE 'nixos.service.user.%'"
+        )
+        for s in db_user_svcs:
+            name = s["key"].replace("nixos.service.user.", "")
+            service_checks.append(("user", f"{name}.service"))
+
+        # System services from DB
+        db_sys_svcs = query_all(
+            "SELECT key FROM system_config WHERE key LIKE 'nixos.service.system.%'"
+        )
+        for s in db_sys_svcs:
+            name = s["key"].replace("nixos.service.system.", "").replace("_", "-")
+            service_checks.append(("system", f"{name}.service"))
+
+        # Always check git-daemon
+        service_checks.append(("system", "git-daemon.service"))
+
+        daemon_rows = []
+        for scope, svc_name in service_checks:
+            try:
+                if scope == "user":
+                    r = _sp.run(
+                        ["systemctl", "--user", "is-active", svc_name],
+                        capture_output=True, text=True, timeout=3
+                    )
+                    status_r = _sp.run(
+                        ["systemctl", "--user", "show", svc_name,
+                         "--property=ActiveState,SubState,MainPID,MemoryCurrent"],
+                        capture_output=True, text=True, timeout=3
+                    )
+                else:
+                    r = _sp.run(
+                        ["systemctl", "is-active", svc_name],
+                        capture_output=True, text=True, timeout=3
+                    )
+                    status_r = _sp.run(
+                        ["systemctl", "show", svc_name,
+                         "--property=ActiveState,SubState,MainPID,MemoryCurrent"],
+                        capture_output=True, text=True, timeout=3
+                    )
+
+                state = r.stdout.strip()
+                props = {}
+                if status_r.returncode == 0:
+                    for line in status_r.stdout.strip().split("\n"):
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            props[k] = v
+
+                if state == "active":
+                    state_cell = '<span style="color:#4a9a6a">active</span>'
+                elif state == "activating":
+                    state_cell = '<span style="color:#e9a045">activating</span>'
+                elif state == "failed":
+                    state_cell = '<span style="color:#e94560">failed</span>'
+                elif state == "inactive":
+                    state_cell = '<span class="muted">inactive</span>'
+                else:
+                    state_cell = f'<span class="muted">{html.escape(state)}</span>'
+
+                pid = props.get("MainPID", "")
+                pid_cell = pid if pid and pid != "0" else ""
+                mem = props.get("MemoryCurrent", "")
+                if mem and mem != "[not set]":
+                    try:
+                        mem_mb = int(mem) / 1024 / 1024
+                        mem_cell = f"{mem_mb:.1f} MB"
+                    except Exception:
+                        mem_cell = ""
+                else:
+                    mem_cell = ""
+
+                scope_badge = f'<span class="badge{" blue" if scope == "user" else ""}">{scope}</span>'
+
+                daemon_rows.append([
+                    f'<code>{html.escape(svc_name)}</code>',
+                    scope_badge,
+                    state_cell,
+                    pid_cell,
+                    f'<span class="muted">{mem_cell}</span>',
+                ])
+            except Exception:
+                daemon_rows.append([
+                    f'<code>{html.escape(svc_name)}</code>',
+                    f'<span class="badge">{scope}</span>',
+                    '<span class="muted">?</span>',
+                    "", "",
+                ])
+
+        if daemon_rows:
+            daemon_html = f"""
+<h3 style="margin-top:1.5rem">Daemons
+  <span class="help-tip" style="position:relative">?<span class="tip">Systemd services managed by TempleDB NixOS config. User services run as your user, system services run as root.</span></span>
+</h3>
+{_table(["Service", "Scope", "Status", "PID", "Memory"], daemon_rows)}
+"""
+    except Exception:
+        pass
+
     body = f"""
 <h2>Status</h2>
 <div style="margin-bottom:1.5rem">{stats_html}</div>
@@ -3783,6 +3941,7 @@ def status():
 {dotfiles_html}
 {config_links_html}
 {bootstrap_html}
+{daemon_html}
 
 <h3 style="margin-top:1.5rem">Third-Party Services &amp; APIs
   <span class="help-tip" style="position:relative">?<span class="tip">External services TempleDB integrates with. Not all are required — most are optional depending on your workflow.</span></span>
