@@ -68,6 +68,9 @@ table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
 .tab:hover { color: #d0d0e8; }
 .tab.active { color: #e94560; border-bottom-color: #e94560; }
 th { text-align: left; padding: 0.4rem 0.6rem; background: #13131f; color: #606080; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid #1e1e3a; }
+th:hover { color: #a0a0c0; }
+th[data-sort="asc"] span { color: #e94560 !important; }
+th[data-sort="desc"] span { color: #e94560 !important; }
 td { padding: 0.35rem 0.6rem; border-bottom: 1px solid #1a1a2e; font-size: 0.85rem; }
 tr:hover td { background: #16162a; }
 a { color: #4a9eff; text-decoration: none; }
@@ -168,6 +171,27 @@ function gSearch(q){{
     r.style.display=fuzzyMatch(r.textContent,q)?'':'none';
   }});
 }}
+function sortTable(th){{
+  var table=th.closest('table');
+  if(!table)return;
+  var tbody=table.querySelector('tbody');
+  if(!tbody)return;
+  var idx=Array.from(th.parentElement.children).indexOf(th);
+  var rows=Array.from(tbody.querySelectorAll('tr'));
+  var asc=th.dataset.sort!=='asc';
+  th.parentElement.querySelectorAll('th').forEach(function(h){{h.dataset.sort='';h.style.color='';}});
+  th.dataset.sort=asc?'asc':'desc';
+  th.style.color='#e94560';
+  rows.sort(function(a,b){{
+    var av=a.children[idx]?a.children[idx].textContent.trim():'';
+    var bv=b.children[idx]?b.children[idx].textContent.trim():'';
+    var an=parseFloat(av.replace(/,/g,''));
+    var bn=parseFloat(bv.replace(/,/g,''));
+    if(!isNaN(an)&&!isNaN(bn))return asc?an-bn:bn-an;
+    return asc?av.localeCompare(bv):bv.localeCompare(av);
+  }});
+  rows.forEach(function(r){{tbody.appendChild(r);}});
+}}
 document.addEventListener('keydown',function(e){{
   if(e.key==='/'&&!e.target.matches('input,textarea')){{
     e.preventDefault();
@@ -207,7 +231,10 @@ document.addEventListener('keydown',function(e){{
 def _table(headers: list[str], rows: list[list[str]], empty: str = "No results.", table_id: str = "") -> str:
     if not rows:
         return f'<p class="muted">{html.escape(empty)}</p>'
-    ths = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+    ths = "".join(
+        f'<th onclick="sortTable(this)" style="cursor:pointer;user-select:none" title="Click to sort">{html.escape(h)} <span style="font-size:0.65rem;color:#404060">⇅</span></th>'
+        for h in headers
+    )
     trs = ""
     for row in rows:
         tds = "".join(f"<td>{cell}</td>" for cell in row)
