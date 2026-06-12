@@ -1328,7 +1328,7 @@ class NixOSCommand(Command):
     # ── Import / Generate-All ────────────────────────────────────────────
 
     def import_config(self, args) -> int:
-        """Import existing NixOS config let-bindings into system_config table."""
+        """Comprehensively import NixOS config into system_config table."""
         import re as _re
 
         slug = _resolve_slug(getattr(args, 'slug', None))
@@ -1342,79 +1342,186 @@ class NixOSCommand(Command):
             return 1
 
         repo = Path(proj[0])
-        nix_files = ['home.nix', 'configuration.nix']
         imported = 0
 
-        for nix_file in nix_files:
-            fpath = repo / nix_file
-            if not fpath.exists():
-                continue
+        def _set(key, value):
+            nonlocal imported
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))", (key, value)
+            )
+            imported += 1
 
-            content = fpath.read_text()
+        # ── home.nix ──────────────────────────────────────────────────────
+        home_path = repo / 'home.nix'
+        if home_path.exists():
+            content = home_path.read_text()
+            print("home.nix:")
 
-            # Only extract let bindings from the "Portable path definitions" block
-            # Look for the section between "Portable path definitions" and the next blank line or non-let code
+            # Portable path let-bindings
             let_section = _re.search(
                 r'# === Portable path definitions ===\n(.*?)(?=\n\n|\n  \w+\s*=\s*pkgs\.)',
                 content, _re.DOTALL
             )
-            if not let_section:
-                print(f"  {nix_file}: no portable path definitions block found, skipping")
-                continue
+            if let_section:
+                for m in _re.finditer(r'^\s+(\w+)\s*=\s*"(/[^"]*)";\s*$', let_section.group(1), _re.MULTILINE):
+                    _set(f"nixos.let.home.{m.group(1)}", m.group(2))
+                    print(f"  nixos.let.home.{m.group(1)} = {m.group(2)}")
 
-            let_block = let_section.group(1)
-            prefix = "nixos.let." + nix_file.replace('.nix', '') + "."
+            # Packages — extract from home.packages = with pkgs; [ ... ];
+            pkg_block = _re.search(r'home\.packages\s*=\s*with pkgs;\s*\[(.*?)\];', content, _re.DOTALL)
+            if pkg_block:
+                current_category = "uncategorized"
+                for line in pkg_block.group(1).split('\n'):
+                    line = line.strip()
+                    if line.startswith('#') and not line.startswith('# Custom'):
+                        current_category = line.lstrip('# ').strip().lower().replace(' ', '_')
+                        continue
+                    # Skip flake-input packages and local packages
+                    if not line or line.startswith('#') or '.' in line or line.startswith('my') or line == 'voiceAIPackage' or line == 'ghcNPackages':
+                        continue
+                    pkg = line.rstrip(';').strip()
+                    if pkg and _re.match(r'^[a-zA-Z][\w-]*$', pkg):
+                        _set(f"nixos.pkg.user.{current_category}.{pkg}", "true")
+                print(f"  Packages: {sum(1 for k in [] if True)} (see nixos.pkg.user.*)")
 
-            # Extract: varName = "/some/path"; (only absolute paths or simple values)
-            let_pattern = _re.compile(
-                r'^\s+(\w+)\s*=\s*"(/[^"]*)";\s*$', _re.MULTILINE
+            # Shell aliases
+            alias_block = _re.search(r'shellAliases\s*=\s*\{(.*?)\};', content, _re.DOTALL)
+            if alias_block:
+                for m in _re.finditer(r'(\w+)\s*=\s*"([^"]*)"', alias_block.group(1)):
+                    _set(f"nixos.alias.{m.group(1)}", m.group(2))
+                print(f"  Aliases: imported")
+
+            # Programs enabled
+            for m in _re.finditer(r'programs\.(\w+)\s*=\s*\{\s*\n\s*enable\s*=\s*true', content):
+                _set(f"nixos.program.{m.group(1)}", "true")
+                print(f"  nixos.program.{m.group(1)} = true")
+
+            # home.username and homeDirectory
+            m = _re.search(r'home\.username\s*=\s*"([^"]+)"', content)
+            if m:
+                _set("nixos.username", m.group(1))
+            m = _re.search(r'home\.homeDirectory\s*=\s*(\w+)', content)
+            if m and m.group(1) != 'homeDir':  # skip if it's a variable reference
+                _set("nixos.home_directory", m.group(1))
+
+            # home.stateVersion
+            m = _re.search(r'home\.stateVersion\s*=\s*"([^"]+)"', content)
+            if m:
+                _set("nixos.home.stateVersion", m.group(1))
+
+            # home.file entries
+            for m in _re.finditer(r'"([^"]+)"\s*=\s*\{[^}]*source\s*=\s*\./([^;]+)', content):
+                _set(f"nixos.home.file.{m.group(1)}", m.group(2).strip())
+                print(f"  nixos.home.file.{m.group(1)} = {m.group(2).strip()}")
+
+            # systemd user services
+            for m in _re.finditer(r'systemd\.user\.services\.(\w[\w-]*)\s*=', content):
+                _set(f"nixos.service.user.{m.group(1)}", "true")
+                print(f"  nixos.service.user.{m.group(1)} = true")
+
+        # ── configuration.nix ─────────────────────────────────────────────
+        conf_path = repo / 'configuration.nix'
+        if conf_path.exists():
+            content = conf_path.read_text()
+            print("\nconfiguration.nix:")
+
+            # Portable path let-bindings
+            let_section = _re.search(
+                r'# === Portable path definitions ===\n(.*?)(?=\n\n|\n  # Port)',
+                content, _re.DOTALL
             )
+            if let_section:
+                for m in _re.finditer(r'^\s+(\w+)\s*=\s*"(/[^"]*)";\s*$', let_section.group(1), _re.MULTILINE):
+                    _set(f"nixos.let.configuration.{m.group(1)}", m.group(2))
+                    print(f"  nixos.let.configuration.{m.group(1)} = {m.group(2)}")
 
-            for match in let_pattern.finditer(let_block):
-                var_name = match.group(1)
-                var_value = match.group(2)
+            # System packages
+            sys_pkg_block = _re.search(r'environment\.systemPackages\s*=\s*with pkgs;\s*\[(.*?)\];', content, _re.DOTALL)
+            if sys_pkg_block:
+                for line in sys_pkg_block.group(1).split('\n'):
+                    line = line.strip()
+                    if line.startswith('#'):
+                        continue
+                    pkg = line.rstrip(';').strip()
+                    if pkg and _re.match(r'^[a-zA-Z][\w-]*$', pkg):
+                        _set(f"nixos.pkg.system.{pkg}", "true")
+                print(f"  System packages: imported")
 
-                key = prefix + var_name
-                conn.execute(
-                    "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
-                    "VALUES (?, ?, datetime('now'))",
-                    (key, var_value)
-                )
-                print(f"  {key} = {var_value}")
-                imported += 1
+            # Services enabled
+            for m in _re.finditer(r'services\.(\w[\w.]*?)\.enable\s*=\s*true', content):
+                svc = m.group(1).replace('.', '_')
+                _set(f"nixos.service.system.{svc}", "true")
+                print(f"  nixos.service.system.{svc} = true")
 
-        # Also extract flake.nix inputs
+            # Programs enabled
+            for m in _re.finditer(r'programs\.(\w[\w.]*?)\.enable\s*=\s*true', content):
+                _set(f"nixos.program.system.{m.group(1)}", "true")
+
+            # system.stateVersion
+            m = _re.search(r'system\.stateVersion\s*=\s*"([^"]+)"', content)
+            if m:
+                _set("nixos.system.stateVersion", m.group(1))
+                print(f"  nixos.system.stateVersion = {m.group(1)}")
+
+            # time.timeZone
+            m = _re.search(r'time\.timeZone\s*=\s*"([^"]+)"', content)
+            if m:
+                _set("nixos.timeZone", m.group(1))
+                print(f"  nixos.timeZone = {m.group(1)}")
+
+            # Firewall TCP ports
+            tcp_block = _re.search(r'firewall\.allowedTCPPorts\s*=\s*\[(.*?)\];', content, _re.DOTALL)
+            if tcp_block:
+                ports = []
+                for line in tcp_block.group(1).split('\n'):
+                    line = _re.sub(r'#.*', '', line).strip()
+                    for p in _re.findall(r'\b(\d+)\b', line):
+                        ports.append(p)
+                _set("nixos.firewall.tcp", json.dumps(sorted(set(ports), key=int)))
+                print(f"  Firewall TCP: {len(ports)} ports")
+
+            # Networking hostname
+            m = _re.search(r'networking\.hostName\s*=\s*"([^"]+)"', content)
+            if m:
+                _set("nixos.networking.hostName", m.group(1))
+
+            # Hardware settings
+            for m in _re.finditer(r'hardware\.(\w[\w.]*?)\s*=\s*(true|false)', content):
+                _set(f"nixos.hardware.{m.group(1)}", m.group(2))
+
+            # Virtualisation
+            for m in _re.finditer(r'virtualisation\.(\w[\w.]*?)\.enable\s*=\s*(true|false)', content):
+                _set(f"nixos.virtualisation.{m.group(1)}", m.group(2))
+
+            # Nix settings
+            m = _re.search(r'experimental-features\s*=\s*\[([^\]]+)\]', content)
+            if m:
+                features = [f.strip().strip('"') for f in m.group(1).split()]
+                _set("nixos.nix.experimental-features", json.dumps(features))
+
+            # Git daemon
+            m = _re.search(r'gitDaemon\.port\s*=\s*(\d+)', content)
+            if m:
+                _set("nixos.gitDaemon.port", m.group(1))
+
+        # ── flake.nix ─────────────────────────────────────────────────────
         flake_path = repo / 'flake.nix'
         if flake_path.exists():
             content = flake_path.read_text()
-            input_pattern = _re.compile(
-                r'^\s+(\S+)\.url\s*=\s*"([^"]+)";\s*$', _re.MULTILINE
-            )
-            for match in input_pattern.finditer(content):
-                input_name = match.group(1)
-                input_url = match.group(2)
-                key = f"nixos.flake.input.{input_name}"
-                conn.execute(
-                    "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
-                    "VALUES (?, ?, datetime('now'))",
-                    (key, input_url)
-                )
-                print(f"  {key} = {input_url}")
-                imported += 1
+            print("\nflake.nix:")
+            for m in _re.finditer(r'^\s+(\S+)\.url\s*=\s*"([^"]+)";\s*$', content, _re.MULTILINE):
+                _set(f"nixos.flake.input.{m.group(1)}", m.group(2))
+                print(f"  nixos.flake.input.{m.group(1)} = {m.group(2)}")
 
-        # Store host configurations
+        # ── hosts/ ────────────────────────────────────────────────────────
         hosts_dir = repo / 'hosts'
         if hosts_dir.exists():
+            print("\nhosts/:")
             for host_file in hosts_dir.glob('*.nix'):
                 host_name = host_file.stem
-                key = f"nixos.host.{host_name}"
-                conn.execute(
-                    "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
-                    "VALUES (?, ?, datetime('now'))",
-                    (key, str(host_file.relative_to(repo)))
-                )
-                print(f"  {key} = {host_file.relative_to(repo)}")
-                imported += 1
+                _set(f"nixos.host.{host_name}", str(host_file.relative_to(repo)))
+                print(f"  nixos.host.{host_name} = {host_file.relative_to(repo)}")
 
         conn.commit()
         print(f"\nImported {imported} config values from {slug}")
