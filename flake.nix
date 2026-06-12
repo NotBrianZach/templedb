@@ -106,11 +106,71 @@
               default = "${config.home.homeDirectory}/.config/sops/age/keys.txt";
               description = "Path to the age key file used for secret decryption.";
             };
+
+            mount.enable = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Auto-mount TempleDB FUSE filesystem at ~/temple on login.";
+            };
+
+            sync.enable = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Run cr-sqlite sync server for machine-to-machine replication.";
+            };
+
+            sync.port = lib.mkOption {
+              type = lib.types.int;
+              default = 9420;
+              description = "TCP port for sync server.";
+            };
           };
 
-          config = lib.mkIf cfg.enable {
-            home.packages = [ cfg.package ];
-          };
+          config = lib.mkIf cfg.enable (lib.mkMerge [
+            {
+              home.packages = [ cfg.package ];
+            }
+
+            (lib.mkIf cfg.mount.enable {
+              home.activation.createTempleMount = lib.hm.dag.entryAfter ["writeBoundary"] ''
+                mkdir -p $HOME/temple
+              '';
+
+              systemd.user.services.templedb-mount = {
+                Unit = {
+                  Description = "TempleDB FUSE Mount";
+                  After = [ "default.target" ];
+                };
+                Service = {
+                  Type = "simple";
+                  ExecStart = "${cfg.package}/bin/templedb mount %h/temple --foreground";
+                  ExecStop = "/run/wrappers/bin/fusermount -u %h/temple";
+                  Restart = "on-failure";
+                  RestartSec = 5;
+                  Environment = [ "PYTHONUNBUFFERED=1" ];
+                };
+                Install.WantedBy = [ "default.target" ];
+              };
+            })
+
+            (lib.mkIf cfg.sync.enable {
+              systemd.user.services.templedb-sync = {
+                Unit = {
+                  Description = "TempleDB Sync Server";
+                  After = [ "network-online.target" ];
+                  Wants = [ "network-online.target" ];
+                };
+                Service = {
+                  Type = "simple";
+                  ExecStart = "${cfg.package}/bin/templedb sync serve --port ${toString cfg.sync.port}";
+                  Restart = "on-failure";
+                  RestartSec = 10;
+                  Environment = [ "PYTHONUNBUFFERED=1" ];
+                };
+                Install.WantedBy = [ "default.target" ];
+              };
+            })
+          ]);
         };
 
     in
