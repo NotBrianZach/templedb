@@ -81,7 +81,11 @@ class TestMigrator:
 
 class TestFuseFS:
     def test_path_parsing(self):
-        from temple_fuse import TempleFS
+        try:
+            from temple_fuse import TempleFS
+        except OSError:
+            pytest.skip("libfuse not available")
+
         fs = TempleFS.__new__(TempleFS)
 
         assert fs._parse_path("/") == (None, None)
