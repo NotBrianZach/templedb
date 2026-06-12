@@ -1616,7 +1616,30 @@ class NixOSCommand(Command):
             else:
                 print(f"  [DRY RUN] Would update {nix_file} ({let_updated} bindings)")
 
-        # Step 2: Render .nix.template files
+        # Step 2: Generate nix code from DB (packages, aliases, services, firewall)
+        try:
+            from nix_codegen import update_home_nix, update_configuration_nix
+
+            home_path = repo / 'home.nix'
+            conf_path = repo / 'configuration.nix'
+
+            if home_path.exists():
+                if not dry_run:
+                    n = update_home_nix(home_path)
+                    print(f"  Updated home.nix ({n} managed sections)")
+                else:
+                    print(f"  [DRY RUN] Would update home.nix managed sections")
+
+            if conf_path.exists():
+                if not dry_run:
+                    n = update_configuration_nix(conf_path)
+                    print(f"  Updated configuration.nix ({n} managed sections)")
+                else:
+                    print(f"  [DRY RUN] Would update configuration.nix managed sections")
+        except Exception as e:
+            print(f"  Nix codegen: {e}")
+
+        # Step 3: Render .nix.template files (woofs config, etc.)
         try:
             from template_renderer import TemplateRenderer
             renderer = TemplateRenderer()
