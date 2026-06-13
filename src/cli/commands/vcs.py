@@ -92,6 +92,7 @@ class VCSCommands(Command):
                 return 1
 
             # Fuzzy match file patterns if provided
+            untracked_added = 0
             if file_patterns and not stage_all:
                 resolved_files = []
                 for pattern in file_patterns:
@@ -99,22 +100,29 @@ class VCSCommands(Command):
                     if file_record:
                         resolved_files.append(file_record['file_path'])
                     else:
-                        logger.warning(f"Skipping unmatched pattern: {pattern}")
+                        # Try adding as untracked file (exact path)
+                        if self.service.add_untracked_file(project['slug'], pattern):
+                            logger.info(f"Added untracked file: {pattern}")
+                            untracked_added += 1
+                        else:
+                            logger.warning(f"Skipping unmatched pattern: {pattern}")
 
-                if not resolved_files:
+                if not resolved_files and untracked_added == 0:
                     logger.error("No files matched the patterns")
                     return 1
 
                 file_patterns = resolved_files
 
-            # Stage files via service
-            count = self.service.stage_files(
-                project_slug=project['slug'],
-                file_patterns=file_patterns,
-                stage_all=stage_all
-            )
+            # Stage tracked files via service
+            count = 0
+            if file_patterns or stage_all:
+                count = self.service.stage_files(
+                    project_slug=project['slug'],
+                    file_patterns=file_patterns if file_patterns else None,
+                    stage_all=stage_all
+                )
 
-            print(f"✓ Staged {count} file(s)")
+            print(f"✓ Staged {count + untracked_added} file(s)")
             return 0
 
         except ResourceNotFoundError as e:

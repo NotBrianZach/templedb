@@ -104,7 +104,7 @@ class FileCommands(Command):
         """Checkout file from TempleDB to working directory or specified path"""
         try:
             # Get project
-            project = self.project_repo.get_project(args.project)
+            project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
                 logger.error(f"Project '{args.project}' not found")
                 return 1
@@ -156,7 +156,7 @@ class FileCommands(Command):
         """Set file content from string (stdin or --content)"""
         try:
             # Get project
-            project = self.project_repo.get_project(args.project)
+            project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
                 logger.error(f"Project '{args.project}' not found")
                 return 1
@@ -234,7 +234,7 @@ def register(cli):
         'file',
         help='File management commands'
     )
-    file_subparsers = file_parser.add_subparsers(dest='file_command', required=True)
+    file_subparsers = file_parser.add_subparsers(dest='file_subcommand', required=True)
 
     # file show
     show_parser = file_subparsers.add_parser(

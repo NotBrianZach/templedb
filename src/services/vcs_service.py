@@ -127,6 +127,94 @@ class VCSService(BaseService):
                 solution="Provide file patterns or use stage_all=True"
             )
 
+    def add_untracked_file(self, project_slug: str, file_path: str) -> bool:
+        """
+        Add a new untracked file to the project and stage it.
+
+        Creates project_files and vcs_working_state records for a file
+        that exists on disk but isn't yet tracked in the database.
+
+        Args:
+            project_slug: Project slug
+            file_path: Relative file path within the project
+
+        Returns:
+            True if file was added and staged successfully
+        """
+        import os
+        from pathlib import Path
+
+        # Normalize path (remove ./ prefix, resolve)
+        file_path = str(Path(file_path))
+
+        project = self.get_project(project_slug)
+        branch = self.get_default_branch(project['id'])
+        if not branch:
+            raise ResourceNotFoundError("No default branch found")
+
+        # Determine the checkout directory
+        checkout_dir = os.path.expanduser(
+            f"~/.config/templedb/checkouts/{project_slug}"
+        )
+        full_path = Path(checkout_dir) / file_path
+
+        if not full_path.exists():
+            return False
+
+        # Detect file type from extension
+        ext_to_type = {
+            '.sh': 'shell_script', '.bash': 'shell_script',
+            '.py': 'python', '.js': 'javascript', '.mjs': 'javascript',
+            '.ts': 'typescript', '.tsx': 'tsx_component',
+            '.jsx': 'jsx_component', '.css': 'css', '.scss': 'scss',
+            '.html': 'html', '.sql': 'sql_file',
+            '.json': 'config_json', '.yaml': 'config_yaml', '.yml': 'config_yaml',
+            '.md': 'markdown', '.nix': 'nix_file',
+            '.el': 'emacs_lisp', '.env': 'env_file',
+        }
+        ext = full_path.suffix.lower()
+        type_name = ext_to_type.get(ext, 'javascript')  # fallback
+
+        # Get file_type_id
+        file_type = self.vcs_repo.query_one(
+            "SELECT id FROM file_types WHERE type_name = ?", (type_name,)
+        )
+        if not file_type:
+            # Fallback to first type
+            file_type = self.vcs_repo.query_one("SELECT id FROM file_types LIMIT 1")
+
+        file_type_id = file_type['id']
+        file_name = full_path.name
+
+        # Read content
+        try:
+            content = full_path.read_text()
+        except UnicodeDecodeError:
+            content = None
+
+        # Insert project_files record
+        self.vcs_repo.execute("""
+            INSERT OR IGNORE INTO project_files (project_id, file_type_id, file_path, file_name, status)
+            VALUES (?, ?, ?, ?, 'active')
+        """, (project['id'], file_type_id, file_path, file_name))
+
+        # Get the file record
+        file_record = self.vcs_repo.query_one("""
+            SELECT id FROM project_files WHERE project_id = ? AND file_path = ?
+        """, (project['id'], file_path))
+
+        if not file_record:
+            return False
+
+        # Create working state record
+        self.vcs_repo.execute("""
+            INSERT OR REPLACE INTO vcs_working_state
+                (project_id, branch_id, file_id, content_text, state, staged)
+            VALUES (?, ?, ?, ?, 'added', 1)
+        """, (project['id'], branch['id'], file_record['id'], content))
+
+        return True
+
     def unstage_files(
         self,
         project_slug: str,
