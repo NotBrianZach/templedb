@@ -147,10 +147,12 @@ class BootstrapCommand(Command):
             errors += 1
 
         # ── Step 4: Checkout projects ────────────────────────────────
-        _step(4, "Project checkouts")
+        _step(4, "Materialize projects (DB → git repos for git daemon)")
 
         from db_utils import get_connection
         try:
+            from services.system_service import SystemService
+            svc = SystemService()
             conn = get_connection()
             projects = conn.execute(
                 "SELECT slug FROM projects ORDER BY slug"
@@ -159,39 +161,32 @@ class BootstrapCommand(Command):
             if not projects:
                 _skip("No projects in database")
             else:
-                CHECKOUTS_DIR.mkdir(parents=True, exist_ok=True)
-                checkout_count = 0
-
+                materialized = 0
                 for row in projects:
                     slug = row["slug"]
                     checkout_path = CHECKOUTS_DIR / slug
 
-                    if checkout_path.exists() and any(checkout_path.iterdir()):
+                    if checkout_path.exists() and (checkout_path / ".git").exists():
                         if args.verbose:
-                            _ok(f"{slug} (already exists)")
+                            _ok(f"{slug} (already materialized)")
                         continue
 
-                    # Use templedb project checkout
-                    result = _run([
-                        sys.executable, "-m", "cli",
-                        "project", "checkout", slug, str(checkout_path), "--writable"
-                    ], cwd=str(Path(__file__).parent.parent.parent.parent))
-
-                    if result.returncode == 0:
+                    result = svc.materialize_from_db(slug)
+                    if result:
                         _ok(slug)
-                        checkout_count += 1
+                        materialized += 1
                     else:
-                        # Not all projects need checkouts (some may have no files)
                         if args.verbose:
-                            _skip(f"{slug} (no files or checkout failed)")
+                            _skip(f"{slug} (no files)")
 
-                if checkout_count > 0:
-                    print(f"  Checked out {checkout_count} project(s)")
+                if materialized > 0:
+                    print(f"  Materialized {materialized} project(s) as git repos")
+                    print(f"  Git daemon can now serve them on port 9419")
                 else:
-                    _ok("All projects already checked out")
+                    _ok("All projects already materialized")
 
         except Exception as e:
-            _fail(f"Could not read projects: {e}")
+            _fail(f"Could not materialize projects: {e}")
             errors += 1
 
         # ── Step 5: Apply dotfiles ───────────────────────────────────

@@ -88,14 +88,27 @@ class SystemService:
                     fpath.write_bytes(b"")
                 written += 1
 
-            # Ensure git repo exists and files are staged (nix flake needs this)
+            # Ensure git repo with committed files (git daemon needs commits to serve)
             git_dir = checkout_dir / ".git"
             if not git_dir.exists():
                 subprocess.run(["git", "init"], cwd=str(checkout_dir),
                                capture_output=True, check=False)
+                # Enable git daemon export
+                (git_dir / "git-daemon-export-ok").touch()
 
             subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
                            capture_output=True, check=False)
+
+            # Commit so git daemon can serve the content
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m",
+                 f"TempleDB materialize ({written} files)"],
+                cwd=str(checkout_dir), capture_output=True, check=False,
+                env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
+                     "GIT_AUTHOR_EMAIL": "templedb@localhost",
+                     "GIT_COMMITTER_NAME": "TempleDB",
+                     "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+            )
 
             logger.info(f"Materialized {written} files to {checkout_dir}")
             return checkout_dir
