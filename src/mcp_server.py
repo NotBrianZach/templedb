@@ -189,6 +189,11 @@ class MCPServer:
             "templedb_git_export": self.tool_git_export,
             "templedb_dotfiles_list": self.tool_dotfiles_list,
             "templedb_bootstrap_status": self.tool_bootstrap_status,
+            "templedb_cli": self.tool_cli,
+            "templedb_graph_search": self.tool_graph_search,
+            "templedb_graph_deps": self.tool_graph_deps,
+            "templedb_nixos_host_list": self.tool_nixos_host_list,
+            "templedb_nixos_generate_all": self.tool_nixos_generate_all,
         }
 
     def _get_db_connection(self):
@@ -1654,6 +1659,71 @@ class MCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_cli",
+                "description": "Run any TempleDB CLI command. Use this for commands not available as dedicated MCP tools. Examples: 'nixos generate-all', 'graph search supabase', 'nixos host list', 'sync status', 'backup gcs'.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "CLI command and arguments as a single string (e.g. 'nixos host clone zMothership2 zMothership3')"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            },
+            {
+                "name": "templedb_graph_search",
+                "description": "Search across all projects, files, env vars, secrets, commits, and symbols. Returns categorized results.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (fuzzy matched)"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "templedb_graph_deps",
+                "description": "Show project dependency graph: env vars, secrets, flake inputs, symbols, deploy history.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project slug"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_nixos_host_list",
+                "description": "List all NixOS host configurations with override counts.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "templedb_nixos_generate_all",
+                "description": "Regenerate all NixOS config from DB: let-bindings, packages, services, flake inputs, templates, modules.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "host": {
+                            "type": "string",
+                            "description": "Generate for specific host (default: active host)"
+                        }
+                    },
                     "required": []
                 }
             }
@@ -4414,6 +4484,104 @@ class MCPServer:
                 "projects": proj_count,
                 "dotfiles_configured": dotfiles_count,
                 "ready": age_ok and mig_pending == 0,
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_cli(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Run any TempleDB CLI command."""
+        try:
+            import subprocess, shlex, shutil
+            command = args["command"]
+            cmd_parts = shlex.split(command)
+
+            # Find templedb binary
+            templedb = shutil.which("templedb")
+            if not templedb:
+                templedb_path = Path(__file__).parent.parent / "result" / "bin" / "templedb"
+                if templedb_path.exists():
+                    templedb = str(templedb_path)
+                else:
+                    templedb = str(Path(__file__).parent.parent / "templedb")
+
+            result = subprocess.run(
+                [templedb] + cmd_parts,
+                capture_output=True, text=True, timeout=120
+            )
+            return self._success_response({
+                "exit_code": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "command": f"templedb {command}",
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_graph_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Search across everything."""
+        try:
+            from knowledge_graph import search_everywhere
+            results = search_everywhere(args["query"], limit=30)
+            return self._success_response(results)
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_graph_deps(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Project dependency graph."""
+        try:
+            from knowledge_graph import project_dependencies
+            results = project_dependencies(args["project"])
+            return self._success_response(results)
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_nixos_host_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List NixOS hosts."""
+        try:
+            conn = self._get_db_connection()
+            hosts = conn.execute(
+                "SELECT key, value FROM system_config WHERE key LIKE 'nixos.host.%' ORDER BY key"
+            ).fetchall()
+            active = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+            ).fetchone()
+            active_host = active[0] if active else None
+
+            result = []
+            for h in hosts:
+                hostname = h["key"].replace("nixos.host.", "")
+                overrides = conn.execute(
+                    "SELECT COUNT(*) as n FROM system_config WHERE key LIKE ?",
+                    (f"{hostname}.%",)
+                ).fetchone()
+                result.append({
+                    "hostname": hostname,
+                    "config_file": h["value"],
+                    "overrides": overrides["n"],
+                    "active": hostname == active_host,
+                })
+            return self._success_response({"hosts": result})
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_nixos_generate_all(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Regenerate all NixOS config."""
+        try:
+            import subprocess, shutil
+            host = args.get("host", "")
+            cmd_parts = ["nixos", "generate-all"]
+            if host:
+                cmd_parts.extend(["--host", host])
+
+            templedb = shutil.which("templedb") or str(Path(__file__).parent.parent / "templedb")
+            result = subprocess.run(
+                [templedb] + cmd_parts,
+                capture_output=True, text=True, timeout=120
+            )
+            return self._success_response({
+                "exit_code": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
             })
         except Exception as e:
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
