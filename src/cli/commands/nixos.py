@@ -1622,6 +1622,14 @@ class NixOSCommand(Command):
             print(f"  Host: {host}")
         print()
 
+        # Unlock checkout for modifications (will re-lock at end)
+        try:
+            from services.system_service import SystemService
+            svc = SystemService()
+            svc.unlock_checkout(slug)
+        except Exception:
+            pass
+
         # Step 1: Update let-bindings in nix files from system_config
         # Host-scoped keys override system-wide keys
         nix_files = {'home': 'home.nix', 'configuration': 'configuration.nix'}
@@ -1759,14 +1767,31 @@ class NixOSCommand(Command):
         else:
             print(f"  [DRY RUN] Would generate managed modules")
 
-        # Step 5: Git stage generated files for nix eval
+        # Step 5: Git stage + lock checkout read-only
         if not dry_run:
             import subprocess
             subprocess.run(
                 ["git", "add", "-A"],
                 cwd=str(repo), capture_output=True
             )
-            print(f"\n  Staged all generated files for nix evaluation")
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "TempleDB generate-all"],
+                cwd=str(repo), capture_output=True, check=False,
+                env={**__import__('os').environ, "GIT_AUTHOR_NAME": "TempleDB",
+                     "GIT_AUTHOR_EMAIL": "templedb@localhost",
+                     "GIT_COMMITTER_NAME": "TempleDB",
+                     "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+            )
+
+            # Lock files read-only (DB is source of truth, not checkout)
+            try:
+                from services.system_service import SystemService
+                svc = SystemService()
+                locked = svc.lock_checkout(slug)
+                print(f"\n  Committed and locked {locked} files read-only")
+                print(f"  (Edit via ~/temple/ FUSE mount or GUI, not the checkout)")
+            except Exception:
+                print(f"\n  Staged all generated files for nix evaluation")
 
         print(f"\nNext steps:")
         print(f"  templedb nixos rebuild {slug}")

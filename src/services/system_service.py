@@ -117,6 +117,51 @@ class SystemService:
             logger.error(f"Materialize failed: {e}")
             return None
 
+    def lock_checkout(self, project_slug: str):
+        """Make checkout files read-only after generate-all.
+
+        DB is the source of truth — edits should go through FUSE (~/ temple/)
+        or the GUI, not the checkout directory.
+        """
+        sudo_user = os.environ.get('SUDO_USER')
+        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
+        checkout_dir = real_home / ".config" / "templedb" / "checkouts" / project_slug
+
+        if not checkout_dir.exists():
+            return 0
+
+        locked = 0
+        for fpath in checkout_dir.rglob("*"):
+            if fpath.is_file() and '.git' not in fpath.parts:
+                fpath.chmod(0o444)
+                locked += 1
+
+        # Final git commit
+        subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
+                       capture_output=True, check=False)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m",
+             f"TempleDB locked ({locked} files read-only)"],
+            cwd=str(checkout_dir), capture_output=True, check=False,
+            env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
+                 "GIT_AUTHOR_EMAIL": "templedb@localhost",
+                 "GIT_COMMITTER_NAME": "TempleDB",
+                 "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+        )
+        return locked
+
+    def unlock_checkout(self, project_slug: str):
+        """Make checkout files writable for generate-all to modify."""
+        sudo_user = os.environ.get('SUDO_USER')
+        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
+        checkout_dir = real_home / ".config" / "templedb" / "checkouts" / project_slug
+
+        if not checkout_dir.exists():
+            return
+        for fpath in checkout_dir.rglob("*"):
+            if fpath.is_file() and '.git' not in fpath.parts:
+                fpath.chmod(0o644)
+
     def get_project_checkout_path(self, project_slug: str) -> Optional[Path]:
         """Get the checkout path for a project.
 
