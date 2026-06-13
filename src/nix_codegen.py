@@ -160,6 +160,39 @@ def generate_firewall_ports() -> str:
         return ""
 
 
+def update_flake_inputs(flake_path: Path, dry_run: bool = False) -> int:
+    """Update flake input URLs from nixos.flake.input.* DB keys.
+
+    Matches lines like:  bza.url = "old-url";
+    and replaces with the DB value.
+    """
+    rows = _get_keys("nixos.flake.input.")
+    if not rows:
+        return 0
+
+    content = flake_path.read_text()
+    updated = 0
+
+    for r in rows:
+        input_name = r["key"].replace("nixos.flake.input.", "")
+        new_url = r["value"]
+
+        # Match: input_name.url = "anything";
+        pattern = re.compile(
+            rf'(\s+{re.escape(input_name)}\.url\s*=\s*)"[^"]*"(;)',
+            re.MULTILINE
+        )
+        new_content = pattern.sub(rf'\1"{new_url}"\2', content)
+        if new_content != content:
+            content = new_content
+            updated += 1
+
+    if updated > 0 and not dry_run:
+        flake_path.write_text(content)
+
+    return updated
+
+
 def update_home_nix(home_path: Path, dry_run: bool = False) -> int:
     """Update managed sections in home.nix. Returns count of sections updated."""
     content = home_path.read_text()

@@ -1682,10 +1682,18 @@ class NixOSCommand(Command):
 
         # Step 2: Generate nix code from DB (packages, aliases, services, firewall)
         try:
-            from nix_codegen import update_home_nix, update_configuration_nix
+            from nix_codegen import update_home_nix, update_configuration_nix, update_flake_inputs
 
             home_path = repo / 'home.nix'
             conf_path = repo / 'configuration.nix'
+            flake_path = repo / 'flake.nix'
+
+            if flake_path.exists():
+                if not dry_run:
+                    n = update_flake_inputs(flake_path)
+                    print(f"  Updated flake.nix ({n} input URLs)")
+                else:
+                    print(f"  [DRY RUN] Would update flake.nix input URLs")
 
             if home_path.exists():
                 if not dry_run:
