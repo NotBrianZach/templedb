@@ -205,7 +205,7 @@
             # Python env with all templedb dependencies
             (python3.withPackages (ps: with ps; [
               pyyaml rich requests cryptography fastapi uvicorn python-multipart fusepy
-              tree-sitter tree-sitter-python tree-sitter-javascript tree-sitter-typescript
+              tree-sitter tree-sitter-python tree-sitter-javascript
             ]))
           ];
           shellHook = ''
