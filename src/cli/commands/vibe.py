@@ -143,18 +143,17 @@ The database is the source of truth. All edits must go through:
 - Use project-specific context when answering questions
 - This is NOT the TempleDB project itself - this is a separate project tracked by TempleDB
 
-## TempleDB VCS Workflow
-After editing files, commit changes:
+## TempleDB Workflow
+After editing files, commit and publish:
 ```bash
 templedb vcs status {slug} --refresh    # detect changes
 templedb vcs add -p {slug} --all        # stage all
-templedb vcs commit -p {slug} -m "msg"  # commit
+templedb vcs commit -p {slug} -m "msg"  # commit to DB
+templedb publish run {slug} -m "msg"    # commit + materialize + push to GitHub
 ```
 
-To export to git for GitHub:
-```bash
-templedb git-export {slug} --remote <github-url>
-```
+**DO NOT use git directly.** Use `templedb publish` to push to GitHub.
+Use `templedb vcs` for all version control operations.
 
 ## Getting Started
 You can help with:
