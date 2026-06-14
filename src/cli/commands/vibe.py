@@ -2,9 +2,7 @@
 """
 Vibe - Launch Claude Code with auto-generated project context
 """
-import os
 import sys
-import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -159,6 +157,9 @@ What would you like to work on?
 
     def start(self, args) -> int:
         """Launch Claude Code with project context"""
+        from types import SimpleNamespace
+        from .claude import ClaudeCommands
+
         project = args.project if hasattr(args, 'project') and args.project else None
 
         if not project:
@@ -166,17 +167,15 @@ What would you like to work on?
 
         self._ensure_project_prompt(project)
 
-        templedb_path = Path(__file__).parent.parent.parent.parent / "templedb"
-        cmd = [str(templedb_path), "claude", "--from-db", "--project", project]
-
-        if hasattr(args, 'claude_args') and args.claude_args:
-            cmd.extend(args.claude_args)
-
-        try:
-            os.execvp(cmd[0], cmd)
-        except Exception as e:
-            print(f"Error launching Claude: {e}", file=sys.stderr)
-            return 1
+        claude_args = list(args.claude_args) if getattr(args, 'claude_args', None) else []
+        ns = SimpleNamespace(
+            from_db=True,
+            project=project,
+            template=None,
+            claude_args=claude_args,
+            dry_run=False,
+        )
+        return ClaudeCommands().launch_claude(ns)
 
 
 def register(cli):
