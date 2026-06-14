@@ -189,6 +189,61 @@ class PublishCommands(Command):
         return mirrors
 
 
+    def build(self, args) -> int:
+        """Build a project with nix from its materialized checkout or git daemon."""
+        from db_utils import get_connection
+
+        project_slug = args.project
+        conn = get_connection()
+        proj = conn.execute(
+            "SELECT id, repo_url FROM projects WHERE slug = ?", (project_slug,)
+        ).fetchone()
+        if not proj:
+            print(f"Project '{project_slug}' not found", file=sys.stderr)
+            return 1
+
+        # Determine where to build from
+        checkout = CHECKOUTS_DIR / project_slug
+        repo_url = proj["repo_url"]
+
+        # Try git daemon first (cleanest — works from anywhere)
+        git_daemon_url = f"git://localhost:9419/{project_slug}"
+        output = args.output or project_slug
+
+        # Check if git daemon can serve this project
+        probe = subprocess.run(
+            ["git", "ls-remote", git_daemon_url],
+            capture_output=True, text=True, timeout=5
+        )
+
+        if probe.returncode == 0:
+            build_uri = f"{git_daemon_url}#{output}"
+            print(f"Building from git daemon: {build_uri}")
+        elif checkout.exists() and (checkout / "flake.nix").exists():
+            build_uri = f"path:{checkout}#{output}"
+            print(f"Building from checkout: {build_uri}")
+        elif repo_url and Path(repo_url).exists() and (Path(repo_url) / "flake.nix").exists():
+            build_uri = f"path:{repo_url}#{output}"
+            print(f"Building from repo: {build_uri}")
+        else:
+            print(f"No buildable source found for {project_slug}", file=sys.stderr)
+            print(f"  Materialize first: templedb publish run {project_slug}")
+            return 1
+
+        cmd = ["nix", "build", build_uri, "--no-update-lock-file"]
+        if args.dry_run:
+            cmd.append("--dry-run")
+
+        print(f"  Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd)
+
+        if result.returncode == 0:
+            print(f"\n  Build successful")
+            if not args.dry_run:
+                print(f"  Output: ./result")
+        return result.returncode
+
+
 def register(cli):
     """Register publish commands."""
     cmd = PublishCommands()
@@ -220,3 +275,10 @@ def register(cli):
     # publish mirror-list
     ml = subparsers.add_parser('mirror-list', help='List all mirrors')
     cli.commands['publish.mirror-list'] = cmd.mirror_list
+
+    # publish build
+    bp = subparsers.add_parser('build', help='Build project with nix (from git daemon or checkout)')
+    bp.add_argument('project', help='Project slug')
+    bp.add_argument('-o', '--output', help='Flake output name (default: project slug)')
+    bp.add_argument('--dry-run', action='store_true', help='Show what would be built')
+    cli.commands['publish.build'] = cmd.build
