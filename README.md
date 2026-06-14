@@ -26,9 +26,9 @@ We throw out of the temple those that would lend us technical debt in the form o
 
 ## How It Works
 
-TempleDB is a CLI tool backed by a single SQLite database. The database stores everything: your project files, version history, secrets, environment variables, NixOS configuration, deployment state, and cross-project relationships.
+TempleDB is a single SQLite database that stores everything: your project files, version history, secrets, environment variables, NixOS configuration, deployment state, and cross-project relationships.
 
-You interact with it through the `templedb` command (or `tdb` for short):
+You interact with it through multiple interfaces — a CLI, a FUSE filesystem, a web GUI, an MCP server for AI agents, a git daemon for nix, and a sync engine for multi-machine replication. The `templedb` CLI (or `tdb` for short) is the primary way to manage it:
 
 ```bash
 $ templedb --help
