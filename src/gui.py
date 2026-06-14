@@ -2530,10 +2530,17 @@ templedb backup local                      # local backup
 templedb backup gcs                        # backup to GCS
 templedb backup restore &lt;path&gt;            # restore from backup</pre>
 
-<h3 style="margin-top:1rem">Config Links</h3>
-<pre style="font-size:0.75rem">templedb config link &lt;proj&gt; [--force]      # symlink config files
-templedb config list                       # list all links
-templedb config verify                     # check link status</pre>
+<h3 style="margin-top:1rem">Publishing</h3>
+<pre style="font-size:0.75rem">templedb publish run &lt;proj&gt; -m "msg"       # commit + push to mirrors
+templedb publish build &lt;proj&gt;              # nix build from git daemon
+templedb publish mirror-add &lt;p&gt; github &lt;url&gt;
+templedb publish mirror-list               # show all mirrors</pre>
+
+<h3 style="margin-top:1rem">Sync &amp; Network</h3>
+<pre style="font-size:0.75rem">templedb sync init                         # init cr-sqlite CRDTs
+templedb sync sync &lt;peer&gt;                 # bidirectional sync
+templedb network setup                     # configure Tailscale
+templedb network sync-all                  # sync all peers</pre>
 </div>
 
 </div>
