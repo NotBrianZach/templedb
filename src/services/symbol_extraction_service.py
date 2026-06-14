@@ -26,15 +26,39 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+HAS_TREE_SITTER = False
+_TS_LANGUAGES = {}
+
 try:
     import tree_sitter
-    import tree_sitter_python as tspython
-    import tree_sitter_javascript as tsjavascript
-    import tree_sitter_typescript as tstypescript
     HAS_TREE_SITTER = True
+
+    try:
+        import tree_sitter_python as tspython
+        _TS_LANGUAGES["python"] = tree_sitter.Language(tspython.language())
+    except ImportError:
+        pass
+
+    try:
+        import tree_sitter_javascript as tsjavascript
+        _TS_LANGUAGES["javascript"] = tree_sitter.Language(tsjavascript.language())
+    except ImportError:
+        pass
+
+    try:
+        import tree_sitter_typescript as tstypescript
+        _TS_LANGUAGES["typescript"] = tree_sitter.Language(tstypescript.language_typescript())
+        _TS_LANGUAGES["tsx"] = tree_sitter.Language(tstypescript.language_tsx())
+    except ImportError:
+        pass
+
+    if _TS_LANGUAGES:
+        logging.info(f"tree-sitter languages: {list(_TS_LANGUAGES.keys())}")
+    else:
+        HAS_TREE_SITTER = False
+
 except ImportError:
-    HAS_TREE_SITTER = False
-    logging.warning("tree-sitter not available. Install with: pip install tree-sitter tree-sitter-python tree-sitter-javascript tree-sitter-typescript or use Nix devShell")
+    logging.warning("tree-sitter not available")
 
 try:
     from ..db_utils import get_connection, transaction
@@ -98,34 +122,24 @@ class SymbolExtractor:
 
     def __init__(self):
         if not HAS_TREE_SITTER:
-            raise RuntimeError("tree-sitter is not installed. Install with: pip install tree-sitter tree-sitter-python tree-sitter-javascript tree-sitter-typescript")
+            raise RuntimeError("tree-sitter not available")
 
-        # Initialize Tree-sitter parsers
-        self.parsers = {
-            'python': self._init_python_parser(),
-            'javascript': self._init_javascript_parser(),
-            'typescript': self._init_typescript_parser(),
-        }
+        # Initialize parsers from available languages
+        self.parsers = {}
+        for lang_name, lang_obj in _TS_LANGUAGES.items():
+            self.parsers[lang_name] = tree_sitter.Parser(lang_obj)
 
-        logger.info("SymbolExtractor initialized with Tree-sitter parsers")
+        # Alias: tsx/jsx use javascript parser if no dedicated parser
+        if 'javascript' in self.parsers:
+            self.parsers.setdefault('jsx', self.parsers['javascript'])
+        if 'tsx' in self.parsers:
+            pass  # already set
+        elif 'typescript' in self.parsers:
+            self.parsers.setdefault('tsx', self.parsers['typescript'])
+        elif 'javascript' in self.parsers:
+            self.parsers.setdefault('tsx', self.parsers['javascript'])
 
-    def _init_python_parser(self):
-        """Initialize Python parser"""
-        lang = tree_sitter.Language(tspython.language())
-        parser = tree_sitter.Parser(lang)
-        return parser
-
-    def _init_javascript_parser(self):
-        """Initialize JavaScript parser"""
-        lang = tree_sitter.Language(tsjavascript.language())
-        parser = tree_sitter.Parser(lang)
-        return parser
-
-    def _init_typescript_parser(self):
-        """Initialize TypeScript parser"""
-        lang = tree_sitter.Language(tstypescript.language())
-        parser = tree_sitter.Parser(lang)
-        return parser
+        logger.info(f"SymbolExtractor: {list(self.parsers.keys())} parsers")
 
     def extract_symbols_from_file(
         self,

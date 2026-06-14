@@ -151,8 +151,84 @@ def who_uses(name: str) -> Dict[str, List[Dict]]:
     if rows:
         results["files_containing"] = [dict(r) for r in rows]
 
+    # Symbol callers/callees
+    rows = conn.execute(
+        "SELECT p.slug, cs.symbol_name, cs.symbol_type, pf.file_path "
+        "FROM code_symbols cs "
+        "JOIN projects p ON cs.project_id = p.id "
+        "JOIN project_files pf ON cs.file_id = pf.id "
+        "WHERE cs.symbol_name LIKE ? LIMIT 20",
+        (q,)
+    ).fetchall()
+    if rows:
+        results["symbols"] = [dict(r) for r in rows]
+
+    # File dependency edges (who imports this file?)
+    rows = conn.execute(
+        "SELECT p.slug, pf1.file_path as importer, pf2.file_path as imported, fd.dependency_type "
+        "FROM file_dependencies fd "
+        "JOIN project_files pf1 ON fd.parent_file_id = pf1.id "
+        "JOIN project_files pf2 ON fd.dependency_file_id = pf2.id "
+        "JOIN projects p ON pf1.project_id = p.id "
+        "WHERE pf2.file_path LIKE ? OR pf1.file_path LIKE ? LIMIT 20",
+        (q, q)
+    ).fetchall()
+    if rows:
+        results["file_deps"] = [dict(r) for r in rows]
+
     conn.close()
     return results
+
+
+def file_importers(project_slug: str, file_path: str) -> List[Dict]:
+    """Find all files that import/depend on a given file."""
+    conn = _conn()
+    # parent_file_id = the file doing the importing
+    # dependency_file_id = the file being imported
+    rows = conn.execute("""
+        SELECT pf1.file_path as importer, fd.dependency_type
+        FROM file_dependencies fd
+        JOIN project_files pf1 ON fd.parent_file_id = pf1.id
+        JOIN project_files pf2 ON fd.dependency_file_id = pf2.id
+        JOIN projects p ON pf1.project_id = p.id
+        WHERE p.slug = ? AND pf2.file_path = ?
+        ORDER BY pf1.file_path
+    """, (project_slug, file_path)).fetchall()
+
+    # Also find files this file imports
+    imported = conn.execute("""
+        SELECT pf2.file_path as imports, fd.dependency_type
+        FROM file_dependencies fd
+        JOIN project_files pf1 ON fd.parent_file_id = pf1.id
+        JOIN project_files pf2 ON fd.dependency_file_id = pf2.id
+        JOIN projects p ON pf1.project_id = p.id
+        WHERE p.slug = ? AND pf1.file_path = ?
+        ORDER BY pf2.file_path
+    """, (project_slug, file_path)).fetchall()
+
+    conn.close()
+    result = [dict(r) for r in rows]
+    for r in imported:
+        result.append({"importer": file_path, "imports": r["imports"], "dependency_type": r["dependency_type"], "direction": "outgoing"})
+    return result
+
+
+def symbol_callers(project_slug: str, symbol_name: str) -> List[Dict]:
+    """Find all callers of a symbol."""
+    conn = _conn()
+    rows = conn.execute("""
+        SELECT cs1.symbol_name as caller, pf1.file_path as caller_file,
+               csd.dependency_type, csd.call_line
+        FROM code_symbol_dependencies csd
+        JOIN code_symbols cs1 ON csd.caller_symbol_id = cs1.id
+        JOIN code_symbols cs2 ON csd.called_symbol_id = cs2.id
+        JOIN project_files pf1 ON cs1.file_id = pf1.id
+        JOIN projects p ON cs2.project_id = p.id
+        WHERE p.slug = ? AND cs2.symbol_name = ?
+        ORDER BY pf1.file_path
+    """, (project_slug, symbol_name)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def changes_since_deploy(project_slug: str) -> Dict[str, Any]:

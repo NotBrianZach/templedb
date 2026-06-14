@@ -168,6 +168,52 @@ class GraphCommands(Command):
         print()
         return 0
 
+    def build_deps(self, args) -> int:
+        """Build file dependency graph for a project."""
+        from file_deps import build_file_deps_for_project
+
+        project = args.project
+        print(f"Building file dependency graph for {project}...")
+        result = build_file_deps_for_project(project)
+
+        if "error" in result:
+            print(f"Error: {result['error']}")
+            return 1
+
+        print(f"  Files scanned: {result['files_scanned']}")
+        print(f"  Imports found: {result['imports_found']}")
+        print(f"  Resolved: {result['resolved']}")
+        print(f"  Unresolved: {result['unresolved']}")
+        return 0
+
+    def importers(self, args) -> int:
+        """Find what imports a given file."""
+        from knowledge_graph import file_importers
+
+        results = file_importers(args.project, args.file)
+        if not results:
+            print(f"No files import {args.file}")
+            return 0
+
+        print(f"\nFiles importing {args.file}:")
+        for r in results:
+            print(f"  {r['importer']:50s} ({r['dependency_type']})")
+        return 0
+
+    def callers(self, args) -> int:
+        """Find what calls a given symbol."""
+        from knowledge_graph import symbol_callers
+
+        results = symbol_callers(args.project, args.symbol)
+        if not results:
+            print(f"No callers found for {args.symbol}")
+            return 0
+
+        print(f"\nCallers of {args.symbol}:")
+        for r in results:
+            print(f"  {r['caller']:30s} {r['caller_file']:40s} line {r.get('call_line', '?')}")
+        return 0
+
     def overview(self, args) -> int:
         """Cross-project analysis."""
         from knowledge_graph import cross_project_analysis
@@ -243,3 +289,20 @@ def register(cli):
     o = subparsers.add_parser('overview', help='Cross-project analysis')
     o.add_argument('--json', action='store_true')
     cli.commands['graph.overview'] = cmd.overview
+
+    # graph build-deps
+    bd = subparsers.add_parser('build-deps', help='Build file dependency graph')
+    bd.add_argument('project', help='Project slug')
+    cli.commands['graph.build-deps'] = cmd.build_deps
+
+    # graph importers
+    im = subparsers.add_parser('importers', help='Find what imports a file')
+    im.add_argument('project', help='Project slug')
+    im.add_argument('file', help='File path')
+    cli.commands['graph.importers'] = cmd.importers
+
+    # graph callers
+    ca = subparsers.add_parser('callers', help='Find what calls a symbol')
+    ca.add_argument('project', help='Project slug')
+    ca.add_argument('symbol', help='Symbol name')
+    cli.commands['graph.callers'] = cmd.callers
