@@ -374,9 +374,20 @@ class EnvCommands(Command):
                 secrets = self._load_secrets_for_project(project['id'], target)
 
             # Second pass: Resolve compound values (templates)
-            for var_name, template in templates.items():
-                resolved_value = self._resolve_template(template, env_vars, secrets)
-                env_vars[var_name] = resolved_value
+            # Iterate until all templates are resolved (handles chained compounds
+            # like DB_USER=${PROJECT_REF} and DATABASE_URL=${DB_USER}:...)
+            remaining = dict(templates)
+            for _ in range(10):  # max iterations to prevent infinite loops
+                if not remaining:
+                    break
+                still_unresolved = {}
+                for var_name, tmpl in remaining.items():
+                    resolved_value = self._resolve_template(tmpl, env_vars, secrets)
+                    env_vars[var_name] = resolved_value
+                    # Check if any ${...} references remain unresolved
+                    if '${' in resolved_value:
+                        still_unresolved[var_name] = tmpl
+                remaining = still_unresolved
 
             # Format output based on requested format
             if format_type == 'dotenv':
