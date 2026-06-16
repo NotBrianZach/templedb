@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""
+TempleDB Database Utilities
+Provides connection pooling and query optimization
+"""
+
+import os
+import sqlite3
+import threading
+import logging
+from contextlib import contextmanager
+from typing import Optional, List, Dict, Any
+
+logger = logging.getLogger(__name__)
+
+# Get database path, handling sudo properly
+def _get_db_path():
+    """Get database path, using real user's home when run with sudo"""
+    if 'TEMPLEDB_PATH' in os.environ:
+        return os.environ['TEMPLEDB_PATH']
+
+    # When run with sudo, use SUDO_USER's home
+    sudo_user = os.environ.get('SUDO_USER')
+    if sudo_user:
+        return f'/home/{sudo_user}/.local/share/templedb/templedb.sqlite'
+    else:
+        return os.path.expanduser("~/.local/share/templedb/templedb.sqlite")
+
+DB_PATH = _get_db_path()
+
+# Thread-local storage for connections
+_thread_local = threading.local()
+
+
+def get_connection() -> sqlite3.Connection:
+    """Get thread-local database connection (connection pooling)"""
+    if not hasattr(_thread_local, 'connection'):
+        _thread_local.connection = sqlite3.connect(DB_PATH, timeout=30.0)
+        _thread_local.connection.row_factory = sqlite3.Row
+        # Enable foreign keys (required for CASCADE deletes)
+        _thread_local.connection.execute("PRAGMA foreign_keys=ON")
+        # Enable performance optimizations
+        _thread_local.connection.execute("PRAGMA journal_mode=WAL")
+        _thread_local.connection.execute("PRAGMA synchronous=NORMAL")
+        _thread_local.connection.execute("PRAGMA cache_size=-64000")  # 64MB cache
+        _thread_local.connection.execute("PRAGMA temp_store=MEMORY")
+        _thread_local.connection.execute("PRAGMA mmap_size=268435456")  # 256MB mmap
+        _thread_local.connection.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
+    return _thread_local.connection
+
+
+def get_simple_connection(db_path: str = None, row_factory: bool = False) -> sqlite3.Connection:
+    """
+    Get a simple non-pooled database connection with optimal concurrency settings.
+    Use this for short-lived operations or when you need a fresh connection.
+
+    Args:
+        db_path: Database path (defaults to DB_PATH)
+        row_factory: Enable Row factory for dict-like access (default: False)
+
+    Returns:
+        Configured SQLite connection with WAL mode and optimal settings
+    """
+    path = db_path or DB_PATH
+    conn = sqlite3.connect(path, timeout=30.0, isolation_level=None)
+
+    if row_factory:
+        conn.row_factory = sqlite3.Row
+
+    # CRITICAL: Enable WAL mode for concurrent access
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+    return conn
+
+
+def close_connection():
+    """Close thread-local connection"""
+    if hasattr(_thread_local, 'connection'):
+        _thread_local.connection.close()
+        delattr(_thread_local, 'connection')
+
+
+@contextmanager
+def transaction():
+    """Context manager for database transactions"""
+    conn = get_connection()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def query_one(sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
+    """Execute query and return single row as dict"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    except sqlite3.ProgrammingError as e:
+        logger.error(f"SQL syntax error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        logger.debug(f"Params: {params}")
+        raise
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database operational error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        raise
+    except sqlite3.DatabaseError as e:
+        logger.error(f"Database error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        raise
+
+
+def query_all(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    """Execute query and return all rows as list of dicts"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.ProgrammingError as e:
+        logger.error(f"SQL syntax error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        logger.debug(f"Params: {params}")
+        raise
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database operational error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        raise
+    except sqlite3.DatabaseError as e:
+        logger.error(f"Database error: {e}")
+        logger.debug(f"Query: {sql[:500]}")
+        raise
+
+
+def execute(sql: str, params: tuple = (), commit: bool = True) -> int:
+    """Execute statement and return lastrowid
+
+    Args:
+        sql: SQL statement to execute
+        params: Parameters for the statement
+        commit: Whether to auto-commit (default True for backward compatibility)
+                Set to False when using transaction() context manager
+
+    Returns:
+        Last inserted row ID
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        if commit:
+            conn.commit()
+        return cursor.lastrowid
+    except sqlite3.IntegrityError as e:
+        logger.error(f"Database constraint violation: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        logger.debug(f"Params: {params}")
+        raise
+    except sqlite3.ProgrammingError as e:
+        logger.error(f"SQL syntax error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        logger.debug(f"Params: {params}")
+        raise
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database operational error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
+    except sqlite3.DatabaseError as e:
+        logger.error(f"Database error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
+
+
+def executemany(sql: str, params_list: List[tuple], commit: bool = True) -> None:
+    """Execute statement with multiple parameter sets
+
+    Args:
+        sql: SQL statement to execute
+        params_list: List of parameter tuples
+        commit: Whether to auto-commit (default True for backward compatibility)
+                Set to False when using transaction() context manager
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.executemany(sql, params_list)
+        if commit:
+            conn.commit()
+    except sqlite3.IntegrityError as e:
+        logger.error(f"Database constraint violation in batch operation: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        logger.debug(f"Batch size: {len(params_list)}")
+        raise
+    except sqlite3.ProgrammingError as e:
+        logger.error(f"SQL syntax error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database operational error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
+    except sqlite3.DatabaseError as e:
+        logger.error(f"Database error in batch operation: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
+
+
+# Prepared statement cache
+_prepared_statements = {}
+
+
+def query_prepared(name: str, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    """Execute prepared query (cached)"""
+    # Note: SQLite doesn't have true prepared statements like PostgreSQL,
+    # but we cache the SQL string for consistency
+    if name not in _prepared_statements:
+        _prepared_statements[name] = sql
+    return query_all(_prepared_statements[name], params)
+
+
+# Common queries (optimized and cached)
+
+def get_project_by_slug(slug: str) -> Optional[Dict[str, Any]]:
+    """Get project by slug (cached query)"""
+    return query_one(
+        "SELECT * FROM projects WHERE slug = ? LIMIT 1",
+        (slug,)
+    )
+
+
+def get_environment(project_slug: str, env_name: str) -> Optional[Dict[str, Any]]:
+    """Get environment configuration (optimized)"""
+    env = query_one("""
+        SELECT
+            ne.id,
+            ne.project_id,
+            p.slug AS project_slug,
+            p.name AS project_name,
+            p.repo_url,
+            ne.env_name,
+            ne.description,
+            ne.base_packages,
+            ne.target_packages,
+            ne.multi_packages,
+            ne.profile,
+            ne.runScript
+        FROM nix_environments ne
+        JOIN projects p ON ne.project_id = p.id
+        WHERE p.slug = ? AND ne.env_name = ? AND ne.is_active = 1
+        LIMIT 1
+    """, (project_slug, env_name))
+
+    if not env:
+        return None
+
+    # Get environment variables in single query
+    env['variables'] = query_all("""
+        SELECT var_name, var_value, description
+        FROM nix_env_variables
+        WHERE environment_id = ?
+        ORDER BY var_name
+    """, (env['id'],))
+
+    return env
+
+
+def list_projects() -> List[Dict[str, Any]]:
+    """List all projects with file counts (optimized)"""
+    return query_all("""
+        SELECT
+            p.slug,
+            p.name,
+            p.repo_url,
+            COUNT(pf.id) as file_count,
+            SUM(pf.lines_of_code) as total_lines
+        FROM projects p
+        LEFT JOIN project_files pf ON pf.project_id = p.id
+        GROUP BY p.id, p.slug, p.name, p.repo_url
+        ORDER BY p.slug
+    """)
+
+
+def list_environments(project_slug: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List environments (optimized)"""
+    if project_slug:
+        return query_all("""
+            SELECT
+                env_name,
+                description,
+                json_array_length(base_packages) as package_count,
+                (SELECT COUNT(*) FROM nix_env_sessions WHERE environment_id = ne.id) as session_count
+            FROM nix_environments ne
+            JOIN projects p ON ne.project_id = p.id
+            WHERE p.slug = ? AND ne.is_active = 1
+            ORDER BY env_name
+        """, (project_slug,))
+    else:
+        return query_all("""
+            SELECT
+                p.slug as project_slug,
+                ne.env_name,
+                ne.description,
+                json_array_length(ne.base_packages) as package_count,
+                (SELECT COUNT(*) FROM nix_env_sessions WHERE environment_id = ne.id) as session_count
+            FROM nix_environments ne
+            JOIN projects p ON ne.project_id = p.id
+            WHERE ne.is_active = 1
+            ORDER BY p.slug, ne.env_name
+        """)
+
+
+# Batch operations for performance
+
+def batch_insert_files(files: List[Dict[str, Any]]):
+    """Batch insert files (much faster than individual inserts)"""
+    if not files:
+        return
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Prepare data
+    values = [
+        (
+            f.get('project_id'),
+            f.get('file_path'),
+            f.get('component_name'),
+            f.get('file_type_id'),
+            f.get('description'),
+            f.get('lines_of_code', 0),
+            f.get('status', 'active')
+        )
+        for f in files
+    ]
+
+    cursor.executemany("""
+        INSERT INTO project_files
+        (project_id, file_path, component_name, file_type_id, description, lines_of_code, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, values)
+
+    conn.commit()
+
+
+# Performance monitoring
+
+def get_db_stats() -> Dict[str, Any]:
+    """Get database performance statistics"""
+    conn = get_connection()
+    stats = {}
+
+    # Database size
+    result = query_one("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()")
+    stats['size_bytes'] = result['size'] if result else 0
+    stats['size_mb'] = stats['size_bytes'] / (1024 * 1024)
+
+    # Table counts
+    stats['tables'] = {}
+    tables = ['projects', 'project_files', 'nix_environments', 'vcs_commits', 'vcs_branches']
+    for table in tables:
+        result = query_one(f"SELECT COUNT(*) as count FROM {table}")
+        stats['tables'][table] = result['count'] if result else 0
+
+    return stats
+
+
+def vacuum_db():
+    """Vacuum database to reclaim space and optimize"""
+    conn = get_connection()
+    conn.execute("VACUUM")
+    conn.execute("ANALYZE")
+
+
+def check_integrity() -> bool:
+    """Check database integrity"""
+    result = query_one("PRAGMA integrity_check")
+    return result and result.get('integrity_check') == 'ok'

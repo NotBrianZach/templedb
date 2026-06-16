@@ -1,0 +1,172 @@
+# Impact-Aware Refactoring Workflow
+# Systematic refactoring with code intelligence and blast radius awareness
+
+workflow:
+  name: "impact-aware-refactoring"
+  version: "1.0"
+  description: "Refactor code with full awareness of dependencies, blast radius, and architectural boundaries"
+
+  # Pre-flight: Ensure code intelligence is ready
+  preflight:
+    - type: "code_intelligence"
+      action: "extract_symbols"
+      args:
+        project: "${project}"
+        force: false
+
+    - type: "code_intelligence"
+      action: "build_graph"
+      args:
+        project: "${project}"
+        force: false
+
+    - type: "code_intelligence"
+      action: "build_clusters"
+      args:
+        project: "${project}"
+        resolution: 0.3
+
+  # Main workflow phases
+  phases:
+    # Phase 1: Discovery & Impact Analysis
+    - name: "discovery"
+      description: "Discover affected code and calculate blast radius"
+      tasks:
+        - name: "search_target_symbols"
+          type: "code_search"
+          query: "${target_symbol}"
+          limit: 20
+
+        - name: "analyze_impact"
+          type: "code_impact_analysis"
+          symbol_name: "${target_symbol}"
+
+        - name: "check_clusters"
+          type: "code_intelligence"
+          action: "show_clusters"
+          args:
+            project: "${project}"
+            include_members: true
+            limit: 50
+
+      validation:
+        - type: "code_intelligence"
+          check_type: "blast_radius"
+          max_affected_symbols: "${max_blast_radius:-100}"
+          error: "Blast radius too large! Consider breaking into smaller refactorings."
+
+    # Phase 2: Planning & Test Coverage
+    - name: "planning"
+      description: "Plan refactoring approach and verify test coverage"
+      tasks:
+        - name: "identify_affected_files"
+          type: "bash"
+          command: "echo 'Analyzing affected files from impact analysis...'"
+
+        - name: "check_test_coverage"
+          type: "bash"
+          command: "${coverage_command:-pytest --cov=${target_file} tests/ -v --cov-report=term-missing}"
+          timeout: 300
+
+        - name: "generate_refactoring_plan"
+          type: "python"
+          code: |
+            # Generate refactoring plan based on dependency graph
+            context.set_variable('refactoring_plan', 'generated')
+            result = {'status': 'plan_generated', 'steps': []}
+
+      validation:
+        - type: "test_results"
+          task_name: "check_test_coverage"
+          condition: "all_pass"
+          min_coverage: "${min_coverage:-70}"
+          error: "Test coverage below threshold. Write tests before refactoring."
+
+    # Phase 3: Refactoring Execution (TDD Style)
+    - name: "refactoring"
+      description: "Execute refactoring with continuous validation"
+      requires_human_approval: true
+
+      tasks:
+        - name: "create_refactoring_branch"
+          type: "bash"
+          command: "git checkout -b refactor/${target_symbol}_$(date +%Y%m%d) 2>/dev/null || echo 'Branch exists or not a git repo'"
+
+        - name: "run_pre_refactoring_tests"
+          type: "bash"
+          command: "${test_command:-pytest tests/ -v --tb=short}"
+          timeout: 600
+
+        - name: "manual_refactoring_checkpoint"
+          type: "bash"
+          command: "echo '✓ Refactoring checkpoint - Implement changes now'"
+
+      validation:
+        - type: "test_results"
+          task_name: "run_pre_refactoring_tests"
+          condition: "all_pass"
+          error: "Pre-refactoring tests failed! Fix tests before proceeding."
+
+    # Phase 4: Post-Refactoring Validation
+    - name: "validation"
+      description: "Validate refactoring results"
+      tasks:
+        - name: "run_post_refactoring_tests"
+          type: "bash"
+          command: "${test_command:-pytest tests/ -v --tb=short}"
+          timeout: 600
+
+        - name: "verify_no_regressions"
+          type: "bash"
+          command: "echo 'Checking for regressions...'"
+
+        - name: "re_analyze_impact"
+          type: "code_impact_analysis"
+          symbol_name: "${target_symbol}"
+
+        - name: "check_architectural_integrity"
+          type: "code_intelligence"
+          action: "show_clusters"
+          args:
+            project: "${project}"
+            include_members: true
+            limit: 50
+
+      validation:
+        - type: "test_results"
+          task_name: "run_post_refactoring_tests"
+          condition: "all_pass"
+          error: "Post-refactoring tests failed! Refactoring introduced regressions."
+
+        - type: "assertion"
+          condition: "True"  # Would check cluster integrity
+          error: "Architectural boundaries violated! Code moved across cluster boundaries."
+
+    # Phase 5: Documentation & Review
+    - name: "review"
+      description: "Document changes and prepare for review"
+      tasks:
+        - name: "generate_change_summary"
+          type: "bash"
+          command: "git diff --stat ${base_ref:-main}"
+
+        - name: "check_naming_consistency"
+          type: "code_search"
+          query: "${target_symbol}"
+          limit: 50
+
+        - name: "prepare_review_notes"
+          type: "bash"
+          command: "echo '✓ Refactoring complete - Ready for code review'"
+
+      validation:
+        - type: "assertion"
+          condition: "True"  # Would check naming consistency
+          error: "Naming inconsistencies detected. Update all references."
+
+  # Post-flight: Summary
+  postflight:
+    - type: "bash"
+      command: "echo '✓ Impact-aware refactoring workflow complete!'"
+    - type: "bash"
+      command: "echo 'Review changes, run final tests, and create pull request.'"

@@ -1,0 +1,8 @@
+{
+  "provider": "local",
+  "config": {
+    "backup_dir": "~/.local/share/templedb/backups",
+    "retention_days": 30,
+    "max_backups": 10
+  }
+}

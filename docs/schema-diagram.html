@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TempleDB Schema — Interactive Diagram</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --c-projects: #3b82f6;
+    --c-vcs: #10b981;
+    --c-code: #a78bfa;
+    --c-secrets: #f59e0b;
+    --c-deploy: #f87171;
+    --c-ai: #22d3ee;
+    --panel-w: 380px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 13px;
+    overflow: hidden;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── HEADER ──────────────────────────────────── */
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+    z-index: 10;
+  }
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: var(--text);
+  }
+  header h1 span { color: var(--c-projects); }
+  .header-meta {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .legend {
+    margin-left: auto;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 3px 7px;
+    border-radius: 4px;
+    transition: background .15s;
+  }
+  .legend-item:hover { background: var(--surface2); }
+  .legend-dot {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* ── MAIN LAYOUT ─────────────────────────────── */
+  .main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── CANVAS AREA ─────────────────────────────── */
+  .canvas-wrap {
+    flex: 1;
+    overflow: auto;
+    position: relative;
+    padding: 28px;
+  }
+  .canvas {
+    position: relative;
+    width: 1040px;
+    min-height: 720px;
+  }
+
+  /* SVG overlay for arrows */
+  .arrows-svg {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .arrow-path {
+    fill: none;
+    stroke-width: 1.5;
+    opacity: 0.35;
+    stroke-dasharray: 6 3;
+  }
+  .arrow-path.highlight { opacity: 0.8; stroke-dasharray: none; }
+
+  /* ── DOMAIN GROUPS ───────────────────────────── */
+  .group {
+    position: absolute;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    overflow: hidden;
+    transition: box-shadow .2s;
+  }
+  .group:hover { box-shadow: 0 0 0 1px var(--border), 0 8px 32px rgba(0,0,0,.5); }
+
+  .group-header {
+    padding: 9px 13px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: #fff;
+  }
+  .group-header .icon { font-style: normal; font-size: 14px; }
+  .group-desc {
+    font-size: 10px;
+    color: rgba(255,255,255,0.55);
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    margin-top: 1px;
+  }
+
+  .group-tables {
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  /* ── TABLE CARDS ─────────────────────────────── */
+  .tcard {
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    background: var(--surface2);
+    border: 1px solid transparent;
+    transition: border-color .15s, background .15s;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .tcard:hover {
+    border-color: var(--border);
+    background: #21262d;
+  }
+  .tcard.active {
+    border-color: currentColor;
+  }
+  .tcard-name {
+    font-size: 12px;
+    font-weight: 500;
+    flex: 1;
+  }
+  .tcard-badge {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.08);
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+
+  /* ── DETAIL PANEL ────────────────────────────── */
+  .detail-panel {
+    width: var(--panel-w);
+    flex-shrink: 0;
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    transition: width .2s;
+  }
+  .detail-panel.empty {
+    width: 300px;
+  }
+
+  .panel-placeholder {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--muted);
+    padding: 30px;
+    text-align: center;
+  }
+  .panel-placeholder .big { font-size: 32px; }
+  .panel-placeholder p { font-size: 11px; line-height: 1.6; }
+
+  .panel-content { padding: 20px; display: none; }
+  .panel-content.visible { display: block; }
+
+  .panel-table-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .panel-domain-badge {
+    display: inline-block;
+    font-size: 9px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    color: #000;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+  }
+  .panel-commentary {
+    background: var(--surface2);
+    border-left: 3px solid;
+    border-radius: 0 6px 6px 0;
+    padding: 10px 13px;
+    font-size: 11px;
+    line-height: 1.7;
+    color: #c9d1d9;
+    margin-bottom: 16px;
+  }
+
+  .panel-section-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--muted);
+    margin-bottom: 8px;
+    margin-top: 14px;
+  }
+
+  .col-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .col-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+  }
+  .col-row:nth-child(odd) { background: var(--surface2); }
+  .col-row.pk { background: rgba(59,130,246,0.08); }
+  .col-row.fk { background: rgba(16,185,129,0.08); }
+  .col-name { font-weight: 600; color: var(--text); flex: 1; }
+  .col-type { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+  .col-tag {
+    font-size: 9px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .col-tag.pk { background: rgba(59,130,246,0.25); color: #93c5fd; }
+  .col-tag.fk { background: rgba(16,185,129,0.2); color: #6ee7b7; }
+  .col-tag.enc { background: rgba(245,158,11,0.2); color: #fcd34d; }
+
+  .rel-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .rel-item {
+    font-size: 11px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    background: var(--surface2);
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    cursor: pointer;
+  }
+  .rel-item:hover { background: #21262d; }
+  .rel-arrow { color: var(--muted); font-size: 10px; }
+  .rel-name { color: var(--c-vcs); }
+
+  /* ── SCROLLBAR ───────────────────────────────── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Temple<span>DB</span> — Schema</h1>
+  <span class="header-meta">~210 tables &amp; views &nbsp;·&nbsp; click any table for details</span>
+  <div class="legend">
+    <div class="legend-item" onclick="highlightDomain('projects')">
+      <span class="legend-dot" style="background:var(--c-projects)"></span>Projects
+    </div>
+    <div class="legend-item" onclick="highlightDomain('vcs')">
+      <span class="legend-dot" style="background:var(--c-vcs)"></span>VCS
+    </div>
+    <div class="legend-item" onclick="highlightDomain('code')">
+      <span class="legend-dot" style="background:var(--c-code)"></span>Code Intel
+    </div>
+    <div class="legend-item" onclick="highlightDomain('secrets')">
+      <span class="legend-dot" style="background:var(--c-secrets)"></span>Secrets
+    </div>
+    <div class="legend-item" onclick="highlightDomain('deploy')">
+      <span class="legend-dot" style="background:var(--c-deploy)"></span>Deployment
+    </div>
+    <div class="legend-item" onclick="highlightDomain('ai')">
+      <span class="legend-dot" style="background:var(--c-ai)"></span>AI &amp; Vibe
+    </div>
+  </div>
+</header>
+
+<div class="main">
+  <div class="canvas-wrap">
+    <div class="canvas" id="canvas">
+      <svg class="arrows-svg" id="arrowsSvg"></svg>
+      <!-- groups injected by JS -->
+    </div>
+  </div>
+
+  <div class="detail-panel empty" id="detailPanel">
+    <div class="panel-placeholder" id="panelPlaceholder">
+      <span class="big">&#9707;</span>
+      <p>Click any table card to explore its schema, columns, and design commentary.</p>
+    </div>
+    <div class="panel-content" id="panelContent"></div>
+  </div>
+</div>
+
+<script>
+// ────────────────────────────────────────────────
+// SCHEMA DATA
+// ────────────────────────────────────────────────
+const DOMAINS = [
+  {
+    id: 'projects',
+    name: 'Projects & Tags',
+    icon: '⬡',
+    color: '#3b82f6',
+    description: 'Core identity layer',
+    pos: { left: 20, top: 20, width: 230 },
+    tables: [
+      {
+        name: 'projects',
+        badge: 'root',
+        commentary: `The root entity of the entire database. Every project tracked by TempleDB gets a unique slug (used as the stable identifier in all CLI commands), an optional git remote URL, and rich metadata about its type and Nix integration status.\n\nproject_type distinguishes between regular app code, NixOS system configs, background services, and libraries. The flake validation fields record the last time TempleDB ran "nix flake check" and what it found.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'slug', type: 'TEXT UNIQUE', note: 'stable identifier used in CLI' },
+          { name: 'name', type: 'TEXT' },
+          { name: 'repo_url', type: 'TEXT', note: 'git remote URL' },
+          { name: 'git_branch', type: 'TEXT' },
+          { name: 'project_type', type: 'TEXT', note: 'regular|nixos-config|service|library' },
+          { name: 'project_category', type: 'TEXT', note: 'package|service|desktop-app|nixos-module' },
+          { name: 'is_nix_project', type: 'BOOLEAN' },
+          { name: 'flake_check_status', type: 'TEXT', note: 'valid|invalid|unknown' },
+          { name: 'nix_build_status', type: 'TEXT', note: 'builds|fails|untested' },
+          { name: 'service_type', type: 'TEXT', note: 'oneshot|simple|forking…' },
+          { name: 'created_at', type: 'TEXT' },
+        ],
+        refs: [
+          { label: '→ vcs_branches', domain: 'vcs', table: 'vcs_branches' },
+          { label: '→ project_files', domain: 'vcs', table: 'project_files' },
+          { label: '→ deployment_targets', domain: 'deploy', table: 'deployment_targets' },
+        ]
+      },
+      {
+        name: 'tags',
+        badge: 'taxonomy',
+        commentary: `Flat tag taxonomy. Tags are global (not project-scoped) so the same tag like "python" or "production-critical" can appear across many projects. Useful for cross-cutting queries like "show me all services tagged 'critical'".`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'name', type: 'TEXT UNIQUE' },
+          { name: 'description', type: 'TEXT' },
+          { name: 'created_at', type: 'TIMESTAMP' },
+        ],
+        refs: [{ label: '↔ projects (via project_tags)', domain: 'projects', table: 'project_tags' }]
+      },
+      {
+        name: 'project_tags',
+        badge: 'junction',
+        commentary: `Classic many-to-many junction linking projects to tags. Cascade deletes keep this tidy when a project or tag is removed.`,
+        columns: [
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'tag_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'created_at', type: 'TIMESTAMP' },
+        ],
+        refs: []
+      },
+      {
+        name: 'project_domains',
+        badge: 'dns',
+        commentary: `Maps custom domains to projects. Stores domain name, TLS certificate status, and whether the domain is the primary one for the project. Integrates with the Cloudflare DNS tools.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'domain', type: 'TEXT' },
+          { name: 'is_primary', type: 'BOOLEAN' },
+          { name: 'cert_status', type: 'TEXT' },
+          { name: 'provider', type: 'TEXT' },
+        ],
+        refs: []
+      },
+    ]
+  },
+
+  {
+    id: 'vcs',
+    name: 'Version Control',
+    icon: '⎇',
+    color: '#10b981',
+    description: 'ACID-safe git-like VCS',
+    pos: { left: 275, top: 20, width: 235 },
+    tables: [
+      {
+        name: 'vcs_branches',
+        badge: 'branch',
+        commentary: `Named branches per project. Works just like git branches — each branch has a head_commit pointer that advances with each commit. Branches can be protected (preventing force-updates) and one branch per project is marked as default.\n\nBranches cascade-delete with their project, which simplifies cleanup.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'branch_name', type: 'TEXT' },
+          { name: 'parent_branch_id', type: 'INTEGER', tag: 'fk', note: 'branched from' },
+          { name: 'is_default', type: 'BOOLEAN' },
+          { name: 'is_protected', type: 'BOOLEAN' },
+          { name: 'head_commit_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'created_by', type: 'TEXT' },
+        ],
+        refs: [{ label: '→ vcs_commits (head)', domain: 'vcs', table: 'vcs_commits' }]
+      },
+      {
+        name: 'vcs_commits',
+        badge: 'commit',
+        commentary: `The heart of the VCS subsystem. Each commit has a SHA-256 content hash, a parent chain (enabling history traversal), author/committer metadata, and a link back to the branch and project.\n\nThis replaces git object storage — commits are ACID-transactional since they live in SQLite. The commit_hash is deterministic from the commit content, just like git's SHA-1 objects, so it can be used as a stable reference externally.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'branch_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'commit_hash', type: 'TEXT UNIQUE', note: 'SHA-256 of content' },
+          { name: 'parent_commit_id', type: 'INTEGER', tag: 'fk', note: 'linear history' },
+          { name: 'merge_parent_commit_id', type: 'INTEGER', tag: 'fk', note: 'merge commits' },
+          { name: 'author', type: 'TEXT' },
+          { name: 'author_email', type: 'TEXT' },
+          { name: 'commit_message', type: 'TEXT' },
+          { name: 'commit_timestamp', type: 'TEXT' },
+        ],
+        refs: [
+          { label: '→ vcs_file_states (snapshot)', domain: 'vcs', table: 'vcs_file_states' },
+        ]
+      },
+      {
+        name: 'vcs_file_states',
+        badge: 'snapshot',
+        commentary: `Records the state of every file at every commit — analogous to git tree objects but stored relationally. The change_type field (added/modified/deleted/renamed) makes it cheap to compute diffs without walking blob hashes.\n\nContent is stored by reference to content_blobs, so two commits with identical file contents share one blob row (deduplication).`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'commit_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'file_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'content_hash', type: 'TEXT', note: 'ref to content_blobs' },
+          { name: 'content_text', type: 'TEXT', note: 'inline for small files' },
+          { name: 'file_size', type: 'INTEGER' },
+          { name: 'line_count', type: 'INTEGER' },
+          { name: 'change_type', type: 'TEXT', note: 'added|modified|deleted|renamed' },
+          { name: 'previous_path', type: 'TEXT', note: 'set on renames' },
+        ],
+        refs: []
+      },
+      {
+        name: 'project_files',
+        badge: 'registry',
+        commentary: `The file registry — a stable row per unique file path within a project. While vcs_file_states captures historical snapshots, project_files is the canonical reference. Code analysis, readmes, and other features all foreign-key to this table.\n\nThe component_name, owner, and purpose fields are optional enrichment for documentation and impact analysis.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'file_type_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'file_path', type: 'TEXT', note: 'relative from project root' },
+          { name: 'file_name', type: 'TEXT' },
+          { name: 'component_name', type: 'TEXT', note: 'logical name' },
+          { name: 'purpose', type: 'TEXT' },
+          { name: 'owner', type: 'TEXT' },
+          { name: 'status', type: 'TEXT', note: 'active|deprecated|archived' },
+        ],
+        refs: [
+          { label: '→ file_contents', domain: 'vcs', table: 'file_contents' },
+          { label: '→ code_symbols', domain: 'code', table: 'code_symbols' },
+        ]
+      },
+      {
+        name: 'file_contents',
+        badge: 'current',
+        commentary: `Points to the current version of a file's content. The UNIQUE(file_id, is_current) constraint ensures only one "current" row per file, making "get latest content" a simple indexed lookup.\n\nActual bytes live in content_blobs, referenced by SHA-256 hash. This indirection enables deduplication across all projects.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'file_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'content_hash', type: 'TEXT', tag: 'fk', note: '→ content_blobs' },
+          { name: 'file_size_bytes', type: 'INTEGER' },
+          { name: 'line_count', type: 'INTEGER' },
+          { name: 'is_current', type: 'BOOLEAN' },
+          { name: 'version', type: 'INTEGER' },
+        ],
+        refs: [{ label: '→ content_blobs', domain: 'vcs', table: 'content_blobs' }]
+      },
+      {
+        name: 'content_blobs',
+        badge: 'CAS',
+        commentary: `Content-addressable storage. The primary key is the SHA-256 hash of the content — identical files across all projects share a single blob row.\n\nSupports inline storage (for small files), external file paths, and remote URLs (for large binary assets). The reference_count tracks how many file_contents rows point here, enabling safe garbage collection.\n\nCompression support (zstd, gzip) keeps the database footprint small for text-heavy codebases.`,
+        columns: [
+          { name: 'hash_sha256', type: 'TEXT', tag: 'pk', note: 'content is the key' },
+          { name: 'content_text', type: 'TEXT', note: 'inline text storage' },
+          { name: 'content_blob', type: 'BLOB', note: 'inline binary storage' },
+          { name: 'content_type', type: 'TEXT', note: 'text|binary' },
+          { name: 'file_size_bytes', type: 'INTEGER' },
+          { name: 'reference_count', type: 'INTEGER', note: 'for GC' },
+          { name: 'storage_location', type: 'TEXT', note: 'inline|external|remote' },
+          { name: 'external_path', type: 'TEXT' },
+          { name: 'compression', type: 'TEXT', note: 'zstd|gzip' },
+          { name: 'remote_url', type: 'TEXT' },
+        ],
+        refs: []
+      },
+    ]
+  },
+
+  {
+    id: 'code',
+    name: 'Code Intelligence',
+    icon: '◈',
+    color: '#a78bfa',
+    description: 'Symbols, deps, clusters, search',
+    pos: { left: 535, top: 20, width: 240 },
+    tables: [
+      {
+        name: 'code_symbols',
+        badge: 'symbol',
+        commentary: `Extracted symbols from source code — functions, classes, methods, interfaces, constants. Only symbols that cross file boundaries (exported/public API/entry points) are tracked, keeping the table focused on what matters for impact analysis.\n\nqualified_name gives the dotted path (e.g. "MyClass.myMethod"), which is stable enough to survive minor refactors and be used as a join key.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'file_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'symbol_type', type: 'TEXT', note: 'function|class|method|type…' },
+          { name: 'symbol_name', type: 'TEXT' },
+          { name: 'qualified_name', type: 'TEXT', note: 'e.g. MyClass.doThing' },
+          { name: 'scope', type: 'TEXT', note: 'exported|public_api|entry_point' },
+          { name: 'start_line', type: 'INTEGER' },
+          { name: 'end_line', type: 'INTEGER' },
+          { name: 'complexity_score', type: 'REAL' },
+          { name: 'call_count', type: 'INTEGER', note: 'in-bound calls' },
+        ],
+        refs: [
+          { label: '→ code_symbol_dependencies', domain: 'code', table: 'code_symbol_dependencies' },
+          { label: '→ code_cluster_members', domain: 'code', table: 'code_cluster_members' },
+        ]
+      },
+      {
+        name: 'code_symbol_dependencies',
+        badge: 'graph',
+        commentary: `A directed call graph — each row says "caller_symbol calls called_symbol". The dependency_type distinguishes calls, imports, inheritance (extends), and instantiation.\n\nis_critical_path marks edges that are part of the main execution flow, which powers the "blast radius" estimates in impact analysis. confidence_score is lower for dynamic dispatch where we can't be certain a call happens.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'caller_symbol_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'called_symbol_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'dependency_type', type: 'TEXT', note: 'calls|imports|extends|implements' },
+          { name: 'call_line', type: 'INTEGER' },
+          { name: 'is_conditional', type: 'BOOLEAN', note: 'inside if/loop/try' },
+          { name: 'is_critical_path', type: 'BOOLEAN' },
+          { name: 'confidence_score', type: 'REAL', note: '0.0–1.0' },
+        ],
+        refs: []
+      },
+      {
+        name: 'code_clusters',
+        badge: 'leiden',
+        commentary: `Architectural clusters detected by the Leiden community-detection algorithm run on the symbol dependency graph. Each cluster represents a cohesive module or feature — files that talk to each other more than to the outside world.\n\ncohesion_score is higher when cluster members are densely interconnected. Low-cohesion clusters signal architectural debt or accidental coupling.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'cluster_name', type: 'TEXT' },
+          { name: 'cluster_type', type: 'TEXT', note: 'feature|module|layer|utility' },
+          { name: 'description', type: 'TEXT' },
+          { name: 'cohesion_score', type: 'REAL', note: '0.0–1.0' },
+        ],
+        refs: [{ label: '→ code_cluster_members', domain: 'code', table: 'code_cluster_members' }]
+      },
+      {
+        name: 'code_cluster_members',
+        badge: 'junction',
+        commentary: `Maps files into clusters. A file can belong to only one cluster (clusters are non-overlapping partitions of the codebase). The membership_score captures how strongly the file belongs — low scores indicate "betweenness" files that bridge clusters.`,
+        columns: [
+          { name: 'cluster_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'file_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'membership_score', type: 'REAL' },
+          { name: 'is_core_member', type: 'BOOLEAN' },
+        ],
+        refs: []
+      },
+      {
+        name: 'code_search_index',
+        badge: 'FTS',
+        commentary: `Hybrid search index combining BM25 full-text search with graph-ranking signals. Rows here are augmented versions of code_symbols, enriched with surrounding context, docstrings, and inferred semantic tags.\n\nThe companion code_search_fts table is an FTS5 virtual table pointing at this one. Search results are re-ranked by graph centrality (how many other symbols depend on this one).`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'symbol_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'search_text', type: 'TEXT', note: 'tokenized for FTS' },
+          { name: 'symbol_context', type: 'TEXT', note: 'surrounding code' },
+          { name: 'semantic_tags', type: 'TEXT', note: 'inferred topics' },
+          { name: 'centrality_score', type: 'REAL', note: 'graph rank boost' },
+        ],
+        refs: []
+      },
+    ]
+  },
+
+  {
+    id: 'secrets',
+    name: 'Secrets & Config',
+    icon: '⚿',
+    color: '#f59e0b',
+    description: 'Age-encrypted secrets + env vars',
+    pos: { left: 20, top: 310, width: 235 },
+    tables: [
+      {
+        name: 'secret_blobs',
+        badge: 'encrypted',
+        commentary: `Stores age-encrypted secret blobs. The actual decrypted value never touches the database — only the ciphertext blob is stored. Each secret has a profile (grouping) and a name within that profile.\n\nDecryption requires an encryption key registered in encryption_keys plus the corresponding hardware token or key file. This table intentionally holds no plaintext.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'profile', type: 'TEXT', note: 'logical grouping' },
+          { name: 'secret_name', type: 'TEXT' },
+          { name: 'secret_blob', type: 'BLOB', tag: 'enc', note: 'age ciphertext' },
+          { name: 'content_type', type: 'TEXT', note: 'application/text…' },
+          { name: 'created_at', type: 'TEXT' },
+          { name: 'updated_at', type: 'TEXT' },
+        ],
+        refs: [{ label: '↔ encryption_keys (via assignments)', domain: 'secrets', table: 'secret_key_assignments' }]
+      },
+      {
+        name: 'encryption_keys',
+        badge: 'age key',
+        commentary: `Registry of all age recipients that can decrypt secrets. Supports Yubikey PIV tokens, filesystem age keys, and bare age identities.\n\nCritically, this table tracks revocation — a revoked key cannot be re-enabled, only a new key can be added. This enforces forward secrecy: rotate key → re-encrypt secrets → revoke old entry. The location field ("daily-use", "safe", "offsite") supports a multi-key backup strategy.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'key_name', type: 'TEXT UNIQUE', note: 'e.g. yubikey-1-primary' },
+          { name: 'key_type', type: 'TEXT', note: 'yubikey|filesystem|age' },
+          { name: 'recipient', type: 'TEXT UNIQUE', note: 'age1… recipient string' },
+          { name: 'serial_number', type: 'TEXT', note: 'Yubikey serial' },
+          { name: 'piv_slot', type: 'TEXT', note: '9a|9c|9d|9e' },
+          { name: 'location', type: 'TEXT', note: 'daily-use|safe|offsite' },
+          { name: 'is_active', type: 'INTEGER', note: 'can be disabled' },
+          { name: 'is_revoked', type: 'INTEGER', note: 'permanent, irreversible' },
+          { name: 'revoked_at', type: 'TEXT' },
+          { name: 'revocation_reason', type: 'TEXT' },
+        ],
+        refs: []
+      },
+      {
+        name: 'secret_key_assignments',
+        badge: 'junction',
+        commentary: `Many-to-many: which encryption keys can decrypt which secret blobs. One secret can be re-encrypted for multiple keys (e.g. daily Yubikey + backup key stored in a safe). This is how "any-key decryption" works — you only need one of the assigned keys to be present.`,
+        columns: [
+          { name: 'secret_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'key_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'assigned_at', type: 'TEXT' },
+          { name: 'assigned_by', type: 'TEXT' },
+        ],
+        refs: []
+      },
+      {
+        name: 'env_vars',
+        badge: 'global',
+        commentary: `Global key-value environment variables that are not project-scoped and not encrypted. Good for non-secret configuration that needs to be available across projects (e.g. EDITOR, DEFAULT_REGION).\n\nThe environment column allows multiple named environments (production, staging, dev) to coexist with separate values for the same key.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'key', type: 'TEXT' },
+          { name: 'value', type: 'TEXT' },
+          { name: 'description', type: 'TEXT' },
+          { name: 'environment', type: 'TEXT', note: 'default|production|staging…' },
+          { name: 'created_at', type: 'TEXT' },
+          { name: 'updated_at', type: 'TEXT' },
+        ],
+        refs: []
+      },
+      {
+        name: 'system_config',
+        badge: 'config',
+        commentary: `Single-row config store for TempleDB itself — database version, feature flags, and system-wide settings. Migrated via migration_history. Think of it as the database's own package.json.`,
+        columns: [
+          { name: 'key', type: 'TEXT', tag: 'pk' },
+          { name: 'value', type: 'TEXT' },
+          { name: 'description', type: 'TEXT' },
+          { name: 'updated_at', type: 'TEXT' },
+        ],
+        refs: []
+      },
+    ]
+  },
+
+  {
+    id: 'deploy',
+    name: 'Deployment',
+    icon: '⛵',
+    color: '#f87171',
+    description: 'Targets, history, NixOps4',
+    pos: { left: 275, top: 310, width: 240 },
+    tables: [
+      {
+        name: 'deployment_targets',
+        badge: 'target',
+        commentary: `Named deployment targets per project. A project might have production, staging, and preview targets each pointing at different infrastructure. target_type describes the kind of infrastructure (container, static site, serverless, database).\n\nThe provider field ("vercel", "gcp", "cloudflare") drives which deployment script is invoked. connection_string stores encrypted DSN for database targets.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'target_name', type: 'TEXT', note: 'production|staging|preview' },
+          { name: 'target_type', type: 'TEXT', note: 'container|static|serverless|db' },
+          { name: 'host', type: 'TEXT' },
+          { name: 'region', type: 'TEXT' },
+          { name: 'provider', type: 'TEXT', note: 'vercel|gcp|cloudflare|local' },
+          { name: 'requires_vpn', type: 'BOOLEAN' },
+          { name: 'access_url', type: 'TEXT' },
+          { name: 'connection_string', type: 'TEXT' },
+        ],
+        refs: [{ label: '→ deployment_history', domain: 'deploy', table: 'deployment_history' }]
+      },
+      {
+        name: 'deployment_history',
+        badge: 'audit',
+        commentary: `Immutable audit log of every deployment. Captures the VCS commit hash deployed, duration, who triggered it, and whether it succeeded or was rolled back.\n\nRollbacks are logged as their own deployment_type='rollback' rows, preserving the full audit trail. Cathedral package checksums are recorded when the deployment used a Cathedral bundle.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'target_name', type: 'TEXT' },
+          { name: 'deployment_type', type: 'TEXT', note: 'deploy|rollback' },
+          { name: 'commit_hash', type: 'TEXT', note: 'VCS ref deployed' },
+          { name: 'cathedral_checksum', type: 'TEXT' },
+          { name: 'status', type: 'TEXT', note: 'in_progress|success|failed|rolled_back' },
+          { name: 'started_at', type: 'TIMESTAMP' },
+          { name: 'completed_at', type: 'TIMESTAMP' },
+          { name: 'duration_ms', type: 'INTEGER' },
+          { name: 'deployed_by', type: 'TEXT' },
+          { name: 'deployment_method', type: 'TEXT', note: 'orchestrator|manual|ci' },
+        ],
+        refs: []
+      },
+      {
+        name: 'nixops4_networks',
+        badge: 'nixops',
+        commentary: `A NixOps4 "network" — a collection of NixOS machines managed together. Each network has a config file (usually a flake.nix), a UUID for NixOps4 state tracking, and a state file path.\n\nThis bridges TempleDB's project model with NixOps4's infrastructure-as-code model. One project can own multiple networks (e.g. "production-cluster", "dev-box").`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'network_name', type: 'TEXT' },
+          { name: 'network_uuid', type: 'TEXT UNIQUE' },
+          { name: 'config_file_path', type: 'TEXT' },
+          { name: 'flake_uri', type: 'TEXT' },
+          { name: 'state_file_path', type: 'TEXT' },
+          { name: 'is_active', type: 'BOOLEAN' },
+          { name: 'description', type: 'TEXT' },
+        ],
+        refs: [{ label: '→ nixops4_machines', domain: 'deploy', table: 'nixops4_machines' }]
+      },
+      {
+        name: 'nixops4_machines',
+        badge: 'nixos',
+        commentary: `Individual NixOS machines within a network. Stores the SSH connection details (host, user, port), the NixOS system type, and current deployment state including the active store path.\n\nThe target_env field tells NixOps4 the virtualization or cloud backend (libvirtd, ec2, none for bare metal). Health status and last_deployed_at enable monitoring dashboards.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'network_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'machine_name', type: 'TEXT', note: 'e.g. web1, db1' },
+          { name: 'machine_uuid', type: 'TEXT UNIQUE' },
+          { name: 'target_host', type: 'TEXT', note: 'hostname or IP' },
+          { name: 'target_user', type: 'TEXT', note: 'SSH user' },
+          { name: 'target_port', type: 'INTEGER' },
+          { name: 'system_type', type: 'TEXT', note: 'nixos|linux|darwin' },
+          { name: 'target_env', type: 'TEXT', note: 'libvirtd|ec2|none…' },
+          { name: 'nixos_version', type: 'TEXT' },
+          { name: 'health_status', type: 'TEXT' },
+          { name: 'last_deployed_at', type: 'TEXT' },
+        ],
+        refs: []
+      },
+    ]
+  },
+
+  {
+    id: 'ai',
+    name: 'AI & Vibe',
+    icon: '⌬',
+    color: '#22d3ee',
+    description: 'Context, readmes, work, vibe sessions',
+    pos: { left: 535, top: 310, width: 240 },
+    tables: [
+      {
+        name: 'contexts',
+        badge: 'LLM',
+        commentary: `Stores LLM context windows for AI-assisted features. The primary key is (bTitle, tStamp, ordering) — enabling multiple ordered chunks per named context block.\n\nEmbeddings are stored as JSON (SQLite has no native vector type) for similarity search. The append/prependSummary fields allow context to be "compressed" into a summary when the window fills up, mirroring how real LLM conversations are managed.`,
+        columns: [
+          { name: 'bTitle', type: 'TEXT', tag: 'pk', note: 'context block name' },
+          { name: 'tStamp', type: 'TEXT', tag: 'pk' },
+          { name: 'ordering', type: 'INTEGER', tag: 'pk' },
+          { name: 'embedding', type: 'TEXT', note: 'JSON float array' },
+          { name: 'append', type: 'TEXT' },
+          { name: 'prependSummary', type: 'TEXT' },
+          { name: 'appendSummary', type: 'TEXT' },
+        ],
+        refs: []
+      },
+      {
+        name: 'readme_files',
+        badge: 'docs',
+        commentary: `Indexed documentation files. TempleDB scans projects for README and docs files, extracts titles, descriptions, categories, and section counts.\n\nThe auto_index flag controls whether a file appears in auto-generated documentation indexes. index_priority lets you pin important docs to the top. readme_topics and readme_references extend this into a cross-project documentation graph.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'file_path', type: 'TEXT' },
+          { name: 'title', type: 'TEXT', note: 'extracted from h1' },
+          { name: 'description', type: 'TEXT', note: 'first paragraph' },
+          { name: 'category', type: 'TEXT', note: 'setup|api|deployment|arch' },
+          { name: 'scope', type: 'TEXT', note: 'project|global|feature' },
+          { name: 'word_count', type: 'INTEGER' },
+          { name: 'section_count', type: 'INTEGER' },
+          { name: 'auto_index', type: 'BOOLEAN' },
+          { name: 'index_priority', type: 'INTEGER' },
+          { name: 'last_scanned_at', type: 'TEXT' },
+        ],
+        refs: []
+      },
+      {
+        name: 'work_items',
+        badge: 'tasks',
+        commentary: `Lightweight task tracker embedded in the database. Work items have status (pending/in_progress/done/blocked), priority, and type (task/bug/feature/spike). Parent-child hierarchy via parent_item_id enables epics and sub-tasks.\n\nThe TEXT primary key (instead of auto-increment integer) allows stable external references like TASK-abc123 without collision risk across distributed instances.`,
+        columns: [
+          { name: 'id', type: 'TEXT', tag: 'pk', note: 'stable string ID' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'title', type: 'TEXT' },
+          { name: 'description', type: 'TEXT' },
+          { name: 'status', type: 'TEXT', note: 'pending|in_progress|done|blocked' },
+          { name: 'priority', type: 'TEXT', note: 'low|medium|high|critical' },
+          { name: 'item_type', type: 'TEXT', note: 'task|bug|feature|spike' },
+          { name: 'assigned_to', type: 'TEXT' },
+          { name: 'parent_item_id', type: 'TEXT', note: 'self-referential tree' },
+          { name: 'estimated_effort', type: 'TEXT' },
+          { name: 'tags', type: 'TEXT', note: 'JSON array' },
+        ],
+        refs: []
+      },
+      {
+        name: 'vibe_browser_sessions',
+        badge: 'vibe',
+        commentary: `Tracks browser sessions during Vibe coding — TempleDB's AI-assisted development mode. Each session captures what project was active, which files were being edited, and timing.\n\nThe "Vibe" subsystem records the full context of a coding session so AI assistance can be grounded in exactly what you were doing and what changed.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'session_token', type: 'TEXT UNIQUE' },
+          { name: 'project_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'started_at', type: 'TEXT' },
+          { name: 'ended_at', type: 'TEXT' },
+          { name: 'active_files', type: 'TEXT', note: 'JSON list' },
+          { name: 'browser_url', type: 'TEXT' },
+        ],
+        refs: [{ label: '→ vibe_claude_interactions', domain: 'ai', table: 'vibe_claude_interactions' }]
+      },
+      {
+        name: 'vibe_claude_interactions',
+        badge: 'AI log',
+        commentary: `Records every AI tool call and response during a Vibe session. This creates a searchable audit trail of what the AI did — what files it read, what edits it made, what the user asked. Pairs (prompt, response) are stored for future retrieval and pattern mining.\n\nvibe_interaction_embeddings extends this with vector embeddings for semantic search over past AI interactions.`,
+        columns: [
+          { name: 'id', type: 'INTEGER', tag: 'pk' },
+          { name: 'session_id', type: 'INTEGER', tag: 'fk' },
+          { name: 'tool_name', type: 'TEXT', note: 'which MCP tool was called' },
+          { name: 'tool_input', type: 'TEXT', note: 'JSON params' },
+          { name: 'tool_result', type: 'TEXT', note: 'JSON response' },
+          { name: 'user_message', type: 'TEXT' },
+          { name: 'assistant_message', type: 'TEXT' },
+          { name: 'timestamp', type: 'TEXT' },
+          { name: 'duration_ms', type: 'INTEGER' },
+        ],
+        refs: []
+      },
+    ]
+  }
+];
+
+// ── CROSS-DOMAIN RELATIONSHIPS (for arrows) ──────
+const ARROWS = [
+  { from: 'projects',  to: 'vcs',     color: '#10b981' },
+  { from: 'projects',  to: 'code',    color: '#a78bfa' },
+  { from: 'projects',  to: 'secrets', color: '#f59e0b' },
+  { from: 'projects',  to: 'deploy',  color: '#f87171' },
+  { from: 'projects',  to: 'ai',      color: '#22d3ee' },
+  { from: 'vcs',       to: 'code',    color: '#6366f1' },
+];
+
+// ────────────────────────────────────────────────
+// RENDER GROUPS
+// ────────────────────────────────────────────────
+const canvas = document.getElementById('canvas');
+const groupEls = {};
+
+DOMAINS.forEach(domain => {
+  const g = document.createElement('div');
+  g.className = 'group';
+  g.id = 'g-' + domain.id;
+  g.style.left = domain.pos.left + 'px';
+  g.style.top = domain.pos.top + 'px';
+  g.style.width = domain.pos.width + 'px';
+  g.style.borderColor = domain.color + '55';
+
+  const header = document.createElement('div');
+  header.className = 'group-header';
+  header.style.background = domain.color + '22';
+  header.style.borderBottom = '1px solid ' + domain.color + '44';
+  header.innerHTML = `
+    <span class="icon" style="color:${domain.color}">${domain.icon}</span>
+    <span style="color:${domain.color}">${domain.name}</span>
+    <span class="group-desc">${domain.description}</span>
+  `;
+
+  const tableContainer = document.createElement('div');
+  tableContainer.className = 'group-tables';
+
+  domain.tables.forEach(table => {
+    const card = document.createElement('div');
+    card.className = 'tcard';
+    card.style.color = domain.color;
+    card.dataset.domain = domain.id;
+    card.dataset.table = table.name;
+    card.innerHTML = `
+      <span class="tcard-name">${table.name}</span>
+      <span class="tcard-badge">${table.badge}</span>
+    `;
+    card.addEventListener('click', () => showDetail(domain, table, card));
+    tableContainer.appendChild(card);
+  });
+
+  g.appendChild(header);
+  g.appendChild(tableContainer);
+  canvas.appendChild(g);
+  groupEls[domain.id] = g;
+});
+
+// ────────────────────────────────────────────────
+// DRAW ARROWS (after layout)
+// ────────────────────────────────────────────────
+function getCenter(domainId) {
+  const el = groupEls[domainId];
+  const d = DOMAINS.find(d => d.id === domainId);
+  const h = el.offsetHeight;
+  return {
+    x: d.pos.left + d.pos.width / 2,
+    y: d.pos.top + h / 2,
+  };
+}
+
+function drawArrows() {
+  const svg = document.getElementById('arrowsSvg');
+  svg.innerHTML = '';
+
+  // Update canvas min-height based on actual group heights
+  let maxBottom = 0;
+  DOMAINS.forEach(d => {
+    const el = groupEls[d.id];
+    maxBottom = Math.max(maxBottom, d.pos.top + el.offsetHeight);
+  });
+  canvas.style.minHeight = (maxBottom + 30) + 'px';
+  svg.setAttribute('viewBox', `0 0 1040 ${maxBottom + 30}`);
+  svg.style.height = (maxBottom + 30) + 'px';
+
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  ARROWS.forEach((a, i) => {
+    const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+    marker.setAttribute('id', 'arr' + i);
+    marker.setAttribute('markerWidth', '6');
+    marker.setAttribute('markerHeight', '6');
+    marker.setAttribute('refX', '5');
+    marker.setAttribute('refY', '3');
+    marker.setAttribute('orient', 'auto');
+    const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+    poly.setAttribute('points', '0 0, 6 3, 0 6');
+    poly.setAttribute('fill', a.color);
+    poly.setAttribute('opacity', '0.5');
+    marker.appendChild(poly);
+    defs.appendChild(marker);
+  });
+  svg.appendChild(defs);
+
+  ARROWS.forEach((a, i) => {
+    const from = getCenter(a.from);
+    const to = getCenter(a.to);
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const mx = from.x + dx * 0.5;
+    const my = from.y + dy * 0.5;
+
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('class', 'arrow-path');
+    path.setAttribute('stroke', a.color);
+    path.setAttribute('d', `M ${from.x} ${from.y} Q ${mx} ${from.y} ${to.x} ${to.y}`);
+    path.setAttribute('marker-end', `url(#arr${i})`);
+    svg.appendChild(path);
+  });
+}
+
+// Initial draw + redraw on resize
+requestAnimationFrame(drawArrows);
+window.addEventListener('resize', drawArrows);
+
+// ────────────────────────────────────────────────
+// DETAIL PANEL
+// ────────────────────────────────────────────────
+let activeCard = null;
+
+function showDetail(domain, table, cardEl) {
+  if (activeCard) activeCard.classList.remove('active');
+  activeCard = cardEl;
+  cardEl.classList.add('active');
+
+  const panel = document.getElementById('detailPanel');
+  const placeholder = document.getElementById('panelPlaceholder');
+  const content = document.getElementById('panelContent');
+
+  panel.classList.remove('empty');
+  placeholder.style.display = 'none';
+  content.classList.add('visible');
+
+  // Render column rows
+  const colRows = (table.columns || []).map(c => {
+    const tag = c.tag ? `<span class="col-tag ${c.tag}">${c.tag.toUpperCase()}</span>` : '';
+    const note = c.note ? `<span style="color:#6e7681;font-size:10px"> — ${c.note}</span>` : '';
+    return `<div class="col-row ${c.tag || ''}">
+      <span class="col-name">${c.name}${note}</span>
+      <span class="col-type">${c.type}</span>
+      ${tag}
+    </div>`;
+  }).join('');
+
+  // Render related tables
+  const relRows = (table.refs || []).map(r => `
+    <div class="rel-item" onclick="navigateTo('${r.domain}','${r.table}')">
+      <span class="rel-arrow">⟶</span>
+      <span class="rel-name">${r.table}</span>
+      <span style="color:var(--muted);font-size:10px;margin-left:auto">${r.label.split('→')[0] || ''}</span>
+    </div>
+  `).join('');
+
+  const commentaryLines = (table.commentary || '').split('\n\n').map(p =>
+    `<p>${p}</p>`
+  ).join('<br>');
+
+  content.innerHTML = `
+    <div class="panel-table-name">${table.name}</div>
+    <span class="panel-domain-badge" style="background:${domain.color}">${domain.name}</span>
+
+    <div class="panel-commentary" style="border-color:${domain.color}">
+      ${commentaryLines}
+    </div>
+
+    <div class="panel-section-title">Columns (${(table.columns||[]).length})</div>
+    <div class="col-list">${colRows}</div>
+
+    ${relRows ? `
+    <div class="panel-section-title">References</div>
+    <div class="rel-list">${relRows}</div>
+    ` : ''}
+
+    <div style="margin-top:20px;padding-top:14px;border-top:1px solid var(--border)">
+      <div class="panel-section-title">Legend</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:10px;color:var(--muted)">
+        <span><span class="col-tag pk" style="padding:1px 5px;border-radius:3px">PK</span> primary key</span>
+        <span><span class="col-tag fk" style="padding:1px 5px;border-radius:3px">FK</span> foreign key</span>
+        <span><span class="col-tag enc" style="padding:1px 5px;border-radius:3px">ENC</span> encrypted</span>
+      </div>
+    </div>
+  `;
+}
+
+function navigateTo(domainId, tableName) {
+  const domain = DOMAINS.find(d => d.id === domainId);
+  if (!domain) return;
+  const table = domain.tables.find(t => t.name === tableName);
+  if (!table) return;
+  const cards = document.querySelectorAll('.tcard');
+  cards.forEach(c => {
+    if (c.dataset.domain === domainId && c.dataset.table === tableName) {
+      c.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      showDetail(domain, table, c);
+    }
+  });
+}
+
+function highlightDomain(domainId) {
+  const domain = DOMAINS.find(d => d.id === domainId);
+  if (!domain || !domain.tables.length) return;
+  navigateTo(domainId, domain.tables[0].name);
+  const el = groupEls[domainId];
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+</script>
+</body>
+</html>
