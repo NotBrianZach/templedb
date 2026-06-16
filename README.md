@@ -224,7 +224,7 @@ Features: sortable tables, fuzzy search (press /), inline config editing, knowle
 
 ## MCP Server (Claude Code Integration)
 
-10 core tools — minimal context footprint (~1000 tokens vs 7700 for the old 77-tool set):
+10 core tools — minimal context footprint (~1000 tokens):
 
 ```json
 {"mcpServers": {"templedb": {"command": "templedb", "args": ["mcp", "serve"]}}}
