@@ -599,11 +599,16 @@ class TempleFS(Operations):
         """Auto-stage a file change in vcs_working_state."""
         try:
             conn = self._conn()
-            # Get default branch
+            # Get active branch (falls back to default)
             branch = conn.execute(
-                "SELECT id FROM vcs_branches WHERE project_id = ? AND is_default = 1 LIMIT 1",
+                "SELECT active_branch_id as id FROM projects WHERE id = ? AND active_branch_id IS NOT NULL",
                 (project_id,)
             ).fetchone()
+            if not branch:
+                branch = conn.execute(
+                    "SELECT id FROM vcs_branches WHERE project_id = ? AND is_default = 1 LIMIT 1",
+                    (project_id,)
+                ).fetchone()
             if not branch:
                 return
 

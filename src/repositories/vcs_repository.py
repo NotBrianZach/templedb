@@ -226,6 +226,102 @@ class VCSRepository(BaseRepository):
             ORDER BY vb.is_default DESC, vb.branch_name
         """, (project_id,))
 
+    def get_active_branch(self, project_id: int) -> Optional[Dict[str, Any]]:
+        """Get the active (current) branch for a project."""
+        branch = self.query_one("""
+            SELECT vb.id, vb.branch_name, vb.is_default, vb.head_commit_id, vb.is_protected
+            FROM projects p
+            JOIN vcs_branches vb ON p.active_branch_id = vb.id
+            WHERE p.id = ?
+        """, (project_id,))
+        if branch:
+            return branch
+        # Fallback: use default branch if active_branch_id not set
+        return self.query_one("""
+            SELECT id, branch_name, is_default, head_commit_id, is_protected
+            FROM vcs_branches WHERE project_id = ? AND is_default = 1 LIMIT 1
+        """, (project_id,))
+
+    def switch_branch(self, project_id: int, target_branch_id: int):
+        """Switch the active branch for a project.
+
+        Updates file_contents.is_current to reflect the target branch's
+        head commit content. Does NOT check for dirty working state —
+        caller must do that.
+        """
+        # Get head commit for target branch
+        branch = self.query_one(
+            "SELECT head_commit_id FROM vcs_branches WHERE id = ?",
+            (target_branch_id,))
+        head_commit_id = branch['head_commit_id'] if branch else None
+
+        # Clear is_current for all project files
+        self.execute("""
+            UPDATE file_contents SET is_current = 0
+            WHERE file_id IN (SELECT id FROM project_files WHERE project_id = ?)
+        """, (project_id,), commit=False)
+
+        if head_commit_id:
+            # Set is_current for files at the target branch's head commit
+            # Walk back through the commit chain to build the full file tree
+            file_states = self.query_all("""
+                WITH RECURSIVE branch_commits AS (
+                    SELECT id, parent_commit_id FROM vcs_commits WHERE id = ?
+                    UNION ALL
+                    SELECT c.id, c.parent_commit_id
+                    FROM vcs_commits c
+                    JOIN branch_commits bc ON c.id = bc.parent_commit_id
+                )
+                SELECT fs.file_id, fs.content_hash, fs.change_type
+                FROM vcs_file_states fs
+                JOIN branch_commits bc ON fs.commit_id = bc.id
+                ORDER BY fs.commit_id DESC
+            """, (head_commit_id,))
+
+            # Build latest state per file (most recent commit wins)
+            seen = set()
+            for fs in file_states:
+                if fs['file_id'] in seen:
+                    continue
+                seen.add(fs['file_id'])
+                if fs['change_type'] == 'deleted':
+                    continue
+                # Update file_contents to point to this version
+                self.execute("""
+                    UPDATE file_contents SET is_current = 1, content_hash = ?
+                    WHERE file_id = ? AND is_current = 0
+                """, (fs['content_hash'], fs['file_id']), commit=False)
+                # If no file_contents row exists, the file may need one
+                affected = self.execute("""
+                    UPDATE file_contents SET is_current = 1, content_hash = ?
+                    WHERE file_id = ?
+                """, (fs['content_hash'], fs['file_id']), commit=False)
+
+        # Update active_branch_id
+        self.execute(
+            "UPDATE projects SET active_branch_id = ? WHERE id = ?",
+            (target_branch_id, project_id), commit=False)
+
+        self.commit()
+
+    def get_dirty_files(self, project_id: int, branch_id: int) -> List[Dict[str, Any]]:
+        """Get uncommitted changes for a branch."""
+        return self.query_all("""
+            SELECT ws.state, ws.staged, pf.file_path
+            FROM vcs_working_state ws
+            JOIN project_files pf ON ws.file_id = pf.id
+            WHERE ws.project_id = ? AND ws.branch_id = ?
+              AND (ws.state != 'unmodified' OR ws.staged = 1)
+            ORDER BY pf.file_path
+        """, (project_id, branch_id))
+
+    def delete_branch(self, branch_id: int):
+        """Delete a branch and its working state."""
+        self.execute("DELETE FROM vcs_working_state WHERE branch_id = ?",
+                     (branch_id,), commit=False)
+        self.execute("DELETE FROM vcs_branches WHERE id = ?",
+                     (branch_id,))
+
     # ========== Commit Metadata Operations ==========
 
     def create_commit_metadata(

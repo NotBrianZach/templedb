@@ -82,6 +82,16 @@ SYNC_SHADOW_SCHEMA = {
             updated_at TEXT DEFAULT ''
         )
     """,
+    "sync_vcs_branches": """
+        CREATE TABLE IF NOT EXISTS sync_vcs_branches (
+            id INTEGER PRIMARY KEY NOT NULL,
+            project_id INTEGER DEFAULT 0,
+            branch_name TEXT DEFAULT '',
+            is_default INTEGER DEFAULT 0,
+            head_commit_id INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT ''
+        )
+    """,
 }
 
 # Mapping from shadow table → (main table, key columns for upsert)
@@ -91,6 +101,7 @@ SHADOW_TO_MAIN = {
     "sync_environment_variables": ("environment_variables", "scope_type, scope_id, var_name"),
     "sync_vcs_commits": ("vcs_commits", "commit_hash"),
     "sync_nixos_config": ("system_config", "key"),
+    "sync_vcs_branches": ("vcs_branches", "project_id, branch_name"),
 }
 
 def _find_crsqlite():
@@ -216,6 +227,12 @@ class SyncEngine:
         conn.execute("""
             INSERT OR IGNORE INTO sync_vcs_commits (id, project_id, branch_id, commit_hash, author, commit_message, commit_timestamp)
             SELECT id, project_id, branch_id, commit_hash, author, commit_message, commit_timestamp FROM vcs_commits
+        """)
+
+        # vcs_branches → sync_vcs_branches
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_vcs_branches (id, project_id, branch_name, is_default, head_commit_id, created_at)
+            SELECT id, project_id, branch_name, is_default, COALESCE(head_commit_id, 0), created_at FROM vcs_branches
         """)
 
         # Host-scoped system_config → sync_nixos_config

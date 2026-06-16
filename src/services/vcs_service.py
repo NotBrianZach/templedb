@@ -54,6 +54,13 @@ class VCSService(BaseService):
         branches = self.vcs_repo.get_branches(project_id)
         return next((b for b in branches if b.get('is_default')), None)
 
+    def get_current_branch(self, project_id: int) -> Optional[Dict[str, Any]]:
+        """Get active branch, falling back to default."""
+        branch = self.vcs_repo.get_active_branch(project_id)
+        if not branch:
+            branch = self.get_default_branch(project_id)
+        return branch
+
     def stage_files(
         self,
         project_slug: str,
@@ -76,11 +83,11 @@ class VCSService(BaseService):
             ValidationError: If neither file_patterns nor stage_all provided
         """
         project = self.get_project(project_slug)
-        branch = self.get_default_branch(project['id'])
+        branch = self.get_current_branch(project['id'])
 
         if not branch:
             raise ResourceNotFoundError(
-                "No default branch found",
+                "No branch found",
                 solution="Create a branch first"
             )
 
@@ -148,9 +155,9 @@ class VCSService(BaseService):
         file_path = str(Path(file_path))
 
         project = self.get_project(project_slug)
-        branch = self.get_default_branch(project['id'])
+        branch = self.get_current_branch(project['id'])
         if not branch:
-            raise ResourceNotFoundError("No default branch found")
+            raise ResourceNotFoundError("No branch found")
 
         # Determine the checkout directory
         checkout_dir = os.path.expanduser(
@@ -233,10 +240,10 @@ class VCSService(BaseService):
             Number of files unstaged
         """
         project = self.get_project(project_slug)
-        branch = self.get_default_branch(project['id'])
+        branch = self.get_current_branch(project['id'])
 
         if not branch:
-            raise ResourceNotFoundError("No default branch found")
+            raise ResourceNotFoundError("No branch found")
 
         if unstage_all:
             self.vcs_repo.execute("""
@@ -310,7 +317,7 @@ class VCSService(BaseService):
             branches = self.vcs_repo.get_branches(project['id'])
             branch = next((b for b in branches if b['branch_name'] == branch_name), None)
         else:
-            branch = self.get_default_branch(project['id'])
+            branch = self.get_current_branch(project['id'])
 
         if not branch:
             raise ResourceNotFoundError("Branch not found")
@@ -359,7 +366,7 @@ class VCSService(BaseService):
             Dictionary with staged, modified, untracked files
         """
         project = self.get_project(project_slug)
-        branch = self.get_default_branch(project['id'])
+        branch = self.get_current_branch(project['id'])
 
         if not branch:
             return {

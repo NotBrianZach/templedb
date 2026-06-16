@@ -685,32 +685,6 @@ CREATE TABLE IF NOT EXISTS impact_transitive_cache (
     CHECK(direction IN ('dependent', 'dependency'))
 );
 
-CREATE TABLE IF NOT EXISTS learning_progress (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    developer_id TEXT NOT NULL,
-    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
-
-    -- Aggregated stats
-    total_quizzes INTEGER DEFAULT 0,
-    total_questions INTEGER DEFAULT 0,
-    total_correct INTEGER DEFAULT 0,
-    average_score REAL,
-
-    -- By category
-    category_stats TEXT,                     -- JSON: {"architecture": {"correct": 5, "total": 8}, ...}
-
-    -- Strengths and weaknesses
-    strong_concepts TEXT,                    -- JSON array
-    weak_concepts TEXT,                      -- JSON array
-
-    -- Timestamps
-    first_quiz_at TEXT,
-    last_quiz_at TEXT,
-    updated_at TEXT DEFAULT (datetime('now')),
-
-    UNIQUE(developer_id, project_id)
-);
-
 CREATE TABLE IF NOT EXISTS markdown (
   filePath TEXT PRIMARY KEY,
   articleType TEXT NOT NULL DEFAULT 'article',
@@ -1319,7 +1293,7 @@ CREATE TABLE IF NOT EXISTS projects (
     CHECK(project_category IN ('package', 'service', 'desktop-app', 'nixos-module', 'home-module')), flake_validated_at TEXT, flake_check_status TEXT
     CHECK(flake_check_status IN ('valid', 'invalid', 'unknown', NULL)), nix_build_status TEXT
     CHECK(nix_build_status IN ('builds', 'fails', 'untested', NULL)), service_type TEXT
-    CHECK(service_type IN ('oneshot', 'simple', 'forking', 'dbus', 'notify', NULL)));
+    CHECK(service_type IN ('oneshot', 'simple', 'forking', 'dbus', 'notify', NULL)), active_branch_id INTEGER REFERENCES vcs_branches(id));
 
 CREATE TABLE IF NOT EXISTS prompt_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1368,104 +1342,29 @@ CREATE TABLE IF NOT EXISTS prompt_usage_log (
     used_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS quiz_configs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  description TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS quiz_questions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
-
-    -- Question content
-    question_text TEXT NOT NULL,
-    question_type TEXT NOT NULL DEFAULT 'multiple_choice',  -- multiple_choice, true_false, short_answer, code_snippet
-    sequence_order INTEGER NOT NULL,         -- Order in quiz
-
-    -- Context (what code/change this relates to)
-    related_file_path TEXT,
-    related_commit_hash TEXT,
-    code_snippet TEXT,                       -- The relevant code snippet
-    line_range TEXT,                         -- JSON: {"start": 10, "end": 25}
-
-    -- Answer data
-    correct_answer TEXT NOT NULL,            -- JSON based on question_type
-    options TEXT,                            -- JSON array for multiple choice
-    explanation TEXT,                        -- Why this is the answer
-
-    -- Difficulty & categorization
-    difficulty TEXT DEFAULT 'medium',        -- easy, medium, hard
-    category TEXT,                           -- architecture, logic, security, performance, style
-    points INTEGER DEFAULT 1,
-
-    -- Learning objectives
-    learning_objective TEXT,                 -- What should dev understand from this?
-    related_concepts TEXT,                   -- JSON array of concepts
-
-    -- Metadata
-    tags TEXT,                               -- JSON array
-    hints TEXT,                              -- JSON array of progressive hints
-    reference_links TEXT                     -- JSON array of doc links
-);
-
-CREATE TABLE IF NOT EXISTS quiz_responses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
-    question_id INTEGER NOT NULL REFERENCES quiz_questions(id) ON DELETE CASCADE,
-
-    -- Response
-    answer_given TEXT NOT NULL,              -- Developer's answer (JSON)
-    is_correct BOOLEAN,
-    time_taken_seconds INTEGER,
-
-    -- Context
-    attempt_number INTEGER DEFAULT 1,        -- Allow retries
-    hints_used INTEGER DEFAULT 0,
-
-    -- Timestamps
-    answered_at TEXT DEFAULT (datetime('now')),
-
-    -- Feedback
-    feedback_text TEXT,                      -- AI-generated feedback
-    self_confidence INTEGER,                 -- Developer's self-reported confidence (1-5)
-
-    UNIQUE(session_id, question_id, attempt_number)
-);
-
-CREATE TABLE IF NOT EXISTS quiz_sessions (
+CREATE TABLE IF NOT EXISTS vibe_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
 
     -- Context
-    session_name TEXT NOT NULL,              -- e.g., "Post-commit review: Fix auth bug"
-    session_type TEXT DEFAULT 'commit',      -- commit, work-item, feature, general
+    session_name TEXT NOT NULL,              -- e.g., "Fix auth bug", "Add search feature"
+    session_type TEXT DEFAULT 'coding',      -- coding, review, debug, research, general
     related_commit_id INTEGER REFERENCES vcs_commits(id),
     related_work_item_id TEXT REFERENCES work_items(id),
 
-    -- Metadata
-    generated_by TEXT,                       -- AI agent identifier
-    reviewed_by TEXT,                        -- Developer identifier
-    difficulty_level TEXT DEFAULT 'medium',  -- easy, medium, hard, expert
-
     -- Status
-    status TEXT NOT NULL DEFAULT 'pending',  -- pending, in_progress, completed, abandoned
-    score REAL,                              -- Overall score (0.0-1.0)
+    status TEXT NOT NULL DEFAULT 'active',   -- active, completed, abandoned
 
     -- Timestamps
     created_at TEXT DEFAULT (datetime('now')),
-    started_at TEXT,
+    started_at TEXT DEFAULT (datetime('now')),
     completed_at TEXT,
-
-    -- Config
-    show_answers_immediately BOOLEAN DEFAULT 0,  -- Show answers after each question
-    shuffle_questions BOOLEAN DEFAULT 0,
-    time_limit_seconds INTEGER,
 
     -- Metadata
     tags TEXT,                               -- JSON array
-    metadata TEXT                            -- JSON for extensibility
-, browser_url TEXT, claude_pid INTEGER, auto_generate BOOLEAN DEFAULT 1, session_token TEXT);
+    metadata TEXT,                           -- JSON for extensibility
+    session_token TEXT
+);
 
 CREATE TABLE IF NOT EXISTS reading_notes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1819,6 +1718,14 @@ CREATE TABLE IF NOT EXISTS vcs_commits (
     UNIQUE(project_id, commit_hash)
 );
 
+CREATE TABLE IF NOT EXISTS vcs_commit_parents (
+    commit_id INTEGER NOT NULL REFERENCES vcs_commits(id) ON DELETE CASCADE,
+    parent_commit_id INTEGER NOT NULL REFERENCES vcs_commits(id) ON DELETE CASCADE,
+    parent_order INTEGER NOT NULL DEFAULT 0,  -- 0 = first parent, 1 = merge parent, etc.
+
+    PRIMARY KEY (commit_id, parent_commit_id)
+);
+
 CREATE TABLE IF NOT EXISTS vcs_file_change_metadata (
     id INTEGER PRIMARY KEY,
     commit_id INTEGER NOT NULL REFERENCES vcs_commits(id) ON DELETE CASCADE,
@@ -1929,29 +1836,9 @@ CREATE TABLE IF NOT EXISTS vcs_working_state (
     UNIQUE(project_id, branch_id, file_id)
 );
 
-CREATE TABLE IF NOT EXISTS vibe_browser_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
-
-    -- Browser info
-    session_token TEXT NOT NULL UNIQUE,
-    user_agent TEXT,
-    ip_address TEXT,
-
-    -- Connection tracking
-    connected_at TEXT DEFAULT (datetime('now')),
-    last_heartbeat_at TEXT DEFAULT (datetime('now')),
-    disconnected_at TEXT,
-
-    -- State
-    current_question_id INTEGER REFERENCES quiz_questions(id),
-    questions_shown INTEGER DEFAULT 0,
-    questions_answered INTEGER DEFAULT 0
-);
-
 CREATE TABLE IF NOT EXISTS vibe_claude_interactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES vibe_sessions(id) ON DELETE CASCADE,
 
     -- Interaction metadata
     interaction_sequence INTEGER NOT NULL,  -- Order within session (0, 1, 2, ...)
@@ -2000,7 +1887,7 @@ CREATE TABLE IF NOT EXISTS vibe_claude_interactions (
 CREATE TABLE IF NOT EXISTS vibe_interaction_code_snippets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     interaction_id INTEGER NOT NULL REFERENCES vibe_claude_interactions(id) ON DELETE CASCADE,
-    session_id INTEGER NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES vibe_sessions(id) ON DELETE CASCADE,
 
     -- Code details
     language TEXT NOT NULL,
@@ -2035,7 +1922,7 @@ CREATE TABLE IF NOT EXISTS vibe_interaction_embeddings (
 
 CREATE TABLE IF NOT EXISTS vibe_interaction_pairs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES vibe_sessions(id) ON DELETE CASCADE,
     prompt_interaction_id INTEGER NOT NULL REFERENCES vibe_claude_interactions(id),
     response_interaction_id INTEGER NOT NULL REFERENCES vibe_claude_interactions(id),
 
@@ -2063,7 +1950,7 @@ CREATE TABLE IF NOT EXISTS vibe_interaction_pairs (
 
 CREATE TABLE IF NOT EXISTS vibe_interaction_topics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES vibe_sessions(id) ON DELETE CASCADE,
 
     -- Topic identification
     topic_name TEXT NOT NULL,              -- e.g., 'authentication', 'error-handling', 'database-migration'
@@ -2083,40 +1970,14 @@ CREATE TABLE IF NOT EXISTS vibe_interaction_topics (
     UNIQUE(session_id, topic_name)
 );
 
-CREATE TABLE IF NOT EXISTS vibe_question_queue (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
-    question_id INTEGER NOT NULL REFERENCES quiz_questions(id) ON DELETE CASCADE,
-
-    -- Queue management
-    queue_position INTEGER NOT NULL,
-    priority TEXT DEFAULT 'normal',          -- high, normal, low
-    status TEXT DEFAULT 'pending',           -- pending, shown, answered, skipped
-
-    -- Presentation
-    shown_at TEXT,
-    answered_at TEXT,
-    time_in_queue_seconds INTEGER,
-
-    -- Context for when to show
-    trigger_type TEXT,                       -- 'on_change', 'on_commit', 'periodic', 'manual'
-    related_change_id INTEGER REFERENCES vibe_session_changes(id),
-
-    UNIQUE(session_id, question_id)
-);
-
 CREATE TABLE IF NOT EXISTS vibe_session_changes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES vibe_sessions(id) ON DELETE CASCADE,
 
     -- Change tracking
     file_path TEXT NOT NULL,
     change_type TEXT NOT NULL,              -- 'edit', 'create', 'delete'
     diff_content TEXT,
-
-    -- Question generation
-    questions_generated INTEGER DEFAULT 0,
-    questions_answered INTEGER DEFAULT 0,
 
     -- Timestamps
     changed_at TEXT DEFAULT (datetime('now')),
@@ -2128,12 +1989,11 @@ CREATE TABLE IF NOT EXISTS vibe_session_changes (
 
 CREATE TABLE IF NOT EXISTS vibe_session_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES vibe_sessions(id) ON DELETE CASCADE,
 
     -- Event details
-    event_type TEXT NOT NULL,                -- 'started', 'change', 'question_generated',
-                                             -- 'question_shown', 'question_answered',
-                                             -- 'claude_response', 'committed', 'ended'
+    event_type TEXT NOT NULL,                -- 'started', 'change', 'claude_response',
+                                             -- 'committed', 'ended'
     event_data TEXT,                         -- JSON
 
     -- Timestamp
@@ -2141,7 +2001,7 @@ CREATE TABLE IF NOT EXISTS vibe_session_events (
 );
 
 CREATE TABLE IF NOT EXISTS vibe_session_stats (
-    session_id INTEGER PRIMARY KEY REFERENCES quiz_sessions(id) ON DELETE CASCADE,
+    session_id INTEGER PRIMARY KEY REFERENCES vibe_sessions(id) ON DELETE CASCADE,
 
     -- Interaction counts
     total_interactions INTEGER DEFAULT 0,
@@ -2435,10 +2295,6 @@ CREATE INDEX IF NOT EXISTS idx_interaction_pairs_session
 CREATE INDEX IF NOT EXISTS idx_interaction_pairs_turn
     ON vibe_interaction_pairs(session_id, turn_number);
 
-CREATE INDEX IF NOT EXISTS idx_learning_progress_developer ON learning_progress(developer_id);
-
-CREATE INDEX IF NOT EXISTS idx_learning_progress_project ON learning_progress(project_id);
-
 CREATE INDEX IF NOT EXISTS idx_migration_history_applied_at
     ON migration_history(applied_at DESC);
 
@@ -2574,27 +2430,11 @@ CREATE INDEX IF NOT EXISTS idx_prompt_usage_used_at ON prompt_usage_log(used_at)
 
 CREATE INDEX IF NOT EXISTS idx_prompt_usage_work_item ON prompt_usage_log(work_item_id);
 
-CREATE INDEX IF NOT EXISTS idx_quiz_questions_category ON quiz_questions(category);
+CREATE INDEX IF NOT EXISTS idx_vibe_sessions_project ON vibe_sessions(project_id);
 
-CREATE INDEX IF NOT EXISTS idx_quiz_questions_order ON quiz_questions(session_id, sequence_order);
+CREATE INDEX IF NOT EXISTS idx_vibe_sessions_status ON vibe_sessions(status);
 
-CREATE INDEX IF NOT EXISTS idx_quiz_questions_session ON quiz_questions(session_id);
-
-CREATE INDEX IF NOT EXISTS idx_quiz_responses_correct ON quiz_responses(is_correct);
-
-CREATE INDEX IF NOT EXISTS idx_quiz_responses_question ON quiz_responses(question_id);
-
-CREATE INDEX IF NOT EXISTS idx_quiz_responses_session ON quiz_responses(session_id);
-
-CREATE INDEX IF NOT EXISTS idx_quiz_sessions_commit ON quiz_sessions(related_commit_id);
-
-CREATE INDEX IF NOT EXISTS idx_quiz_sessions_project ON quiz_sessions(project_id);
-
-CREATE INDEX IF NOT EXISTS idx_quiz_sessions_status ON quiz_sessions(status);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_quiz_sessions_token ON quiz_sessions(session_token) WHERE session_token IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_quiz_sessions_work_item ON quiz_sessions(related_work_item_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vibe_sessions_token ON vibe_sessions(session_token) WHERE session_token IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_readme_files_auto_index ON readme_files(auto_index, index_priority DESC);
 
@@ -2676,6 +2516,8 @@ CREATE INDEX IF NOT EXISTS idx_validation_history_type ON nix_flake_validation_h
 
 CREATE INDEX IF NOT EXISTS idx_vcs_branches_head ON vcs_branches(head_commit_id);
 
+CREATE INDEX IF NOT EXISTS idx_vcs_commit_parents_parent ON vcs_commit_parents(parent_commit_id);
+
 CREATE INDEX IF NOT EXISTS idx_vcs_commit_metadata_ai ON vcs_commit_metadata(ai_assisted);
 
 CREATE INDEX IF NOT EXISTS idx_vcs_commit_metadata_breaking ON vcs_commit_metadata(is_breaking);
@@ -2732,12 +2574,6 @@ CREATE INDEX IF NOT EXISTS idx_vibe_events_time ON vibe_session_events(occurred_
 
 CREATE INDEX IF NOT EXISTS idx_vibe_events_type ON vibe_session_events(event_type);
 
-CREATE INDEX IF NOT EXISTS idx_vibe_queue_position ON vibe_question_queue(session_id, queue_position);
-
-CREATE INDEX IF NOT EXISTS idx_vibe_queue_session ON vibe_question_queue(session_id);
-
-CREATE INDEX IF NOT EXISTS idx_vibe_queue_status ON vibe_question_queue(status);
-
 CREATE INDEX IF NOT EXISTS idx_work_items_assigned
     ON work_items(assigned_to, status);
 
@@ -2772,51 +2608,28 @@ LEFT JOIN prompt_templates pt ON pp.template_id = pt.id
 WHERE pp.is_active = 1
 ORDER BY pp.priority DESC, pp.created_at DESC;
 
-CREATE VIEW IF NOT EXISTS active_quiz_sessions_view AS
-SELECT
-    qs.id,
-    qs.session_name,
-    qs.session_type,
-    qs.status,
-    p.slug as project_slug,
-    p.name as project_name,
-    qs.generated_by,
-    qs.reviewed_by,
-    qs.difficulty_level,
-    qs.score,
-    COUNT(qq.id) as total_questions,
-    COUNT(qr.id) as answered_questions,
-    qs.created_at,
-    qs.started_at
-FROM quiz_sessions qs
-JOIN projects p ON qs.project_id = p.id
-LEFT JOIN quiz_questions qq ON qq.session_id = qs.id
-LEFT JOIN quiz_responses qr ON qr.session_id = qs.id
-WHERE qs.status IN ('pending', 'in_progress')
-GROUP BY qs.id;
-
 CREATE VIEW IF NOT EXISTS active_vibe_sessions_view AS
 SELECT
-    qs.id,
-    qs.session_name,
-    qs.session_token,
-    qs.browser_url,
-    qs.claude_pid,
+    vs.id,
+    vs.session_name,
+    vs.session_type,
+    vs.session_token,
     p.slug as project_slug,
+    p.name as project_name,
     COUNT(DISTINCT vsc.id) as total_changes,
-    COUNT(DISTINCT vqq.id) as queued_questions,
-    COUNT(DISTINCT vqq.id) FILTER (WHERE vqq.status = 'answered') as answered_questions,
-    MAX(vbs.last_heartbeat_at) as last_browser_heartbeat,
-    qs.started_at,
-    qs.status
-FROM quiz_sessions qs
-JOIN projects p ON qs.project_id = p.id
-LEFT JOIN vibe_session_changes vsc ON vsc.session_id = qs.id
-LEFT JOIN vibe_question_queue vqq ON vqq.session_id = qs.id
-LEFT JOIN vibe_browser_sessions vbs ON vbs.session_id = qs.id
-WHERE qs.status IN ('pending', 'in_progress')
-  AND qs.session_type = 'vibe-realtime'
-GROUP BY qs.id;
+    COUNT(DISTINCT ci.id) as total_interactions,
+    vss.user_prompts,
+    vss.assistant_responses,
+    vss.total_tokens,
+    vs.started_at,
+    vs.status
+FROM vibe_sessions vs
+JOIN projects p ON vs.project_id = p.id
+LEFT JOIN vibe_session_changes vsc ON vsc.session_id = vs.id
+LEFT JOIN vibe_claude_interactions ci ON ci.session_id = vs.id
+LEFT JOIN vibe_session_stats vss ON vss.session_id = vs.id
+WHERE vs.status = 'active'
+GROUP BY vs.id;
 
 CREATE VIEW IF NOT EXISTS active_work_items_view AS
 SELECT
@@ -3027,22 +2840,6 @@ SELECT
 FROM deployment_history dh
 JOIN projects p ON dh.project_id = p.id
 GROUP BY p.id, dh.target;
-
-CREATE VIEW IF NOT EXISTS developer_learning_analytics_view AS
-SELECT
-    lp.developer_id,
-    p.slug as project_slug,
-    lp.total_quizzes,
-    lp.total_questions,
-    lp.total_correct,
-    lp.average_score,
-    lp.strong_concepts,
-    lp.weak_concepts,
-    lp.last_quiz_at,
-    CAST((julianday('now') - julianday(lp.last_quiz_at)) AS INTEGER) as days_since_last_quiz
-FROM learning_progress lp
-LEFT JOIN projects p ON lp.project_id = p.id
-ORDER BY lp.last_quiz_at DESC;
 
 CREATE VIEW IF NOT EXISTS encryption_key_stats_view AS
 SELECT
@@ -3689,48 +3486,6 @@ SELECT
 FROM prompt_usage_log
 GROUP BY prompt_type, prompt_id;
 
-CREATE VIEW IF NOT EXISTS quiz_questions_with_responses_view AS
-SELECT
-    qq.id as question_id,
-    qq.session_id,
-    qs.session_name,
-    qq.question_text,
-    qq.question_type,
-    qq.category,
-    qq.difficulty,
-    qq.code_snippet,
-    qq.related_file_path,
-    qr.answer_given,
-    qr.is_correct,
-    qr.time_taken_seconds,
-    qr.hints_used,
-    qr.answered_at,
-    qq.explanation
-FROM quiz_questions qq
-JOIN quiz_sessions qs ON qq.session_id = qs.id
-LEFT JOIN quiz_responses qr ON qr.question_id = qq.id
-ORDER BY qq.session_id, qq.sequence_order;
-
-CREATE VIEW IF NOT EXISTS quiz_results_view AS
-SELECT
-    qs.id as session_id,
-    qs.session_name,
-    p.slug as project_slug,
-    qs.reviewed_by,
-    qs.difficulty_level,
-    COUNT(qq.id) as total_questions,
-    COUNT(qr.id) as answered_questions,
-    SUM(CASE WHEN qr.is_correct = 1 THEN 1 ELSE 0 END) as correct_answers,
-    AVG(CASE WHEN qr.is_correct = 1 THEN 1.0 ELSE 0.0 END) as accuracy,
-    AVG(qr.time_taken_seconds) as avg_time_per_question,
-    qs.completed_at
-FROM quiz_sessions qs
-JOIN projects p ON qs.project_id = p.id
-LEFT JOIN quiz_questions qq ON qq.session_id = qs.id
-LEFT JOIN quiz_responses qr ON qr.session_id = qs.id AND qr.attempt_number = 1
-WHERE qs.status = 'completed'
-GROUP BY qs.id;
-
 CREATE VIEW IF NOT EXISTS readme_files_with_topics AS
 SELECT
     rf.id,
@@ -4113,7 +3868,7 @@ WHERE ws.staged = 0 AND ws.state != 'unmodified';
 CREATE VIEW IF NOT EXISTS vibe_code_generation_view AS
 SELECT
     cs.session_id,
-    qs.session_name,
+    vs.session_name,
     p.slug as project_slug,
     cs.language,
     COUNT(*) as snippet_count,
@@ -4122,8 +3877,8 @@ SELECT
     SUM(CASE WHEN cs.was_applied = 1 THEN cs.line_count ELSE 0 END) as applied_lines,
     ROUND(100.0 * SUM(CASE WHEN cs.was_applied = 1 THEN 1 ELSE 0 END) / COUNT(*), 2) as application_rate_pct
 FROM vibe_interaction_code_snippets cs
-JOIN quiz_sessions qs ON cs.session_id = qs.id
-JOIN projects p ON qs.project_id = p.id
+JOIN vibe_sessions vs ON cs.session_id = vs.id
+JOIN projects p ON vs.project_id = p.id
 GROUP BY cs.session_id, cs.language
 ORDER BY snippet_count DESC;
 
@@ -4131,7 +3886,7 @@ CREATE VIEW IF NOT EXISTS vibe_conversation_view AS
 SELECT
     ci.id,
     ci.session_id,
-    qs.session_name,
+    vs.session_name,
     p.slug as project_slug,
     p.name as project_name,
     ci.interaction_sequence,
@@ -4149,39 +3904,13 @@ SELECT
     ip.led_to_commit,
     ip.tool_calls_count
 FROM vibe_claude_interactions ci
-JOIN quiz_sessions qs ON ci.session_id = qs.id
-JOIN projects p ON qs.project_id = p.id
+JOIN vibe_sessions vs ON ci.session_id = vs.id
+JOIN projects p ON vs.project_id = p.id
 LEFT JOIN vibe_interaction_pairs ip ON (
     ip.prompt_interaction_id = ci.id OR
     ip.response_interaction_id = ci.id
 )
 ORDER BY ci.session_id, ci.interaction_sequence;
-
-CREATE VIEW IF NOT EXISTS vibe_question_queue_view AS
-SELECT
-    vqq.id as queue_id,
-    vqq.session_id,
-    qq.id as question_id,
-    qq.question_text,
-    qq.question_type,
-    qq.code_snippet,
-    qq.related_file_path,
-    qq.options,
-    qq.difficulty,
-    qq.category,
-    qq.learning_objective,
-    qq.points,
-    vqq.queue_position,
-    vqq.priority,
-    vqq.status,
-    vqq.trigger_type,
-    vsc.file_path as related_change_file,
-    vsc.diff_content as related_change_diff
-FROM vibe_question_queue vqq
-JOIN quiz_questions qq ON vqq.question_id = qq.id
-LEFT JOIN vibe_session_changes vsc ON vqq.related_change_id = vsc.id
-WHERE vqq.status IN ('pending', 'shown')
-ORDER BY vqq.priority DESC, vqq.queue_position ASC;
 
 CREATE VIEW IF NOT EXISTS vibe_reusable_patterns_view AS
 SELECT
@@ -4194,8 +3923,8 @@ SELECT
     GROUP_CONCAT(DISTINCT t.topic_name) as related_topics,
     cs.code_content as example_code
 FROM vibe_interaction_code_snippets cs
-JOIN quiz_sessions qs ON cs.session_id = qs.id
-JOIN projects p ON qs.project_id = p.id
+JOIN vibe_sessions vs ON cs.session_id = vs.id
+JOIN projects p ON vs.project_id = p.id
 LEFT JOIN vibe_interaction_topics t ON t.session_id = cs.session_id
 WHERE cs.was_applied = 1
 GROUP BY p.id, cs.language, cs.snippet_type, cs.code_content
@@ -4204,8 +3933,8 @@ ORDER BY sessions_used DESC, times_applied DESC;
 
 CREATE VIEW IF NOT EXISTS vibe_session_quality_view AS
 SELECT
-    qs.id as session_id,
-    qs.session_name,
+    vs.id as session_id,
+    vs.session_name,
     p.slug as project_slug,
     vss.total_interactions,
     vss.user_prompts,
@@ -4221,30 +3950,29 @@ SELECT
     vss.first_interaction_at,
     vss.last_interaction_at,
     CAST((julianday(vss.last_interaction_at) - julianday(vss.first_interaction_at)) * 24 * 60 AS INTEGER) as session_duration_minutes
-FROM quiz_sessions qs
-JOIN projects p ON qs.project_id = p.id
-LEFT JOIN vibe_session_stats vss ON vss.session_id = qs.id
-LEFT JOIN vibe_interaction_pairs ip ON ip.session_id = qs.id
-WHERE qs.session_type = 'vibe-realtime'
-GROUP BY qs.id;
+FROM vibe_sessions vs
+JOIN projects p ON vs.project_id = p.id
+LEFT JOIN vibe_session_stats vss ON vss.session_id = vs.id
+LEFT JOIN vibe_interaction_pairs ip ON ip.session_id = vs.id
+GROUP BY vs.id;
 
 CREATE VIEW IF NOT EXISTS vibe_session_timeline_view AS
 SELECT
     vse.id,
     vse.session_id,
-    qs.session_name,
+    vs.session_name,
     vse.event_type,
     vse.event_data,
     vse.occurred_at,
-    CAST((julianday(vse.occurred_at) - julianday(qs.started_at)) * 24 * 60 AS INTEGER) as minutes_since_start
+    CAST((julianday(vse.occurred_at) - julianday(vs.started_at)) * 24 * 60 AS INTEGER) as minutes_since_start
 FROM vibe_session_events vse
-JOIN quiz_sessions qs ON vse.session_id = qs.id
+JOIN vibe_sessions vs ON vse.session_id = vs.id
 ORDER BY vse.occurred_at DESC;
 
 CREATE VIEW IF NOT EXISTS vibe_tool_usage_view AS
 SELECT
     ci.session_id,
-    qs.session_name,
+    vs.session_name,
     p.slug as project_slug,
     ci.tool_name,
     COUNT(*) as usage_count,
@@ -4254,8 +3982,8 @@ SELECT
     MIN(ci.created_at) as first_used,
     MAX(ci.created_at) as last_used
 FROM vibe_claude_interactions ci
-JOIN quiz_sessions qs ON ci.session_id = qs.id
-JOIN projects p ON qs.project_id = p.id
+JOIN vibe_sessions vs ON ci.session_id = vs.id
+JOIN projects p ON vs.project_id = p.id
 WHERE ci.tool_name IS NOT NULL
 GROUP BY ci.session_id, ci.tool_name
 ORDER BY usage_count DESC;
@@ -4264,7 +3992,7 @@ CREATE VIEW IF NOT EXISTS vibe_topics_view AS
 SELECT
     t.id,
     t.session_id,
-    qs.session_name,
+    vs.session_name,
     p.slug as project_slug,
     t.topic_name,
     t.topic_category,
@@ -4275,8 +4003,8 @@ SELECT
     ci_first.content as first_mention,
     ci_last.content as last_mention
 FROM vibe_interaction_topics t
-JOIN quiz_sessions qs ON t.session_id = qs.id
-JOIN projects p ON qs.project_id = p.id
+JOIN vibe_sessions vs ON t.session_id = vs.id
+JOIN projects p ON vs.project_id = p.id
 LEFT JOIN vibe_claude_interactions ci_first ON t.first_interaction_id = ci_first.id
 LEFT JOIN vibe_claude_interactions ci_last ON t.last_interaction_id = ci_last.id
 ORDER BY t.session_id, t.created_at;

@@ -102,6 +102,8 @@ ls ~/temple/bza/frontend/                # browse project files
 vim ~/temple/bza/frontend/lib/queries.ts # edit directly — auto-stages in VCS
 ```
 
+See [FUSE + VCS Integration](docs/FUSE_VCS_INTEGRATION.md) for details on the write pipeline, auto-staging, and content-addressable storage.
+
 ### Commit and publish
 
 When you're done editing, commit to the database and push to GitHub in one step:
@@ -119,6 +121,13 @@ Or do it step by step:
 templedb vcs status bza --refresh        # see what changed
 templedb vcs add -p bza --all            # stage changes
 templedb vcs commit -p bza -m "fix"      # commit to DB
+
+# Branch operations
+templedb vcs branch bza feature-x        # create branch from current
+templedb vcs switch bza feature-x        # switch (FUSE updates instantly)
+templedb vcs merge bza feature-x         # merge into current branch
+templedb vcs merge bza feature-x --squash # squash into single commit
+templedb vcs branch bza -d feature-x     # delete merged branch
 ```
 
 ### Query the knowledge graph
@@ -140,27 +149,44 @@ Your entire NixOS configuration lives in the database. Import it, edit it, gener
 
 ```bash
 # Import existing nix config → 170+ DB keys
-templedb nixos import-config
+templedb nixos import-config system_config
 
-# Edit via CLI, GUI, or FUSE
-templedb nixos config-set nixos.pkg.user.vpn.tailscale true
-templedb nixos config-set nixos.service.system.tailscale true
+# Edit via CLI — config-set is host-scoped by default (uses active host)
+templedb nixos config-set nixos.pkg.user.vpn.tailscale true     # → zMothership2.nixos.pkg...
+templedb nixos config-set nixos.service.system.tailscale true   # → zMothership2.nixos.service...
+
+# Use --global for keys that apply to all hosts
+templedb nixos config-set --global nixos.username zach
+templedb nixos config-set --global nixos.flake.input.nixpkgs "github:NixOS/nixpkgs/nixos-25.11"
+
+# Or target a specific host
+templedb nixos config-set --host zStation videoDriver modesetting
 
 # Generate nix files from DB (packages, aliases, services, firewall, flake inputs)
-templedb nixos generate-all
+templedb nixos generate-all system_config
 
 # Apply
 templedb nixos rebuild system_config
 ```
 
+### Host scoping
+
+Every machine has an active host identity set via `nixos.flake_output`. Config keys are scoped:
+
+- **Host-scoped** (default): `config-set key value` → stored as `<hostname>.key`
+- **Global**: `config-set --global key value` → stored as `key`, inherited by all hosts
+- **Host override**: `config-set --host zStation key value` → stored as `zStation.key`
+
+`generate-all` merges global keys with host-specific overrides for the active host.
+
 ### Multi-host management
 
-Clone host configs for new machines. Each host has its own overrides (GPU driver, boot loader, hostname):
+Clone host configs for new machines. Each host gets its own overrides (GPU driver, boot loader, hostname):
 
 ```bash
 templedb nixos host list
 templedb nixos host clone zMothership2 zMothership3
-templedb nixos host set zMothership3 videoDriver modesetting
+templedb nixos config-set --host zMothership3 videoDriver modesetting
 templedb nixos host activate zMothership3
 ```
 
@@ -188,6 +214,8 @@ templedb sync sync zMothership2          # bidirectional sync
 ```
 
 Changes merge automatically — last-writer-wins for config, append-only for commits.
+
+See [Machine-to-Machine Sync](docs/MACHINE_TO_MACHINE_SYNC.md) for details on which tables are synced via cr-sqlite and how the protocol works.
 
 ---
 

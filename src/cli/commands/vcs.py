@@ -367,13 +367,12 @@ class VCSCommands(Command):
             branches = self.vcs_repo.get_branches(project['id'])
             branch = next((b for b in branches if b['branch_name'] == args.branch), None)
         else:
-            branches = self.vcs_repo.get_branches(project['id'])
-            branch = next((b for b in branches if b.get('is_default')), None)
+            branch = self.vcs_repo.get_active_branch(project['id'])
 
         if not branch:
             logger.error("Branch not found")
             logger.info(f"  List branches: templedb vcs branch {project['slug']}")
-            logger.info(f"  Create one:    templedb vcs branch {project['slug']} --create main")
+            logger.info(f"  Create one:    templedb vcs branch {project['slug']} main")
             return 1
 
         # Get staged files with content info
@@ -400,13 +399,33 @@ class VCSCommands(Command):
         commit_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16].upper()
 
         # Create commit
+        parent_hash = None
+        if branch.get('head_commit_id'):
+            parent = self.vcs_repo.query_one(
+                "SELECT commit_hash FROM vcs_commits WHERE id = ?",
+                (branch['head_commit_id'],))
+            parent_hash = parent['commit_hash'] if parent else None
+
         commit_id = self.vcs_repo.create_commit(
             project_id=project['id'],
             branch_id=branch['id'],
             commit_hash=commit_hash,
             author=author,
-            message=args.message
+            message=args.message,
+            parent_hash=parent_hash
         )
+
+        # Record parent in join table
+        if branch.get('head_commit_id'):
+            self.vcs_repo.execute("""
+                INSERT OR IGNORE INTO vcs_commit_parents (commit_id, parent_commit_id, parent_order)
+                VALUES (?, ?, 0)
+            """, (commit_id, branch['head_commit_id']), commit=False)
+
+        # Update branch head
+        self.vcs_repo.execute(
+            "UPDATE vcs_branches SET head_commit_id = ? WHERE id = ?",
+            (commit_id, branch['id']), commit=False)
 
         # Create file states
         for file in staged:
@@ -570,7 +589,8 @@ class VCSCommands(Command):
             return emit_error(args, "NOT_FOUND", f"Project '{args.project}' not found")
 
         limit = args.n if hasattr(args, 'n') and args.n else 10
-        commits = self.vcs_repo.get_commit_history(project['id'], branch_name=None, limit=limit)
+        branch_filter = getattr(args, 'branch', None)
+        commits = self.vcs_repo.get_commit_history(project['id'], branch_name=branch_filter, limit=limit)
 
         items = [
             {
@@ -597,49 +617,130 @@ class VCSCommands(Command):
 
         return emit_list(args, items, human_fn=_human)
 
-    def branch(self, args) -> int:
-        """List or create branches"""
-        # Fuzzy match project
+    def switch(self, args) -> int:
+        """Switch active branch"""
+        from cli.json_output import emit, emit_error
+
         project = fuzzy_match_project(args.project, show_matched=False)
         if not project:
             _project_not_found(args.project)
             return 1
 
-        if hasattr(args, 'name') and args.name:
-            # Create new branch - get default branch as parent
-            branches = self.vcs_repo.get_branches(project['id'])
-            parent = next((b for b in branches if b.get('is_default')), None)
+        # Find target branch
+        target = self.vcs_repo.query_one("""
+            SELECT id, branch_name, head_commit_id
+            FROM vcs_branches WHERE project_id = ? AND branch_name = ?
+        """, (project['id'], args.branch))
 
-            if not parent:
-                logger.error("No default branch found")
+        if not target:
+            return emit_error(args, "NOT_FOUND", f"Branch '{args.branch}' not found",
+                              solution=f"templedb vcs branch {project['slug']}")
+
+        # Check current branch
+        current = self.vcs_repo.get_active_branch(project['id'])
+        if current and current['id'] == target['id']:
+            print(f"Already on branch '{args.branch}'")
+            return 0
+
+        # Check for dirty working state
+        if current and not getattr(args, 'force', False):
+            dirty = self.vcs_repo.get_dirty_files(project['id'], current['id'])
+            if dirty:
+                return emit_error(args, "DIRTY", f"Uncommitted changes on '{current['branch_name']}'",
+                                  solution=f"Commit first or use --force to discard",
+                                  details=[f"  {f['state']:10s} {f['file_path']}" for f in dirty])
+
+        # If forcing, clear working state for current branch
+        if current and getattr(args, 'force', False):
+            self.vcs_repo.execute("""
+                DELETE FROM vcs_working_state
+                WHERE project_id = ? AND branch_id = ? AND state != 'unmodified'
+            """, (project['id'], current['id']))
+
+        # Perform the switch
+        self.vcs_repo.switch_branch(project['id'], target['id'])
+
+        result = {
+            "project": project['slug'],
+            "from_branch": current['branch_name'] if current else None,
+            "to_branch": target['branch_name'],
+        }
+        return emit(args, result, human_fn=lambda d: (
+            print(f"Switched to branch '{d['to_branch']}'"),
+        ) and None)
+
+    def branch(self, args) -> int:
+        """List, create, or delete branches"""
+        from cli.json_output import emit, emit_error
+
+        project = fuzzy_match_project(args.project, show_matched=False)
+        if not project:
+            _project_not_found(args.project)
+            return 1
+
+        # Delete branch
+        if hasattr(args, 'delete') and args.delete:
+            branch_name = args.delete
+            branch = self.vcs_repo.query_one("""
+                SELECT id, branch_name, is_default
+                FROM vcs_branches WHERE project_id = ? AND branch_name = ?
+            """, (project['id'], branch_name))
+
+            if not branch:
+                return emit_error(args, "NOT_FOUND", f"Branch '{branch_name}' not found")
+
+            if branch['is_default']:
+                return emit_error(args, "PROTECTED", "Cannot delete the default branch")
+
+            current = self.vcs_repo.get_active_branch(project['id'])
+            if current and current['id'] == branch['id']:
+                return emit_error(args, "ACTIVE", "Cannot delete the active branch",
+                                  solution=f"Switch first: templedb vcs switch {project['slug']} main")
+
+            self.vcs_repo.delete_branch(branch['id'])
+            print(f"Deleted branch: {branch_name}")
+            return 0
+
+        # Create branch
+        if hasattr(args, 'name') and args.name:
+            current = self.vcs_repo.get_active_branch(project['id'])
+            if not current:
+                logger.error("No active branch found")
                 return 1
 
-            self.vcs_repo.execute("""
-                INSERT INTO vcs_branches (project_id, branch_name, parent_branch_id)
-                VALUES (?, ?, ?)
-            """, (project['id'], args.name, parent['id']))
+            # Create branch with head pointing to current branch's head
+            branch_id = self.vcs_repo.execute("""
+                INSERT INTO vcs_branches (project_id, branch_name, parent_branch_id, head_commit_id)
+                VALUES (?, ?, ?, ?)
+            """, (project['id'], args.name, current['id'], current['head_commit_id']))
 
-            print(f"✓ Created branch: {args.name}")
+            print(f"Created branch '{args.name}' from '{current['branch_name']}'")
             return 0
-        else:
-            # List branches - use query to get summary view data
-            branches = self.vcs_repo.query_all("""
-                SELECT branch_name, total_commits, last_author, last_message
-                FROM vcs_branch_summary_view
-                WHERE project_slug = ?
-                ORDER BY branch_name
-            """, (project['slug'],))
 
-            if not branches:
-                print("No branches found")
-                return 0
+        # List branches
+        active = self.vcs_repo.get_active_branch(project['id'])
+        active_id = active['id'] if active else None
 
-            print(self.format_table(
-                branches,
-                ['branch_name', 'total_commits', 'last_message'],
-                title=f"Branches for {project['slug']}"
-            ))
+        branches = self.vcs_repo.query_all("""
+            SELECT vb.id, vb.branch_name, vb.is_default, vb.head_commit_id,
+                   (SELECT COUNT(*) FROM vcs_commits WHERE branch_id = vb.id) as commit_count,
+                   (SELECT commit_message FROM vcs_commits WHERE id = vb.head_commit_id) as last_message
+            FROM vcs_branches vb
+            WHERE vb.project_id = ?
+            ORDER BY vb.is_default DESC, vb.branch_name
+        """, (project['id'],))
+
+        if not branches:
+            print("No branches found")
             return 0
+
+        for b in branches:
+            marker = "* " if b['id'] == active_id else "  "
+            default_tag = " (default)" if b['is_default'] else ""
+            msg = f" - {b['last_message']}" if b['last_message'] else ""
+            print(f"{marker}{b['branch_name']}{default_tag}  [{b['commit_count']} commits]{msg}")
+
+        return 0
 
     def diff(self, args) -> int:
         """Show diff between file versions"""
@@ -853,12 +954,10 @@ class VCSCommands(Command):
 
     def _diff_staged(self, project: dict, args) -> int:
         """Show diff of staged changes"""
-        # Get default branch
-        branches = self.vcs_repo.get_branches(project['id'])
-        branch = next((b for b in branches if b.get('is_default')), None)
+        branch = self.vcs_repo.get_active_branch(project['id'])
 
         if not branch:
-            logger.error("No default branch found")
+            logger.error("No active branch found")
             return 1
 
         # Get all staged files
@@ -995,6 +1094,294 @@ class VCSCommands(Command):
                 print(f"  {change_symbol} {fs['change_type']:<10} {fs['file_path']} {size_info}")
 
         return 0
+
+    def merge(self, args) -> int:
+        """Merge a branch into the current branch"""
+        from cli.json_output import emit, emit_error
+        from merge_resolver import ThreeWayMerge, FileVersion, MergeResult
+
+        project = fuzzy_match_project(args.project, show_matched=False)
+        if not project:
+            _project_not_found(args.project)
+            return 1
+
+        # Get current (target) branch
+        current = self.vcs_repo.get_active_branch(project['id'])
+        if not current:
+            return emit_error(args, "NO_BRANCH", "No active branch")
+
+        # Get source branch
+        source = self.vcs_repo.query_one("""
+            SELECT id, branch_name, head_commit_id
+            FROM vcs_branches WHERE project_id = ? AND branch_name = ?
+        """, (project['id'], args.source))
+
+        if not source:
+            return emit_error(args, "NOT_FOUND", f"Branch '{args.source}' not found")
+
+        if source['id'] == current['id']:
+            return emit_error(args, "SAME_BRANCH", "Cannot merge a branch into itself")
+
+        if not source['head_commit_id']:
+            return emit_error(args, "EMPTY", f"Branch '{args.source}' has no commits")
+
+        # Check for dirty working state
+        dirty = self.vcs_repo.get_dirty_files(project['id'], current['id'])
+        if dirty:
+            return emit_error(args, "DIRTY", "Uncommitted changes on current branch",
+                              solution="Commit or discard changes first")
+
+        # Find common ancestor by walking parent chains
+        def get_ancestor_ids(commit_id):
+            """Get all ancestor commit IDs for a commit."""
+            ancestors = set()
+            queue = [commit_id]
+            while queue:
+                cid = queue.pop(0)
+                if cid in ancestors:
+                    continue
+                ancestors.add(cid)
+                parents = self.vcs_repo.query_all(
+                    "SELECT parent_commit_id FROM vcs_commit_parents WHERE commit_id = ?",
+                    (cid,))
+                if not parents:
+                    # Fallback to parent_commit_id column
+                    row = self.vcs_repo.query_one(
+                        "SELECT parent_commit_id FROM vcs_commits WHERE id = ?", (cid,))
+                    if row and row['parent_commit_id']:
+                        queue.append(row['parent_commit_id'])
+                else:
+                    queue.extend(p['parent_commit_id'] for p in parents)
+            return ancestors
+
+        common_ancestor_id = None
+        if current['head_commit_id']:
+            current_ancestors = get_ancestor_ids(current['head_commit_id'])
+            # Walk source's ancestors to find first one in current's set
+            queue = [source['head_commit_id']]
+            visited = set()
+            while queue:
+                cid = queue.pop(0)
+                if cid in visited:
+                    continue
+                visited.add(cid)
+                if cid in current_ancestors:
+                    common_ancestor_id = cid
+                    break
+                parents = self.vcs_repo.query_all(
+                    "SELECT parent_commit_id FROM vcs_commit_parents WHERE commit_id = ?",
+                    (cid,))
+                if not parents:
+                    row = self.vcs_repo.query_one(
+                        "SELECT parent_commit_id FROM vcs_commits WHERE id = ?", (cid,))
+                    if row and row['parent_commit_id']:
+                        queue.append(row['parent_commit_id'])
+                else:
+                    queue.extend(p['parent_commit_id'] for p in parents)
+
+        # Get file states at each point
+        def get_file_tree(commit_id):
+            """Get file_id -> (content_hash, content_text, change_type) at a commit."""
+            if not commit_id:
+                return {}
+            states = self.vcs_repo.query_all("""
+                WITH RECURSIVE commit_chain AS (
+                    SELECT id, parent_commit_id FROM vcs_commits WHERE id = ?
+                    UNION ALL
+                    SELECT c.id, c.parent_commit_id
+                    FROM vcs_commits c JOIN commit_chain cc ON c.id = cc.parent_commit_id
+                )
+                SELECT fs.file_id, fs.content_hash, fs.content_text, fs.change_type,
+                       pf.file_path, fs.commit_id
+                FROM vcs_file_states fs
+                JOIN commit_chain cc ON fs.commit_id = cc.id
+                JOIN project_files pf ON fs.file_id = pf.id
+                ORDER BY fs.commit_id DESC
+            """, (commit_id,))
+            tree = {}
+            for s in states:
+                if s['file_id'] not in tree:
+                    if s['change_type'] != 'deleted':
+                        tree[s['file_id']] = s
+            return tree
+
+        base_tree = get_file_tree(common_ancestor_id)
+        ours_tree = get_file_tree(current['head_commit_id'])
+        theirs_tree = get_file_tree(source['head_commit_id'])
+
+        # Find all affected files
+        all_file_ids = set(ours_tree.keys()) | set(theirs_tree.keys())
+
+        merger = ThreeWayMerge()
+        auto_merged = []
+        conflicts = []
+        merged_contents = {}  # file_id -> merged content
+
+        strategy = getattr(args, 'strategy', 'manual') or 'manual'
+
+        for fid in all_file_ids:
+            ours = ours_tree.get(fid)
+            theirs = theirs_tree.get(fid)
+            base = base_tree.get(fid)
+
+            ours_hash = ours['content_hash'] if ours else None
+            theirs_hash = theirs['content_hash'] if theirs else None
+            base_hash = base['content_hash'] if base else None
+
+            # No change on source side — skip
+            if theirs_hash == base_hash:
+                continue
+
+            # No change on our side — take theirs (fast-forward)
+            if ours_hash == base_hash:
+                file_path = (theirs or ours or base)['file_path']
+                if theirs:
+                    merged_contents[fid] = theirs['content_text']
+                    auto_merged.append(file_path)
+                continue
+
+            # Both changed — need three-way merge
+            file_path = (ours or theirs or base)['file_path']
+            if ours and theirs and ours.get('content_text') and theirs.get('content_text'):
+                base_version = FileVersion(
+                    content=base['content_text'] if base and base.get('content_text') else '',
+                    hash=base_hash or '', source='base')
+                ours_version = FileVersion(
+                    content=ours['content_text'], hash=ours_hash, source='ours')
+                theirs_version = FileVersion(
+                    content=theirs['content_text'], hash=theirs_hash, source='theirs')
+
+                success, merged, conflict = merger.merge_files(
+                    file_path, ours_version, theirs_version, base_version)
+
+                if success and merged:
+                    merged_contents[fid] = merged
+                    auto_merged.append(file_path)
+                elif conflict:
+                    conflicts.append(conflict)
+            else:
+                # Binary or missing content — conflict
+                from merge_resolver import MergeConflict, ConflictType
+                conflicts.append(MergeConflict(
+                    file_path=file_path,
+                    conflict_type=ConflictType.BOTH_MODIFIED))
+
+        if conflicts:
+            # Write conflict markers to working state
+            for conflict in conflicts:
+                file_row = self.vcs_repo.query_one(
+                    "SELECT id FROM project_files WHERE project_id = ? AND file_path = ?",
+                    (project['id'], conflict.file_path))
+                if file_row and conflict.conflict_markers:
+                    self.vcs_repo.execute("""
+                        INSERT INTO vcs_working_state (project_id, branch_id, file_id, state, staged, content_text)
+                        VALUES (?, ?, ?, 'conflict', 0, ?)
+                        ON CONFLICT (project_id, branch_id, file_id)
+                        DO UPDATE SET state = 'conflict', staged = 0, content_text = excluded.content_text
+                    """, (project['id'], current['id'], file_row['id'], conflict.conflict_markers))
+
+            print(f"Merge has conflicts ({len(conflicts)} files):")
+            for c in conflicts:
+                print(f"  CONFLICT  {c.file_path}")
+            print(f"\nAuto-merged: {len(auto_merged)} files")
+            print(f"\nResolve conflicts, then commit:")
+            print(f"  templedb vcs commit -p {project['slug']} -m \"Merge '{args.source}' into '{current['branch_name']}'\"")
+            return 1
+
+        # Clean merge — apply changes and auto-commit
+        import hashlib as _hashlib
+        for fid, content in merged_contents.items():
+            if content is None:
+                continue
+            content_hash = _hashlib.sha256(content.encode()).hexdigest()
+            # Update content_blobs
+            self.vcs_repo.execute("""
+                INSERT OR IGNORE INTO content_blobs (hash_sha256, content_text, file_size_bytes)
+                VALUES (?, ?, ?)
+            """, (content_hash, content, len(content.encode())), commit=False)
+            # Update file_contents
+            self.vcs_repo.execute("""
+                UPDATE file_contents SET content_hash = ?, is_current = 1,
+                    file_size_bytes = ?, line_count = ?
+                WHERE file_id = ?
+            """, (content_hash, len(content.encode()), content.count('\n') + 1, fid), commit=False)
+
+        # Create commit
+        squash = getattr(args, 'squash', False)
+        author = self._get_author()
+
+        if squash:
+            # Squash: collect source branch commit messages for summary
+            source_commits = self.vcs_repo.query_all("""
+                WITH RECURSIVE branch_commits AS (
+                    SELECT id, parent_commit_id, commit_message FROM vcs_commits WHERE id = ?
+                    UNION ALL
+                    SELECT c.id, c.parent_commit_id, c.commit_message
+                    FROM vcs_commits c JOIN branch_commits bc ON c.id = bc.parent_commit_id
+                    WHERE c.id != ?
+                )
+                SELECT commit_message FROM branch_commits
+            """, (source['head_commit_id'], common_ancestor_id or -1))
+
+            summary_lines = [f"Squash merge branch '{args.source}' into '{current['branch_name']}'", ""]
+            for sc in source_commits:
+                summary_lines.append(f"  * {sc['commit_message']}")
+            merge_msg = "\n".join(summary_lines)
+        else:
+            merge_msg = f"Merge branch '{args.source}' into '{current['branch_name']}'"
+
+        hash_input = f"{project['slug']}:{current['branch_name']}:merge:{args.source}:{time.time()}"
+        commit_hash = _hashlib.sha256(hash_input.encode()).hexdigest()[:16].upper()
+
+        commit_id = self.vcs_repo.create_commit(
+            project_id=project['id'],
+            branch_id=current['id'],
+            commit_hash=commit_hash,
+            author=author,
+            message=merge_msg
+        )
+
+        # Record parents (squash only records first parent — linear history)
+        if current['head_commit_id']:
+            self.vcs_repo.execute("""
+                INSERT OR IGNORE INTO vcs_commit_parents (commit_id, parent_commit_id, parent_order)
+                VALUES (?, ?, 0)
+            """, (commit_id, current['head_commit_id']), commit=False)
+        if not squash:
+            self.vcs_repo.execute("""
+                INSERT OR IGNORE INTO vcs_commit_parents (commit_id, parent_commit_id, parent_order)
+                VALUES (?, ?, 1)
+            """, (commit_id, source['head_commit_id']), commit=False)
+
+        # Create file states for merged files
+        for fid, content in merged_contents.items():
+            if content is None:
+                continue
+            content_hash = _hashlib.sha256(content.encode()).hexdigest()
+            self.vcs_repo.execute("""
+                INSERT INTO vcs_file_states (commit_id, file_id, content_hash, file_size, line_count, change_type)
+                VALUES (?, ?, ?, ?, ?, 'modified')
+            """, (commit_id, fid, content_hash, len(content.encode()), content.count('\n') + 1), commit=False)
+
+        # Update branch head
+        self.vcs_repo.execute(
+            "UPDATE vcs_branches SET head_commit_id = ? WHERE id = ?",
+            (commit_id, current['id']))
+
+        merge_type = "Squash merged" if squash else "Merged"
+        result = {
+            "project": project['slug'],
+            "source": args.source,
+            "target": current['branch_name'],
+            "auto_merged": len(auto_merged),
+            "commit_hash": commit_hash,
+            "squash": squash,
+        }
+        return emit(args, result, human_fn=lambda d: (
+            print(f"{merge_type} '{d['source']}' into '{d['target']}'"),
+            print(f"  {d['auto_merged']} files auto-merged"),
+            print(f"  Commit: {d['commit_hash']}"),
+        ) and None)
 
     def import_history(self, args) -> int:
         """Import full git history from repository"""
@@ -1168,13 +1555,32 @@ def register(cli):
     log_parser = subparsers.add_parser('log', help='Show commit history')
     log_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
     log_parser.add_argument('-n', type=int, help='Number of commits to show')
+    log_parser.add_argument('--branch', '-b', help='Filter by branch name')
     cli.commands['vcs.log'] = cmd.log
 
     # vcs branch
-    branch_parser = subparsers.add_parser('branch', help='List or create branches')
+    branch_parser = subparsers.add_parser('branch', help='List, create, or delete branches')
     branch_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
     branch_parser.add_argument('name', nargs='?', help='New branch name')
+    branch_parser.add_argument('-d', '--delete', metavar='NAME', help='Delete a branch')
     cli.commands['vcs.branch'] = cmd.branch
+
+    # vcs switch
+    switch_parser = subparsers.add_parser('switch', help='Switch active branch')
+    switch_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
+    switch_parser.add_argument('branch', help='Branch to switch to')
+    switch_parser.add_argument('--force', '-f', action='store_true', help='Discard uncommitted changes')
+    cli.commands['vcs.switch'] = cmd.switch
+
+    # vcs merge
+    merge_parser = subparsers.add_parser('merge', help='Merge a branch into current branch')
+    merge_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
+    merge_parser.add_argument('source', help='Source branch to merge from')
+    merge_parser.add_argument('--squash', action='store_true',
+                              help='Squash into single commit (linear history)')
+    merge_parser.add_argument('--strategy', choices=['manual', 'ours', 'theirs', 'ai-assisted'],
+                              default='manual', help='Merge strategy for conflicts')
+    cli.commands['vcs.merge'] = cmd.merge
 
     # vcs diff
     diff_parser = subparsers.add_parser('diff', help='Show diff between file versions')

@@ -1160,10 +1160,10 @@ def _staging_area(slug: str) -> str:
         return '<p class="muted">Project not found.</p>'
 
     branch = query_one("""
-        SELECT id FROM vcs_branches WHERE project_id = ? AND is_default = 1
+        SELECT COALESCE(p.active_branch_id, vb.id) as id FROM projects p LEFT JOIN vcs_branches vb ON vb.project_id = p.id AND vb.is_default = 1 WHERE p.id = ?
     """, (proj["id"],))
     if not branch:
-        return '<p class="muted">No default branch.</p>'
+        return '<p class="muted">No branch found.</p>'
 
     staged = query_all("""
         SELECT pf.file_path, ws.state, ws.file_id
@@ -1219,7 +1219,7 @@ def _staging_area(slug: str) -> str:
 @app.post("/vcs/{slug}/staging/stage/{file_id}", response_class=HTMLResponse)
 def vcs_stage_file(slug: str, file_id: int):
     proj = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
-    branch = query_one("SELECT id FROM vcs_branches WHERE project_id = ? AND is_default = 1", (proj["id"],))
+    branch = query_one("SELECT COALESCE(p.active_branch_id, vb.id) as id FROM projects p LEFT JOIN vcs_branches vb ON vb.project_id = p.id AND vb.is_default = 1 WHERE p.id = ?", (proj["id"],))
     from db_utils import execute
     execute("UPDATE vcs_working_state SET staged = 1 WHERE file_id = ? AND project_id = ? AND branch_id = ?",
             (file_id, proj["id"], branch["id"]))
@@ -1229,7 +1229,7 @@ def vcs_stage_file(slug: str, file_id: int):
 @app.post("/vcs/{slug}/staging/unstage/{file_id}", response_class=HTMLResponse)
 def vcs_unstage_file(slug: str, file_id: int):
     proj = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
-    branch = query_one("SELECT id FROM vcs_branches WHERE project_id = ? AND is_default = 1", (proj["id"],))
+    branch = query_one("SELECT COALESCE(p.active_branch_id, vb.id) as id FROM projects p LEFT JOIN vcs_branches vb ON vb.project_id = p.id AND vb.is_default = 1 WHERE p.id = ?", (proj["id"],))
     from db_utils import execute
     execute("UPDATE vcs_working_state SET staged = 0 WHERE file_id = ? AND project_id = ? AND branch_id = ?",
             (file_id, proj["id"], branch["id"]))
@@ -2477,8 +2477,14 @@ templedb project sync &lt;slug&gt;              # re-scan from disk</pre>
 templedb vcs add -p &lt;proj&gt; --all          # stage all
 templedb vcs commit -p &lt;proj&gt; -m "msg"    # commit
 templedb vcs log &lt;proj&gt;                   # history
+templedb vcs log &lt;proj&gt; --branch feat     # log for branch
 templedb vcs diff &lt;proj&gt;                  # show changes
 templedb vcs branch &lt;proj&gt;                # list branches
+templedb vcs branch &lt;proj&gt; feat           # create branch
+templedb vcs branch &lt;proj&gt; -d feat        # delete branch
+templedb vcs switch &lt;proj&gt; feat           # switch branch
+templedb vcs merge &lt;proj&gt; feat            # merge into current
+templedb vcs merge &lt;proj&gt; feat --squash  # squash into 1 commit
 templedb git-export &lt;proj&gt; --remote &lt;url&gt; # export to git</pre>
 </div>
 
