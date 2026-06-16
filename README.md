@@ -83,8 +83,9 @@ The database is the single source of truth. Everything else — the FUSE mount, 
   │  r/w   │ │ :9419  │ │      │ │        │ │            │
   └────────┘ └────────┘ └──────┘ └────────┘ └────────────┘
        │          │          │         │           │
-  Edit files  Nix flake  Claude    Browser    Tailscale
-  directly    inputs     sessions  settings    peers
+  Edit files  Nix flake  Claude    Settings    Tailscale
+  directly    inputs     sessions  Dashboard    peers
+                                    View
 ```
 
 ---
