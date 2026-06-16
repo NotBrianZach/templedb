@@ -348,12 +348,14 @@ class MCPServer:
             },
             {
                 "name": "templedb_config_set",
-                "description": "Set a system_config key-value pair.",
+                "description": "Set a system_config key-value pair. Host-scoped by default (prefixes active host). Use scope='global' for keys shared across all hosts.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "key": {"type": "string", "description": "Config key"},
-                        "value": {"type": "string", "description": "Config value"}
+                        "value": {"type": "string", "description": "Config value"},
+                        "scope": {"type": "string", "enum": ["host", "global"], "description": "Scope: 'host' (default, prefixes active host) or 'global'"},
+                        "host": {"type": "string", "description": "Target a specific host (default: active host from nixos.flake_output)"}
                     },
                     "required": ["key", "value"]
                 }
@@ -1241,16 +1243,27 @@ class MCPServer:
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def tool_config_set(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Set system config value (simple key-value store)"""
+        """Set system config value, host-scoped by default."""
         try:
             key = args["key"]
             value = args["value"]
             description = args.get("description", "")
+            scope = args.get("scope", "host")
 
             conn = self._get_db_connection()
             cursor = conn.cursor()
 
-            # Use INSERT OR REPLACE
+            if scope != "global":
+                host = args.get("host")
+                if not host:
+                    row = cursor.execute(
+                        "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+                    ).fetchone()
+                    host = row[0] if row else None
+
+                if host:
+                    key = f"{host}.{key}"
+
             cursor.execute("""
                 INSERT OR REPLACE INTO system_config
                 (key, value, description, updated_at)

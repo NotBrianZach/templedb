@@ -440,12 +440,12 @@ Useful for understanding large codebases.
                 {
                     'title': 'Vibe Coding',
                     'content': '''
-Interactive learning from AI changes:
+Launch Claude with auto-generated project context:
                     ''',
                     'example': './templedb vibe start my-project',
                     'explanation': '''
-Launches Claude + quiz UI + file watcher.
-Auto-generates questions as you code.
+Launches Claude Code with project-specific context.
+Auto-generates a prompt from your project if none exists.
                     '''
                 }
             ]

@@ -78,7 +78,8 @@ class BootstrapCommand(Command):
             _step(1, "Database (downloading from GCS)")
             bucket = args.from_gcs
             # List backups and get latest
-            result = _run(["gsutil", "ls", f"gs://{bucket}/"])
+            print(f"  Listing backups in gs://{bucket}/ ...")
+            result = _run(["gsutil", "ls", "-l", f"gs://{bucket}/"])
             if result.returncode != 0:
                 _fail(f"Cannot access GCS bucket: {bucket}")
                 print(f"       Error: {result.stderr.strip()}")
@@ -91,15 +92,30 @@ class BootstrapCommand(Command):
                 _fail(f"No .sqlite backups found in gs://{bucket}/")
                 return 1
 
-            latest = sorted(files)[-1]
-            print(f"  Downloading: {latest}")
+            # Parse the -l output to get the actual GCS path (last field on each line)
+            parsed = []
+            for f in files:
+                parts = f.split()
+                if parts:
+                    gs_path = parts[-1] if parts[-1].startswith("gs://") else f
+                    parsed.append(gs_path)
+
+            latest = sorted(parsed)[-1]
+            print(f"  Latest backup: {latest}")
 
             db_path.parent.mkdir(parents=True, exist_ok=True)
-            dl = _run(["gsutil", "cp", latest, str(db_path)])
+            print(f"  Downloading to {db_path} ...")
+            # Stream gsutil output so user sees transfer progress
+            dl = subprocess.run(
+                ["gsutil", "-m", "cp", latest, str(db_path)],
+                text=True,
+            )
             if dl.returncode != 0:
-                _fail(f"Download failed: {dl.stderr.strip()}")
+                _fail("Download failed (see output above)")
                 return 1
-            _ok(f"Downloaded {latest}")
+
+            size_mb = db_path.stat().st_size / (1024 * 1024)
+            _ok(f"Downloaded {latest} ({size_mb:.1f} MB)")
 
         elif db_path.exists():
             _ok(f"Database exists: {db_path}")

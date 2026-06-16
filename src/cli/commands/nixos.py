@@ -683,16 +683,34 @@ class NixOSCommand(Command):
         return 0
 
     def config_set(self, args) -> int:
-        """Set system configuration value"""
+        """Set system configuration value, scoped to the active host by default."""
         try:
-            from db_utils import execute
+            from db_utils import execute, get_connection
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+            key = args.key
+
+            if not args.glob:
+                # Determine host scope
+                host = getattr(args, 'host', None)
+                if not host:
+                    conn = get_connection()
+                    row = conn.execute(
+                        "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+                    ).fetchone()
+                    host = row[0] if row else None
+
+                if host:
+                    key = f"{host}.{key}"
+                else:
+                    print("⚠  No active host found (nixos.flake_output not set). Writing as global key.", file=sys.stderr)
+
             execute(
                 "INSERT INTO system_config (key, value, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (args.key, args.value, now),
+                (key, args.value, now),
             )
-            print(f"✓ Set {args.key} = {args.value}")
+            print(f"✓ Set {key} = {args.value}")
             return 0
         except Exception as e:
             logger.error(f"Failed to set config: {e}", exc_info=True)
@@ -1898,9 +1916,12 @@ def register(cli):
     cg.add_argument('key')
     cli.commands['nixos.config-get'] = cmd.config_get
 
-    cs = subparsers.add_parser('config-set', help='Set system configuration value')
+    cs = subparsers.add_parser('config-set', help='Set system configuration value (host-scoped by default)')
     cs.add_argument('key')
     cs.add_argument('value')
+    cs.add_argument('--global', '-g', dest='glob', action='store_true',
+                    help='Write as global key (not scoped to active host)')
+    cs.add_argument('--host', help='Scope to a specific host (default: active host from nixos.flake_output)')
     cli.commands['nixos.config-set'] = cmd.config_set
 
     subparsers.add_parser('config-list', help='List all system configuration')
