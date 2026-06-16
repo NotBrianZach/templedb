@@ -229,13 +229,6 @@ templedb graph importers bza frontend/lib/supabase.ts  # who imports this? (44 f
 templedb graph callers bza uploadDocument # who calls this function?
 ```
 
-The most-imported files (coupling hotspots):
-```
-44x  bza  frontend/lib/supabase.ts
-32x  bza  frontend/types/index.ts
-31x  woofs  shopUI/src/supabaseClient.mjs
-```
-
 ---
 
 ## Web GUI
