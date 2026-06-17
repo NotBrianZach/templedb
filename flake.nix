@@ -139,6 +139,12 @@
               default = "${cfg.package}/bin/templedb ai claude hook";
               description = "Command to run as Claude Code hook.";
             };
+
+            claude.mcp = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = "Register TempleDB MCP server globally so all Claude Code sessions can access TempleDB tools.";
+            };
           };
 
           config = lib.mkIf cfg.enable (lib.mkMerge [
@@ -169,8 +175,8 @@
             })
 
             (lib.mkIf cfg.claude.enable {
-              # Generate ~/.claude/settings.json with templedb hooks
-              home.file.".claude/settings.json".text = builtins.toJSON {
+              # Generate ~/.claude/settings.json with templedb hooks + optional MCP
+              home.file.".claude/settings.json".text = builtins.toJSON ({
                 hooks = {
                   PreToolUse = [
                     {
@@ -229,6 +235,18 @@
                     "WebSearch"
                   ];
                   deny = [];
+                };
+              };
+            })
+
+            (lib.mkIf (cfg.claude.enable && cfg.claude.mcp) {
+              # Global ~/.mcp.json so TempleDB MCP tools are available in all projects
+              home.file.".mcp.json".text = builtins.toJSON {
+                mcpServers = {
+                  templedb = {
+                    command = "${cfg.package}/bin/templedb";
+                    args = ["ai" "mcp" "serve"];
+                  };
                 };
               };
             })

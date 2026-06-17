@@ -50,23 +50,43 @@ command groups:
     nixos              Generate modules, rebuild, doctor, hosts, dotfiles
 
   Secrets & Environment
-    secret             Encrypted secrets (age/sops)
-    env                Environment variables per project
+    env secret         Encrypted secrets (age/sops)
+    env var            Environment variables per project
+    env key            Key management
+    env direnv         Direnv integration
 
   Deployment & Publishing
-    deploy             Deploy projects
+    deploy targets     Deployment targets
+    deploy migration   Database migrations
     publish            Commit + push to GitHub mirrors
 
   Knowledge Graph
     graph              Cross-project search, dependency maps, impact analysis
 
+  Search
+    search query       Query project files
+    search query-open  Query and open in editor
+
+  AI & Tooling
+    ai claude          Claude integration
+    ai vibe            Vibe coding quizzes
+    ai prompt          Prompt management
+    ai mcp             MCP server
+
   Sync & Network
     sync               cr-sqlite CRDT sync between machines
-    network            Tailscale VPN setup
+    sync network       Tailscale VPN setup
 
-  Database & Storage
-    db                 Migrations, integrity checks
-    backup             Local and cloud (GCS) backups
+  Storage
+    storage backup     Local and cloud (GCS) backups
+    storage cathedral  Cathedral packages
+    storage blob       Blob storage
+
+  Admin
+    admin db           Migrations, integrity checks
+    admin cache        Cache management
+    admin schema       Schema operations
+    admin gitserver    Git server
 ```
 
 The database is the single source of truth. Everything else — the FUSE mount, the git daemon, the NixOS config files — is derived from it.
@@ -206,7 +226,7 @@ cr-sqlite provides conflict-free replication between your machines over Tailscal
 
 ```bash
 templedb sync init                       # initialize CRDTs
-templedb network setup                   # configure Tailscale
+templedb sync network setup               # configure Tailscale
 templedb sync serve                      # start sync server (port 9420)
 
 # On the other machine:
@@ -248,7 +268,7 @@ Features: sortable tables, fuzzy search (press /), inline config editing, knowle
 10 core tools — minimal context footprint (~1000 tokens):
 
 ```json
-{"mcpServers": {"templedb": {"command": "templedb", "args": ["mcp", "serve"]}}}
+{"mcpServers": {"templedb": {"command": "templedb", "args": ["ai", "mcp", "serve"]}}}
 ```
 
 | Tool | Purpose |
@@ -278,10 +298,14 @@ cd ~/templeDB && nix build .#templedb --no-update-lock-file
 programs.templedb = {
   enable = true;
   package = templedb.packages.${pkgs.system}.templedb;
-  mount.enable = true;    # auto-mount ~/temple on login
-  sync.enable = true;     # sync server on port 9420
+  mount.enable = true;      # auto-mount ~/temple on login
+  sync.enable = true;       # sync server on port 9420
+  claude.enable = true;     # generate ~/.claude/settings.json with TempleDB hooks
+  claude.mcp = true;        # (default) register TempleDB MCP server globally (~/.mcp.json)
 };
 ```
+
+The `claude.mcp = true` option creates `~/.mcp.json` in your home directory, making TempleDB's MCP tools available in every Claude Code session — regardless of which project directory you're in. This means `templedb ai vibe start <any-project>` will always have access to TempleDB context tools.
 
 ---
 
