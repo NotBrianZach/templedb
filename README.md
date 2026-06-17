@@ -293,19 +293,90 @@ nix build github:NotBrianZach/templedb#templedb
 # Or from source
 git clone https://github.com/NotBrianZach/templedb.git ~/templeDB
 cd ~/templeDB && nix build .#templedb --no-update-lock-file
+```
 
-# Home-Manager module
+### Home-Manager Module
+
+Add TempleDB as a flake input and import the module:
+
+```nix
+# flake.nix
+{
+  inputs.templedb.url = "github:NotBrianZach/templedb";
+  inputs.templedb.inputs.nixpkgs.follows = "nixpkgs";
+
+  outputs = { nixpkgs, templedb, ... }: {
+    # Import the home-manager module
+    homeManagerModules = [ templedb.homeManagerModules.default ];
+  };
+}
+```
+
+Then configure in your home-manager config:
+
+```nix
 programs.templedb = {
   enable = true;
   package = templedb.packages.${pkgs.system}.templedb;
-  mount.enable = true;      # auto-mount ~/temple on login
-  sync.enable = true;       # sync server on port 9420
-  claude.enable = true;     # generate ~/.claude/settings.json with TempleDB hooks
-  claude.mcp = true;        # (default) register TempleDB MCP server globally (~/.mcp.json)
+
+  # FUSE mount: auto-mount database as ~/temple on login (systemd user service)
+  mount.enable = true;
+
+  # Sync: cr-sqlite replication server between machines over Tailscale
+  sync.enable = true;        # starts systemd user service
+  sync.port = 9420;          # default port
+
+  # Claude Code: hooks that block raw git in TempleDB-managed projects
+  claude.enable = true;      # generates ~/.claude/settings.json
+
+  # MCP: register TempleDB tools globally for all Claude Code sessions
+  claude.mcp = true;         # (default when claude.enable) creates ~/.mcp.json
+
+  # Age key path for secret decryption
+  ageKeyFile = "~/.config/sops/age/keys.txt";  # default
 };
 ```
 
-The `claude.mcp = true` option creates `~/.mcp.json` in your home directory, making TempleDB's MCP tools available in every Claude Code session — regardless of which project directory you're in. This means `templedb ai vibe start <any-project>` will always have access to TempleDB context tools.
+### What the module provides
+
+| Option | What it does |
+|--------|-------------|
+| `enable` | Installs `templedb` and `tdb` (alias) to PATH |
+| `mount.enable` | Systemd user service: FUSE mount at `~/temple` with auto-restart |
+| `sync.enable` | Systemd user service: cr-sqlite sync server on port 9420 |
+| `claude.enable` | Generates `~/.claude/settings.json` with PreToolUse/PostToolUse hooks |
+| `claude.mcp` | Creates `~/.mcp.json` so TempleDB MCP tools work in every Claude Code session, not just the templeDB project |
+
+### Direnv integration
+
+TempleDB provides a direnv helper. Add to `~/.config/direnv/direnvrc`:
+
+```bash
+use_templedb() {
+    eval "$(tdb env direnv "$@")"
+}
+```
+
+Then in any project's `.envrc`:
+
+```bash
+use_templedb
+# or: eval "$(templedb env direnv)"
+```
+
+This loads the project's environment variables, secrets, and Nix environment automatically when you `cd` into the directory.
+
+### Shell tips
+
+The nix package installs both `templedb` and `tdb` (symlink). Some useful aliases for your shell:
+
+```bash
+# Recent activity across all projects
+alias tdb-reflog='tdb graph search --recent'
+
+# Quick project status
+alias tdb-ls='tdb project list'
+```
 
 ---
 
