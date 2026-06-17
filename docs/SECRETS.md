@@ -40,12 +40,12 @@ secret_key_assignments          - Track which keys encrypt each secret
 
 ```bash
 # Basic usage
-templedb secret set <project> <name> <value> --keys <key1,key2>
+templedb env secretset <project> <name> <value> --keys <key1,key2>
 
 # Examples
-templedb secret set woofs_projects OPENROUTER_API_KEY "sk-or-..." --keys sops-key
-templedb secret set myapp DATABASE_URL "postgres://..." --keys yubikey-1,sops-key
-templedb secret set myapp API_SECRET "abc123" --keys yubikey-1 --profile production
+templedb env secretset woofs_projects OPENROUTER_API_KEY "sk-or-..." --keys sops-key
+templedb env secretset myapp DATABASE_URL "postgres://..." --keys yubikey-1,sops-key
+templedb env secretset myapp API_SECRET "abc123" --keys yubikey-1 --profile production
 ```
 
 **Options:**
@@ -56,16 +56,16 @@ templedb secret set myapp API_SECRET "abc123" --keys yubikey-1 --profile product
 
 ```bash
 # Get secret value only
-templedb secret get <project> <name>
+templedb env secretget <project> <name>
 
 # Get secret with metadata
-templedb secret get <project> <name> --metadata
+templedb env secretget <project> <name> --metadata
 
 # Examples
-templedb secret get woofs_projects OPENROUTER_API_KEY
+templedb env secretget woofs_projects OPENROUTER_API_KEY
 # Output: sk-or-...
 
-templedb secret get woofs_projects OPENROUTER_API_KEY --metadata
+templedb env secretget woofs_projects OPENROUTER_API_KEY --metadata
 # Output:
 # Secret: OPENROUTER_API_KEY
 # Project: woofs_projects
@@ -86,13 +86,13 @@ templedb secret get woofs_projects OPENROUTER_API_KEY --metadata
 
 ```bash
 # List all secrets for a project
-templedb secret list <project>
+templedb env secretlist <project>
 
 # List with decrypted values (use with caution!)
-templedb secret list <project> --values
+templedb env secretlist <project> --values
 
 # Examples
-templedb secret list woofs_projects
+templedb env secretlist woofs_projects
 # Output:
 # Secrets for woofs_projects (profile: default):
 # ============================================================
@@ -118,15 +118,15 @@ templedb secret list woofs_projects
 
 ```bash
 # Share a specific secret from one project to another
-templedb secret share-key <source-project> <target-project> <secret-name>
+templedb env secretshare-key <source-project> <target-project> <secret-name>
 
 # Examples
-templedb secret share-key woofs_projects bza OPENROUTER_API_KEY
+templedb env secretshare-key woofs_projects bza OPENROUTER_API_KEY
 # Output:
 # ✓ Shared 'OPENROUTER_API_KEY' from woofs_projects to bza
 #   Both projects now have access to the same secret
 
-templedb secret share-key system_config myapp DATABASE_URL --profile production
+templedb env secretshare-key system_config myapp DATABASE_URL --profile production
 ```
 
 **How It Works:**
@@ -142,13 +142,13 @@ templedb secret share-key system_config myapp DATABASE_URL --profile production
 
 ```bash
 # Delete a secret from a project
-templedb secret delete <project> <name>
+templedb env secretdelete <project> <name>
 
 # Examples
-templedb secret delete woofs_projects OLD_API_KEY
+templedb env secretdelete woofs_projects OLD_API_KEY
 # Output: ✓ Deleted secret 'OLD_API_KEY' from woofs_projects
 
-templedb secret delete bza OPENROUTER_API_KEY
+templedb env secretdelete bza OPENROUTER_API_KEY
 # Output:
 # ✓ Removed secret 'OPENROUTER_API_KEY' from bza
 #   Secret is still shared with 1 other project(s)
@@ -166,11 +166,11 @@ templedb secret delete bza OPENROUTER_API_KEY
 
 ```bash
 # Migrate old YAML-based secrets to individual secrets
-templedb secret migrate <project> --keys <key1,key2>
+templedb env secretmigrate <project> --keys <key1,key2>
 
 # Examples
-templedb secret migrate woofs_projects --keys sops-key
-templedb secret migrate myapp --keys yubikey-1,sops-key --profile production
+templedb env secretmigrate woofs_projects --keys sops-key
+templedb env secretmigrate myapp --keys yubikey-1,sops-key --profile production
 ```
 
 **What It Does:**
@@ -190,24 +190,24 @@ Before using secrets, you need encryption keys registered in TempleDB.
 ### List Available Keys
 
 ```bash
-templedb key list
+templedb env keylist
 ```
 
 ### Add a New Key
 
 ```bash
 # Add Yubikey
-templedb key add my-yubikey --recipient age1yubikey1q...
+templedb env keyadd my-yubikey --recipient age1yubikey1q...
 
 # Add filesystem age key
-templedb key add my-age-key --recipient age1abc... --location ~/.age/key.txt
+templedb env keyadd my-age-key --recipient age1abc... --location ~/.age/key.txt
 ```
 
 ### Use Multiple Keys
 
 ```bash
 # Encrypt secret with multiple keys (any one can decrypt)
-templedb secret set myapp API_KEY "secret123" --keys yubikey-1,sops-key,age-key
+templedb env secretset myapp API_KEY "secret123" --keys yubikey-1,sops-key,age-key
 ```
 
 ## Common Workflows
@@ -216,25 +216,25 @@ templedb secret set myapp API_KEY "secret123" --keys yubikey-1,sops-key,age-key
 
 ```bash
 # 1. Add encryption keys
-templedb key add yubikey-1 --recipient age1yubikey1q...
-templedb key add sops-key --recipient age1cv5kqala...
+templedb env keyadd yubikey-1 --recipient age1yubikey1q...
+templedb env keyadd sops-key --recipient age1cv5kqala...
 
 # 2. Set secrets
-templedb secret set myapp DATABASE_URL "postgres://..." --keys yubikey-1
-templedb secret set myapp API_KEY "secret123" --keys yubikey-1,sops-key
+templedb env secretset myapp DATABASE_URL "postgres://..." --keys yubikey-1
+templedb env secretset myapp API_KEY "secret123" --keys yubikey-1,sops-key
 ```
 
 ### Sharing Configuration Between Projects
 
 ```bash
 # Share database credentials from main project to worker project
-templedb secret share-key myapp myapp-worker DATABASE_URL
+templedb env secretshare-key myapp myapp-worker DATABASE_URL
 
 # Verify
-templedb secret list myapp-worker
+templedb env secretlist myapp-worker
 # DATABASE_URL (shared)
 
-templedb secret get myapp-worker DATABASE_URL
+templedb env secretget myapp-worker DATABASE_URL
 # postgres://...
 ```
 
@@ -242,32 +242,32 @@ templedb secret get myapp-worker DATABASE_URL
 
 ```bash
 # Use profiles for different environments
-templedb secret set myapp DATABASE_URL "postgres://dev" --keys yubikey-1
-templedb secret set myapp DATABASE_URL "postgres://prod" --keys yubikey-1 --profile production
+templedb env secretset myapp DATABASE_URL "postgres://dev" --keys yubikey-1
+templedb env secretset myapp DATABASE_URL "postgres://prod" --keys yubikey-1 --profile production
 
 # Get production secret
-templedb secret get myapp DATABASE_URL --profile production
+templedb env secretget myapp DATABASE_URL --profile production
 ```
 
 ### Secret Rotation
 
 ```bash
 # Update secret (all projects sharing it will see the new value)
-templedb secret set myapp API_KEY "new-key-456" --keys yubikey-1
+templedb env secretset myapp API_KEY "new-key-456" --keys yubikey-1
 
 # Verify it's updated everywhere
-templedb secret get myapp API_KEY
-templedb secret get myapp-worker API_KEY  # If shared
+templedb env secretget myapp API_KEY
+templedb env secretget myapp-worker API_KEY  # If shared
 ```
 
 ### Cleanup
 
 ```bash
 # Remove secret from one project
-templedb secret delete myapp-worker API_KEY
+templedb env secretdelete myapp-worker API_KEY
 
 # Delete secret entirely
-templedb secret delete myapp API_KEY
+templedb env secretdelete myapp API_KEY
 ```
 
 ## Integration with Deployment
@@ -276,17 +276,17 @@ Secrets can be exported for deployment:
 
 ```bash
 # Export as shell environment variables
-templedb secret export myapp --format shell > env.sh
+templedb env secretexport myapp --format shell > env.sh
 source env.sh
 
 # Export as .env file
-templedb secret export myapp --format dotenv > .env
+templedb env secretexport myapp --format dotenv > .env
 
 # Export as YAML
-templedb secret export myapp --format yaml > secrets.yaml
+templedb env secretexport myapp --format yaml > secrets.yaml
 
 # Export as JSON
-templedb secret export myapp --format json > secrets.json
+templedb env secretexport myapp --format json > secrets.json
 ```
 
 ## Security Considerations
@@ -315,7 +315,7 @@ templedb secret export myapp --format json > secrets.json
 
 1. **Use Yubikeys for production secrets**
    ```bash
-   templedb secret set myapp PROD_API_KEY "..." --keys yubikey-1,yubikey-2
+   templedb env secretset myapp PROD_API_KEY "..." --keys yubikey-1,yubikey-2
    ```
 
 2. **Don't share secrets unnecessarily**
@@ -332,7 +332,7 @@ templedb secret export myapp --format json > secrets.json
 4. **Rotate secrets regularly**
    ```bash
    # Update existing secret (preserves sharing)
-   templedb secret set myapp API_KEY "new-value" --keys yubikey-1
+   templedb env secretset myapp API_KEY "new-value" --keys yubikey-1
    ```
 
 5. **Audit secret access**
@@ -415,10 +415,10 @@ export TEMPLEDB_AGE_KEY_FILE=/path/to/key.txt
 **Solution:**
 ```bash
 # Check which keys protect this secret
-templedb secret show-keys myapp
+templedb env secretshow-keys myapp
 
 # Add your key to the secret (requires existing key access)
-templedb secret add-key myapp --key my-yubikey
+templedb env secretadd-key myapp --key my-yubikey
 ```
 
 ### "Key not found"
@@ -428,15 +428,15 @@ templedb secret add-key myapp --key my-yubikey
 **Solution:**
 ```bash
 # List available keys
-templedb key list
+templedb env keylist
 
 # Add the key
-templedb key add my-key --recipient age1...
+templedb env keyadd my-key --recipient age1...
 ```
 
 ### Secret Already Shared
 
-**Problem:** `templedb secret share-key` says "already shared".
+**Problem:** `templedb env secretshare-key` says "already shared".
 
 **Solution:** This is informational - the secret is already accessible to the target project. No action needed.
 
@@ -453,8 +453,8 @@ sqlite3 ~/.local/share/templedb/templedb.db \
    WHERE sb.content_type = 'application/x-age+yaml';"
 
 # Migrate each project
-templedb secret migrate myapp --keys sops-key
-templedb secret migrate otherapp --keys yubikey-1,sops-key
+templedb env secretmigrate myapp --keys sops-key
+templedb env secretmigrate otherapp --keys yubikey-1,sops-key
 ```
 
 The migration:

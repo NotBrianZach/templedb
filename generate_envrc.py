@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate .envrc file for a project if it doesn't exist.
-This creates a standard .envrc that calls 'tdb direnv'.
+This creates a standard .envrc that calls 'tdb env direnv'.
 """
 import sys
 import sqlite3
@@ -15,8 +15,8 @@ def generate_envrc_for_project(project_path: Path, force: bool = False):
         print(f"✓ .envrc already exists at {envrc_path}")
         return False
 
-    # Standard .envrc content that calls tdb direnv
-    envrc_content = 'eval "$(tdb direnv)"\n'
+    # Standard .envrc content that calls tdb env direnv
+    envrc_content = 'eval "$(tdb env direnv)"\n'
 
     envrc_path.write_text(envrc_content)
     print(f"✅ Generated .envrc at {envrc_path}")

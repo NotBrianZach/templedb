@@ -531,11 +531,14 @@ class EnvCommands(Command):
 
 
 def register(cli):
-    """Register environment commands"""
+    """Register environment commands (including var, secret, key, direnv subcommands)"""
+    from cli.commands import var, secret, key, direnv
+
     cmd = EnvCommands()
 
-    env_parser = cli.register_command('env', None, help_text='Environment management')
-    subparsers = env_parser.add_subparsers(dest='env_subcommand', required=True)
+    env_parser = cli.register_command('env', None,
+        help_text='Environment management (Nix envs, variables, secrets, keys, direnv)')
+    subparsers = env_parser.add_subparsers(dest='env_subcommand')
 
     # env enter
     enter_parser = subparsers.add_parser('enter', help='Enter Nix environment')
@@ -566,40 +569,8 @@ def register(cli):
     new_parser.add_argument('env_name', help='Environment name')
     cli.commands['env.new'] = cmd.new
 
-    # env var set (Quick Win #4)
-    varset_parser = subparsers.add_parser('set', help='Set environment variable')
-    varset_parser.add_argument('project', help='Project slug')
-    varset_parser.add_argument('var_name', help='Variable name')
-    varset_parser.add_argument('value', nargs='?', default=None, help='Variable value (not required for compound)')
-    varset_parser.add_argument('--target', default='default', help='Deployment target (default: default)')
-    varset_parser.add_argument('--compound', metavar='TEMPLATE',
-                               help='Set as compound variable with template (e.g. "postgresql://${DB_USER}:${secret:DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}")')
-    cli.commands['env.set'] = cmd.var_set
-
-    # env var get
-    varget_parser = subparsers.add_parser('get', help='Get environment variable')
-    varget_parser.add_argument('project', help='Project slug')
-    varget_parser.add_argument('var_name', help='Variable name')
-    varget_parser.add_argument('--target', default='default', help='Deployment target (default: default)')
-    cli.commands['env.get'] = cmd.var_get
-
-    # env var list
-    varlist_parser = subparsers.add_parser('vars', help='List environment variables')
-    varlist_parser.add_argument('project', help='Project slug')
-    varlist_parser.add_argument('--target', help='Filter by deployment target')
-    cli.commands['env.vars'] = cmd.var_list
-
-    # env var delete
-    vardel_parser = subparsers.add_parser('unset', help='Delete environment variable')
-    vardel_parser.add_argument('project', help='Project slug')
-    vardel_parser.add_argument('var_name', help='Variable name')
-    vardel_parser.add_argument('--target', default='default', help='Deployment target (default: default)')
-    cli.commands['env.unset'] = cmd.var_delete
-
-    # env export
-    export_parser = subparsers.add_parser('export', help='Export environment variables')
-    export_parser.add_argument('project', help='Project slug')
-    export_parser.add_argument('--target', default='staging', help='Deployment target (default: staging)')
-    export_parser.add_argument('--format', choices=['dotenv', 'shell', 'json', 'yaml'], default='dotenv',
-                                help='Output format (default: dotenv)')
-    cli.commands['env.export'] = cmd.var_export
+    # --- Consolidated subcommands from other modules ---
+    var.register_subcommands(subparsers, cli, prefix='env')
+    secret.register_subcommands(subparsers, cli, prefix='env')
+    key.register_subcommands(subparsers, cli, prefix='env')
+    direnv.register_subcommands(subparsers, cli, prefix='env')

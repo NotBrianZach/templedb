@@ -37,7 +37,7 @@ class BlobCommands(Command):
         """
         Show blob storage statistics
 
-        Usage: ./templedb blob status [project]
+        Usage: ./templedb storage blob status [project]
         """
         project_filter = args.project if hasattr(args, 'project') and args.project else None
 
@@ -111,7 +111,7 @@ class BlobCommands(Command):
         if migratable_result and migratable_result['count'] > 0:
             print(f"\n💡 {migratable_result['count']:,} large inline blobs could be migrated to external storage")
             print(f"   Total size: {(migratable_result['total_size'] or 0) / 1024 / 1024:.2f} MB")
-            print(f"   Run: ./templedb blob migrate --to-external")
+            print(f"   Run: ./templedb storage blob migrate --to-external")
 
         # Compression info
         if not ZSTD_AVAILABLE:
@@ -125,7 +125,7 @@ class BlobCommands(Command):
         """
         Verify blob integrity
 
-        Usage: ./templedb blob verify [project] [--fix]
+        Usage: ./templedb storage blob verify [project] [--fix]
         """
         project_filter = args.project if hasattr(args, 'project') and args.project else None
         fix = args.fix if hasattr(args, 'fix') and args.fix else False
@@ -200,7 +200,7 @@ class BlobCommands(Command):
         """
         List large blobs
 
-        Usage: ./templedb blob list [--min-size SIZE] [--storage-location LOC] [project]
+        Usage: ./templedb storage blob list [--min-size SIZE] [--storage-location LOC] [project]
         """
         project_filter = args.project if hasattr(args, 'project') and args.project else None
         min_size = args.min_size if hasattr(args, 'min_size') and args.min_size else 10 * 1024 * 1024  # 10MB default
@@ -297,8 +297,8 @@ class BlobCommands(Command):
         Migrate blobs between storage locations
 
         Usage:
-          ./templedb blob migrate --to-external [--min-size SIZE] [project]
-          ./templedb blob migrate --to-inline [--max-size SIZE] [project]
+          ./templedb storage blob migrate --to-external [--min-size SIZE] [project]
+          ./templedb storage blob migrate --to-inline [--max-size SIZE] [project]
         """
         to_external = args.to_external if hasattr(args, 'to_external') and args.to_external else False
         to_inline = args.to_inline if hasattr(args, 'to_inline') and args.to_inline else False
@@ -306,7 +306,7 @@ class BlobCommands(Command):
         if not to_external and not to_inline:
             raise ValidationError(
                 "Must specify either --to-external or --to-inline\n"
-                "Example: ./templedb blob migrate --to-external"
+                "Example: ./templedb storage blob migrate --to-external"
             )
 
         if to_external and to_inline:

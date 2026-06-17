@@ -48,7 +48,7 @@ class DBCommands(Command):
 
         if not Path(db_path).exists():
             print(f"Database not found: {db_path}")
-            print(f"  Create with: templedb db migrate")
+            print(f"  Create with: templedb admin db migrate")
             return 1
 
         m = Migrator(db_path)
@@ -69,7 +69,7 @@ class DBCommands(Command):
                 print(f"  [PENDING] {e['filename']}")
 
         if pending > 0:
-            print(f"\nRun 'templedb db migrate' to apply {pending} pending migration(s)")
+            print(f"\nRun 'templedb admin db migrate' to apply {pending} pending migration(s)")
 
         return 0
 

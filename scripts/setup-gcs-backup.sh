@@ -162,7 +162,7 @@ echo -e "${GREEN}✓${NC} Configuration file created"
 # Test connection
 echo
 echo "Testing connection..."
-if ./templedb backup cloud test gcs --config "$CONFIG_FILE"; then
+if ./templedb storage backup cloud test gcs --config "$CONFIG_FILE"; then
     echo -e "${GREEN}✓${NC} Connection test successful!"
 else
     echo -e "${RED}✗${NC} Connection test failed"
@@ -187,11 +187,11 @@ TEMPLEDB="$HOME/templeDB/templedb"
 
 echo "[$(date)] Starting backup..." >> "$LOG_FILE"
 
-if "$TEMPLEDB" backup cloud push gcs --config "$CONFIG" >> "$LOG_FILE" 2>&1; then
+if "$TEMPLEDB" storage backup cloud push gcs --config "$CONFIG" >> "$LOG_FILE" 2>&1; then
     echo "[$(date)] ✅ Backup successful" >> "$LOG_FILE"
 
     # Cleanup old backups
-    "$TEMPLEDB" backup cloud cleanup gcs --days 30 --config "$CONFIG" >> "$LOG_FILE" 2>&1
+    "$TEMPLEDB" storage backup cloud cleanup gcs --days 30 --config "$CONFIG" >> "$LOG_FILE" 2>&1
 else
     echo "[$(date)] ❌ Backup failed" >> "$LOG_FILE"
     exit 1
@@ -252,11 +252,11 @@ read -r TEST_BACKUP
 if [ "$TEST_BACKUP" = "y" ] || [ "$TEST_BACKUP" = "Y" ]; then
     echo
     echo "Creating test backup..."
-    if ./templedb backup cloud push gcs --config "$CONFIG_FILE"; then
+    if ./templedb storage backup cloud push gcs --config "$CONFIG_FILE"; then
         echo -e "${GREEN}✓${NC} Test backup successful!"
         echo
         echo "Verifying backup in cloud..."
-        ./templedb backup cloud status gcs --config "$CONFIG_FILE"
+        ./templedb storage backup cloud status gcs --config "$CONFIG_FILE"
     else
         echo -e "${RED}✗${NC} Test backup failed"
     fi
@@ -272,13 +272,13 @@ echo "Backup script:      $BACKUP_SCRIPT"
 echo "GCS Bucket:         gs://$BUCKET_NAME"
 echo
 echo "Manual backup:"
-echo "  ./templedb backup cloud push gcs"
+echo "  ./templedb storage backup cloud push gcs"
 echo
 echo "List backups:"
-echo "  ./templedb backup cloud status gcs"
+echo "  ./templedb storage backup cloud status gcs"
 echo
 echo "Restore backup:"
-echo "  ./templedb backup cloud pull gcs BACKUP_ID"
+echo "  ./templedb storage backup cloud pull gcs BACKUP_ID"
 echo
 echo "View logs:"
 echo "  tail -f ~/.local/share/templedb/backup.log"

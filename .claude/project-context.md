@@ -402,9 +402,9 @@ templedb env enter <project> [<env>]       # Enter Nix shell
 **age-encrypted secrets** with profile support:
 
 ```bash
-templedb secret init <project> --age-recipient <key>
-templedb secret edit <project> [--profile <prof>]
-templedb secret export <project> --format <fmt>  # shell/json/yaml/dotenv
+templedb env secretinit <project> --age-recipient <key>
+templedb env secretedit <project> [--profile <prof>]
+templedb env secretexport <project> --format <fmt>  # shell/json/yaml/dotenv
 ```
 
 **Features:**
@@ -572,22 +572,22 @@ templedb env new <proj> <env>      # Create environment
 
 ### Secrets
 ```bash
-templedb secret init <proj> --age-recipient <key>
-templedb secret edit <proj> [--profile <prof>]
-templedb secret export <proj> --format <fmt>
-templedb secret print-raw <proj>
+templedb env secretinit <proj> --age-recipient <key>
+templedb env secretedit <proj> [--profile <prof>]
+templedb env secretexport <proj> --format <fmt>
+templedb env secretprint-raw <proj>
 ```
 
 ### MCP Server
 ```bash
-templedb mcp serve  # Start Model Context Protocol server
+templedb ai mcp serve  # Start Model Context Protocol server
 ```
 
 ### System
 ```bash
 templedb status      # Show database status
 templedb tui         # Launch terminal UI
-templedb backup      # Backup database
+templedb storage backup     # Backup database
 templedb restore     # Restore from backup
 ```
 
@@ -934,8 +934,8 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite "SELECT * FROM projects"
 ./templedb tui
 
 # Launch Claude Code
-./templedb claude                    # Load from file
-./templedb claude --from-db          # Load from database
+./templedb ai claude                    # Load from file
+./templedb ai claude --from-db          # Load from database
 ```
 
 ---

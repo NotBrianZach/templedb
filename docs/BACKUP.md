@@ -6,16 +6,16 @@ Backup TempleDB database to cloud storage (Google Drive, S3, Backblaze) or local
 
 ```bash
 # Local backup
-templedb backup local ~/backups/templedb-$(date +%Y%m%d).sqlite
+templedb storage backup local ~/backups/templedb-$(date +%Y%m%d).sqlite
 
 # Cloud backup (Google Cloud Storage)
-templedb backup cloud push --provider gcs
+templedb storage backup cloud push --provider gcs
 
 # Restore from local backup
-templedb backup restore ~/backups/templedb-20260311.sqlite
+templedb storage backup restore ~/backups/templedb-20260311.sqlite
 
 # Restore from cloud
-templedb backup cloud pull --provider gcs --backup-id <backup-id>
+templedb storage backup cloud pull --provider gcs --backup-id <backup-id>
 ```
 
 ## Local Backup
@@ -24,13 +24,13 @@ templedb backup cloud pull --provider gcs --backup-id <backup-id>
 
 ```bash
 # Create local backup (auto-generated filename)
-templedb backup local
+templedb storage backup local
 
 # Create backup with specific path
-templedb backup local ~/backups/templedb-$(date +%Y%m%d).sqlite
+templedb storage backup local ~/backups/templedb-$(date +%Y%m%d).sqlite
 
 # Restore from backup
-templedb backup restore ~/backups/templedb-20260311.sqlite
+templedb storage backup restore ~/backups/templedb-20260311.sqlite
 ```
 
 ### Manual Backup
@@ -43,7 +43,7 @@ cp ~/.local/share/templedb/templedb.sqlite ~/backups/
 cp ~/.local/share/templedb/templedb.sqlite ~/backups/templedb-$(date +%Y%m%d-%H%M%S).sqlite
 
 # Automated (cron)
-0 2 * * * /path/to/templedb backup local ~/backups/templedb-$(date +\%Y\%m\%d).sqlite
+0 2 * * * /path/to/templedb storage backup local ~/backups/templedb-$(date +\%Y\%m\%d).sqlite
 ```
 
 **Database location:** `~/.local/share/templedb/templedb.sqlite`
@@ -62,31 +62,31 @@ TempleDB supports multiple cloud storage providers for automated backups:
 
 ```bash
 # Initialize GCS backup setup
-templedb backup cloud init gcs
+templedb storage backup cloud init gcs
 
 # Test connection
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud test \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb storage backup cloud test \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 
 # Push backup to cloud
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud push \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb storage backup cloud push \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 
 # List cloud backups
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud status \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb storage backup cloud status \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 
 # Pull backup from cloud
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud pull \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb storage backup cloud pull \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json \
   --backup-id templedb-backups/templedb_backup_YYYYMMDD_HHMMSS.sqlite
 
 # Cleanup old backups
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud cleanup \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb storage backup cloud cleanup \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 ```
@@ -107,20 +107,20 @@ TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud cleanup \
 
 ```bash
 # One-time setup
-templedb backup cloud init google-drive
+templedb storage backup cloud init google-drive
 # Opens browser for OAuth, saves credentials encrypted in database
 
 # Upload backup
-templedb backup cloud push --provider google-drive
+templedb storage backup cloud push --provider google-drive
 
 # List backups
-templedb backup cloud status --provider google-drive
+templedb storage backup cloud status --provider google-drive
 
 # Restore
-templedb backup cloud pull --provider google-drive --backup-id <id>
+templedb storage backup cloud pull --provider google-drive --backup-id <id>
 
 # Automated (cron)
-0 3 * * * /path/to/templedb backup cloud push --provider google-drive
+0 3 * * * /path/to/templedb storage backup cloud push --provider google-drive
 ```
 
 ### AWS S3
@@ -129,20 +129,20 @@ templedb backup cloud pull --provider google-drive --backup-id <id>
 
 ```bash
 # Setup
-templedb backup cloud init --provider s3 \
+templedb storage backup cloud init --provider s3 \
   --bucket my-backups \
   --region us-east-1 \
   --access-key $AWS_ACCESS_KEY \
   --secret-key $AWS_SECRET_KEY
 
 # Upload
-templedb backup cloud push --provider s3
+templedb storage backup cloud push --provider s3
 
 # List
-templedb backup cloud status --provider s3
+templedb storage backup cloud status --provider s3
 
 # Restore
-templedb backup cloud pull --provider s3 --backup-id <id>
+templedb storage backup cloud pull --provider s3 --backup-id <id>
 ```
 
 ### Backblaze B2
@@ -151,13 +151,13 @@ templedb backup cloud pull --provider s3 --backup-id <id>
 
 ```bash
 # Setup
-templedb backup cloud init --provider backblaze \
+templedb storage backup cloud init --provider backblaze \
   --bucket my-backups \
   --key-id $B2_KEY_ID \
   --app-key $B2_APP_KEY
 
 # Upload/list/restore same as S3
-templedb backup cloud push --provider backblaze
+templedb storage backup cloud push --provider backblaze
 ```
 
 ## Encryption
@@ -169,10 +169,10 @@ templedb backup cloud push --provider backblaze
 age-keygen -o ~/.config/templedb/backup-key.txt
 
 # Upload encrypted
-templedb backup upload --provider google-drive --encrypt --age-key ~/.config/templedb/backup-key.txt
+templedb storage backup upload --provider google-drive --encrypt --age-key ~/.config/templedb/backup-key.txt
 
 # Download + decrypt
-templedb backup download --provider google-drive --backup-id <id> \
+templedb storage backup download --provider google-drive --backup-id <id> \
   --decrypt --age-key ~/.config/templedb/backup-key.txt \
   --output ~/restore.sqlite
 ```
@@ -193,11 +193,11 @@ age-plugin-yubikey --generate
 # Stores key on Yubikey, outputs recipient public key
 
 # Backup encrypted to Yubikey
-templedb backup upload --provider google-drive \
+templedb storage backup upload --provider google-drive \
   --encrypt --yubikey --age-recipient <yubikey-public-key>
 
 # Restore (requires Yubikey inserted)
-templedb backup download --provider google-drive --backup-id <id> \
+templedb storage backup download --provider google-drive --backup-id <id> \
   --decrypt --yubikey \
   --output ~/restore.sqlite
 # Prompts for Yubikey PIN
@@ -214,13 +214,13 @@ See [advanced/YUBIKEY.md](advanced/YUBIKEY.md) for full Yubikey setup.
 
 ```bash
 # From local file
-templedb backup restore ~/backups/templedb-20260311.sqlite
+templedb storage backup restore ~/backups/templedb-20260311.sqlite
 
 # From cloud (downloads first)
-templedb backup restore --provider google-drive --backup-id <id>
+templedb storage backup restore --provider google-drive --backup-id <id>
 
 # Restore to different location
-templedb backup restore ~/backups/old.sqlite --output ~/test-restore.sqlite
+templedb storage backup restore ~/backups/old.sqlite --output ~/test-restore.sqlite
 ```
 
 **What restore does:**
@@ -246,13 +246,13 @@ mv ~/.local/share/templedb/templedb.sqlite.before-restore \
 crontab -e
 
 # Daily GCS backup at 3 AM
-0 3 * * * TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt /path/to/templedb backup cloud push --provider gcs --config ~/.config/templedb/gcs_config.json
+0 3 * * * TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt /path/to/templedb storage backup cloud push --provider gcs --config ~/.config/templedb/gcs_config.json
 
 # Weekly Google Drive backup (Sundays at 2 AM)
-0 2 * * 0 /path/to/templedb backup cloud push --provider google-drive
+0 2 * * 0 /path/to/templedb storage backup cloud push --provider google-drive
 
 # Hourly backup for production (S3)
-0 * * * * /path/to/templedb backup cloud push --provider s3 --config ~/.config/templedb/s3_config.json
+0 * * * * /path/to/templedb storage backup cloud push --provider s3 --config ~/.config/templedb/s3_config.json
 ```
 
 ### systemd Timer (Linux)
@@ -265,7 +265,7 @@ Description=TempleDB Cloud Backup
 [Service]
 Type=oneshot
 Environment="TEMPLEDB_AGE_KEY_FILE=%h/.age/key.txt"
-ExecStart=/usr/local/bin/templedb backup cloud push \
+ExecStart=/usr/local/bin/templedb storage backup cloud push \
   --provider gcs \
   --config %h/.config/templedb/gcs_config.json
 ```
@@ -305,7 +305,7 @@ DATE=$(date +%Y%m%d-%H%M%S)
 cp ~/.local/share/templedb/templedb.sqlite $BACKUP_DIR/templedb-$DATE.sqlite
 
 # Upload to cloud (GCS)
-/path/to/templedb backup cloud push \
+/path/to/templedb storage backup cloud push \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 
@@ -319,7 +319,7 @@ echo "Backup complete: templedb-$DATE.sqlite"
 
 ```bash
 # List backups (includes size and timestamp)
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud status \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb storage backup cloud status \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 
@@ -330,7 +330,7 @@ gcloud storage ls -L gs://your-bucket/templedb-backups/
 sqlite3 ~/.local/share/templedb/templedb.sqlite "PRAGMA integrity_check;"
 
 # Test restore to verify backup is valid
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud pull \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb storage backup cloud pull \
   --provider gcs \
   --backup-id <id> \
   --db-path /tmp/test-restore.sqlite
@@ -342,7 +342,7 @@ sqlite3 /tmp/test-restore.sqlite "PRAGMA integrity_check;"
 **Cloud providers:**
 ```bash
 # Automatic cleanup (removes old backups based on retention policy)
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud cleanup \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb storage backup cloud cleanup \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 
@@ -383,12 +383,12 @@ cat > ~/.config/templedb/gcs_config.json << EOF
 EOF
 
 # 4. List available backups
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud status \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb storage backup cloud status \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json
 
 # 5. Restore latest backup
-TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb backup cloud pull \
+TEMPLEDB_AGE_KEY_FILE=~/.age/key.txt templedb storage backup cloud pull \
   --provider gcs \
   --config ~/.config/templedb/gcs_config.json \
   --backup-id templedb-backups/templedb_backup_YYYYMMDD_HHMMSS.sqlite
@@ -442,25 +442,25 @@ SQL
 cp ~/.local/share/templedb/templedb.sqlite ~/backups/
 
 # List available cloud providers
-templedb backup cloud providers
+templedb storage backup cloud providers
 
 # Test cloud connection
-templedb backup cloud test --provider <provider> [--config <file>]
+templedb storage backup cloud test --provider <provider> [--config <file>]
 
 # Create cloud backup
-templedb backup cloud push --provider <provider> [--config <file>]
+templedb storage backup cloud push --provider <provider> [--config <file>]
 
 # List cloud backups
-templedb backup cloud status --provider <provider> [--config <file>]
+templedb storage backup cloud status --provider <provider> [--config <file>]
 
 # Restore from cloud
-templedb backup cloud pull --provider <provider> --backup-id <id> [--config <file>]
+templedb storage backup cloud pull --provider <provider> --backup-id <id> [--config <file>]
 
 # Cleanup old backups
-templedb backup cloud cleanup --provider <provider> [--config <file>]
+templedb storage backup cloud cleanup --provider <provider> [--config <file>]
 
 # Local restore
-templedb backup restore <file>
+templedb storage backup restore <file>
 ```
 
 **Environment variables:**
@@ -537,20 +537,20 @@ gcloud storage buckets add-iam-policy-binding gs://YOUR_BUCKET_NAME \
 
 **"Provider not configured"**
 ```bash
-templedb backup cloud init --provider google-drive
+templedb storage backup cloud init --provider google-drive
 ```
 
 **"OAuth failed" (Google Drive)**
 ```bash
 # Revoke and re-authorize
-templedb backup cloud init --provider google-drive --force
+templedb storage backup cloud init --provider google-drive --force
 ```
 
 **"Restore failed: checksum mismatch"**
 ```bash
 # Backup file corrupted, try different backup
-templedb backup cloud status --provider gcs --config ~/.config/templedb/gcs_config.json
-templedb backup cloud pull --provider gcs --backup-id <different-id>
+templedb storage backup cloud status --provider gcs --config ~/.config/templedb/gcs_config.json
+templedb storage backup cloud pull --provider gcs --backup-id <different-id>
 ```
 
 **"Database locked during backup"**
@@ -560,7 +560,7 @@ templedb status
 # Kill any running processes
 lsof ~/.local/share/templedb/templedb.sqlite
 # Try again
-templedb backup cloud push --provider gcs --config ~/.config/templedb/gcs_config.json
+templedb storage backup cloud push --provider gcs --config ~/.config/templedb/gcs_config.json
 ```
 
 **"Billing account disabled" (GCS)**

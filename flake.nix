@@ -127,6 +127,18 @@
               default = 9420;
               description = "TCP port for sync server.";
             };
+
+            claude.enable = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Generate Claude Code settings with TempleDB hooks.";
+            };
+
+            claude.hookCommand = lib.mkOption {
+              type = lib.types.str;
+              default = "${cfg.package}/bin/templedb ai claude hook";
+              description = "Command to run as Claude Code hook.";
+            };
           };
 
           config = lib.mkIf cfg.enable (lib.mkMerge [
@@ -153,6 +165,71 @@
                   Environment = [ "PYTHONUNBUFFERED=1" ];
                 };
                 Install.WantedBy = [ "default.target" ];
+              };
+            })
+
+            (lib.mkIf cfg.claude.enable {
+              # Generate ~/.claude/settings.json with templedb hooks
+              home.file.".claude/settings.json".text = builtins.toJSON {
+                hooks = {
+                  PreToolUse = [
+                    {
+                      matcher = "Bash";
+                      hooks = [
+                        {
+                          type = "command";
+                          command = cfg.claude.hookCommand;
+                          arguments = ["pre-tool" "bash"];
+                        }
+                      ];
+                    }
+                  ];
+                  PostToolUse = [
+                    {
+                      matcher = "Bash";
+                      hooks = [
+                        {
+                          type = "command";
+                          command = cfg.claude.hookCommand;
+                          arguments = ["post-tool" "bash"];
+                        }
+                      ];
+                    }
+                  ];
+                  Notification = [
+                    {
+                      matcher = "";
+                      hooks = [
+                        {
+                          type = "command";
+                          command = cfg.claude.hookCommand;
+                          arguments = ["notify"];
+                        }
+                      ];
+                    }
+                  ];
+                };
+                permissions = {
+                  allow = [
+                    "Bash(templedb:*)"
+                    "Bash(python3:*)"
+                    "Bash(nix:*)"
+                    "Bash(nix-shell:*)"
+                    "Bash(npm:*)"
+                    "Bash(ls:*)"
+                    "Bash(fusermount:*)"
+                    "Bash(systemctl:*)"
+                    "Bash(journalctl:*)"
+                    "Bash(gh:*)"
+                    "Bash(jq:*)"
+                    "Read(//home/**)"
+                    "Read(//tmp/**)"
+                    "Read(//etc/**)"
+                    "Read(//nix/store/**)"
+                    "WebSearch"
+                  ];
+                  deny = [];
+                };
               };
             })
 

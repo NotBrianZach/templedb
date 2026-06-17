@@ -122,14 +122,14 @@ for var in "${MISSING[@]}"; do
 
     if [ "$HAS_BLOB" = "0" ]; then
       echo "⚠️  No encrypted secret blob exists for this project/profile."
-      echo "   Please run: templedb secret init $PROJECT --profile $PROFILE --age-recipient <key>"
-      echo "   Then: templedb secret edit $PROJECT --profile $PROFILE"
+      echo "   Please run: templedb env secret init $PROJECT --profile $PROFILE --age-recipient <key>"
+      echo "   Then: templedb env secret edit $PROJECT --profile $PROFILE"
       echo "   Add: $var: $value"
       echo ""
       continue
     else
       echo "ℹ️  Secret blob exists. Please add manually with:"
-      echo "   templedb secret edit $PROJECT --profile $PROFILE"
+      echo "   templedb env secret edit $PROJECT --profile $PROFILE"
       echo "   Add to 'env:' section:"
       echo "     $var: <your-value>"
       echo ""
@@ -184,4 +184,4 @@ echo "✅ Configuration complete!"
 echo ""
 echo "To verify:"
 echo "  templedb env ls"
-echo "  templedb secret export $PROJECT --profile $PROFILE"
+echo "  templedb env secret export $PROJECT --profile $PROFILE"

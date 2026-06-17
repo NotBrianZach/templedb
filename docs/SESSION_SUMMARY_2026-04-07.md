@@ -169,7 +169,7 @@ sqlite3 ~/.templedb/templedb.db "SELECT name FROM sqlite_master WHERE type='tabl
 
 1. **Test Vibe Enhancement**
    ```bash
-   ./templedb vibe start myproject
+   ./templedb ai vibestart myproject
    # Verify SESSION RULES appear in prompt
    ```
 

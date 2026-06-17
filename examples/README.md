@@ -132,13 +132,13 @@ python src/generator.py
 
 ```bash
 # Initialize secrets
-templedb secret init data-pipeline --age-recipient <your-age-key>
+templedb env secretinit data-pipeline --age-recipient <your-age-key>
 
 # Interactive variable prompting
 ./prompt_missing_vars.sh data-pipeline dev
 
 # Export secrets to environment
-eval "$(templedb secret export data-pipeline --format shell)"
+eval "$(templedb env secretexport data-pipeline --format shell)"
 ```
 
 ---

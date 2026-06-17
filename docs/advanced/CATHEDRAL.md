@@ -223,16 +223,16 @@ my-project.cathedral/
 **Push to Cathedral**
 ```bash
 # Export project to .cathedral package
-templedb cathedral export my-project
+templedb storage cathedralexport my-project
 
 # Push to CathedralDB server
-templedb cathedral push my-project \
+templedb storage cathedralpush my-project \
   --server https://cathedral.example.com \
   --visibility public \
   --tags "react,frontend,web"
 
 # Push specific version
-templedb cathedral push my-project:v1.2.0
+templedb storage cathedralpush my-project:v1.2.0
 ```
 
 ### 2. Project Discovery
@@ -240,16 +240,16 @@ templedb cathedral push my-project:v1.2.0
 **Browse and Search**
 ```bash
 # List public projects
-templedb cathedral list
+templedb storage cathedrallist
 
 # Search projects
-templedb cathedral search "react authentication"
+templedb storage cathedralsearch "react authentication"
 
 # View project details
-templedb cathedral show user/my-project
+templedb storage cathedralshow user/my-project
 
 # List project versions
-templedb cathedral versions user/my-project
+templedb storage cathedralversions user/my-project
 ```
 
 ### 3. Project Import
@@ -257,13 +257,13 @@ templedb cathedral versions user/my-project
 **Pull from Cathedral**
 ```bash
 # Clone project to local TempleDB
-templedb cathedral pull user/my-project
+templedb storage cathedralpull user/my-project
 
 # Import specific version
-templedb cathedral pull user/my-project:v1.0.0
+templedb storage cathedralpull user/my-project:v1.0.0
 
 # Fork project (create your own copy)
-templedb cathedral fork user/my-project \
+templedb storage cathedralfork user/my-project \
   --as my-forked-project
 ```
 
@@ -272,16 +272,16 @@ templedb cathedral fork user/my-project \
 **Bi-directional Sync**
 ```bash
 # Initial link to remote
-templedb cathedral link my-project user/my-project
+templedb storage cathedrallink my-project user/my-project
 
 # Pull updates from cathedral
-templedb cathedral sync my-project --pull
+templedb storage cathedralsync my-project --pull
 
 # Push local changes to cathedral
-templedb cathedral sync my-project --push
+templedb storage cathedralsync my-project --push
 
 # Automatic sync (bidirectional)
-templedb cathedral sync my-project --auto
+templedb storage cathedralsync my-project --auto
 ```
 
 ### 5. Team Collaboration
@@ -289,7 +289,7 @@ templedb cathedral sync my-project --auto
 **Access Control**
 ```bash
 # Add collaborator
-templedb cathedral collaborator add \
+templedb storage cathedralcollaborator add \
   user/my-project \
   --user teammate@example.com \
   --role contributor
@@ -297,10 +297,10 @@ templedb cathedral collaborator add \
 # Roles: owner, maintainer, contributor, reader
 
 # Create organization
-templedb cathedral org create mycompany
+templedb storage cathedralorg create mycompany
 
 # Add project to org
-templedb cathedral project move my-project mycompany/
+templedb storage cathedralproject move my-project mycompany/
 ```
 
 ### 6. Migration
@@ -308,16 +308,16 @@ templedb cathedral project move my-project mycompany/
 **Cross-Platform Migration**
 ```bash
 # Export entire TempleDB
-templedb cathedral export-all \
+templedb storage cathedralexport-all \
   --output ~/backups/templedb-export.tar.gz
 
 # Import to new machine
-templedb cathedral import-all \
+templedb storage cathedralimport-all \
   --input ~/backups/templedb-export.tar.gz \
   --merge  # Merge with existing projects
 
 # Selective migration
-templedb cathedral migrate \
+templedb storage cathedralmigrate \
   --projects "project1,project2,project3" \
   --include-files \
   --include-history
@@ -774,12 +774,12 @@ Organization Roles:
 
 ```bash
 # Export with secrets (encrypted)
-templedb cathedral export my-project \
+templedb storage cathedralexport my-project \
   --include-secrets \
   --encrypt-for age1ql3z... age1abc... age1xyz...
 
 # Import and decrypt (requires age key)
-templedb cathedral import user/my-project.cathedral \
+templedb storage cathedralimport user/my-project.cathedral \
   --decrypt-secrets \
   --age-key ~/.config/age/keys.txt
 ```
@@ -788,10 +788,10 @@ templedb cathedral import user/my-project.cathedral \
 
 ```bash
 # Verify package signature
-templedb cathedral verify user/my-project.cathedral
+templedb storage cathedralverify user/my-project.cathedral
 
 # Check package integrity
-templedb cathedral check user/my-project.cathedral
+templedb storage cathedralcheck user/my-project.cathedral
 ```
 
 ---
@@ -841,19 +841,19 @@ templedb cathedral check user/my-project.cathedral
 
 ```bash
 # Export from TempleDB
-templedb cathedral export my-project \
+templedb storage cathedralexport my-project \
   --output ~/exports/my-project.cathedral
 
 # Push to CathedralDB
-templedb cathedral push ~/exports/my-project.cathedral \
+templedb storage cathedralpush ~/exports/my-project.cathedral \
   --server https://cathedral.example.com
 
 # Pull to different machine
-templedb cathedral pull user/my-project \
+templedb storage cathedralpull user/my-project \
   --server https://cathedral.example.com
 
 # Verify identical state
-templedb cathedral diff my-project user/my-project
+templedb storage cathedraldiff my-project user/my-project
 ```
 
 ### Schema Migration
@@ -883,13 +883,13 @@ templedb cathedral diff my-project user/my-project
 
 ```bash
 # Conflict detection
-templedb cathedral sync my-project --check
+templedb storage cathedralsync my-project --check
 
 # Manual resolution
-templedb cathedral conflicts my-project
+templedb storage cathedralconflicts my-project
 
 # Resolution strategies
-templedb cathedral sync my-project \
+templedb storage cathedralsync my-project \
   --strategy theirs  # Use remote version
   --strategy ours    # Use local version
   --strategy merge   # Attempt auto-merge
@@ -948,7 +948,7 @@ templedb cathedral sync my-project \
 │  #react #frontend #web #spa                            │
 │                                                         │
 │  📥 Install                                             │
-│  $ templedb cathedral pull user/my-project             │
+│  $ templedb storage cathedralpull user/my-project             │
 │                                                         │
 │  🔗 Repository                                          │
 │  https://github.com/user/my-project                    │
@@ -1121,7 +1121,7 @@ bucket/
 **Scenario**: Sharing best-practice project configurations
 
 - **Before**: README with manual setup instructions
-- **After**: `templedb cathedral pull template/react-app`
+- **After**: `templedb storage cathedralpull template/react-app`
 - **Benefit**: Instant project setup with all tools configured
 
 ### 3. Consulting Teams
@@ -1262,10 +1262,10 @@ templedb help | grep cathedral
 
 ```bash
 # Export to current directory
-templedb cathedral export my-project
+templedb storage cathedralexport my-project
 
 # Export to specific directory
-templedb cathedral export my-project --output ~/exports/
+templedb storage cathedralexport my-project --output ~/exports/
 ```
 
 This creates a `.cathedral` directory containing:
@@ -1278,7 +1278,7 @@ This creates a `.cathedral` directory containing:
 ### Verify a Package
 
 ```bash
-templedb cathedral verify my-project.cathedral
+templedb storage cathedralverify my-project.cathedral
 ```
 
 Output:
@@ -1304,13 +1304,13 @@ Output:
 
 ```bash
 # Import with original slug
-templedb cathedral import my-project.cathedral
+templedb storage cathedralimport my-project.cathedral
 
 # Import with a different slug
-templedb cathedral import my-project.cathedral --as my-fork
+templedb storage cathedralimport my-project.cathedral --as my-fork
 
 # Overwrite existing project
-templedb cathedral import my-project.cathedral --overwrite
+templedb storage cathedralimport my-project.cathedral --overwrite
 ```
 
 ## Common Workflows
@@ -1319,31 +1319,31 @@ templedb cathedral import my-project.cathedral --overwrite
 
 ```bash
 # Backup a project
-templedb cathedral export important-project --output ~/backups/
+templedb storage cathedralexport important-project --output ~/backups/
 
 # Later, restore it (on same or different machine)
-templedb cathedral import ~/backups/important-project.cathedral
+templedb storage cathedralimport ~/backups/important-project.cathedral
 ```
 
 ### 2. Share with Team
 
 ```bash
 # Export project
-templedb cathedral export team-project --output ~/shared/
+templedb storage cathedralexport team-project --output ~/shared/
 
 # Compress for sharing
 tar -czf team-project.tar.gz team-project.cathedral/
 
 # Team member imports
 tar -xzf team-project.tar.gz
-templedb cathedral import team-project.cathedral
+templedb storage cathedralimport team-project.cathedral
 ```
 
 ### 3. Fork a Project
 
 ```bash
 # Import someone else's project with your own slug
-templedb cathedral import upstream-project.cathedral --as my-fork
+templedb storage cathedralimport upstream-project.cathedral --as my-fork
 
 # Now you have an independent copy
 templedb project list | grep my-fork
@@ -1353,24 +1353,24 @@ templedb project list | grep my-fork
 
 ```bash
 # On old machine:
-templedb cathedral export work-project --output /tmp/
+templedb storage cathedralexport work-project --output /tmp/
 
 # Copy to new machine (via USB, rsync, etc)
 scp -r /tmp/work-project.cathedral new-machine:~/
 
 # On new machine:
-templedb cathedral import ~/work-project.cathedral
+templedb storage cathedralimport ~/work-project.cathedral
 ```
 
 ### 5. Project Templates
 
 ```bash
 # Create a template project
-templedb cathedral export react-template
+templedb storage cathedralexport react-template
 
 # Share the template
 # Others can use it as a starting point
-templedb cathedral import react-template.cathedral --as my-new-app
+templedb storage cathedralimport react-template.cathedral --as my-new-app
 ```
 
 ## What Gets Exported?
@@ -1530,7 +1530,7 @@ projects=$(templedb project list | awk 'NR>2 {print $1}')
 
 for project in $projects; do
     echo "Backing up: $project"
-    templedb cathedral export "$project" --output "$BACKUP_DIR"
+    templedb storage cathedralexport "$project" --output "$BACKUP_DIR"
 done
 
 # Compress backups
@@ -1545,13 +1545,13 @@ echo "✅ Backup complete: ~/backups/templedb/$(date +%Y-%m-%d).tar.gz"
 
 ```bash
 # Create template projects
-templedb cathedral export react-starter --output ~/templates/
-templedb cathedral export python-api --output ~/templates/
-templedb cathedral export nextjs-app --output ~/templates/
+templedb storage cathedralexport react-starter --output ~/templates/
+templedb storage cathedralexport python-api --output ~/templates/
+templedb storage cathedralexport nextjs-app --output ~/templates/
 
 # Use template to start new project
 cd ~/templates
-templedb cathedral import react-starter.cathedral --as my-new-react-app
+templedb storage cathedralimport react-starter.cathedral --as my-new-react-app
 
 # Customize your project...
 ```
@@ -1560,15 +1560,15 @@ templedb cathedral import react-starter.cathedral --as my-new-react-app
 
 ```bash
 # Machine A: Export
-templedb cathedral export work-project --output /tmp/
+templedb storage cathedralexport work-project --output /tmp/
 rsync -avz /tmp/work-project.cathedral laptop:~/sync/
 
 # Machine B (laptop): Import
-templedb cathedral import ~/sync/work-project.cathedral --overwrite
+templedb storage cathedralimport ~/sync/work-project.cathedral --overwrite
 
 # Continue working...
 # Later, export changes and sync back
-templedb cathedral export work-project --output /tmp/
+templedb storage cathedralexport work-project --output /tmp/
 rsync -avz /tmp/work-project.cathedral desktop:~/sync/
 ```
 
@@ -1699,7 +1699,7 @@ logger.error(f"❌ Project not found")
 
 **Export Command**:
 ```bash
-templedb cathedral export woofs_projects
+templedb storage cathedralexport woofs_projects
 ```
 
 **Output**:
@@ -1732,7 +1732,7 @@ templedb cathedral export woofs_projects
 
 **Import Command**:
 ```bash
-templedb cathedral import woofs_projects.cathedral --as woofs_test
+templedb storage cathedralimport woofs_projects.cathedral --as woofs_test
 ```
 
 **Output**:

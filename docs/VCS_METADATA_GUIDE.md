@@ -215,10 +215,10 @@ Commit metadata is **included** in Cathedral exports:
 
 ```bash
 # Export project with full commit history and metadata
-templedb cathedral export my-project --include-vcs
+templedb storage cathedralexport my-project --include-vcs
 
 # Import on another machine
-templedb cathedral import my-project.cathedral
+templedb storage cathedralimport my-project.cathedral
 ```
 
 The metadata travels with your code!

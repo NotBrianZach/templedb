@@ -2558,10 +2558,6 @@ CREATE INDEX IF NOT EXISTS idx_vcs_working_state_project ON vcs_working_state(pr
 
 CREATE INDEX IF NOT EXISTS idx_vcs_working_state_state ON vcs_working_state(state);
 
-CREATE INDEX IF NOT EXISTS idx_vibe_browser_session ON vibe_browser_sessions(session_id);
-
-CREATE INDEX IF NOT EXISTS idx_vibe_browser_token ON vibe_browser_sessions(session_token);
-
 CREATE INDEX IF NOT EXISTS idx_vibe_changes_file ON vibe_session_changes(file_path);
 
 CREATE INDEX IF NOT EXISTS idx_vibe_changes_session ON vibe_session_changes(session_id);

@@ -71,7 +71,7 @@ The Vibe Interaction Capture system logs every prompt, response, and tool use du
 ### 1. Apply the Migration
 
 ```bash
-templedb migration apply 030
+templedb deploy migrationapply 030
 ```
 
 This creates all the necessary tables and views.

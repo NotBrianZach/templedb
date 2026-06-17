@@ -54,11 +54,11 @@ templedb deploy package mygame-server --format docker
 
 ```bash
 # Development (local, unencrypted)
-templedb secret set myproject DATABASE_URL sqlite:///dev.db --env development
+templedb env secret set myproject DATABASE_URL sqlite:///dev.db --env development
 
 # Production (encrypted)
-templedb secret set myproject DATABASE_URL postgresql://prod.db --env production
-templedb secret set myproject OPENROUTER_API_KEY sk-... --env production
+templedb env secret set myproject DATABASE_URL postgresql://prod.db --env production
+templedb env secret set myproject OPENROUTER_API_KEY sk-... --env production
 ```
 
 ### Use Secrets in Code
@@ -96,13 +96,13 @@ templedb deploy vercel myproject --sync-secrets
 
 ```bash
 # Source system
-templedb cathedral export myproject --output /tmp/myproject.cathedral --compress
+templedb storage cathedral export myproject --output /tmp/myproject.cathedral --compress
 
 # Transfer
 scp /tmp/myproject.cathedral deploy@target:/opt/cathedral/
 
 # Target system
-templedb cathedral import /opt/cathedral/myproject.cathedral
+templedb storage cathedral import /opt/cathedral/myproject.cathedral
 templedb deploy run myproject --target production
 ```
 
@@ -144,20 +144,20 @@ templedb deploy push myproject --target production --strategy nix-closure
 
 ```bash
 # Auto-apply pending migrations
-templedb migration apply myproject --target production
+templedb deploy migration apply myproject --target production
 
 # Check migration status
-templedb migration status myproject --target production
+templedb deploy migration status myproject --target production
 ```
 
 ### SQLite → PostgreSQL Migration
 
 ```bash
 # Generate PostgreSQL schema from SQLite
-templedb migration convert myproject --from sqlite --to postgresql
+templedb deploy migration convert myproject --from sqlite --to postgresql
 
 # Migrate data
-templedb migration migrate-data myproject --from sqlite:///dev.db --to $DATABASE_URL
+templedb deploy migration migrate-data myproject --from sqlite:///dev.db --to $DATABASE_URL
 ```
 
 ---
@@ -279,7 +279,7 @@ templedb deploy supabase myproject --function-name my-function
 **Fix**:
 ```bash
 # Set the secret
-templedb secret set myproject DATABASE_URL postgresql://...
+templedb env secret set myproject DATABASE_URL postgresql://...
 
 # Or use environment variable
 export DATABASE_URL=postgresql://...
@@ -297,13 +297,13 @@ echo "DATABASE_URL=postgresql://..." >> .env
 **Fix**:
 ```bash
 # Check target configuration
-templedb target show myproject production
+templedb deploy targets show myproject production
 
 # Test SSH connection
-ssh $(templedb target show myproject production --field host)
+ssh $(templedb deploy targets show myproject production --field host)
 
 # Update target host
-templedb target update myproject production --host new-host.com
+templedb deploy targets update myproject production --host new-host.com
 ```
 
 ### Deployment Cache Miss
@@ -334,6 +334,6 @@ templedb deploy build myproject --target production --cache-only
 ---
 
 **Quick Start**:
-1. Add deployment target: `templedb target add myproject production --host deploy.example.com`
-2. Set secrets: `templedb secret set myproject DATABASE_URL postgresql://...`
+1. Add deployment target: `templedb deploy targets add myproject production --host deploy.example.com`
+2. Set secrets: `templedb env secret set myproject DATABASE_URL postgresql://...`
 3. Deploy: `templedb deploy run myproject --target production`

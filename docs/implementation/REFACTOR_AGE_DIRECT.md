@@ -122,12 +122,12 @@ Recommend: **Option 3 (lazy migration)** - easiest for users
 ### 4. CLI Changes
 
 **Remove:**
-- `templedb secret print-sops` command (or rename to `print-raw`)
+- `templedb env secretprint-sops` command (or rename to `print-raw`)
 
 **Keep:**
-- `templedb secret init`
-- `templedb secret edit`
-- `templedb secret export`
+- `templedb env secretinit`
+- `templedb env secretedit`
+- `templedb env secretexport`
 
 ### 5. Documentation Updates
 

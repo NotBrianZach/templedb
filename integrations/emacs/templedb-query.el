@@ -31,7 +31,7 @@
 ;;
 ;;   From vterm running Claude:
 ;;     You can just say "open the bza files with character analysis prompts"
-;;     and Claude will use the templedb query-open command automatically
+;;     and Claude will use the templedb search query-open command automatically
 ;;
 ;; Examples:
 ;;   - "open authentication code"
@@ -124,7 +124,7 @@ Returns list of file paths.
 LIMIT is the maximum number of results (default: `templedb-query-default-limit`)."
   (let* ((limit (or limit templedb-query-default-limit))
          (results (templedb-query--run-command-json
-                   "query" project query
+                   "search" "query" project query
                    "--json"
                    "--limit" (number-to-string limit))))
     (when results
@@ -230,7 +230,7 @@ If PROJECT is nil, auto-detect from current directory or prompt."
 ;;; Integration with completing-read
 
 (defvar templedb-query--history nil
-  "History for templedb query commands.")
+  "History for templedb search query commands.")
 
 ;;;###autoload
 (defun templedb-query-with-completion ()

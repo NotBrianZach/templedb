@@ -44,10 +44,10 @@ TempleDB currently provides:
 
 ```bash
 # Export project
-templedb cathedral export myproject --output ./packages/
+templedb storage cathedral export myproject --output ./packages/
 
 # Import on target system
-templedb cathedral import myproject.cathedral
+templedb storage cathedral import myproject.cathedral
 ```
 
 #### 2. **Deployment Targets**
@@ -213,13 +213,13 @@ Different project types handle state differently:
 **Implementation**:
 ```bash
 # Source system
-templedb cathedral export myproject --compress
+templedb storage cathedral export myproject --compress
 
 # Transfer
 scp myproject.cathedral deploy@target:/tmp/
 
 # Target system (with TempleDB)
-templedb cathedral import /tmp/myproject.cathedral
+templedb storage cathedral import /tmp/myproject.cathedral
 templedb deploy run myproject --target production
 ```
 
@@ -501,7 +501,7 @@ def get_config():
             "OPENROUTER_API_KEY not found. Set it via:\n"
             "  1. Environment: export OPENROUTER_API_KEY=sk-...\n"
             "  2. Config file: ~/.config/bza/config.json\n"
-            "  3. TempleDB: templedb secret set bza OPENROUTER_API_KEY sk-..."
+            "  3. TempleDB: templedb env secret set bza OPENROUTER_API_KEY sk-..."
         )
 
     return config
@@ -568,12 +568,12 @@ sudo mv bza /usr/local/bin/
 
 ```bash
 # Create migration from TempleDB schema
-templedb migration generate woofs_projects \
+templedb deploy migration generate woofs_projects \
   --from-schema schema.sql \
   --output migrations/001_initial.sql
 
 # Apply migrations to target database
-templedb migration apply woofs_projects \
+templedb deploy migration apply woofs_projects \
   --target production \
   --connection $DATABASE_URL
 ```
@@ -692,7 +692,7 @@ class Config:
         raise ValueError(
             "DATABASE_URL not configured. Set via:\n"
             "  1. Environment: DATABASE_URL=postgresql://...\n"
-            "  2. TempleDB: templedb secret set woofs_projects DATABASE_URL postgresql://..."
+            "  2. TempleDB: templedb env secret set woofs_projects DATABASE_URL postgresql://..."
         )
 
     @staticmethod
@@ -952,7 +952,7 @@ def get_secret(key: str, project: Optional[str] = None) -> str:
     # 5. Error
     raise ValueError(
         f"Secret '{key}' not found. Set it via:\n"
-        f"  • TempleDB: templedb secret set {project or 'PROJECT'} {key} VALUE\n"
+        f"  • TempleDB: templedb env secret set {project or 'PROJECT'} {key} VALUE\n"
         f"  • Environment: export {key}=VALUE\n"
         f"  • File: echo '{key}=VALUE' >> .env\n"
         f"  • Config: ~/.config/{project or 'app'}/config.json"
@@ -972,7 +972,7 @@ export function getSecret(key, project = null) {
   if (project) {
     try {
       const result = execSync(
-        `templedb secret get ${project} ${key}`,
+        `templedb env secret get ${project} ${key}`,
         { encoding: 'utf-8', stdio: 'pipe' }
       );
       if (result.trim()) return result.trim();
@@ -1001,7 +1001,7 @@ export function getSecret(key, project = null) {
   // 5. Error
   throw new Error(
     `Secret '${key}' not found. Set it via:\n` +
-    `  • TempleDB: templedb secret set ${project || 'PROJECT'} ${key} VALUE\n` +
+    `  • TempleDB: templedb env secret set ${project || 'PROJECT'} ${key} VALUE\n` +
     `  • Environment: export ${key}=VALUE\n` +
     `  • File: echo '${key}=VALUE' >> .env\n` +
     `  • Config: ~/.config/${project || 'app'}/config.json`
@@ -1028,13 +1028,13 @@ secrets/
 **Usage**:
 ```bash
 # Development (unencrypted, can commit to VCS)
-templedb secret set myproject DATABASE_URL sqlite:///dev.db --env development
+templedb env secret set myproject DATABASE_URL sqlite:///dev.db --env development
 
 # Production (encrypted with age)
-templedb secret set myproject DATABASE_URL postgresql://... --env production
+templedb env secret set myproject DATABASE_URL postgresql://... --env production
 
 # Retrieve
-templedb secret get myproject DATABASE_URL --env production
+templedb env secret get myproject DATABASE_URL --env production
 ```
 
 ### Secret Injection at Deployment
@@ -1060,7 +1060,7 @@ ExecStart=/usr/local/bin/myproject
 templedb deploy vercel myproject --sync-secrets
 
 # Internally runs:
-# vercel env add DATABASE_URL production < (templedb secret get ...)
+# vercel env add DATABASE_URL production < (templedb env secret get ...)
 ```
 
 ---
@@ -1098,12 +1098,12 @@ myproject.cathedral        # Tarball or directory
 
 ```bash
 # Full export
-templedb cathedral export myproject \
+templedb storage cathedral export myproject \
   --output /tmp/myproject.cathedral \
   --compress
 
 # Selective export (exclude large assets)
-templedb cathedral export myproject \
+templedb storage cathedral export myproject \
   --exclude '*.mp4' \
   --exclude 'node_modules/' \
   --exclude-history  # Omit VCS history for faster transfer
@@ -1128,17 +1128,17 @@ aws s3 cp s3://deployments/myproject-2026-03-21.cathedral ./
 **Option C: Cathedral Registry** (future enhancement)
 ```bash
 # Push to cathedral registry
-templedb cathedral push myproject --registry https://cathedral.example.com
+templedb storage cathedral push myproject --registry https://cathedral.example.com
 
 # Pull on target
-templedb cathedral pull myproject --registry https://cathedral.example.com
+templedb storage cathedral pull myproject --registry https://cathedral.example.com
 ```
 
 #### 3. Import on Target TempleDB
 
 ```bash
 # Import cathedral
-templedb cathedral import /opt/cathedral/myproject.cathedral
+templedb storage cathedral import /opt/cathedral/myproject.cathedral
 
 # Verify
 templedb project show myproject
@@ -1364,7 +1364,7 @@ Tasks:
    - Document secret setup
 
 4. ✅ **Cathedral Remote Sync** (enhancement)
-   - `templedb cathedral push --target ssh://user@host`
+   - `templedb storage cathedral push --target ssh://user@host`
    - Automatic transfer + import on target
 
 **Deliverables**:
@@ -1407,7 +1407,7 @@ Tasks:
 Tasks:
 1. ✅ **Migration Tracking**
    - Track applied migrations per target
-   - `templedb migration status <project> --target production`
+   - `templedb deploy migration status <project> --target production`
 
 2. ✅ **SQLite → PostgreSQL Migration**
    - Schema converter
@@ -1420,8 +1420,8 @@ Tasks:
    - RLS policy generation
 
 **Deliverables**:
-- [ ] `templedb migration apply <project> --target <target>`
-- [ ] `templedb migration convert <project> --from sqlite --to postgresql`
+- [ ] `templedb deploy migration apply <project> --target <target>`
+- [ ] `templedb deploy migration convert <project> --from sqlite --to postgresql`
 - [ ] Supabase CLI integration
 
 ### Phase 4: CI/CD Integration (Week 6)

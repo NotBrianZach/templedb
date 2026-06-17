@@ -40,7 +40,7 @@ class VibeCommands(Command):
                 display = f"{slug}" + (f" ({name})" if name != slug else "")
                 print(f"  • {display}  [{file_count} files]")
             print()
-            print(f"Usage: templedb vibe start <project>")
+            print(f"Usage: templedb ai vibe start <project>")
             print()
 
         finally:

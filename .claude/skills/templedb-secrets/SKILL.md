@@ -5,8 +5,8 @@ description: |
   Use for: secrets management, environment variables, missing var prompts, Yubikey/FIDO2 integration, SOPS/age encryption.
   Activate when user mentions: secrets, environment variables, keys, encryption, Yubikey, FIDO, credentials, passwords, tokens, API keys.
 allowed-tools:
-  - Bash(templedb secret:*)
-  - Bash(./templedb secret:*)
+  - Bash(templedb env secret:*)
+  - Bash(./templedb env secret:*)
   - Bash(templedb env:*)
   - Bash(./templedb env:*)
   - Bash(sqlite3:*)
@@ -70,7 +70,7 @@ chmod 400 ~/.config/sops/age/keys.txt
 cat ~/.config/sops/age/keys.txt | grep "# public key:" | cut -d: -f2 | xargs
 
 # Initialize secrets for project
-templedb secret init my-project \
+templedb env secretinit my-project \
   --profile production \
   --age-recipient age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
@@ -85,7 +85,7 @@ templedb secret init my-project \
 
 ```bash
 # Edit secrets in $EDITOR (vim, nano, etc.)
-templedb secret edit my-project --profile production
+templedb env secretedit my-project --profile production
 ```
 
 **Workflow:**
@@ -107,24 +107,24 @@ templedb secret edit my-project --profile production
 
 ```bash
 # Export as shell variables
-templedb secret export my-project --profile production --format shell
+templedb env secretexport my-project --profile production --format shell
 # Output:
 # export DATABASE_URL=postgresql://...
 # export API_KEY=sk-1234567890abcdef
 # export JWT_SECRET=super-secret-key-here
 
 # Export as JSON
-templedb secret export my-project --profile production --format json
+templedb env secretexport my-project --profile production --format json
 
 # Export as .env format
-templedb secret export my-project --profile production --format dotenv
+templedb env secretexport my-project --profile production --format dotenv
 
 # Export as YAML
-templedb secret export my-project --profile production --format yaml
+templedb env secretexport my-project --profile production --format yaml
 ```
 
 **Use cases:**
-- Load secrets into shell: `eval "$(templedb secret export my-project --format shell)"`
+- Load secrets into shell: `eval "$(templedb env secretexport my-project --format shell)"`
 - CI/CD integration: Export as dotenv
 - Backup/sharing: Export as YAML (still encrypted in DB)
 
@@ -132,7 +132,7 @@ templedb secret export my-project --profile production --format yaml
 
 ```bash
 # View raw SOPS-encrypted YAML (for debugging)
-templedb secret print-sops my-project --profile production
+templedb env secretprint-sops my-project --profile production
 ```
 
 ---
@@ -284,7 +284,7 @@ for var in $REQUIRED; do
       # Add to encrypted secrets
       echo "Adding to encrypted secrets..."
       # TODO: Implement adding to secret blob
-      templedb secret edit "$PROJECT" --profile "$PROFILE"
+      templedb env secretedit "$PROJECT" --profile "$PROFILE"
     else
       # Add as regular env var
       templedb env add "$var" "$value" \
@@ -358,7 +358,7 @@ age-plugin-yubikey --generate
 # Recipient: age1yubikey1q2w3e4r5t6y7u8i9o0p...
 
 # Initialize secrets with Yubikey recipient
-templedb secret init my-project \
+templedb env secretinit my-project \
   --profile production \
   --age-recipient age1yubikey1q2w3e4r5t6y7u8i9o0p...
 ```
@@ -389,7 +389,7 @@ When secrets require Yubikey decryption:
 
 ```bash
 # User runs:
-templedb secret export my-project --profile production
+templedb env secretexport my-project --profile production
 
 # System prompts:
 # 🔑 Yubikey required for decryption
@@ -444,7 +444,7 @@ age-plugin-yubikey --generate  # Bob's key:   age1yubikey1bbbb...
 age-plugin-yubikey --generate  # Carol's key: age1yubikey1cccc...
 
 # Initialize with multiple recipients
-templedb secret init my-project \
+templedb env secretinit my-project \
   --profile production \
   --age-recipient age1yubikey1aaaa... \
   --age-recipient age1yubikey1bbbb... \
@@ -498,7 +498,7 @@ chmod 644 ~/.config/sops/age/keys.txt  # NEVER DO THIS
 ```bash
 # Regular rotation schedule
 # Edit secrets and add rotation date
-templedb secret edit my-project --profile production
+templedb env secretedit my-project --profile production
 
 # In YAML, add:
 # meta:
@@ -520,12 +520,12 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite "
 
 ```bash
 # Use profiles to separate secret access
-templedb secret init my-project --profile dev      # Development secrets
-templedb secret init my-project --profile staging  # Staging secrets
-templedb secret init my-project --profile prod     # Production secrets
+templedb env secretinit my-project --profile dev      # Development secrets
+templedb env secretinit my-project --profile staging  # Staging secrets
+templedb env secretinit my-project --profile prod     # Production secrets
 
 # Only load what's needed
-templedb secret export my-project --profile dev     # NOT prod!
+templedb env secretexport my-project --profile dev     # NOT prod!
 ```
 
 ### 4. Audit Logging
@@ -558,7 +558,7 @@ age-keygen -o ~/.config/sops/age/keys-prod.txt
 
 # Use SOPS_AGE_KEY_FILE to specify key
 export SOPS_AGE_KEY_FILE=~/.config/sops/age/keys-prod.txt
-templedb secret export my-project --profile prod
+templedb env secretexport my-project --profile prod
 ```
 
 ---
@@ -579,13 +579,13 @@ fi
 PUB_KEY=$(grep "public key:" ~/.config/sops/age/keys.txt | cut -d: -f2 | xargs)
 
 # 3. Initialize secrets
-templedb secret init my-project --profile production --age-recipient "$PUB_KEY"
+templedb env secretinit my-project --profile production --age-recipient "$PUB_KEY"
 
 # 4. Edit and add secrets
-templedb secret edit my-project --profile production
+templedb env secretedit my-project --profile production
 
 # 5. Verify
-templedb secret export my-project --profile production --format yaml
+templedb env secretexport my-project --profile production --format yaml
 ```
 
 ### Workflow 2: Team Onboarding
@@ -598,12 +598,12 @@ NEW_MEMBER_KEY=$(grep "public key:" ~/.config/sops/age/keys.txt | cut -d: -f2 | 
 
 # 2. Add their key as recipient
 # (Re-encrypt secrets with additional recipient)
-templedb secret export my-project --profile prod --format yaml > /tmp/secrets.yaml
+templedb env secretexport my-project --profile prod --format yaml > /tmp/secrets.yaml
 sops --add-age "$NEW_MEMBER_KEY" /tmp/secrets.yaml
-templedb secret init my-project --profile prod --age-recipient "$NEW_MEMBER_KEY"
+templedb env secretinit my-project --profile prod --age-recipient "$NEW_MEMBER_KEY"
 
 # 3. They can now decrypt
-templedb secret export my-project --profile prod
+templedb env secretexport my-project --profile prod
 ```
 
 ### Workflow 3: Yubikey-Protected Production
@@ -614,10 +614,10 @@ age-plugin-yubikey --generate
 YUBIKEY_RECIPIENT=$(age-plugin-yubikey --list | grep "Recipient:" | awk '{print $2}')
 
 # 2. Initialize production secrets with Yubikey
-templedb secret init my-project --profile prod --age-recipient "$YUBIKEY_RECIPIENT"
+templedb env secretinit my-project --profile prod --age-recipient "$YUBIKEY_RECIPIENT"
 
 # 3. Edit secrets (will require Yubikey touch)
-templedb secret edit my-project --profile prod
+templedb env secretedit my-project --profile prod
 
 # 4. Deploy (requires physical Yubikey)
 templedb deploy my-project prod --require-hardware-key
@@ -635,7 +635,7 @@ chmod 400 /tmp/age-key.txt
 export SOPS_AGE_KEY_FILE=/tmp/age-key.txt
 
 # 3. Export secrets for deployment
-templedb secret export my-project --profile prod --format dotenv > .env
+templedb env secretexport my-project --profile prod --format dotenv > .env
 
 # 4. Deploy application
 ./deploy.sh
@@ -755,9 +755,9 @@ ORDER BY ts DESC;
 
 ```bash
 # Secrets
-templedb secret init <project> --age-recipient <key>
-templedb secret edit <project> --profile <profile>
-templedb secret export <project> --format [shell|json|yaml|dotenv]
+templedb env secretinit <project> --age-recipient <key>
+templedb env secretedit <project> --profile <profile>
+templedb env secretexport <project> --format [shell|json|yaml|dotenv]
 
 # Environment Variables
 templedb env add <key> <value> [--secret]

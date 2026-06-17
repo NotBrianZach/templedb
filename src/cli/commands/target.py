@@ -45,7 +45,7 @@ class TargetCommands(Command):
         if existing:
             raise ValidationError(
                 f"Target '{target_name}' ({target_type}) already exists for {project_slug}\n"
-                f"To update: ./templedb target update {project_slug} {target_name} --host <new_host>"
+                f"To update: ./templedb deploy targets update {project_slug} {target_name} --host <new_host>"
             )
 
         # Insert target
@@ -127,7 +127,7 @@ class TargetCommands(Command):
         if not rows:
             if project_slug:
                 print(f"\n⚠️  No deployment targets found for {project_slug}")
-                print(f"\n💡 Add one with: ./templedb target add {project_slug} production --type database --host <host>\n")
+                print(f"\n💡 Add one with: ./templedb deploy targets add {project_slug} production --type database --host <host>\n")
             else:
                 print("\n⚠️  No deployment targets found")
             return 0
@@ -182,7 +182,7 @@ class TargetCommands(Command):
         if not target:
             raise ResourceNotFoundError(
                 f"Target '{target_name}' not found for {project_slug}\n"
-                f"Use: ./templedb target list {project_slug}"
+                f"Use: ./templedb deploy targets list {project_slug}"
             )
 
         # Build update statement dynamically based on provided args
@@ -208,7 +208,7 @@ class TargetCommands(Command):
         if not updates:
             raise ValidationError(
                 "No updates specified\n"
-                f"Usage: ./templedb target update {project_slug} {target_name} --host <host> --region <region>"
+                f"Usage: ./templedb deploy targets update {project_slug} {target_name} --host <host> --region <region>"
             )
 
         params.append(target['id'])
@@ -235,14 +235,14 @@ class TargetCommands(Command):
         if not target:
             raise ResourceNotFoundError(
                 f"Target '{target_name}' not found for {project_slug}\n"
-                f"Use: ./templedb target list {project_slug}"
+                f"Use: ./templedb deploy targets list {project_slug}"
             )
 
         # Confirm deletion unless --force
         if not (hasattr(args, 'force') and args.force):
             raise ValidationError(
                 f"This will delete deployment target: {target_name}\n"
-                f"Use --force to confirm: ./templedb target remove {project_slug} {target_name} --force"
+                f"Use --force to confirm: ./templedb deploy targets remove {project_slug} {target_name} --force"
             )
 
         # Delete target
@@ -269,7 +269,7 @@ class TargetCommands(Command):
         if not target:
             raise ResourceNotFoundError(
                 f"Target '{target_name}' not found for {project_slug}\n"
-                f"Use: ./templedb target list {project_slug}"
+                f"Use: ./templedb deploy targets list {project_slug}"
             )
 
         print(f"\n📍 Deployment Target: {target_name}\n")
@@ -313,6 +313,53 @@ class TargetCommands(Command):
 
         print()
         return 0
+
+
+def register_subcommands(parent_subparsers, cli, prefix='deploy'):
+    """Register target commands as subcommands under a parent (e.g., deploy target add)."""
+    target_handler = TargetCommands()
+
+    # Note: deploy.py already has a simple 'target' subcommand — this adds the full CRUD version
+    # as 'targets' to avoid collision with deploy's inline target subcommand
+    target_parser = parent_subparsers.add_parser('targets', help='Manage deployment targets (add, list, show, update, remove)')
+    subparsers = target_parser.add_subparsers(dest='targets_subcommand', required=True)
+
+    add_parser = subparsers.add_parser('add', help='Add deployment target')
+    add_parser.add_argument('slug', help='Project slug')
+    add_parser.add_argument('target_name', help='Target name (e.g., production, staging)')
+    add_parser.add_argument('--type', default='database', help='Target type (database, edge_function, static_site)')
+    add_parser.add_argument('--provider', help='Provider (supabase, vercel, aws, etc.)')
+    add_parser.add_argument('--host', help='Hostname or URL')
+    add_parser.add_argument('--region', help='Cloud region')
+    add_parser.add_argument('--vpn', action='store_true', help='Requires VPN')
+    add_parser.add_argument('--url', help='Access URL')
+    cli.commands[f'{prefix}.targets.add'] = target_handler.add
+
+    list_parser = subparsers.add_parser('list', help='List deployment targets', aliases=['ls'])
+    list_parser.add_argument('slug', nargs='?', help='Project slug (optional)')
+    cli.commands[f'{prefix}.targets.list'] = target_handler.list_targets
+    cli.commands[f'{prefix}.targets.ls'] = target_handler.list_targets
+
+    show_parser = subparsers.add_parser('show', help='Show target details')
+    show_parser.add_argument('slug', help='Project slug')
+    show_parser.add_argument('target_name', help='Target name')
+    cli.commands[f'{prefix}.targets.show'] = target_handler.show
+
+    update_parser = subparsers.add_parser('update', help='Update deployment target')
+    update_parser.add_argument('slug', help='Project slug')
+    update_parser.add_argument('target_name', help='Target name')
+    update_parser.add_argument('--host', help='New hostname')
+    update_parser.add_argument('--region', help='New region')
+    update_parser.add_argument('--provider', help='New provider')
+    update_parser.add_argument('--url', help='New access URL')
+    cli.commands[f'{prefix}.targets.update'] = target_handler.update
+
+    remove_parser = subparsers.add_parser('remove', help='Remove deployment target', aliases=['rm'])
+    remove_parser.add_argument('slug', help='Project slug')
+    remove_parser.add_argument('target_name', help='Target name')
+    remove_parser.add_argument('--force', action='store_true', help='Confirm deletion')
+    cli.commands[f'{prefix}.targets.remove'] = target_handler.remove
+    cli.commands[f'{prefix}.targets.rm'] = target_handler.remove
 
 
 def register(cli):

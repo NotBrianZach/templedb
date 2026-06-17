@@ -1278,7 +1278,7 @@ def secret_detail(slug: str, profile: str):
             keys = sorted(data.keys())
             rows = [[html.escape(k), '<span class="muted">••••••</span>'] for k in keys]
             table = _table(["Key", "Value"], rows, "No keys.")
-            note = '<p class="muted" style="margin-top:0.5rem">Values hidden. Use CLI to view: <code>templedb secret export ' + html.escape(slug) + '</code></p>'
+            note = '<p class="muted" style="margin-top:0.5rem">Values hidden. Use CLI to view: <code>templedb env secret export ' + html.escape(slug) + '</code></p>'
             content = table + note
         except Exception:
             content = f'<pre>{html.escape(out)}</pre>'
@@ -1638,10 +1638,10 @@ def env_list(project: str = Query(""), env: str = Query(""), kind: str = Query("
 <pre style="font-size:0.75rem">templedb env set &lt;project&gt; &lt;KEY&gt; &lt;value&gt;      # set env var
 templedb env list &lt;project&gt;                    # list env vars
 templedb env export &lt;project&gt; --format dotenv  # export as .env
-templedb secret set &lt;project&gt; &lt;KEY&gt;           # set encrypted secret (prompts)
-templedb secret list                            # list all secrets
-templedb secret get &lt;project&gt; &lt;KEY&gt;           # decrypt &amp; show
-templedb secret export &lt;project&gt; --format dotenv  # export decrypted</pre>
+templedb env secret set &lt;project&gt; &lt;KEY&gt;       # set encrypted secret (prompts)
+templedb env secret list                        # list all secrets
+templedb env secret get &lt;project&gt; &lt;KEY&gt;       # decrypt &amp; show
+templedb env secret export &lt;project&gt; --format dotenv  # export decrypted</pre>
 </div>
 </details>
 """
@@ -2514,12 +2514,12 @@ templedb mount-status                      # check mount state</pre>
 
 <div>
 <h3>Secrets &amp; Environment</h3>
-<pre style="font-size:0.75rem">templedb secret list                       # list secrets
-templedb secret set &lt;proj&gt; &lt;key&gt;          # set secret
-templedb secret export &lt;proj&gt;             # export as dotenv
+<pre style="font-size:0.75rem">templedb env secret list                   # list secrets
+templedb env secret set &lt;proj&gt; &lt;key&gt;      # set secret
+templedb env secret export &lt;proj&gt;         # export as dotenv
 templedb env set &lt;proj&gt; &lt;key&gt; &lt;val&gt;      # set env var
 templedb env list &lt;proj&gt;                  # list env vars
-templedb key list                          # list encryption keys</pre>
+templedb env key list                      # list encryption keys</pre>
 
 <h3 style="margin-top:1rem">Deployment</h3>
 <pre style="font-size:0.75rem">templedb deploy run &lt;proj&gt;                # deploy project
@@ -2529,12 +2529,12 @@ templedb deploy shell &lt;proj&gt;              # enter deploy shell
 templedb deploy rollback &lt;proj&gt;           # rollback deploy</pre>
 
 <h3 style="margin-top:1rem">Database &amp; Backup</h3>
-<pre style="font-size:0.75rem">templedb db status                         # migration status
-templedb db migrate                        # apply migrations
-templedb db integrity                      # integrity check
-templedb backup local                      # local backup
-templedb backup gcs                        # backup to GCS
-templedb backup restore &lt;path&gt;            # restore from backup</pre>
+<pre style="font-size:0.75rem">templedb admin db status                    # migration status
+templedb admin db migrate                   # apply migrations
+templedb admin db integrity                 # integrity check
+templedb storage backup local               # local backup
+templedb storage backup gcs                 # backup to GCS
+templedb storage backup restore &lt;path&gt;     # restore from backup</pre>
 
 <h3 style="margin-top:1rem">Publishing</h3>
 <pre style="font-size:0.75rem">templedb publish run &lt;proj&gt; -m "msg"       # commit + push to mirrors
@@ -2545,8 +2545,8 @@ templedb publish mirror-list               # show all mirrors</pre>
 <h3 style="margin-top:1rem">Sync &amp; Network</h3>
 <pre style="font-size:0.75rem">templedb sync init                         # init cr-sqlite CRDTs
 templedb sync sync &lt;peer&gt;                 # bidirectional sync
-templedb network setup                     # configure Tailscale
-templedb network sync-all                  # sync all peers</pre>
+templedb sync network setup                # configure Tailscale
+templedb sync network sync-all             # sync all peers</pre>
 </div>
 
 </div>
@@ -3877,7 +3877,7 @@ def status():
 </details>
 """
         if pending > 0:
-            migration_html += '<p style="margin-top:0.5rem;color:#e94560;font-size:0.85rem">Run <code>templedb db migrate</code> to apply pending migrations</p>'
+            migration_html += '<p style="margin-top:0.5rem;color:#e94560;font-size:0.85rem">Run <code>templedb admin db migrate</code> to apply pending migrations</p>'
     except Exception as e:
         migration_html = f'<p class="muted" style="margin-top:1rem">Migrations: could not check ({html.escape(str(e))})</p>'
 
@@ -4199,7 +4199,7 @@ def status():
 </tr>
 <tr>
   <td><strong>Claude / Anthropic</strong></td>
-  <td>AI-assisted coding via <code>templedb vibe start</code>, MCP server for Claude Code integration</td>
+  <td>AI-assisted coding via <code>templedb ai vibe start</code>, MCP server for Claude Code integration</td>
   <td><span class="badge">optional</span></td>
   <td><code>claude</code> CLI installed</td>
 </tr>

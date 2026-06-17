@@ -186,7 +186,7 @@ Export and import portable project bundles:
 
 ```bash
 # Export project with cathedral
-templedb cathedral export myproject
+templedb storage cathedral export myproject
 
 # Move to another machine, extract
 tar -xzf myproject.cathedral.tar.gz

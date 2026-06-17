@@ -122,7 +122,7 @@ _HEADER_TEMPLATE = """\
 # Source: templedb nixos config keys (system_config table)
 # Generated: {timestamp}
 # To update:
-#   templedb var set <key> <value> --nixos
+#   templedb env var set <key> <value> --nixos
 #   templedb nixos generate {slug}
 """
 
@@ -242,7 +242,7 @@ def _nixos_status(slug: str):
         if pending_migrations == 0:
             migration_status = "OK"
         else:
-            migration_status = f"{pending_migrations} PENDING — run: templedb db migrate"
+            migration_status = f"{pending_migrations} PENDING — run: templedb admin db migrate"
     except Exception:
         migration_status = "unknown"
 
@@ -502,7 +502,7 @@ class NixOSCommand(Command):
             pending = sum(1 for s in m.status() if not s["applied"])
             if pending > 0:
                 print(f"⚠ {pending} pending database migration(s)")
-                print(f"  Run: templedb db migrate\n")
+                print(f"  Run: templedb admin db migrate\n")
         except Exception:
             pass
 
@@ -877,7 +877,7 @@ class NixOSCommand(Command):
             if pending == 0:
                 ok(f"all {applied} migrations applied")
             else:
-                warn(f"{pending} pending migration(s) — run: templedb db migrate")
+                warn(f"{pending} pending migration(s) — run: templedb admin db migrate")
         except Exception as e:
             warn(f"could not check migrations: {e}")
 

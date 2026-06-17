@@ -123,13 +123,13 @@ python src/pipeline.py
 Store API keys and credentials:
 ```bash
 # Initialize secrets
-templedb secret init data-pipeline --age-recipient <key>
+templedb env secretinit data-pipeline --age-recipient <key>
 
 # Add secrets interactively
 ./prompt_missing_vars.sh data-pipeline production
 
 # Export to environment
-eval "$(templedb secret export data-pipeline --format shell)"
+eval "$(templedb env secretexport data-pipeline --format shell)"
 ```
 
 ## Running the Pipeline
@@ -235,8 +235,8 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite \
 templedb env new data-pipeline prod
 
 # Configure production secrets
-templedb secret init data-pipeline --profile prod --age-recipient <key>
-templedb secret edit data-pipeline --profile prod
+templedb env secretinit data-pipeline --profile prod --age-recipient <key>
+templedb env secretedit data-pipeline --profile prod
 
 # Deploy
 templedb deploy data-pipeline prod

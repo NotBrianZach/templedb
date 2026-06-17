@@ -149,7 +149,7 @@ All notable changes to TempleDB are documented in this file.
   - Documentation: `TUI.md`
 
 - **Secret Management** - Age-encrypted secret storage
-  - `templedb secret init/edit/export/print-raw` - Secret management commands
+  - `templedb env secret init/edit/export/print-raw` - Secret management commands
   - Uses age encryption directly (no SOPS dependency)
   - Per-project + per-profile secrets organization
   - Multiple export formats: shell, JSON, YAML, dotenv

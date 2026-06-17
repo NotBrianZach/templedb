@@ -65,44 +65,60 @@ class TempleDBCLI:
             epilog="""
 command groups:
 
-  Getting Started
-    bootstrap          Set up TempleDB on a new machine (restore, migrate, checkout, dotfiles)
-    tutorial           Interactive tutorials and onboarding
-    status             Show database and system status
-
-  Projects & Files
+  Projects & Code
     project            Import, list, show, sync, checkout projects
+    vcs                Version control (status, add, commit, log, diff, branch, merge)
     file               File management commands
-    search             Search files and content
-    vcs                Version control (status, add, commit, log, diff, branch)
-    git-export         Export VCS history as a git repo for GitHub
+    search             Search files, content, and natural language queries
+    graph              Knowledge graph (search, who-uses, deps, callers)
+    publish            Commit + materialize + push to mirrors
 
-  NixOS Integration
-    nixos              Generate modules, rebuild, doctor, dotfiles, import/generate-all
-    config             Manage configuration symlinks (link, unlink, verify)
-
-  Secrets & Environment
-    secret             Manage encrypted secrets (age/sops)
-    env                Environment variables per project/target
-    key                Manage encryption keys
+  Environment & Secrets
+    env                Nix environments, variables, secrets, keys, direnv
+                         env enter|list|new|generate|detect
+                         env var set|get|list|export|edit|unset|tag
+                         env secret set|get|list|delete|export|share-key
+                         env key add|list|info|test|enable|disable
+                         env direnv generate|diff|verify
 
   Deployment
     deploy             Deploy projects (run, status, history, rollback, shell, exec)
-    target             Manage deployment targets
+                         deploy targets add|list|show|update|remove
+                         deploy migration list|show|status|history
+
+  NixOS
+    nixos              Generate modules, rebuild, doctor, dotfiles
+    config             Manage configuration symlinks (link, unlink, verify)
 
   Storage & Sync
-    mount              Mount DB as FUSE filesystem (read/write, auto-stage)
-    unmount            Unmount FUSE filesystem
-    backup             Local and cloud (GCS) database backups
-    cathedral          Export/import portable project bundles
-    db                 Database migrations, integrity checks
+    storage            Backup, cathedral, mount, blob management
+                         storage backup local|restore|cloud|gcs
+                         storage cathedral export|import|inspect|verify
+                         storage mount|unmount|mount-status
+                         storage blob status|verify|list|migrate
+    sync               CRDT sync + network (init, serve, push, pull, peers)
+                         sync network setup|status|connect|sync-all
 
-  Advanced
-    mcp                Start Model Context Protocol server
+  AI Integration
+    ai                 Claude Code, vibe coding, prompts, MCP
+                         ai claude launch|hook|setup|status
+                         ai vibe start
+                         ai prompt list|show|create|render
+                         ai mcp serve
+
+  Admin
+    admin              System status, database, cache, schema, bootstrap
+                         admin status|db|cache|schema|bootstrap|gitserver
+
+  Other
     gui                Launch web GUI dashboard
-    claude / vibe      AI-assisted development sessions
     domain             DNS and domain management
-    query              Natural language file queries
+    workitem           Work item and coordination management
+    tutorial           Interactive tutorials and onboarding
+    dev                Local development server
+    merge              Merge changes from external sources
+
+  Top-level aliases: status, mount, unmount, bootstrap
 
 Use 'templedb <command> --help' for details on any command.
 """,
@@ -113,7 +129,7 @@ Use 'templedb <command> --help' for details on any command.
                                 help='Output results as JSON (for scripting and agent use)')
         self.parser.add_argument('-C', dest='project_dir', metavar='PATH',
                                 help='Run as if templedb was started in PATH instead of CWD')
-        self.subparsers = self.parser.add_subparsers(dest="command", required=True)
+        self.subparsers = self.parser.add_subparsers(dest="command")
 
         # Command registry: maps command names to handler functions
         self.commands: Dict[str, Callable] = {}
@@ -198,6 +214,11 @@ Use 'templedb <command> --help' for details on any command.
         try:
             args = self.parser.parse_args(argv)
 
+            # No command given → show help
+            if not args.command:
+                self.parser.print_help()
+                return 0
+
             # Handle -C flag: change directory before executing command
             import os
             original_cwd = None
@@ -221,8 +242,11 @@ Use 'templedb <command> --help' for details on any command.
                         subcommand = getattr(args, subcommand_attr)
                         # Only use subcommand if it's not None (i.e., actually specified)
                         if subcommand is not None:
-                            # Check for nested subcommands (e.g., nixops4 network create)
+                            # Check for nested subcommands (e.g., env var set, nixops4 network create)
+                            # Support both _command and _subcommand dest conventions
                             nested_attr = f"{subcommand}_command"
+                            if not hasattr(args, nested_attr):
+                                nested_attr = f"{subcommand}_subcommand"
                             if hasattr(args, nested_attr):
                                 nested_command = getattr(args, nested_attr)
                                 if nested_command is not None:

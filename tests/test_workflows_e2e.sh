@@ -40,7 +40,7 @@ call_mcp_tool() {
   sleep 0.1
   echo '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool_name\",\"arguments\":$arguments}}'
   sleep 1
-) | ./templedb mcp serve 2>/dev/null | tail -1
+) | ./templedb ai mcp serve 2>/dev/null | tail -1
 "
 }
 

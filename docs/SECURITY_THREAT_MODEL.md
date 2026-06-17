@@ -354,7 +354,7 @@ malicious.cathedral.tar.gz
 #   ../../../../.bashrc  # Path traversal
 
 # Victim imports:
-templedb cathedral import malicious.cathedral.tar.gz
+templedb storage cathedralimport malicious.cathedral.tar.gz
 
 # Malicious code now on system
 ```
@@ -381,10 +381,10 @@ templedb cathedral import malicious.cathedral.tar.gz
 - [ ] **Package signing (GPG or Sigstore):**
   ```bash
   # Export with signature
-  templedb cathedral export myproject --sign
+  templedb storage cathedralexport myproject --sign
 
   # Import with verification
-  templedb cathedral import package.tar.gz --verify
+  templedb storage cathedralimport package.tar.gz --verify
   ```
 - [ ] **Checksum publication:**
   ```bash
@@ -392,7 +392,7 @@ templedb cathedral import malicious.cathedral.tar.gz
   sha256sum package.tar.gz > package.tar.gz.sha256
 
   # Verify before import
-  templedb cathedral import package.tar.gz --checksum package.tar.gz.sha256
+  templedb storage cathedralimport package.tar.gz --checksum package.tar.gz.sha256
   ```
 - [ ] **Sandboxed extraction:**
   - Extract to temporary directory first

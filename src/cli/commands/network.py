@@ -121,7 +121,7 @@ class NetworkCommands(Command):
         ts_path = self._find_tailscale()
         if not ts_path:
             print("Tailscale not installed.")
-            print("  Run: templedb network setup")
+            print("  Run: templedb sync network setup")
             return 1
 
         status = self._tailscale_status()
@@ -165,7 +165,7 @@ class NetworkCommands(Command):
         """Connect to Tailscale network."""
         ts_path = self._find_tailscale()
         if not ts_path:
-            print("Tailscale not installed. Run: templedb network setup")
+            print("Tailscale not installed. Run: templedb sync network setup")
             return 1
 
         print("Connecting to Tailscale...")
@@ -265,6 +265,26 @@ class NetworkCommands(Command):
         print("    templedb nixos rebuild system_config")
         print("    sudo tailscale up")
         return 0
+
+
+def register_subcommands(parent_subparsers, cli, prefix='sync'):
+    """Register network commands as subcommands under a parent (e.g., sync network setup)."""
+    cmd = NetworkCommands()
+
+    net_parser = parent_subparsers.add_parser('network', help='Network setup (Tailscale VPN + sync)')
+    subparsers = net_parser.add_subparsers(dest='network_subcommand', required=True)
+
+    subparsers.add_parser('setup', help='Install and configure Tailscale for sync')
+    cli.commands[f'{prefix}.network.setup'] = cmd.setup
+
+    subparsers.add_parser('status', help='Show network and peer status')
+    cli.commands[f'{prefix}.network.status'] = cmd.status
+
+    subparsers.add_parser('connect', help='Connect to Tailscale')
+    cli.commands[f'{prefix}.network.connect'] = cmd.connect
+
+    subparsers.add_parser('sync-all', help='Sync with all online TempleDB peers')
+    cli.commands[f'{prefix}.network.sync-all'] = cmd.sync_all
 
 
 def register(cli):

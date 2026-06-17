@@ -114,7 +114,7 @@ templedb search content "pattern" -<TAB>
 templedb project import ~/pro<TAB>
 # Completes directory paths
 
-templedb backup ~/backups/<TAB>
+templedb storage backup~/backups/<TAB>
 # Completes file paths
 ```
 

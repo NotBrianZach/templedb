@@ -2,7 +2,7 @@
   "mcpServers": {
     "templedb": {
       "command": "./templedb",
-      "args": ["mcp", "serve"],
+      "args": ["ai", "mcp", "serve"],
       "env": {
         "TEMPLEDB_DB_PATH": "~/.templedb/projdb.db"
       }

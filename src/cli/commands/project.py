@@ -401,11 +401,11 @@ class ProjectCommands(Command):
             logger.info("  Use --force to overwrite")
             return 0
 
-        # Standard .envrc content that calls templedb direnv
+        # Standard .envrc content that calls templedb env direnv
         # Use absolute path to templedb for reliability
         import os
         templedb_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'templedb'))
-        envrc_content = f'eval "$({templedb_path} direnv)"\n'
+        envrc_content = f'eval "$({templedb_path} env direnv)"\n'
 
         envrc_path.write_text(envrc_content)
         logger.info(f"✅ Generated .envrc at {envrc_path}")

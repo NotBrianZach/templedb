@@ -44,7 +44,7 @@ This allows you to revoke even if you only have access to the compromised key + 
 ### Step 2: Initiate Revocation
 
 ```bash
-templedb key revoke yubikey-1-primary \
+templedb env key revoke yubikey-1-primary \
   --reason "Lost Yubikey, potential compromise" \
   --quorum 2
 ```
@@ -138,14 +138,14 @@ After revocation, add a new key to maintain 4-key redundancy:
 age-plugin-yubikey --generate
 
 # Register it
-templedb key add yubikey \
+templedb env key add yubikey \
   --name "yubikey-4-replacement" \
   --location "daily-use" \
   --notes "Replacement for revoked yubikey-1-primary"
 
 # Add to all secrets
-templedb secret add-key myproject --key yubikey-4-replacement
-templedb secret add-key otherproject --key yubikey-4-replacement
+templedb env secret add-key myproject --key yubikey-4-replacement
+templedb env secret add-key otherproject --key yubikey-4-replacement
 # ... repeat for all projects
 ```
 
@@ -204,16 +204,16 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite \
 # - Yubikey #3 from offsite OR USB backup
 
 # 2. Revoke compromised key with 2-of-3 approval
-templedb key revoke yubikey-1-primary \
+templedb env key revoke yubikey-1-primary \
   --reason "Lost during travel, potential compromise"
 
 # 3. Add replacement key
 age-plugin-yubikey --generate  # On new Yubikey
-templedb key add yubikey --name "yubikey-4-replacement" --location "daily-use"
+templedb env key add yubikey --name "yubikey-4-replacement" --location "daily-use"
 
 # 4. Add to all secrets
 for project in $(templedb project list --format json | jq -r '.[].slug'); do
-  templedb secret add-key $project --key yubikey-4-replacement
+  templedb env secret add-key $project --key yubikey-4-replacement
 done
 ```
 
@@ -221,7 +221,7 @@ done
 
 ```bash
 # 1. Immediate revocation
-templedb key revoke yubikey-1-primary \
+templedb env key revoke yubikey-1-primary \
   --reason "Suspicious activity detected"
 
 # 2. Rotate ALL remaining keys as precaution
@@ -240,16 +240,16 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite \
 
 ```bash
 # 1. Revoke their personal key
-templedb key revoke employee-yubikey \
+templedb env key revoke employee-yubikey \
   --reason "Employee departure - access termination"
 
 # 2. Ensure remaining keys are in your possession
-templedb key list
+templedb env key list
 
 # 3. Test all remaining keys
-templedb key test yubikey-2-backup
-templedb key test yubikey-3-dr
-templedb key test usb-backup
+templedb env key test yubikey-2-backup
+templedb env key test yubikey-3-dr
+templedb env key test usb-backup
 ```
 
 ---
@@ -260,7 +260,7 @@ templedb key test usb-backup
 
 ✅ **DO:**
 - Verify you have access to 2 other keys
-- Test those keys work: `templedb key test <key-name>`
+- Test those keys work: `templedb env key test <key-name>`
 - Document reason for revocation
 - Have replacement key ready
 - Backup database before revocation
@@ -275,7 +275,7 @@ templedb key test usb-backup
 
 ✅ **DO:**
 - Add replacement key immediately
-- Test all secrets decrypt: `templedb secret export <project> --format json`
+- Test all secrets decrypt: `templedb env secret export <project> --format json`
 - Store revoked key securely (don't destroy - forensics)
 - Update key inventory documentation
 - Review audit logs
@@ -291,18 +291,18 @@ templedb key test usb-backup
 **Monthly:**
 ```bash
 # Test all keys
-for key in $(templedb key list --format json | jq -r '.[].key_name'); do
-  templedb key test $key
+for key in $(templedb env key list --format json | jq -r '.[].key_name'); do
+  templedb env key test $key
 done
 
 # Review recent usage
-templedb key list
+templedb env key list
 ```
 
 **Quarterly:**
 ```bash
 # Review revoked keys
-templedb key show-revoked
+templedb env key show-revoked
 
 # Audit trail review
 sqlite3 ~/.local/share/templedb/templedb.sqlite \
@@ -329,7 +329,7 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite \
 **Solution:**
 ```bash
 # Check how many active keys you have
-templedb key list
+templedb env key list
 
 # If you have <2 total active keys, you cannot revoke
 # You need at least 2 keys to approve any revocation
@@ -351,7 +351,7 @@ ykman piv info
 ls -la ~/.age/backup-key.txt
 
 # Test the key independently
-templedb key test <key-name>
+templedb env key test <key-name>
 ```
 
 ### "Re-encryption failed for some secrets"
@@ -361,14 +361,14 @@ templedb key test <key-name>
 **Solution:**
 ```bash
 # Identify which secrets failed
-templedb secret show-keys <project>
+templedb env secret show-keys <project>
 
 # Manually fix each failed secret
 # 1. Decrypt with old keys (before revocation completed)
 # 2. Re-initialize with new keys
-templedb secret export <project> --format yaml > /tmp/secrets.yml
-templedb secret init-multi <project> --keys key1,key2,key3
-templedb secret edit <project>  # Paste old secrets
+templedb env secret export <project> --format yaml > /tmp/secrets.yml
+templedb env secret init-multi <project> --keys key1,key2,key3
+templedb env secret edit <project>  # Paste old secrets
 ```
 
 ---
@@ -381,13 +381,13 @@ Default is 2-of-4, but you can change:
 
 ```bash
 # Require 3-of-4 keys for revocation (higher security)
-templedb key revoke yubikey-1-primary --quorum 3
+templedb env key revoke yubikey-1-primary --quorum 3
 
 # Require all 4 keys for revocation (maximum security)
-templedb key revoke yubikey-1-primary --quorum 4
+templedb env key revoke yubikey-1-primary --quorum 4
 
 # Require 1-of-4 keys for revocation (lower security, emergency only)
-templedb key revoke yubikey-1-primary --quorum 1
+templedb env key revoke yubikey-1-primary --quorum 1
 ```
 
 ### Batch Revocation
@@ -396,8 +396,8 @@ Revoke multiple keys at once:
 
 ```bash
 # If multiple keys compromised
-templedb key revoke yubikey-1-primary --reason "Compromise incident #2026-03"
-templedb key revoke yubikey-2-backup --reason "Compromise incident #2026-03"
+templedb env key revoke yubikey-1-primary --reason "Compromise incident #2026-03"
+templedb env key revoke yubikey-2-backup --reason "Compromise incident #2026-03"
 
 # Then add 2 new keys and re-encrypt everything
 ```
@@ -427,17 +427,17 @@ if revoke_key("yubikey-1-primary", "Automated rotation"):
 
 ```bash
 # Revoke key (requires 2 of any 4 keys, including the one being revoked)
-templedb key revoke <key-name> --reason "Lost/compromised"
+templedb env key revoke <key-name> --reason "Lost/compromised"
 
 # View revoked keys
-templedb key show-revoked
+templedb env key show-revoked
 
 # Test remaining keys
-templedb key test <key-name>
+templedb env key test <key-name>
 
 # Add replacement
-templedb key add yubikey --name "replacement-key"
-templedb secret add-key <project> --key replacement-key
+templedb env key add yubikey --name "replacement-key"
+templedb env secret add-key <project> --key replacement-key
 ```
 
 **Key revocation is irreversible** - proceed with caution and proper authorization.

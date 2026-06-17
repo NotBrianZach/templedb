@@ -207,7 +207,7 @@ templedb sync sync <host>       # Full bidirectional sync
 ```bash
 # On each machine:
 templedb sync init
-templedb network setup          # Configure Tailscale
+templedb sync networksetup          # Configure Tailscale
 
 # Start the sync server (runs on port 9420):
 templedb sync serve

@@ -176,7 +176,7 @@ class DeployOpsMixin:
 
             if not host:
                 print("  No host configured for health checks")
-                print(f"  Set with: templedb target update {project_slug} {target} --host <url>")
+                print(f"  Set with: templedb deploy targets update {project_slug} {target} --host <url>")
                 return 0
 
             # Run HTTP health check

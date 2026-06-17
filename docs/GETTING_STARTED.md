@@ -107,9 +107,9 @@ age-keygen -o ~/.config/sops/age/keys.txt
 export TEMPLEDB_AGE_KEY_FILE=~/.config/sops/age/keys.txt
 
 # Per-project
-templedb secret init myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
-templedb secret edit myapp
-eval "$(templedb secret export myapp --format shell)"
+templedb env secret init myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
+templedb env secret edit myapp
+eval "$(templedb env secret export myapp --format shell)"
 ```
 
 Secrets encrypted with age, stored in database, loaded on-demand.
@@ -154,7 +154,7 @@ Keyboard-driven interface for projects, files, VCS, secrets, search.
 
 ```bash
 # Set up target
-templedb target add myapp production --provider supabase --host db.example.com
+templedb deploy targets add myapp production --provider supabase --host db.example.com
 
 # Register domain + DNS
 templedb domain register myapp example.com --registrar cloudflare
@@ -212,9 +212,9 @@ templedb vcs log <project>             # History
 templedb vcs diff <project>            # Show diffs
 
 # Secrets
-templedb secret init <proj> --age-recipient <key>
-templedb secret edit <project>
-templedb secret export <proj> --format shell
+templedb env secret init <proj> --age-recipient <key>
+templedb env secret edit <project>
+templedb env secret export <proj> --format shell
 
 # Work Items (multi-agent)
 templedb work create --project <proj> --title "Task"
@@ -227,7 +227,7 @@ templedb search files <pattern>
 templedb search content <query>
 
 # Deployment
-templedb target add <proj> <name> --provider <prov> --host <host>
+templedb deploy targets add <proj> <name> --provider <prov> --host <host>
 templedb domain register <proj> <domain> --registrar <reg>
 templedb deploy run <proj> --target <target>
 

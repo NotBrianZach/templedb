@@ -168,7 +168,7 @@ templedb deploy validate myapp production
 
 ```bash
 # Deployment cache tracks lock file changes
-templedb cache list --project myapp
+templedb admin cache list --project myapp
 
 # Output shows content hash includes lock files:
 #   Hash:       abc123def456  # Changes when lock files change

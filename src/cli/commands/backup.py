@@ -126,7 +126,7 @@ class BackupCommands(Command):
                     print(f"📋 Stamped {stamped} migration(s) as pre-existing")
             except Exception as e:
                 print(f"⚠  Could not stamp migrations: {e}")
-                print(f"   Run: templedb db stamp")
+                print(f"   Run: templedb admin db stamp")
 
             return 0
         except Exception as e:
@@ -350,7 +350,7 @@ class BackupCommands(Command):
         print("6. Save to: ~/.config/templedb/gdrive_credentials.json")
         print()
         print("Then run:")
-        print("  ./templedb backup cloud test --provider gdrive")
+        print("  ./templedb storage backup cloud test --provider gdrive")
         print()
 
         # Check if credentials exist
@@ -377,15 +377,15 @@ class BackupCommands(Command):
         print("3. Download service account key JSON")
         print("4. Store credentials in TempleDB secrets:")
         print()
-        print("   ./templedb secret init system_config")
-        print("   ./templedb secret edit system_config")
+        print("   ./templedb env secret init system_config")
+        print("   ./templedb env secret edit system_config")
         print()
         print("   Add to secrets:")
         print("   GCS_BUCKET_NAME=your-bucket-name")
         print("   GCS_SERVICE_ACCOUNT_KEY=<paste JSON key>")
         print()
         print("Then test:")
-        print("  ./templedb backup cloud test --provider gcs")
+        print("  ./templedb storage backup cloud test --provider gcs")
         print()
 
         return 0
@@ -413,7 +413,7 @@ class BackupCommands(Command):
         print('}')
         print()
         print("Then use:")
-        print("  ./templedb backup cloud push --provider local --config config.json")
+        print("  ./templedb storage backup cloud push --provider local --config config.json")
         print()
 
         return 0
@@ -449,7 +449,7 @@ class BackupCommands(Command):
 
         if not row:
             print("GOOGLE_APPLICATION_CREDENTIALS not found in global secrets.", file=sys.stderr)
-            print("Store with: templedb var set --global --secret GOOGLE_APPLICATION_CREDENTIALS <json>", file=sys.stderr)
+            print("Store with: templedb env var set --global --secret GOOGLE_APPLICATION_CREDENTIALS <json>", file=sys.stderr)
             return 1
 
         # Decrypt with age

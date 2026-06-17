@@ -54,7 +54,7 @@ class MigrationCommands(Command):
 
         print(f"\n✓ Total: {len(migrations)} migrations")
         print(f"\n💡 To apply migrations:")
-        print(f"   1. Export project: ./templedb cathedral export {project_slug}")
+        print(f"   1. Export project: ./templedb storage cathedral export {project_slug}")
         print(f"   2. Apply with psql or your database tool")
         print(f"   3. Or use: ./templedb deploy {project_slug}")
 
@@ -81,7 +81,7 @@ class MigrationCommands(Command):
         if not result:
             raise ResourceNotFoundError(
                 f"Migration not found: {migration_path}\n"
-                f"Use: ./templedb migration list {project_slug}"
+                f"Use: ./templedb deploy migration list {project_slug}"
             )
 
         print(f"\n📄 Migration: {result['file_path']}\n")
@@ -135,7 +135,7 @@ class MigrationCommands(Command):
 
         if pending:
             print(f"💡 To apply pending migrations:")
-            print(f"   ./templedb migration apply {project_slug} --target {target_name}")
+            print(f"   ./templedb deploy migration apply {project_slug} --target {target_name}")
 
         return 0
 
@@ -194,7 +194,7 @@ class MigrationCommands(Command):
         if not migration:
             raise ResourceNotFoundError(
                 f"Migration not found: {migration_file}\n"
-                f"Use: ./templedb migration list {project_slug}"
+                f"Use: ./templedb deploy migration list {project_slug}"
             )
 
         # Mark as applied
@@ -208,6 +208,41 @@ class MigrationCommands(Command):
 
         print_success(f"Marked migration as applied: {migration.file_path}")
         return 0
+
+
+def register_subcommands(parent_subparsers, cli, prefix='deploy'):
+    """Register migration commands as subcommands under a parent (e.g., deploy migration list)."""
+    migration_handler = MigrationCommands()
+
+    migration_parser = parent_subparsers.add_parser('migration', help='Manage project database migrations')
+    subparsers = migration_parser.add_subparsers(dest='migration_subcommand', required=True)
+
+    list_parser = subparsers.add_parser('list', help='List all migrations')
+    list_parser.add_argument('slug', help='Project slug')
+    cli.commands[f'{prefix}.migration.list'] = migration_handler.list
+
+    show_parser = subparsers.add_parser('show', help='Show migration content')
+    show_parser.add_argument('slug', help='Project slug')
+    show_parser.add_argument('migration', help='Migration file path or name')
+    cli.commands[f'{prefix}.migration.show'] = migration_handler.show
+
+    status_parser = subparsers.add_parser('status', help='Show migration status (applied vs pending)')
+    status_parser.add_argument('slug', help='Project slug')
+    status_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
+    status_parser.add_argument('--show-applied', action='store_true', help='Show applied migrations')
+    cli.commands[f'{prefix}.migration.status'] = migration_handler.status
+
+    history_parser = subparsers.add_parser('history', help='Show migration history')
+    history_parser.add_argument('slug', help='Project slug')
+    history_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
+    history_parser.add_argument('--limit', type=int, default=20, help='Limit number of results (default: 20)')
+    cli.commands[f'{prefix}.migration.history'] = migration_handler.history
+
+    mark_parser = subparsers.add_parser('mark-applied', help='Mark migration as applied without running')
+    mark_parser.add_argument('slug', help='Project slug')
+    mark_parser.add_argument('migration', help='Migration file path or name')
+    mark_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
+    cli.commands[f'{prefix}.migration.mark-applied'] = migration_handler.mark_applied
 
 
 def register(cli):

@@ -380,8 +380,27 @@ class BootstrapCommand(Command):
             _skip(f"FUSE mount failed: {e}")
             print("       Mount manually: templedb mount ~/temple")
 
-        # ── Step 9: Verify ───────────────────────────────────────────
-        _step(9, "Verification")
+        # ── Step 9: Claude Code hooks ────────────────────────────────
+        _step(9, "Claude Code integration")
+        try:
+            claude_settings = Path.home() / ".claude" / "settings.json"
+            if claude_settings.exists():
+                _ok("Claude Code settings already configured")
+            else:
+                templedb_path = Path(__file__).parent.parent.parent.parent / "templedb"
+                result = subprocess.run(
+                    [str(templedb_path), "claude", "setup", "--force"],
+                    capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    _ok("Claude Code hooks installed (git commands → templedb)")
+                else:
+                    _skip("Claude Code setup failed (install later: templedb ai claude setup)")
+        except Exception as e:
+            _skip(f"Claude Code setup skipped: {e}")
+            print("       Install later: templedb ai claude setup")
+
+        # ── Step 10: Verify ───────────────────────────────────────────
+        _step(10, "Verification")
 
         from db_utils import check_integrity
         if check_integrity():
@@ -394,7 +413,7 @@ class BootstrapCommand(Command):
         status = m.status()
         pending = sum(1 for s in status if not s["applied"])
         if pending > 0:
-            print(f"  WARN  {pending} pending migration(s) — run: templedb db migrate")
+            print(f"  WARN  {pending} pending migration(s) — run: templedb admin db migrate")
             errors += 1
         else:
             _ok(f"All {len(status)} migrations applied")
@@ -411,8 +430,10 @@ class BootstrapCommand(Command):
             print("  1. Copy your age key:   cp /path/to/key.txt ~/.age/key.txt")
         print("  - Edit files via FUSE:  ls ~/temple/<project>/")
         print("  - Rebuild NixOS:        templedb nixos rebuild system_config")
-        print("  - Check backup status:  templedb backup cloud status")
+        print("  - Check backup status:  templedb storage backup cloud status")
         print("  - Launch GUI:           templedb gui")
+        print("  - Start vibe session:   templedb ai vibe start <project>")
+        print("  - Claude hook status:   templedb ai claude status")
 
         return 0
 

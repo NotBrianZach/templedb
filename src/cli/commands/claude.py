@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Claude Code launcher command
+Claude Code launcher, hooks, and settings management.
+
+The hook command is called by Claude Code hooks (configured via home-manager
+or templedb ai claude setup). It enforces TempleDB dogfooding by intercepting
+git commands and redirecting to templedb equivalents.
 """
+import json
 import os
 import sys
 import subprocess
@@ -12,7 +17,55 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
 from cli.tty_utils import is_tty, is_emacs_vterm
-from db_utils import DB_PATH
+from db_utils import DB_PATH, get_simple_connection
+from logger import get_logger
+
+logger = get_logger(__name__)
+
+# Git commands that should be redirected to templedb
+GIT_REDIRECTS = {
+    "git status": "templedb vcs status <project> --refresh",
+    "git add": "templedb vcs add -p <project>",
+    "git commit": "templedb vcs commit -p <project> -m <message>",
+    "git push": "templedb publish run <project> -m <message>",
+    "git log": "templedb vcs log <project>",
+    "git diff": "templedb vcs diff <project>",
+    "git branch": "templedb vcs branch <project>",
+    "git checkout": "templedb vcs switch <project> <branch>",
+    "git switch": "templedb vcs switch <project> <branch>",
+    "git merge": "templedb vcs merge <project> <branch>",
+}
+
+
+def _is_templedb_project(cwd: str) -> bool:
+    """Check if the current directory is a TempleDB-managed project."""
+    try:
+        conn = get_simple_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT slug FROM projects
+            WHERE repo_url = ? OR repo_url LIKE ?
+        """, (cwd, f"%{os.path.basename(cwd)}%"))
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    except Exception:
+        return False
+
+
+def _detect_project_slug(cwd: str) -> str:
+    """Try to detect the project slug from the working directory."""
+    try:
+        conn = get_simple_connection()
+        cursor = conn.cursor()
+        basename = os.path.basename(cwd)
+        cursor.execute("SELECT slug FROM projects WHERE slug = ? OR repo_url LIKE ?",
+                       (basename, f"%{basename}%"))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception:
+        return None
 
 
 class ClaudeCommands(Command):
@@ -145,41 +198,195 @@ class ClaudeCommands(Command):
                     pass
 
 
+    def hook(self, args) -> int:
+        """Handle Claude Code hook invocations.
+
+        Called by Claude Code hooks with arguments like:
+          templedb ai claude hook pre-tool bash
+          templedb ai claude hook post-tool bash
+          templedb ai claude hook notify
+        """
+        hook_type = args.hook_type if hasattr(args, 'hook_type') else None
+        tool_type = args.tool_type if hasattr(args, 'tool_type') else None
+
+        if hook_type == "pre-tool" and tool_type == "bash":
+            return self._pre_tool_bash()
+
+        return 0
+
+    def _pre_tool_bash(self) -> int:
+        """Pre-tool hook for bash commands.
+
+        Reads the tool input from stdin (JSON with 'command' field).
+        If it's a git command in a templedb-managed project, blocks it
+        and suggests the templedb equivalent.
+        """
+        try:
+            input_data = json.loads(sys.stdin.read())
+            command = input_data.get("tool_input", {}).get("command", "")
+        except (json.JSONDecodeError, KeyError):
+            return 0
+
+        cwd = os.getcwd()
+        if not _is_templedb_project(cwd):
+            return 0
+
+        for git_cmd, templedb_cmd in GIT_REDIRECTS.items():
+            if command.strip().startswith(git_cmd):
+                slug = _detect_project_slug(cwd) or "<project>"
+                suggestion = templedb_cmd.replace("<project>", slug)
+                response = {
+                    "decision": "block",
+                    "reason": f"Use templedb instead of git in TempleDB-managed projects.\n"
+                              f"  Instead of: {command.strip()}\n"
+                              f"  Use:        {suggestion}"
+                }
+                print(json.dumps(response))
+                return 0
+
+        return 0
+
+    def setup(self, args) -> int:
+        """Set up Claude Code integration for the current machine.
+
+        Generates ~/.claude/settings.json with TempleDB hooks.
+        For NixOS users, prefer programs.templedb.claude.enable = true.
+        """
+        claude_dir = Path.home() / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        settings_path = claude_dir / "settings.json"
+
+        if settings_path.exists() and not getattr(args, 'force', False):
+            print(f"  {settings_path} already exists")
+            print(f"  Use --force to overwrite")
+            return 1
+
+        templedb_bin = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "templedb"))
+        if not os.path.exists(templedb_bin):
+            templedb_bin = "templedb"
+
+        hook_cmd = f"{templedb_bin} ai claude hook"
+
+        settings = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": hook_cmd,
+                            "arguments": ["pre-tool", "bash"],
+                        }],
+                    }
+                ],
+            },
+            "permissions": {
+                "allow": [
+                    "Bash(templedb:*)", "Bash(python3:*)", "Bash(nix:*)",
+                    "Bash(nix-shell:*)", "Bash(npm:*)", "Bash(ls:*)",
+                    "Bash(fusermount:*)", "Bash(systemctl:*)", "Bash(journalctl:*)",
+                    "Bash(gh:*)", "Bash(jq:*)",
+                    "Read(//home/**)", "Read(//tmp/**)", "Read(//etc/**)",
+                    "Read(//nix/store/**)", "WebSearch",
+                ],
+                "deny": [],
+            },
+        }
+
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        print(f"Claude Code settings written to {settings_path}")
+        print(f"  Hook command: {hook_cmd}")
+        print(f"  Git commands will be blocked in TempleDB-managed projects")
+
+        try:
+            conn = get_simple_connection()
+            conn.execute("""
+                INSERT OR REPLACE INTO system_config (key, value, updated_at)
+                VALUES ('claude.hooks.enabled', 'true', datetime('now'))
+            """)
+            conn.execute("""
+                INSERT OR REPLACE INTO system_config (key, value, updated_at)
+                VALUES ('claude.hooks.command', ?, datetime('now'))
+            """, (hook_cmd,))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Could not update system_config: {e}")
+
+        return 0
+
+    def status(self, args) -> int:
+        """Show Claude Code integration status."""
+        claude_dir = Path.home() / ".claude"
+        settings_path = claude_dir / "settings.json"
+
+        print("Claude Code Integration Status")
+        print()
+
+        if settings_path.exists():
+            try:
+                settings = json.loads(settings_path.read_text())
+                hooks = settings.get("hooks", {})
+                hook_count = sum(len(v) for v in hooks.values())
+                print(f"  Settings: {settings_path}")
+                print(f"  Hooks:    {hook_count} configured")
+                for event, hook_list in hooks.items():
+                    for h in hook_list:
+                        print(f"    {event} [{h.get('matcher', '*')}]")
+            except Exception:
+                print(f"  Settings: {settings_path} (invalid JSON)")
+        else:
+            print(f"  Settings: not configured")
+            print(f"  Run: templedb ai claude setup")
+
+        try:
+            conn = get_simple_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM system_config WHERE key = 'claude.hooks.enabled'")
+            row = cursor.fetchone()
+            enabled = row[0] if row else "false"
+            print(f"  DB config: claude.hooks.enabled = {enabled}")
+            conn.close()
+        except Exception:
+            print(f"  DB config: not available")
+
+        return 0
+
+
 def register(cli):
     """Register Claude commands"""
     cmd = ClaudeCommands()
 
     claude_parser = cli.register_command(
         'claude',
-        cmd.launch_claude,
-        help_text='Launch Claude Code with TempleDB project context'
+        None,
+        help_text='Claude Code integration (launch, hooks, setup)'
     )
+    subparsers = claude_parser.add_subparsers(dest='claude_subcommand')
 
-    # Prompt source options
-    claude_parser.add_argument(
-        '--from-db',
-        action='store_true',
-        help='Load prompt from database instead of file'
-    )
-    claude_parser.add_argument(
-        '--project',
-        help='Load project-specific prompt from database'
-    )
-    claude_parser.add_argument(
-        '--template',
-        help='Template name to use (default: templedb-project-context)'
-    )
+    # claude launch (default — backward compatible)
+    launch_parser = subparsers.add_parser('launch', help='Launch Claude Code with project context')
+    launch_parser.add_argument('--from-db', action='store_true',
+                               help='Load prompt from database instead of file')
+    launch_parser.add_argument('--project', help='Load project-specific prompt')
+    launch_parser.add_argument('--template', help='Template name')
+    launch_parser.add_argument('claude_args', nargs='*', help='Additional arguments for claude')
+    launch_parser.add_argument('--dry-run', action='store_true',
+                               help='Show command without running')
+    cli.commands['claude.launch'] = cmd.launch_claude
 
-    # Allow passing additional arguments to claude
-    claude_parser.add_argument(
-        'claude_args',
-        nargs='*',
-        help='Additional arguments to pass to claude'
-    )
+    # claude hook (called by hooks, not usually by users)
+    hook_parser = subparsers.add_parser('hook', help='Handle Claude Code hook invocation')
+    hook_parser.add_argument('hook_type', nargs='?', help='Hook type (pre-tool, post-tool, notify)')
+    hook_parser.add_argument('tool_type', nargs='?', help='Tool type (bash, etc.)')
+    cli.commands['claude.hook'] = cmd.hook
 
-    # Debug flag to show what command would be run
-    claude_parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Show the command that would be executed without running it'
-    )
+    # claude setup
+    setup_parser = subparsers.add_parser('setup', help='Set up Claude Code integration')
+    setup_parser.add_argument('--force', '-f', action='store_true', help='Overwrite existing settings')
+    cli.commands['claude.setup'] = cmd.setup
+
+    # claude status
+    status_parser = subparsers.add_parser('status', help='Show integration status')
+    cli.commands['claude.status'] = cmd.status

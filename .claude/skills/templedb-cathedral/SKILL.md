@@ -2,8 +2,8 @@
 name: templedb-cathedral
 description: Manage Cathedral packages - export projects as portable bundles, import shared projects, and verify package integrity
 allowed-tools:
-  - Bash(./templedb cathedral:*)
-  - Bash(templedb cathedral:*)
+  - Bash(./templedb storage cathedral:*)
+  - Bash(templedb storage cathedral:*)
   - Bash(ls:*)
   - Bash(cat:*)
   - Bash(tar:*)
@@ -31,10 +31,10 @@ But for **entire project configurations** with database-native tracking.
 ### Export a Project
 ```bash
 # Export to current directory
-templedb cathedral export <project-slug>
+templedb storage cathedral export <project-slug>
 
 # Export to specific directory
-templedb cathedral export <project-slug> --output <directory>
+templedb storage cathedral export <project-slug> --output <directory>
 ```
 
 Creates a `.cathedral` directory containing:
@@ -46,7 +46,7 @@ Creates a `.cathedral` directory containing:
 
 ### Verify Package Integrity
 ```bash
-templedb cathedral verify <package.cathedral>
+templedb storage cathedral verify <package.cathedral>
 ```
 
 Verifies:
@@ -64,13 +64,13 @@ Shows package information:
 ### Import a Package
 ```bash
 # Import with original slug
-templedb cathedral import <package.cathedral>
+templedb storage cathedral import <package.cathedral>
 
 # Import with different slug (fork)
-templedb cathedral import <package.cathedral> --as <new-slug>
+templedb storage cathedral import <package.cathedral> --as <new-slug>
 
 # Overwrite existing project
-templedb cathedral import <package.cathedral> --overwrite
+templedb storage cathedral import <package.cathedral> --overwrite
 ```
 
 ## Common Workflows
@@ -78,29 +78,29 @@ templedb cathedral import <package.cathedral> --overwrite
 ### 1. Backup and Restore
 ```bash
 # Backup a project
-templedb cathedral export important-project --output ~/backups/
+templedb storage cathedral export important-project --output ~/backups/
 
 # Later, restore it (same or different machine)
-templedb cathedral import ~/backups/important-project.cathedral
+templedb storage cathedral import ~/backups/important-project.cathedral
 ```
 
 ### 2. Share with Team
 ```bash
 # Export project
-templedb cathedral export team-project --output ~/shared/
+templedb storage cathedral export team-project --output ~/shared/
 
 # Compress for sharing
 tar -czf team-project.tar.gz team-project.cathedral/
 
 # Team member imports
 tar -xzf team-project.tar.gz
-templedb cathedral import team-project.cathedral
+templedb storage cathedral import team-project.cathedral
 ```
 
 ### 3. Fork a Project
 ```bash
 # Import someone else's project with your own slug
-templedb cathedral import upstream-project.cathedral --as my-fork
+templedb storage cathedral import upstream-project.cathedral --as my-fork
 
 # Now you have an independent copy
 templedb project list | grep my-fork
@@ -109,23 +109,23 @@ templedb project list | grep my-fork
 ### 4. Migration Between Machines
 ```bash
 # On old machine:
-templedb cathedral export work-project --output /tmp/
+templedb storage cathedral export work-project --output /tmp/
 
 # Copy to new machine (via USB, rsync, scp)
 scp -r /tmp/work-project.cathedral new-machine:~/
 
 # On new machine:
-templedb cathedral import ~/work-project.cathedral
+templedb storage cathedral import ~/work-project.cathedral
 ```
 
 ### 5. Project Templates
 ```bash
 # Create a template project
-templedb cathedral export react-template
+templedb storage cathedral export react-template
 
 # Share the template
 # Others use it as starting point
-templedb cathedral import react-template.cathedral --as my-new-app
+templedb storage cathedral import react-template.cathedral --as my-new-app
 ```
 
 ## Package Contents
@@ -215,13 +215,13 @@ If any check fails, import is rejected.
 
 **Export with verification:**
 ```bash
-templedb cathedral export my-project --output /tmp/
-templedb cathedral verify /tmp/my-project.cathedral
+templedb storage cathedral export my-project --output /tmp/
+templedb storage cathedral verify /tmp/my-project.cathedral
 ```
 
 **Import with custom slug:**
 ```bash
-templedb cathedral import upstream.cathedral --as my-fork
+templedb storage cathedral import upstream.cathedral --as my-fork
 templedb project list | grep my-fork
 ```
 
@@ -233,7 +233,7 @@ mkdir -p "$BACKUP_DIR"
 
 templedb project list | awk 'NR>2 {print $1}' | while read project; do
     echo "Backing up: $project"
-    templedb cathedral export "$project" --output "$BACKUP_DIR"
+    templedb storage cathedral export "$project" --output "$BACKUP_DIR"
 done
 
 cd ~/backups/templedb

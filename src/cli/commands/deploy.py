@@ -328,7 +328,7 @@ class DeployCommands(DeployOpsMixin, Command):
                 print()
             else:
                 print("⚠️  No deployment targets configured")
-                print("   Use: ./templedb target add <project> <target_name> ...\n")
+                print("   Use: ./templedb deploy targets add <project> <target_name> ...\n")
 
             # Display deployment scripts
             if status['deploy_scripts']:
@@ -597,8 +597,9 @@ def register(cli):
     deploy_parser = cli.register_command('deploy', None, help_text='Deploy project from TempleDB')
     subparsers = deploy_parser.add_subparsers(dest='deploy_subcommand', required=True)
 
-    # Import deployment backend modules
+    # Import deployment backend modules and consolidated subcommands
     from cli.commands import deploy_nix, nixops4, deploy_script, deploy_appstore, deploy_steam
+    from cli.commands import target as target_module, migration as migration_module
 
     # deploy run command
     run_parser = subparsers.add_parser('run', help='Deploy project (uses FHS isolation by default)')
@@ -714,3 +715,7 @@ def register(cli):
 
     # deploy steam - Steam platform deployment
     deploy_steam.register_under_deploy(subparsers, cli)
+
+    # Consolidated: targets and migration management under deploy
+    target_module.register_subcommands(subparsers, cli, prefix='deploy')
+    migration_module.register_subcommands(subparsers, cli, prefix='deploy')

@@ -199,10 +199,10 @@ TempleDB integrates with sops-nix for secure secret management:
 
 ```bash
 # Initialize secrets
-templedb secret init myproject --age-recipient $(cat ~/.config/sops/age/keys.txt | age-keygen -y)
+templedb env secret init myproject --age-recipient $(cat ~/.config/sops/age/keys.txt | age-keygen -y)
 
 # Edit secrets (opens $EDITOR)
-templedb secret edit myproject
+templedb env secret edit myproject
 ```
 
 ### 2. Generated Modules Include Placeholders
@@ -251,8 +251,8 @@ templedb env set myapp PORT 3000
 templedb env set myapp NODE_ENV production
 
 # 3. Add secrets
-templedb secret init myapp
-templedb secret edit myapp  # Add DATABASE_URL, API_KEYS, etc.
+templedb env secret init myapp
+templedb env secret edit myapp  # Add DATABASE_URL, API_KEYS, etc.
 
 # 4. Generate NixOS configuration
 templedb nixos export myapp -o ~/nixos-configs/myapp
@@ -366,7 +366,7 @@ exec $SHELL
 
 3. Ensure secrets are encrypted with correct key:
    ```bash
-   templedb secret export myproject --format yaml
+   templedb env secret export myproject --format yaml
    ```
 
 ## Benefits of TempleDB + NixOS

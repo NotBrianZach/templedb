@@ -7,17 +7,17 @@ WHAT WAS BUILT
 
 1. CLI COMMANDS (TempleDB)
 
-   templedb query-open - Query and open files in editor
+   templedb search query-open - Query and open files in editor
 
    Examples:
-     templedb query-open bza "prompts that do character analysis"
-     templedb query-open myproject "authentication code" --limit 5
-     templedb query-open myproject "config" --no-select
+     templedb search query-open bza "prompts that do character analysis"
+     templedb search query-open myproject "authentication code" --limit 5
+     templedb search query-open myproject "config" --no-select
 
-   templedb query - Query without opening (preview)
+   templedb search query - Query without opening (preview)
 
    Examples:
-     templedb query myproject "test files" --json
+     templedb search query myproject "test files" --json
 
 
 2. EMACS INTEGRATION (Spacemacs Layer)
@@ -39,7 +39,7 @@ WHAT WAS BUILT
    When running Claude in vterm, just use natural language:
 
    You: "open the bza files with character analysis prompts"
-   Claude: [automatically uses templedb query-open]
+   Claude: [automatically uses templedb search query-open]
 
 
 IMPROVED ERGONOMICS
@@ -51,7 +51,7 @@ BEFORE (your original example):
    on a page"
 
 AFTER (now):
-  From CLI:    templedb query-open bza "character analysis prompts"
+  From CLI:    templedb search query-open bza "character analysis prompts"
   From Emacs:  SPC a t q q → "character analysis prompts"
   From Claude: "open bza files with character analysis prompts"
 
@@ -81,7 +81,7 @@ STEP 2: Try the interactive query
 STEP 3: Try from command line (with Emacs running)
 
   cd ~/templeDB
-  ./templedb query-open bza "character analysis"
+  ./templedb search query-open bza "character analysis"
 
   Result: Files open in your running Emacs instance!
 

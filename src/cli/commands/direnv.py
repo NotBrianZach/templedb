@@ -31,7 +31,7 @@ class DirenvCommand(Command):
 
             if not envrc_path.exists():
                 print("No .envrc file exists yet")
-                print("Run 'templedb direnv --write' to create one")
+                print("Run 'templedb env direnv --write' to create one")
                 return 1
 
             # Generate new content to temp file
@@ -93,7 +93,7 @@ class DirenvCommand(Command):
 
             if not envrc_path.exists():
                 print("✗ No .envrc file found")
-                print("  Run 'templedb direnv --write' to create one")
+                print("  Run 'templedb env direnv --write' to create one")
                 return 1
 
             # Read current file
@@ -130,8 +130,8 @@ class DirenvCommand(Command):
                 return 0
             else:
                 print("⚠️  .envrc differs from TempleDB state")
-                print("   Run 'templedb direnv diff' to see changes")
-                print("   Run 'templedb direnv --write' to update")
+                print("   Run 'templedb env direnv diff' to see changes")
+                print("   Run 'templedb env direnv --write' to update")
                 return 1
 
         except Exception as e:
@@ -168,6 +168,64 @@ class DirenvCommand(Command):
             import traceback
             traceback.print_exc()
             return 1
+
+
+def register_subcommands(parent_subparsers, cli, prefix='env'):
+    """Register direnv commands as subcommands under a parent (e.g., env direnv generate)."""
+    cmd = DirenvCommand()
+
+    direnv_parser = parent_subparsers.add_parser('direnv', help='Direnv integration and .envrc management')
+    direnv_parser.add_argument('--profile', default='default',
+                               help='Secret profile (default/staging/production, auto-detected from git branch)')
+    direnv_parser.add_argument('--environment', '--env', default='default',
+                               help='Environment for env_vars (default/development/production)')
+    direnv_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True,
+                               help="Don't emit 'use nix' directive")
+    direnv_parser.add_argument('--branch', help='Override git branch detection')
+    direnv_parser.add_argument('--ref', help='Override git ref/commit detection')
+    direnv_parser.add_argument('--write', '-w', action='store_true',
+                               help='Write output to .envrc file (instead of stdout)')
+    direnv_parser.add_argument('--no-auto-reload', dest='auto_reload', action='store_false', default=True,
+                               help="Don't add watch_file directive for auto-reload")
+    direnv_parser.add_argument('--no-validate', dest='validate', action='store_false', default=True,
+                               help='Skip validation of generated .envrc')
+
+    subparsers = direnv_parser.add_subparsers(dest='direnv_subcommand')
+    direnv_parser.set_defaults(slug=None)
+    cli.commands[f'{prefix}.direnv'] = cmd.generate
+
+    gen_parser = subparsers.add_parser('generate', help='Generate .envrc (default if no subcommand)', aliases=['gen'])
+    gen_parser.add_argument('slug', nargs='?', help='Project slug (auto-detected from .templedb/ or cwd)')
+    gen_parser.add_argument('--profile', default='default',
+                           help='Secret profile (default/staging/production, auto-detected from git branch)')
+    gen_parser.add_argument('--environment', '--env', default='default',
+                           help='Environment for env_vars (default/development/production)')
+    gen_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True,
+                           help="Don't emit 'use nix' directive")
+    gen_parser.add_argument('--branch', help='Override git branch detection')
+    gen_parser.add_argument('--ref', help='Override git ref/commit detection')
+    gen_parser.add_argument('--write', '-w', action='store_true',
+                           help='Write output to .envrc file (instead of stdout)')
+    gen_parser.add_argument('--no-auto-reload', dest='auto_reload', action='store_false', default=True,
+                           help="Don't add watch_file directive for auto-reload")
+    gen_parser.add_argument('--no-validate', dest='validate', action='store_false', default=True,
+                           help='Skip validation of generated .envrc')
+    cli.commands[f'{prefix}.direnv.generate'] = cmd.generate
+    cli.commands[f'{prefix}.direnv.gen'] = cmd.generate
+
+    diff_parser = subparsers.add_parser('diff', help='Show diff between current .envrc and TempleDB state')
+    diff_parser.add_argument('slug', nargs='?', help='Project slug (auto-detected)')
+    diff_parser.add_argument('--profile', default='default', help='Secret profile')
+    diff_parser.add_argument('--environment', '--env', default='default', help='Environment name')
+    diff_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True)
+    cli.commands[f'{prefix}.direnv.diff'] = cmd.diff
+
+    verify_parser = subparsers.add_parser('verify', help='Verify .envrc matches TempleDB state')
+    verify_parser.add_argument('slug', nargs='?', help='Project slug (auto-detected)')
+    verify_parser.add_argument('--profile', default='default', help='Secret profile')
+    verify_parser.add_argument('--environment', '--env', default='default', help='Environment name')
+    verify_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True)
+    cli.commands[f'{prefix}.direnv.verify'] = cmd.verify
 
 
 def register(cli):

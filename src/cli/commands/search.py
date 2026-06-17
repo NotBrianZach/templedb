@@ -182,3 +182,23 @@ def register(cli):
     files_parser.add_argument('pattern', help='Search pattern')
     files_parser.add_argument('-p', '--project', help='Project slug to limit search')
     cli.commands['search.files'] = cmd.search_files
+
+    # search query (consolidated from query_open)
+    from cli.commands.query_open import QueryOpenCommands
+    qo_cmd = QueryOpenCommands()
+
+    query_parser = subparsers.add_parser('query', help='Query files using natural language')
+    query_parser.add_argument('project', help='Project slug')
+    query_parser.add_argument('query', help='Natural language query')
+    query_parser.add_argument('-l', '--limit', type=int, default=20, help='Maximum number of results')
+    query_parser.add_argument('--json', action='store_true', help='Output as JSON')
+    cli.commands['search.query'] = qo_cmd.query_files
+
+    query_open_parser = subparsers.add_parser('query-open', help='Query and open files using natural language')
+    query_open_parser.add_argument('project', help='Project slug')
+    query_open_parser.add_argument('query', help='Natural language query')
+    query_open_parser.add_argument('-l', '--limit', type=int, default=10, help='Maximum number of files to open')
+    query_open_parser.add_argument('-e', '--editor', help='Editor command (default: auto-detect)')
+    query_open_parser.add_argument('-n', '--no-select', action='store_true', help="Don't select Emacs frame")
+    query_open_parser.add_argument('--dry-run', action='store_true', help='Show files without opening')
+    cli.commands['search.query-open'] = qo_cmd.query_open

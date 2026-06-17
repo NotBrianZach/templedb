@@ -13,17 +13,17 @@ Env vars are stored in the environment_variables table.
 Secrets are stored in secret_blobs + project_secret_blobs (per-variable age encryption).
 
 Usage examples:
-  templedb var set woofs_projects SUPABASE_URL https://... --target staging
-  templedb var set woofs_projects SECRET_KEY abc123 --secret --keys templedb-primary
-  templedb var set NODE_ENV production --global
-  templedb var set DEBUG true --tag backend
-  templedb var get woofs_projects SUPABASE_URL --target staging
-  templedb var list woofs_projects --target staging
-  templedb var export woofs_projects --target staging --format shell
-  templedb var unset woofs_projects SUPABASE_URL --target staging
-  templedb var tag add frontend woofs_projects shopUI
-  templedb var tag list
-  templedb var tag list woofs_projects
+  templedb env var set woofs_projects SUPABASE_URL https://... --target staging
+  templedb env var set woofs_projects SECRET_KEY abc123 --secret --keys templedb-primary
+  templedb env var set NODE_ENV production --global
+  templedb env var set DEBUG true --tag backend
+  templedb env var get woofs_projects SUPABASE_URL --target staging
+  templedb env var list woofs_projects --target staging
+  templedb env var export woofs_projects --target staging --format shell
+  templedb env var unset woofs_projects SUPABASE_URL --target staging
+  templedb env var tag add frontend woofs_projects shopUI
+  templedb env var tag list
+  templedb env var tag list woofs_projects
 """
 import re
 import sys
@@ -150,7 +150,7 @@ def _get_age_recipient(key_name: str) -> tuple:
     )
     if not row:
         print(f"error: encryption key '{key_name}' not found or not active", file=sys.stderr)
-        print("  List keys: templedb key list", file=sys.stderr)
+        print("  List keys: templedb env key list", file=sys.stderr)
         sys.exit(1)
     return row['id'], row['recipient']
 
@@ -770,7 +770,7 @@ class VarCommands(Command):
                     inherited = f"  [{from_label}]" if from_label else ""
                     print(f"  {name:{nw}}  {display}{inherited}")
                 if any_masked:
-                    print(f"  (masked values: templedb var get {slug} KEY to reveal)")
+                    print(f"  (masked values: templedb env var get {slug} KEY to reveal)")
 
         # --- SECRETS (encrypted) ---
         try:
@@ -787,7 +787,7 @@ class VarCommands(Command):
                 nw = max(len(r['secret_name']) for r in secret_rows)
                 for r in secret_rows:
                     print(f"  {r['secret_name']:{nw}}  [encrypted]")
-                print(f"  (to decrypt: templedb var get {slug} KEY --secret)")
+                print(f"  (to decrypt: templedb env var get {slug} KEY --secret)")
         except Exception:
             pass
 
@@ -810,7 +810,7 @@ class VarCommands(Command):
         if not printed:
             print(f"  (no vars)")
         if any_masked:
-            print("  (sensitive values masked — use: templedb var get KEY)")
+            print("  (sensitive values masked — use: templedb env var get KEY)")
 
     def _list_all(self, target_filter):
         rows = self.query_all("""
@@ -840,7 +840,7 @@ class VarCommands(Command):
                 any_masked = True
             print(f"{scope}  {name}{target_suffix}={display}")
         if any_masked:
-            print("\n(sensitive values masked — use: templedb var get PROJECT KEY)")
+            print("\n(sensitive values masked — use: templedb env var get PROJECT KEY)")
 
     # ------------------------------------------------------------------
     # var export
@@ -1123,6 +1123,90 @@ class VarCommands(Command):
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
+
+def register_subcommands(parent_subparsers, cli, prefix='env'):
+    """Register var commands as subcommands under a parent (e.g., env var set)."""
+    cmd = VarCommands()
+
+    var_parser = parent_subparsers.add_parser(
+        'var', help='Unified variable management (env vars + secrets with scope hierarchy)'
+    )
+    subparsers = var_parser.add_subparsers(dest='var_subcommand', required=True)
+
+    p = subparsers.add_parser('set', help='Set a variable')
+    p.add_argument('project', nargs='?', help='Project slug (omit with --global or --tag)')
+    p.add_argument('key', help='Variable name')
+    p.add_argument('value', help='Variable value')
+    p.add_argument('--target', '-t', default=None, help='Deployment target (staging, production, ...)')
+    p.add_argument('--secret', action='store_true', help='Store as age-encrypted secret')
+    p.add_argument('--keys', default=None, help='Comma-separated encryption key names (required with --secret)')
+    p.add_argument('--global', dest='global_scope', action='store_true', help='Set at global scope')
+    p.add_argument('--tag', default=None, help='Set at tag scope (creates tag if new)')
+    p.add_argument('--profile', default='default', help='Secret profile (default: default)')
+    p.add_argument('--nixos', action='store_true',
+                   help='Write to system NixOS config (system_config table, no project needed)')
+    p.add_argument('--description', default=None, help='Description for --nixos keys')
+    cli.commands[f'{prefix}.var.set'] = cmd.var_set
+
+    p = subparsers.add_parser('get', help='Get a variable (with scope resolution)')
+    p.add_argument('project', nargs='?', help='Project slug')
+    p.add_argument('key', help='Variable name')
+    p.add_argument('--target', '-t', default=None, help='Deployment target')
+    p.add_argument('--secret', action='store_true', help='Look up in secrets')
+    p.add_argument('--profile', default='default', help='Secret profile')
+    p.add_argument('--global', dest='global_scope', action='store_true',
+                   help='Look up in global scope only')
+    cli.commands[f'{prefix}.var.get'] = cmd.var_get
+
+    p = subparsers.add_parser('list', aliases=['ls'], help='List variables annotated by scope')
+    p.add_argument('project', nargs='?', help='Project slug (omit to show all)')
+    p.add_argument('--target', '-t', default=None, help='Filter by deployment target')
+    p.add_argument('--global', dest='global_scope', action='store_true', help='Global vars only')
+    p.add_argument('--tag', default=None, help='Tag vars only')
+    p.add_argument('--profile', default='default', help='Secret profile for listing secret keys')
+    cli.commands[f'{prefix}.var.list'] = cmd.var_list
+    cli.commands[f'{prefix}.var.ls'] = cmd.var_list
+
+    p = subparsers.add_parser('export', help='Export merged vars for a project (env + secrets)')
+    p.add_argument('project', help='Project slug')
+    p.add_argument('--target', '-t', default=None, help='Deployment target')
+    p.add_argument('--format', default='shell', choices=['shell', 'dotenv', 'json'])
+    p.add_argument('--secrets', action='store_true', help='Include encrypted secrets (requires age key)')
+    p.add_argument('--profile', default='default', help='Secret profile')
+    cli.commands[f'{prefix}.var.export'] = cmd.var_export
+
+    p = subparsers.add_parser('edit', help='Open a variable value in $EDITOR')
+    p.add_argument('project', nargs='?', help='Project slug (omit with --nixos)')
+    p.add_argument('key', help='Variable name')
+    p.add_argument('--target', '-t', default=None, help='Deployment target')
+    p.add_argument('--nixos', action='store_true', help='Edit a NixOS system_config key')
+    cli.commands[f'{prefix}.var.edit'] = cmd.var_edit
+
+    p = subparsers.add_parser('unset', help='Delete a variable')
+    p.add_argument('project', nargs='?', help='Project slug')
+    p.add_argument('key', help='Variable name')
+    p.add_argument('--target', '-t', default=None, help='Deployment target')
+    p.add_argument('--global', dest='global_scope', action='store_true')
+    p.add_argument('--tag', default=None, help='Tag scope')
+    p.add_argument('--secret', action='store_true', help='Delete from secrets')
+    p.add_argument('--profile', default='default', help='Secret profile')
+    cli.commands[f'{prefix}.var.unset'] = cmd.var_unset
+
+    tag_parser = subparsers.add_parser('tag', help='Manage project tag groups')
+    tag_sub = tag_parser.add_subparsers(dest='tag_subcommand', required=True)
+    cli.commands[f'{prefix}.var.tag'] = cmd.tag_dispatch
+
+    p = tag_sub.add_parser('add', help='Add project(s) to a tag group (creates tag if new)')
+    p.add_argument('tag_name', help='Tag name')
+    p.add_argument('projects', nargs='+', help='Project slug(s)')
+
+    p = tag_sub.add_parser('remove', help='Remove a project from a tag group')
+    p.add_argument('tag_name', help='Tag name')
+    p.add_argument('project', help='Project slug')
+
+    p = tag_sub.add_parser('list', aliases=['ls'], help='List tags (optionally for one project)')
+    p.add_argument('project', nargs='?', help='Project slug (optional)')
+
 
 def register(cli):
     """Register var commands with the CLI instance."""

@@ -41,7 +41,7 @@ class SecretV2Commands(Command):
 
             if not key:
                 logger.error(f"Key not found: {key_name}")
-                logger.info("List available keys with: templedb key list")
+                logger.info("List available keys with: templedb env key list")
                 sys.exit(1)
 
             if not key['is_active']:
@@ -164,7 +164,7 @@ class SecretV2Commands(Command):
         if not key_names:
             logger.error("No encryption keys specified")
             logger.info("Use --keys to specify comma-separated key names")
-            logger.info("List available keys with: templedb key list")
+            logger.info("List available keys with: templedb env key list")
             return 1
 
         recipients, key_ids = self._get_recipients_from_keys(key_names)
@@ -254,7 +254,7 @@ class SecretV2Commands(Command):
 
         if not row:
             logger.error(f"Secret '{secret_name}' not found for {slug}")
-            logger.info(f"List secrets with: templedb secret list {slug}")
+            logger.info(f"List secrets with: templedb env secret list {slug}")
             return 1
 
         # Decrypt
@@ -314,7 +314,7 @@ class SecretV2Commands(Command):
             label = slug or "any project"
             logger.info(f"No secrets found for {label} (profile: {profile})")
             if slug:
-                logger.info(f"Set a secret with: templedb secret set {slug} <name> <value> --keys <key>")
+                logger.info(f"Set a secret with: templedb env secret set {slug} <name> <value> --keys <key>")
             return 0
 
         label = slug or "all projects"
@@ -410,7 +410,7 @@ class SecretV2Commands(Command):
 
         if not secret:
             logger.error(f"Secret '{secret_name}' not found in {source_slug}")
-            logger.info(f"List secrets with: templedb secret list {source_slug}")
+            logger.info(f"List secrets with: templedb env secret list {source_slug}")
             return 1
 
         # Check if already shared
@@ -517,7 +517,7 @@ class SecretV2Commands(Command):
         if not key_names:
             logger.error("No encryption keys specified")
             logger.info("Use --keys to specify comma-separated key names")
-            logger.info("List available keys with: templedb key list")
+            logger.info("List available keys with: templedb env key list")
             return 1
 
         recipients, key_ids = self._get_recipients_from_keys(key_names)
@@ -623,6 +623,68 @@ class SecretV2Commands(Command):
         logger.info(f"✓ Migration complete for {slug}")
         self._audit_log('migrate-secrets', slug, f"migrated_{migrated_count}_secrets", {})
         return 0
+
+
+def register_subcommands(parent_subparsers, cli, prefix='env'):
+    """Register secret commands as subcommands under a parent (e.g., env secret set)."""
+    cmd = SecretV2Commands()
+
+    secret_parser = parent_subparsers.add_parser('secret', help='Manage individual encrypted secrets')
+    subparsers = secret_parser.add_subparsers(dest='secret_subcommand', required=True)
+
+    set_parser = subparsers.add_parser('set', help='Set an individual secret')
+    set_parser.add_argument('slug', help='Project slug')
+    set_parser.add_argument('name', help='Secret name (e.g., OPENROUTER_API_KEY)')
+    set_parser.add_argument('value', help='Secret value')
+    set_parser.add_argument('--profile', default='default', help='Secret profile')
+    set_parser.add_argument('--keys', required=True,
+                           help='Comma-separated list of encryption key names')
+    cli.commands[f'{prefix}.secret.set'] = cmd.secret_set
+
+    get_parser = subparsers.add_parser('get', help='Get an individual secret value')
+    get_parser.add_argument('slug', help='Project slug')
+    get_parser.add_argument('name', help='Secret name')
+    get_parser.add_argument('--profile', default='default', help='Secret profile')
+    get_parser.add_argument('--metadata', action='store_true',
+                           help='Show metadata along with value')
+    cli.commands[f'{prefix}.secret.get'] = cmd.secret_get
+
+    list_parser = subparsers.add_parser('list', help='List secrets (all projects if no slug given)')
+    list_parser.add_argument('slug', nargs='?', help='Project slug (omit to list all projects)')
+    list_parser.add_argument('--profile', default='default', help='Secret profile')
+    list_parser.add_argument('--values', action='store_true',
+                            help='Show decrypted values (use with caution)')
+    cli.commands[f'{prefix}.secret.list'] = cmd.secret_list
+
+    delete_parser = subparsers.add_parser('delete', help='Delete a secret from a project')
+    delete_parser.add_argument('slug', help='Project slug')
+    delete_parser.add_argument('name', help='Secret name')
+    delete_parser.add_argument('--profile', default='default', help='Secret profile')
+    cli.commands[f'{prefix}.secret.delete'] = cmd.secret_delete
+
+    share_parser = subparsers.add_parser('share-key',
+                                        help='Share an individual secret with another project')
+    share_parser.add_argument('source_slug', help='Source project slug (owner of secret)')
+    share_parser.add_argument('target_slug', help='Target project slug (will gain access)')
+    share_parser.add_argument('name', help='Secret name to share')
+    share_parser.add_argument('--profile', default='default', help='Secret profile')
+    cli.commands[f'{prefix}.secret.share-key'] = cmd.secret_share_key
+
+    export_parser = subparsers.add_parser('export', help='Export secrets in various formats')
+    export_parser.add_argument('slug', help='Project slug')
+    export_parser.add_argument('--profile', default='default', help='Secret profile')
+    export_parser.add_argument('--format', default='yaml',
+                              choices=['shell', 'yaml', 'json', 'dotenv'],
+                              help='Output format (default: yaml for backward compatibility)')
+    cli.commands[f'{prefix}.secret.export'] = cmd.secret_export
+
+    migrate_parser = subparsers.add_parser('migrate',
+                                          help='Migrate YAML-based secrets to individual secrets')
+    migrate_parser.add_argument('slug', help='Project slug')
+    migrate_parser.add_argument('--profile', default='default', help='Secret profile')
+    migrate_parser.add_argument('--keys', required=True,
+                               help='Comma-separated list of encryption key names')
+    cli.commands[f'{prefix}.secret.migrate'] = cmd.secret_migrate
 
 
 def register(cli):
