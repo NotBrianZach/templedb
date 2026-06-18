@@ -48,6 +48,7 @@ MIGRATION_SEQUENCE = [
     "050_add_deployment_scripts.sql",
     "063_drop_quiz_tables_rename_vibe_sessions.sql",
     "064_add_branch_operations.sql",
+    "065_add_deployment_pipeline.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",

@@ -423,6 +423,29 @@ CREATE TABLE IF NOT EXISTS deployment_rollbacks (
     FOREIGN KEY (rollback_deployment_id) REFERENCES deployment_history(id)
 );
 
+CREATE TABLE IF NOT EXISTS deployment_triggers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    branch_pattern TEXT NOT NULL,
+    target_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    auto_rollback INTEGER NOT NULL DEFAULT 0,
+    require_health_check INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(project_id, branch_pattern, target_name)
+);
+
+CREATE TABLE IF NOT EXISTS deployment_notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    event TEXT NOT NULL,
+    notification_type TEXT NOT NULL,
+    config TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS deployment_scripts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_slug TEXT NOT NULL UNIQUE,

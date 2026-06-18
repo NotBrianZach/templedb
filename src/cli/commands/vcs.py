@@ -478,6 +478,20 @@ class VCSCommands(Command):
         except Exception as e:
             logger.debug(f"Could not update read-only status: {e}")
 
+        # Auto-deploy triggers
+        deploy_results = []
+        try:
+            from services.deployment_pipeline import DeploymentPipelineService
+            pipeline = DeploymentPipelineService()
+            deploy_results = pipeline.on_commit(
+                project_slug=project['slug'],
+                project_id=project['id'],
+                branch_name=branch['branch_name'],
+                commit_hash=commit_hash,
+            )
+        except Exception as e:
+            logger.debug(f"Auto-deploy check skipped: {e}")
+
         from cli.json_output import emit
         result = {
             "hash": commit_hash,
@@ -487,6 +501,7 @@ class VCSCommands(Command):
             "files": len(staged),
             "message": args.message,
             "readonly_updated": readonly_updated,
+            "auto_deploys": deploy_results,
         }
         return emit(args, result, human_fn=lambda d: (
             print(f"Created commit {d['hash']}"),
@@ -496,6 +511,8 @@ class VCSCommands(Command):
             print(f"  Files: {d['files']}"),
             print(f"  Message: {d['message']}"),
             print(f"  Checkout is now read-only") if d['readonly_updated'] else None,
+            [print(f"  Auto-deploy → {r['target']}: {'OK' if r['success'] else 'FAILED'}")
+             for r in d.get('auto_deploys', [])],
         ) and None)
 
     def status(self, args) -> int:

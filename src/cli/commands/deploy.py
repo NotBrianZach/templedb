@@ -78,6 +78,23 @@ class DeployCommands(DeployOpsMixin, Command):
         try:
             project_slug = args.slug
 
+            # Multi-target deploy
+            all_targets = getattr(args, 'all_targets', False)
+            targets_csv = getattr(args, 'targets', None)
+            if all_targets or targets_csv:
+                from services.deployment_pipeline import DeploymentPipelineService
+                pipeline = DeploymentPipelineService()
+                target_list = targets_csv.split(',') if targets_csv else None
+                dry_run = getattr(args, 'dry_run', False)
+                results = pipeline.deploy_multi(project_slug, targets=target_list, dry_run=dry_run)
+                success_count = sum(1 for r in results if r['success'])
+                fail_count = len(results) - success_count
+                print(f"\nMulti-target deploy: {success_count} succeeded, {fail_count} failed")
+                for r in results:
+                    status = "OK" if r['success'] else "FAILED"
+                    print(f"  {r['target']}: {status} — {r.get('message', '')}")
+                return 0 if fail_count == 0 else 1
+
             # Check if target was explicitly provided
             target_provided = hasattr(args, 'target') and args.target
 
@@ -615,6 +632,9 @@ def register(cli):
                            help='Skip custom deployment script and use standard deployment')
     run_parser.add_argument('--only', choices=['frontend', 'functions', 'migrations', 'secrets'],
                            help='Deploy only a specific component (passed through to the deploy script)')
+    run_parser.add_argument('--all-targets', action='store_true',
+                           help='Deploy to all configured targets for this project')
+    run_parser.add_argument('--targets', help='Comma-separated list of targets to deploy to')
     run_parser.add_argument('--examples', action='store_true', help='Show usage examples')
     cli.commands['deploy.run'] = deploy_handler.deploy
 
@@ -719,3 +739,7 @@ def register(cli):
     # Consolidated: targets and migration management under deploy
     target_module.register_subcommands(subparsers, cli, prefix='deploy')
     migration_module.register_subcommands(subparsers, cli, prefix='deploy')
+
+    # === Pipeline automation commands ===
+    from cli.commands.deploy_pipeline import register_pipeline_commands
+    register_pipeline_commands(subparsers, cli)

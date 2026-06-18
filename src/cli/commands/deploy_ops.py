@@ -273,15 +273,22 @@ class DeployOpsMixin:
                     print("Cancelled")
                     return 0
 
-            # Record rollback
-            tracking_service.record_rollback(
-                deployment_id=target_deployment['id'],
-                reason=reason or "Manual rollback"
+            # Execute rollback via pipeline service
+            from services.deployment_pipeline import DeploymentPipelineService
+            pipeline = DeploymentPipelineService()
+            result = pipeline.rollback(
+                project_slug=project_slug,
+                target=target,
+                to_deployment_id=target_deployment['id'],
+                reason=reason or "Manual rollback",
             )
 
-            print(f"\nRollback recorded. Re-deploy to apply:")
-            print(f"  templedb deploy run {project_slug} --target {target}")
-            return 0
+            if result['success']:
+                print(f"\nRolled back to deployment #{result.get('rolled_back_to', '?')}")
+                return 0
+            else:
+                print(f"\nRollback failed: {result['message']}")
+                return 1
 
         except Exception as e:
             logger.error(f"Rollback failed: {e}")

@@ -2245,40 +2245,150 @@ def deploy_list():
             f'{html.escape((s["last_started_at"] or "")[:10])}{fail_note}',
         ])
 
+    # ── Auto-Deploy Triggers ──────────────────────────────────────────────────
+    triggers = query_all("""
+        SELECT dt.id, p.slug, dt.branch_pattern, dt.target_name, dt.enabled,
+               dt.auto_rollback, dt.require_health_check, dt.updated_at
+        FROM deployment_triggers dt JOIN projects p ON dt.project_id = p.id
+        ORDER BY p.slug, dt.branch_pattern
+    """)
+    trigger_rows = []
+    for t in triggers:
+        toggle = (
+            f'<button hx-post="/deploy/triggers/{t["id"]}/toggle" hx-target="closest tr" hx-swap="outerHTML" '
+            f'style="padding:0.15rem 0.5rem;font-size:0.75rem" class="{"success" if t["enabled"] else ""}">'
+            f'{"on" if t["enabled"] else "off"}</button>'
+        )
+        flags = []
+        if t["auto_rollback"]: flags.append("auto-rollback")
+        if t["require_health_check"]: flags.append("health-check")
+        flag_html = " ".join(f'<span class="badge">{f}</span>' for f in flags) or ""
+        trigger_rows.append([
+            f'<a href="/projects/{html.escape(t["slug"])}">{html.escape(t["slug"])}</a>',
+            f'<code>{html.escape(t["branch_pattern"])}</code>',
+            f'<strong>{html.escape(t["target_name"])}</strong>',
+            toggle,
+            flag_html,
+        ])
+
+    # ── Notifications ──────────────────────────────────────────────────────────
+    notifications = query_all("""
+        SELECT dn.id, dn.event, dn.notification_type, dn.config, dn.enabled,
+               p.slug as project_slug
+        FROM deployment_notifications dn
+        LEFT JOIN projects p ON dn.project_id = p.id
+        ORDER BY dn.event
+    """)
+    notif_rows = []
+    for n in notifications:
+        try:
+            config = json.loads(n["config"])
+            dest = config.get("url") or config.get("command", "")
+        except Exception:
+            dest = n["config"]
+        scope = html.escape(n["project_slug"] or "global")
+        notif_rows.append([
+            f'<code>{html.escape(n["event"])}</code>',
+            f'<span class="badge">{html.escape(n["notification_type"])}</span>',
+            f'<span class="muted" style="font-size:0.78rem">{html.escape(str(dest)[:60])}</span>',
+            scope,
+            '<span style="color:#4a9a6a">on</span>' if n["enabled"] else '<span class="muted">off</span>',
+        ])
+
+    # ── Deployment Cache Stats ─────────────────────────────────────────────────
+    cache_stats = query_all("""
+        SELECT p.slug, dc.target, dc.content_hash, dc.use_count, dc.last_used_at,
+               SUBSTR(dc.files_hash, 1, 8) AS short_files,
+               SUBSTR(dc.deps_hash, 1, 8) AS short_deps
+        FROM deployment_cache dc
+        JOIN projects p ON dc.project_id = p.id
+        ORDER BY dc.last_used_at DESC LIMIT 20
+    """)
+    cache_rows = []
+    for c in cache_stats:
+        cache_rows.append([
+            f'<a href="/projects/{html.escape(c["slug"])}">{html.escape(c["slug"])}</a>',
+            html.escape(c["target"] or ""),
+            f'<code class="muted" style="font-size:0.72rem">{html.escape((c["content_hash"] or "")[:12])}</code>',
+            f'<code class="muted" style="font-size:0.72rem">{html.escape(c["short_files"] or "")}</code>',
+            str(c["use_count"] or 0),
+            html.escape((c["last_used_at"] or "")[:16]),
+        ])
+
     # ── Assemble ───────────────────────────────────────────────────────────────
     history_summary = query_all("""
         SELECT status, COUNT(*) as n FROM deployment_history GROUP BY status ORDER BY n DESC
     """)
     summary_html = " ".join(f'{_status_badge(r["status"])} <span class="muted">{r["n"]}</span>' for r in history_summary)
 
+    # Count auto-deploys
+    auto_count = query_one("SELECT COUNT(*) as n FROM deployment_history WHERE triggered_by = 'auto-commit'")
+    auto_html = f' <span class="badge">auto: {auto_count["n"]}</span>' if auto_count and auto_count["n"] else ""
+
     body = f"""
 <h2>Deploy</h2>
 
-<h3>Scripts</h3>
-{_search_bar("deploy-scripts-tbl", "Filter scripts…")}
+<h3>Auto-Deploy Triggers</h3>
+<p class="muted" style="font-size:0.8rem;margin-bottom:0.5rem">Commits to matching branches auto-deploy to the target. Manage with <code>templedb deploy trigger add/list/remove</code></p>
+{_table(["Project", "Branch", "Target", "Enabled", "Flags"], trigger_rows, "No triggers. Add one: templedb deploy trigger add &lt;project&gt; main production", "deploy-triggers-tbl")}
+
+<h3 style="margin-top:1.5rem">Notifications</h3>
+<p class="muted" style="font-size:0.8rem;margin-bottom:0.5rem">Webhook and command hooks for deploy events. Manage with <code>templedb deploy notify add/list/remove</code></p>
+{_table(["Event", "Type", "Destination", "Scope", "Enabled"], notif_rows, "No notifications configured.", "deploy-notif-tbl")}
+
+<h3 style="margin-top:1.5rem">Scripts</h3>
+{_search_bar("deploy-scripts-tbl", "Filter scripts...")}
 {_table(["Project", "Path", "Description", "Enabled", "Updated"], script_rows, "No deployment scripts.", "deploy-scripts-tbl")}
 
 <h3 style="margin-top:1.5rem">Targets</h3>
-{_search_bar("deploy-targets-tbl", "Filter by project or target…")}
+{_search_bar("deploy-targets-tbl", "Filter by project or target...")}
 {_table(["Project", "Target", "Type", "Host", "Provider", "URL", ""], target_rows, "No targets.", "deploy-targets-tbl")}
 
-<h3 style="margin-top:1.5rem">History <span style="font-weight:normal;font-size:0.85rem">{summary_html}</span></h3>
-{_search_bar("deploy-hist-tbl", "Filter by project / target / status / commit…", "360px")}
+<h3 style="margin-top:1.5rem">History <span style="font-weight:normal;font-size:0.85rem">{summary_html}{auto_html}</span></h3>
+{_search_bar("deploy-hist-tbl", "Filter by project / target / status / commit...", "360px")}
 {_table(["Project", "Target", "Status", "Commit", "By", "Started", "Dur", "Details"], hist_rows, "No history.", "deploy-hist-tbl")}
 
+<h3 style="margin-top:1.5rem">Cache <span class="muted" style="font-weight:normal;font-size:0.85rem">(content-addressable)</span></h3>
+{_table(["Project", "Target", "Content Hash", "Files Hash", "Hits", "Last Used"], cache_rows, "No cached deployments.", "deploy-cache-tbl")}
+
 <h3 style="margin-top:1.5rem">NixOS Switches</h3>
-{_search_bar("nixos-switches-tbl", "Filter by project or date…")}
+{_search_bar("nixos-switches-tbl", "Filter by project or date...")}
 {_table(["Project", "Date", "Command", "Result", "Output"], nixos_rows, "No system deployments.", "nixos-switches-tbl")}
 
 <h3 style="margin-top:1.5rem">NixOS Service Definitions</h3>
-{_search_bar("nix-svc-tbl", "Filter services…")}
+{_search_bar("nix-svc-tbl", "Filter services...")}
 {_table(["Project", "Service", "Unit", "Description", "After", "Flags"], svc_rows, "No service definitions.", "nix-svc-tbl")}
 
 <h3 style="margin-top:1.5rem">Local Services</h3>
-{_search_bar("local-svcs-tbl", "Filter by project or service…")}
+{_search_bar("local-svcs-tbl", "Filter by project or service...")}
 {_table(["Project", "Service", "Status", "Ports", "Package", "Health URL", "Last Started"], local_rows, "No local services.", "local-svcs-tbl")}
 """
     return _base("Deploy", body, "deploy")
+
+
+@app.post("/deploy/triggers/{trigger_id}/toggle", response_class=HTMLResponse)
+def deploy_trigger_toggle(trigger_id: int):
+    row = query_one("SELECT dt.*, p.slug FROM deployment_triggers dt JOIN projects p ON dt.project_id = p.id WHERE dt.id=?", (trigger_id,))
+    if not row:
+        return HTMLResponse('<tr><td colspan="5" class="muted">Not found</td></tr>')
+    new_val = 0 if row["enabled"] else 1
+    execute("UPDATE deployment_triggers SET enabled=?, updated_at=datetime('now') WHERE id=?", (new_val, trigger_id))
+    toggle = (
+        f'<button hx-post="/deploy/triggers/{trigger_id}/toggle" hx-target="closest tr" hx-swap="outerHTML" '
+        f'style="padding:0.15rem 0.5rem;font-size:0.75rem" class="{"success" if new_val else ""}">'
+        f'{"on" if new_val else "off"}</button>'
+    )
+    flags = []
+    if row["auto_rollback"]: flags.append("auto-rollback")
+    if row["require_health_check"]: flags.append("health-check")
+    flag_html = " ".join(f'<span class="badge">{f}</span>' for f in flags) or ""
+    return HTMLResponse(f"""<tr>
+<td><a href="/projects/{html.escape(row['slug'])}">{html.escape(row['slug'])}</a></td>
+<td><code>{html.escape(row['branch_pattern'])}</code></td>
+<td><strong>{html.escape(row['target_name'])}</strong></td>
+<td>{toggle}</td>
+<td>{flag_html}</td>
+</tr>""")
 
 
 @app.post("/deploy/scripts/{script_id}/toggle", response_class=HTMLResponse)
