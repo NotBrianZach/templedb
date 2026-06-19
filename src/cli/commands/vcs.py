@@ -427,13 +427,25 @@ class VCSCommands(Command):
             "UPDATE vcs_branches SET head_commit_id = ? WHERE id = ?",
             (commit_id, branch['id']), commit=False)
 
-        # Create file states
+        # Create file states and update file_contents
         for file in staged:
-            # Use placeholder values for deleted files
-            content_hash = file['content_hash'] or 'DELETED'
+            # content_hash in working_state is the hash of the file on disk
+            # (set by detect_changes / refresh). Use it for the commit.
+            ws_hash = file['content_hash'] or 'DELETED'
             file_size = file.get('file_size_bytes', 0) or 0
             line_count = file.get('line_count')
             content_text = file.get('content_text')
+
+            # For modified/added files, get content from the working state hash
+            # (the content blob was stored during --refresh)
+            if file['state'] in ('modified', 'added') and ws_hash != 'DELETED':
+                ws_blob = self.vcs_repo.query_one(
+                    "SELECT content_text, content_blob FROM content_blobs WHERE hash_sha256 = ?",
+                    (ws_hash,))
+                if ws_blob:
+                    content_text = ws_blob['content_text']
+                    file_size = len((content_text or '').encode('utf-8')) if content_text else len(ws_blob.get('content_blob') or b'')
+                    line_count = content_text.count('\n') + 1 if content_text else None
 
             self.vcs_repo.execute("""
                 INSERT INTO vcs_file_states (
@@ -442,7 +454,32 @@ class VCSCommands(Command):
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (commit_id, file['file_id'], content_text,
-                  content_hash, file_size, line_count, file['state']), commit=False)
+                  ws_hash, file_size, line_count, file['state']), commit=False)
+
+            # Update file_contents so materialization sees the committed content
+            if file['state'] in ('modified', 'added') and ws_hash != 'DELETED':
+                # Mark old versions as not current
+                self.vcs_repo.execute("""
+                    UPDATE file_contents SET is_current = 0
+                    WHERE file_id = ? AND is_current = 1
+                """, (file['file_id'],), commit=False)
+
+                # Check if this hash already has a file_contents row
+                existing = self.vcs_repo.query_one("""
+                    SELECT id FROM file_contents
+                    WHERE file_id = ? AND content_hash = ?
+                """, (file['file_id'], ws_hash))
+
+                if existing:
+                    self.vcs_repo.execute("""
+                        UPDATE file_contents SET is_current = 1, updated_at = datetime('now')
+                        WHERE id = ?
+                    """, (existing['id'],), commit=False)
+                else:
+                    self.vcs_repo.execute("""
+                        INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
+                        VALUES (?, ?, ?, ?, 1)
+                    """, (file['file_id'], ws_hash, file_size, line_count), commit=False)
 
         # Handle deleted files - remove from project_files and working_state
         deleted_files = [f for f in staged if f['state'] == 'deleted']
