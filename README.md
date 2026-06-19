@@ -56,8 +56,13 @@ command groups:
     env direnv         Direnv integration
 
   Deployment & Publishing
+    deploy run         Deploy project (FHS isolation, caching, health checks)
+    deploy trigger     Auto-deploy on commit (branch->target rules)
+    deploy notify      Webhook/command notifications on deploy events
     deploy targets     Deployment targets
     deploy migration   Database migrations
+    deploy rollback    Roll back to previous successful deployment
+    deploy nixops4     NixOps4 declarative orchestration (network/machine/deploy)
     publish            Commit + push to GitHub mirrors
 
   Knowledge Graph
@@ -148,6 +153,49 @@ templedb vcs switch bza feature-x        # switch (FUSE updates instantly)
 templedb vcs merge bza feature-x         # merge into current branch
 templedb vcs merge bza feature-x --squash # squash into single commit
 templedb vcs branch bza -d feature-x     # delete merged branch
+```
+
+### Deploy
+
+Deploy from the database with content-addressable caching, health checks, and environment injection:
+
+```bash
+templedb deploy run bza --target production       # deploy current state
+templedb deploy run bza --commit abc123f           # deploy specific commit
+templedb deploy run bza --branch release/v2        # deploy branch head
+templedb deploy run bza --all-targets              # deploy to all targets
+templedb deploy run bza --targets staging,prod     # deploy to specific targets
+```
+
+Set up auto-deploy — commits to matching branches trigger deployment automatically:
+
+```bash
+templedb deploy trigger add bza main production              # main → production
+templedb deploy trigger add bza "release/*" staging --auto-rollback  # with safety net
+templedb deploy trigger list
+```
+
+Get notified on deploy success/failure:
+
+```bash
+templedb deploy notify add "deploy.*" --webhook https://hooks.slack.com/...
+templedb deploy notify add deploy.failure --command "notify-send 'Deploy failed'"
+```
+
+Roll back to a previous successful deployment (restores env vars + re-deploys):
+
+```bash
+templedb deploy rollback bza --target production --yes
+```
+
+NixOps4 orchestration for multi-machine infrastructure:
+
+```bash
+templedb deploy nixops4 network create bza prod --flake-uri .#
+templedb deploy nixops4 machine add bza prod webserver --host 10.0.0.1
+templedb deploy nixops4 deploy bza prod
+templedb deploy nixops4 check bza prod                # health check
+templedb deploy nixops4 ssh bza prod webserver         # SSH into machine
 ```
 
 ### Query the knowledge graph

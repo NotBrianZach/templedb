@@ -2115,7 +2115,8 @@ def deploy_list():
         SELECT dh.id, p.slug, dh.target_name, dh.deployment_type, dh.status,
                dh.started_at, dh.completed_at, dh.duration_ms,
                dh.deployed_by, dh.deployment_method, dh.error_message,
-               SUBSTR(dh.commit_hash, 1, 8) AS short_hash
+               SUBSTR(dh.commit_hash, 1, 8) AS short_hash,
+               dh.branch_name, dh.triggered_by
         FROM deployment_history dh JOIN projects p ON dh.project_id = p.id
         ORDER BY dh.started_at DESC LIMIT 25
     """)
@@ -2145,11 +2146,24 @@ def deploy_list():
             err_cell = f'<span title="{html.escape(d["error_message"])}">{err_cell}…</span>'
 
         detail_cell = f'{err_cell}{checks_html}'
+        # Triggered-by badge
+        triggered = d.get("triggered_by") or "manual"
+        trigger_badge = ""
+        if triggered == "auto-commit":
+            trigger_badge = '<span class="badge green" style="font-size:0.68rem">auto</span> '
+        elif triggered == "rollback":
+            trigger_badge = '<span class="badge" style="font-size:0.68rem;color:#e9a040">rollback</span> '
+        # Branch
+        branch_html = ""
+        if d.get("branch_name"):
+            branch_html = f'<span class="badge blue" style="font-size:0.68rem">{html.escape(d["branch_name"])}</span> '
+        commit_cell = f'{branch_html}{trigger_badge}<code class="muted" style="font-size:0.75rem">{html.escape(d["short_hash"] or "")}</code>'
+
         hist_rows.append([
             f'<a href="/projects/{html.escape(d["slug"])}">{html.escape(d["slug"])}</a>',
             html.escape(d["target_name"] or ""),
             _status_badge(d["status"]),
-            f'<code class="muted" style="font-size:0.75rem">{html.escape(d["short_hash"] or "")}</code>',
+            commit_cell,
             html.escape(d["deployed_by"] or ""),
             html.escape((d["started_at"] or "")[:16]),
             html.escape(dur),
