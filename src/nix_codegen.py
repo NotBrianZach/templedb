@@ -111,15 +111,26 @@ def generate_aliases() -> str:
 
 
 def generate_services_enable() -> str:
-    """Generate services.*.enable statements from nixos.service.system.* keys."""
+    """Generate services.*.enable statements from nixos.service.system.* keys.
+
+    Handles nested attributes:
+      nixos.service.system.pipewire = true        → services.pipewire.enable = true;
+      nixos.service.system.pipewire.alsa = true   → services.pipewire.alsa.enable = true;
+      nixos.service.system.pipewire.pulse = true  → services.pipewire.pulse.enable = true;
+      nixos.service.system.blueman = true          → services.blueman.enable = true;
+    """
     rows = _get_keys("nixos.service.system.")
     if not rows:
         return ""
 
     lines = []
     for r in rows:
-        svc = r["key"].replace("nixos.service.system.", "").replace("_", ".")
+        svc = r["key"].replace("nixos.service.system.", "")
         val = r["value"]
+        if val in ("true", "True", "1"):
+            val = "true"
+        elif val in ("false", "False", "0"):
+            val = "false"
         lines.append(f"  services.{svc}.enable = {val};")
 
     return "\n".join(lines)
@@ -138,6 +149,38 @@ def generate_programs_enable() -> str:
         if prog.startswith("system."):
             continue
         lines.append(f"  programs.{prog}.enable = true;")
+
+    return "\n".join(lines)
+
+
+def generate_hardware_and_misc() -> str:
+    """Generate direct nix attribute assignments from nixos.hardware.*, nixos.security.* keys.
+
+    These keys map directly to nix attribute paths:
+      nixos.hardware.bluetooth.enable = true  →  hardware.bluetooth.enable = true;
+      nixos.security.rtkit.enable = true      →  security.rtkit.enable = true;
+      nixos.hardware.pulseaudio.enable = false → hardware.pulseaudio.enable = false;
+    """
+    lines = []
+
+    for prefix in ["nixos.hardware.", "nixos.security.", "nixos.nix."]:
+        rows = _get_keys(prefix)
+        # nixos.hardware.foo → hardware.foo, nixos.nix.services.foo → services.foo
+        nix_prefix = prefix.replace("nixos.", "").replace("nix.", "")
+        for r in rows:
+            # Skip nix.conf settings (handled separately)
+            if r["key"].startswith("nixos.nix.") and not r["key"].startswith("nixos.nix.services."):
+                if "experimental" in r["key"] or "substituters" in r["key"]:
+                    continue
+            attr_path = nix_prefix + r["key"].replace(prefix, "")
+            val = r["value"]
+            if val in ("true", "True", "1"):
+                val = "true"
+            elif val in ("false", "False", "0"):
+                val = "false"
+            else:
+                val = f'"{val}"'
+            lines.append(f"  {attr_path} = {val};")
 
     return "\n".join(lines)
 
@@ -274,6 +317,23 @@ def update_configuration_nix(conf_path: Path, dry_run: bool = False) -> int:
             last_brace = content.rfind("}")
             if last_brace > 0:
                 insert = f"\n  {begin}\n{svc_code}\n  {end}\n"
+                content = content[:last_brace] + insert + content[last_brace:]
+                updated += 1
+
+    # --- Hardware & Security ---
+    hw_code = generate_hardware_and_misc()
+    if hw_code:
+        result = _replace_section(content, "hardware", hw_code)
+        if result:
+            content = result
+            updated += 1
+        else:
+            # Append before final closing brace
+            begin = BEGIN.format("hardware")
+            end = END.format("hardware")
+            last_brace = content.rfind("}")
+            if last_brace > 0:
+                insert = f"\n  {begin}\n{hw_code}\n  {end}\n"
                 content = content[:last_brace] + insert + content[last_brace:]
                 updated += 1
 
