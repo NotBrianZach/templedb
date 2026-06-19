@@ -252,13 +252,13 @@ class NetworkCommands(Command):
         # Add tailscale service
         conn.execute(
             "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
-            "VALUES ('nixos.service.system.tailscale', 'true', datetime('now'))"
+            "VALUES ('nixos.attr.services.tailscale.enable', 'true', datetime('now'))"
         )
 
         conn.commit()
         print("\n  Added to system_config:")
         print("    nixos.pkg.user.vpn.tailscale = true")
-        print("    nixos.service.system.tailscale = true")
+        print("    nixos.attr.services.tailscale.enable = true")
         print()
         print("  Next steps:")
         print("    templedb nixos generate-all system_config")

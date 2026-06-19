@@ -4148,11 +4148,14 @@ def status():
 
         # System services from DB
         db_sys_svcs = query_all(
-            "SELECT key FROM system_config WHERE key LIKE 'nixos.service.system.%'"
+            "SELECT key FROM system_config WHERE key LIKE 'nixos.attr.services.%.enable'"
         )
         for s in db_sys_svcs:
-            name = s["key"].replace("nixos.service.system.", "").replace("_", "-")
-            service_checks.append(("system", f"{name}.service"))
+            # nixos.attr.services.pipewire.enable → pipewire
+            name = s["key"].replace("nixos.attr.services.", "").replace(".enable", "")
+            # Skip nested attrs like pipewire.alsa.enable
+            if "." not in name:
+                service_checks.append(("system", f"{name}.service"))
 
         # Always check git-daemon
         service_checks.append(("system", "git-daemon.service"))

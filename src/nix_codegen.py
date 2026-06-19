@@ -2,13 +2,16 @@
 """
 Nix code generator — produces nix expressions from system_config DB keys.
 
-Generates:
-  - home.packages block from nixos.pkg.user.*
-  - environment.systemPackages from nixos.pkg.system.*
-  - shellAliases from nixos.alias.*
-  - services.*.enable from nixos.service.system.*
-  - programs.*.enable from nixos.program.*
-  - firewall.allowedTCPPorts from nixos.firewall.tcp
+Key prefixes:
+  nixos.attr.*           Direct nix attribute paths (1:1 mapping)
+                           nixos.attr.services.pipewire.enable = true
+                           → services.pipewire.enable = true;
+
+  nixos.pkg.user.*       home.packages list items
+  nixos.pkg.system.*     environment.systemPackages list items
+  nixos.alias.*          shellAliases entries
+  nixos.firewall.tcp     firewall.allowedTCPPorts (JSON list)
+  nixos.flake.input.*    flake input URLs (regex replacement)
 
 Each section is delimited by markers:
   # === BEGIN templedb-managed: <section> ===
@@ -37,22 +40,60 @@ def _get_keys(prefix: str) -> List[Dict]:
     )
 
 
+def _nix_value(val: str) -> str:
+    """Convert a string value to a nix literal."""
+    if val in ("true", "True", "1"):
+        return "true"
+    if val in ("false", "False", "0"):
+        return "false"
+    # Integers
+    try:
+        int(val)
+        return val
+    except ValueError:
+        pass
+    # JSON arrays/objects pass through as-is
+    if val.startswith("[") or val.startswith("{"):
+        return val
+    # Everything else is a quoted string
+    return f'"{val}"'
+
+
 def _replace_section(content: str, section_name: str, new_code: str) -> str:
     """Replace a managed section in nix code, or append if not found."""
     begin = BEGIN.format(section_name)
     end = END.format(section_name)
 
-    # Find existing section
     begin_idx = content.find(begin)
     end_idx = content.find(end)
 
     if begin_idx != -1 and end_idx != -1:
-        # Replace existing section
         end_idx += len(end)
         return content[:begin_idx] + begin + "\n" + new_code + "\n    " + end + content[end_idx:]
 
-    # Section doesn't exist yet — return content unchanged (caller decides where to insert)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Generators
+# ---------------------------------------------------------------------------
+
+def generate_attrs() -> str:
+    """Generate direct nix attribute assignments from nixos.attr.* keys.
+
+    nixos.attr.services.pipewire.enable = true → services.pipewire.enable = true;
+    nixos.attr.hardware.bluetooth.enable = true → hardware.bluetooth.enable = true;
+    """
+    rows = _get_keys("nixos.attr.")
+    if not rows:
+        return ""
+
+    lines = []
+    for r in rows:
+        attr_path = r["key"].replace("nixos.attr.", "")
+        lines.append(f"  {attr_path} = {_nix_value(r['value'])};")
+
+    return "\n".join(lines)
 
 
 def generate_user_packages() -> str:
@@ -61,10 +102,8 @@ def generate_user_packages() -> str:
     if not rows:
         return ""
 
-    # Group by category
     categories = {}
     for r in rows:
-        # nixos.pkg.user.<category>.<package> = true
         parts = r["key"].replace("nixos.pkg.user.", "").split(".", 1)
         if len(parts) == 2:
             cat, pkg = parts
@@ -74,7 +113,6 @@ def generate_user_packages() -> str:
 
     lines = []
     for cat in sorted(categories.keys()):
-        # Convert category name back to comment
         cat_label = cat.replace("_", " ").title()
         lines.append(f"    # {cat_label}")
         for pkg in sorted(categories[cat]):
@@ -110,81 +148,6 @@ def generate_aliases() -> str:
     return "\n".join(lines)
 
 
-def generate_services_enable() -> str:
-    """Generate services.*.enable statements from nixos.service.system.* keys.
-
-    Handles nested attributes:
-      nixos.service.system.pipewire = true        → services.pipewire.enable = true;
-      nixos.service.system.pipewire.alsa = true   → services.pipewire.alsa.enable = true;
-      nixos.service.system.pipewire.pulse = true  → services.pipewire.pulse.enable = true;
-      nixos.service.system.blueman = true          → services.blueman.enable = true;
-    """
-    rows = _get_keys("nixos.service.system.")
-    if not rows:
-        return ""
-
-    lines = []
-    for r in rows:
-        svc = r["key"].replace("nixos.service.system.", "")
-        val = r["value"]
-        if val in ("true", "True", "1"):
-            val = "true"
-        elif val in ("false", "False", "0"):
-            val = "false"
-        lines.append(f"  services.{svc}.enable = {val};")
-
-    return "\n".join(lines)
-
-
-def generate_programs_enable() -> str:
-    """Generate programs.*.enable statements from nixos.program.* keys."""
-    rows = _get_keys("nixos.program.")
-    if not rows:
-        return ""
-
-    lines = []
-    for r in rows:
-        prog = r["key"].replace("nixos.program.", "")
-        # Skip system-prefixed ones (handled in configuration.nix)
-        if prog.startswith("system."):
-            continue
-        lines.append(f"  programs.{prog}.enable = true;")
-
-    return "\n".join(lines)
-
-
-def generate_hardware_and_misc() -> str:
-    """Generate direct nix attribute assignments from nixos.hardware.*, nixos.security.* keys.
-
-    These keys map directly to nix attribute paths:
-      nixos.hardware.bluetooth.enable = true  →  hardware.bluetooth.enable = true;
-      nixos.security.rtkit.enable = true      →  security.rtkit.enable = true;
-      nixos.hardware.pulseaudio.enable = false → hardware.pulseaudio.enable = false;
-    """
-    lines = []
-
-    for prefix in ["nixos.hardware.", "nixos.security.", "nixos.nix."]:
-        rows = _get_keys(prefix)
-        # nixos.hardware.foo → hardware.foo, nixos.nix.services.foo → services.foo
-        nix_prefix = prefix.replace("nixos.", "").replace("nix.", "")
-        for r in rows:
-            # Skip nix.conf settings (handled separately)
-            if r["key"].startswith("nixos.nix.") and not r["key"].startswith("nixos.nix.services."):
-                if "experimental" in r["key"] or "substituters" in r["key"]:
-                    continue
-            attr_path = nix_prefix + r["key"].replace(prefix, "")
-            val = r["value"]
-            if val in ("true", "True", "1"):
-                val = "true"
-            elif val in ("false", "False", "0"):
-                val = "false"
-            else:
-                val = f'"{val}"'
-            lines.append(f"  {attr_path} = {val};")
-
-    return "\n".join(lines)
-
-
 def generate_firewall_ports() -> str:
     """Generate firewall.allowedTCPPorts from nixos.firewall.tcp."""
     row = query_one("SELECT value FROM system_config WHERE key = 'nixos.firewall.tcp'")
@@ -193,7 +156,6 @@ def generate_firewall_ports() -> str:
 
     try:
         ports = json.loads(row["value"])
-        # Format as nix list, 8 per line
         chunks = []
         for i in range(0, len(ports), 8):
             chunk = " ".join(str(p) for p in ports[i:i+8])
@@ -203,12 +165,12 @@ def generate_firewall_ports() -> str:
         return ""
 
 
-def update_flake_inputs(flake_path: Path, dry_run: bool = False) -> int:
-    """Update flake input URLs from nixos.flake.input.* DB keys.
+# ---------------------------------------------------------------------------
+# File updaters
+# ---------------------------------------------------------------------------
 
-    Matches lines like:  bza.url = "old-url";
-    and replaces with the DB value.
-    """
+def update_flake_inputs(flake_path: Path, dry_run: bool = False) -> int:
+    """Update flake input URLs from nixos.flake.input.* DB keys."""
     rows = _get_keys("nixos.flake.input.")
     if not rows:
         return 0
@@ -220,7 +182,6 @@ def update_flake_inputs(flake_path: Path, dry_run: bool = False) -> int:
         input_name = r["key"].replace("nixos.flake.input.", "")
         new_url = r["value"]
 
-        # Match: input_name.url = "anything";
         pattern = re.compile(
             rf'(\s+{re.escape(input_name)}\.url\s*=\s*)"[^"]*"(;)',
             re.MULTILINE
@@ -249,7 +210,6 @@ def update_home_nix(home_path: Path, dry_run: bool = False) -> int:
             content = result
             updated += 1
         else:
-            # Insert markers around existing home.packages block
             m = re.search(r'(  home\.packages = with pkgs; \[)\n(.*?)(  \];)', content, re.DOTALL)
             if m:
                 begin = BEGIN.format("user-packages")
@@ -266,7 +226,6 @@ def update_home_nix(home_path: Path, dry_run: bool = False) -> int:
             content = result
             updated += 1
         else:
-            # Insert markers around existing shellAliases block
             m = re.search(r'(    shellAliases = \{)\n(.*?)(    \};)', content, re.DOTALL)
             if m:
                 begin = BEGIN.format("aliases")
@@ -302,38 +261,19 @@ def update_configuration_nix(conf_path: Path, dry_run: bool = False) -> int:
                 content = content[:m.start()] + replacement + content[m.end():]
                 updated += 1
 
-    # --- Services ---
-    svc_code = generate_services_enable()
-    if svc_code:
-        result = _replace_section(content, "services", svc_code)
+    # --- Attributes (services, hardware, security, programs, etc.) ---
+    attr_code = generate_attrs()
+    if attr_code:
+        result = _replace_section(content, "attrs", attr_code)
         if result:
             content = result
             updated += 1
         else:
-            # Append before final closing brace
-            begin = BEGIN.format("services")
-            end = END.format("services")
-            # Find a good insertion point — before the last }
+            begin = BEGIN.format("attrs")
+            end = END.format("attrs")
             last_brace = content.rfind("}")
             if last_brace > 0:
-                insert = f"\n  {begin}\n{svc_code}\n  {end}\n"
-                content = content[:last_brace] + insert + content[last_brace:]
-                updated += 1
-
-    # --- Hardware & Security ---
-    hw_code = generate_hardware_and_misc()
-    if hw_code:
-        result = _replace_section(content, "hardware", hw_code)
-        if result:
-            content = result
-            updated += 1
-        else:
-            # Append before final closing brace
-            begin = BEGIN.format("hardware")
-            end = END.format("hardware")
-            last_brace = content.rfind("}")
-            if last_brace > 0:
-                insert = f"\n  {begin}\n{hw_code}\n  {end}\n"
+                insert = f"\n  {begin}\n{attr_code}\n  {end}\n"
                 content = content[:last_brace] + insert + content[last_brace:]
                 updated += 1
 

@@ -1476,8 +1476,8 @@ class NixOSCommand(Command):
 
             # Programs enabled
             for m in _re.finditer(r'programs\.(\w+)\s*=\s*\{\s*\n\s*enable\s*=\s*true', content):
-                _set(f"nixos.program.{m.group(1)}", "true")
-                print(f"  nixos.program.{m.group(1)} = true")
+                _set(f"nixos.attr.programs.{m.group(1)}.enable", "true")
+                print(f"  nixos.attr.programs.{m.group(1)}.enable = true")
 
             # home.username and homeDirectory
             m = _re.search(r'home\.username\s*=\s*"([^"]+)"', content)
@@ -1532,13 +1532,12 @@ class NixOSCommand(Command):
 
             # Services enabled
             for m in _re.finditer(r'services\.(\w[\w.]*?)\.enable\s*=\s*true', content):
-                svc = m.group(1).replace('.', '_')
-                _set(f"nixos.service.system.{svc}", "true")
-                print(f"  nixos.service.system.{svc} = true")
+                _set(f"nixos.attr.services.{m.group(1)}.enable", "true")
+                print(f"  nixos.attr.services.{m.group(1)}.enable = true")
 
             # Programs enabled
             for m in _re.finditer(r'programs\.(\w[\w.]*?)\.enable\s*=\s*true', content):
-                _set(f"nixos.program.system.{m.group(1)}", "true")
+                _set(f"nixos.attr.programs.{m.group(1)}.enable", "true")
 
             # system.stateVersion
             m = _re.search(r'system\.stateVersion\s*=\s*"([^"]+)"', content)
@@ -1570,11 +1569,11 @@ class NixOSCommand(Command):
 
             # Hardware settings
             for m in _re.finditer(r'hardware\.(\w[\w.]*?)\s*=\s*(true|false)', content):
-                _set(f"nixos.hardware.{m.group(1)}", m.group(2))
+                _set(f"nixos.attr.hardware.{m.group(1)}", m.group(2))
 
             # Virtualisation
             for m in _re.finditer(r'virtualisation\.(\w[\w.]*?)\.enable\s*=\s*(true|false)', content):
-                _set(f"nixos.virtualisation.{m.group(1)}", m.group(2))
+                _set(f"nixos.attr.virtualisation.{m.group(1)}.enable", m.group(2))
 
             # Nix settings
             m = _re.search(r'experimental-features\s*=\s*\[([^\]]+)\]', content)
