@@ -236,7 +236,7 @@
                   ];
                   deny = [];
                 };
-              };
+              });
             })
 
             (lib.mkIf (cfg.claude.enable && cfg.claude.mcp) {

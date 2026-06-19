@@ -41,7 +41,8 @@ class TestMigrator:
         m = Migrator(tmp)
         applied, skipped = m.migrate()
         assert applied == 1  # schema.sql
-        assert skipped == 22  # numbered migrations marked as applied
+        from migrator import MIGRATION_SEQUENCE
+        assert skipped == len(MIGRATION_SEQUENCE)  # numbered migrations marked as applied
 
         status = m.status()
         pending = sum(1 for s in status if not s["applied"])
