@@ -222,13 +222,18 @@ class DeployCommands(DeployOpsMixin, Command):
             import time
             deploy_start_time = time.time()
 
+            deploy_commit = getattr(args, 'commit', None)
+            deploy_branch = getattr(args, 'deploy_branch', None)
+
             result = self.service.deploy(
                 project_slug=project_slug,
                 target=target,
                 dry_run=dry_run,
                 skip_validation=skip_validation,
                 mutable=mutable or no_fhs,  # Both disable FHS
-                use_full_fhs=not no_fhs if not mutable else False
+                use_full_fhs=not no_fhs if not mutable else False,
+                commit_hash=deploy_commit,
+                branch_name=deploy_branch,
             )
 
             deploy_duration = time.time() - deploy_start_time
@@ -632,6 +637,9 @@ def register(cli):
                            help='Skip custom deployment script and use standard deployment')
     run_parser.add_argument('--only', choices=['frontend', 'functions', 'migrations', 'secrets'],
                            help='Deploy only a specific component (passed through to the deploy script)')
+    run_parser.add_argument('--commit', help='Deploy from a specific VCS commit hash')
+    run_parser.add_argument('--branch', dest='deploy_branch',
+                           help='Deploy from the head of a specific branch')
     run_parser.add_argument('--all-targets', action='store_true',
                            help='Deploy to all configured targets for this project')
     run_parser.add_argument('--targets', help='Comma-separated list of targets to deploy to')

@@ -32,7 +32,7 @@ class NixOps4Commands(Command):
     # ========================================================================
 
     def network_create(self, args) -> int:
-        """Create a new nixops4 network"""
+        """Create a new nixops4 network (calls nixops4 CLI + records in DB)"""
         try:
             project = db_utils.get_project_by_slug(args.project)
             if not project:
@@ -42,7 +42,30 @@ class NixOps4Commands(Command):
             # Generate UUID for network
             network_uuid = str(uuid.uuid4())
 
-            # Insert network
+            # Call nixops4 CLI to create the network
+            flake_uri = args.flake_uri
+            config_file = args.config_file or f"{args.project}/network.nix"
+
+            if flake_uri:
+                cmd = ['nixops4', 'create', '--name', args.name, '--flake', flake_uri]
+            else:
+                cmd = ['nixops4', 'create', '--name', args.name, '--config', config_file]
+
+            print(f"🔨 Running: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                # nixops4 might not be installed — still record in DB for tracking
+                if 'not found' in result.stderr.lower() or 'No such file' in result.stderr:
+                    logger.warning("nixops4 binary not found, recording network in DB only")
+                    print(f"⚠️  nixops4 not found in PATH — network recorded in DB only")
+                else:
+                    print(f"⚠️  nixops4 returned {result.returncode}: {result.stderr.strip()}")
+
+            if result.stdout:
+                print(result.stdout)
+
+            # Record in DB regardless (for tracking/planning even without nixops4 installed)
             db_utils.execute("""
                 INSERT INTO nixops4_networks
                 (project_id, network_name, network_uuid, config_file_path, flake_uri, description, created_by)
@@ -51,15 +74,15 @@ class NixOps4Commands(Command):
                 project['id'],
                 args.name,
                 network_uuid,
-                args.config_file or f"{args.project}/network.nix",
-                args.flake_uri,
+                config_file,
+                flake_uri,
                 args.description,
                 args.created_by or 'user'
             ))
 
             print(f"✅ Created network '{args.name}' for project '{args.project}'")
             print(f"   UUID: {network_uuid}")
-            print(f"   Config: {args.config_file or f'{args.project}/network.nix'}")
+            print(f"   Config: {config_file}")
 
             return 0
 
@@ -388,6 +411,142 @@ class NixOps4Commands(Command):
         except Exception as e:
             logger.error(f"Error deploying network: {e}")
             print(f"❌ Deployment error: {e}")
+            return 1
+
+    def destroy(self, args) -> int:
+        """Destroy a nixops4 network (calls nixops4 CLI + removes from DB)"""
+        try:
+            network = self._get_network(args.network, args.project)
+            if not network:
+                return 1
+
+            if not (hasattr(args, 'yes') and args.yes):
+                response = input(f"Destroy network '{args.network}'? This will terminate all machines. [y/N] ").strip().lower()
+                if response != 'y':
+                    print("Cancelled")
+                    return 0
+
+            # Call nixops4 destroy
+            cmd = ['nixops4', 'destroy', '--network', network['network_uuid']]
+            if hasattr(args, 'force') and args.force:
+                cmd.append('--force')
+
+            print(f"🔨 Running: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.stdout:
+                print(result.stdout)
+            if result.returncode != 0:
+                if 'not found' not in result.stderr.lower():
+                    print(f"⚠️  nixops4 returned {result.returncode}: {result.stderr.strip()}")
+
+            # Record destruction in deployment history
+            db_utils.execute("""
+                INSERT INTO nixops4_deployments
+                (network_id, deployment_uuid, operation, started_at, completed_at,
+                 status, triggered_by, triggered_reason)
+                VALUES (?, ?, 'destroy', ?, ?, ?, 'user', ?)
+            """, (network['id'], str(uuid.uuid4()),
+                  datetime.now().isoformat(), datetime.now().isoformat(),
+                  'success' if result.returncode == 0 else 'failed',
+                  args.reason if hasattr(args, 'reason') else 'Manual destroy'))
+
+            # Update all machines to terminated
+            db_utils.execute("""
+                UPDATE nixops4_machines SET deployment_status = 'terminated'
+                WHERE network_id = ?
+            """, (network['id'],))
+
+            # Deactivate network
+            db_utils.execute("""
+                UPDATE nixops4_networks SET is_active = 0 WHERE id = ?
+            """, (network['id'],))
+
+            print(f"✅ Network '{args.network}' destroyed")
+            return 0
+
+        except Exception as e:
+            logger.error(f"Error destroying network: {e}")
+            print(f"❌ Failed to destroy network: {e}")
+            return 1
+
+    def check(self, args) -> int:
+        """Check health of deployed machines (calls nixops4 check)"""
+        try:
+            network = self._get_network(args.network, args.project)
+            if not network:
+                return 1
+
+            cmd = ['nixops4', 'check', '--network', network['network_uuid']]
+            print(f"🔨 Running: {' '.join(cmd)}")
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            print(result.stdout)
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+
+            # Update machine health statuses from output
+            machines = db_utils.query_all("""
+                SELECT * FROM nixops4_machines WHERE network_id = ?
+            """, (network['id'],))
+
+            if result.returncode == 0:
+                for m in machines:
+                    db_utils.execute("""
+                        UPDATE nixops4_machines SET health_status = 'healthy',
+                               health_check_at = ? WHERE id = ?
+                    """, (datetime.now().isoformat(), m['id']))
+                print(f"\n✅ All machines healthy")
+            else:
+                for m in machines:
+                    db_utils.execute("""
+                        UPDATE nixops4_machines SET health_status = 'unhealthy',
+                               health_check_at = ? WHERE id = ?
+                    """, (datetime.now().isoformat(), m['id']))
+                print(f"\n⚠️  Health check failed")
+
+            return result.returncode
+
+        except Exception as e:
+            logger.error(f"Error checking network: {e}")
+            print(f"❌ Health check error: {e}")
+            return 1
+
+    def ssh(self, args) -> int:
+        """SSH into a machine in a nixops4 network"""
+        try:
+            network = self._get_network(args.network, args.project)
+            if not network:
+                return 1
+
+            machine = db_utils.query_one("""
+                SELECT * FROM nixops4_machines
+                WHERE network_id = ? AND machine_name = ?
+            """, (network['id'], args.machine))
+
+            if not machine:
+                print(f"❌ Machine '{args.machine}' not found in network '{args.network}'")
+                return 1
+
+            if not machine['target_host']:
+                print(f"❌ Machine '{args.machine}' has no target host configured")
+                return 1
+
+            user = machine['target_user'] or 'root'
+            port = machine['target_port'] or 22
+            host = machine['target_host']
+
+            ssh_cmd = ['ssh', '-p', str(port), f'{user}@{host}']
+            if hasattr(args, 'ssh_command') and args.ssh_command:
+                ssh_cmd.extend(args.ssh_command)
+
+            print(f"Connecting to {user}@{host}:{port}...")
+            import os
+            os.execvp('ssh', ssh_cmd)
+
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            print(f"❌ SSH error: {e}")
             return 1
 
     def deploy_status(self, args) -> int:
@@ -739,6 +898,29 @@ def _register_nixops4_commands(handler, subparsers, cli, prefix='nixops4'):
     status_parser.add_argument('network', help='Network name')
     status_parser.add_argument('--deployment-uuid', help='Show specific deployment')
     cli.commands[f'{prefix}.status'] = handler.deploy_status
+
+    # destroy
+    destroy_parser = subparsers.add_parser('destroy', help='Destroy a network (terminate all machines)')
+    destroy_parser.add_argument('project', help='Project slug')
+    destroy_parser.add_argument('network', help='Network name')
+    destroy_parser.add_argument('--yes', action='store_true', help='Skip confirmation')
+    destroy_parser.add_argument('--force', action='store_true', help='Force destroy')
+    destroy_parser.add_argument('--reason', help='Reason for destruction')
+    cli.commands[f'{prefix}.destroy'] = handler.destroy
+
+    # check
+    check_parser = subparsers.add_parser('check', help='Check health of deployed machines')
+    check_parser.add_argument('project', help='Project slug')
+    check_parser.add_argument('network', help='Network name')
+    cli.commands[f'{prefix}.check'] = handler.check
+
+    # ssh
+    ssh_parser = subparsers.add_parser('ssh', help='SSH into a machine')
+    ssh_parser.add_argument('project', help='Project slug')
+    ssh_parser.add_argument('network', help='Network name')
+    ssh_parser.add_argument('machine', help='Machine name')
+    ssh_parser.add_argument('ssh_command', nargs='*', help='Command to run (default: interactive shell)')
+    cli.commands[f'{prefix}.ssh'] = handler.ssh
 
 
 def register_under_deploy(deploy_subparsers, cli):

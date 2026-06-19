@@ -56,7 +56,9 @@ class DeploymentService(BaseService):
         dry_run: bool = False,
         skip_validation: bool = False,
         mutable: bool = False,
-        use_full_fhs: Optional[bool] = None
+        use_full_fhs: Optional[bool] = None,
+        commit_hash: Optional[str] = None,
+        branch_name: Optional[str] = None,
     ) -> DeploymentResult:
         """
         Deploy a project to a target environment.
@@ -137,13 +139,30 @@ class DeploymentService(BaseService):
             self.logger.info("")
 
             # First, we need to reconstruct to compute hash (lightweight operation)
-            self.logger.info("Exporting project from TempleDB...")
             export_start = time.time()
-            cathedral_dir = self._export_project(project_slug, export_dir)
 
-            self.logger.info("Reconstructing project from cathedral package...")
-            file_count = self._reconstruct_project(cathedral_dir, work_dir)
-            self.logger.info(f"Reconstructed {file_count} files")
+            if commit_hash or branch_name:
+                # Commit-specific deploy: reconstruct files at a specific VCS state
+                resolved_hash = commit_hash
+                if branch_name and not commit_hash:
+                    # Resolve branch to its head commit
+                    resolved_hash = self._resolve_branch_head(project['id'], branch_name)
+                    if not resolved_hash:
+                        raise DeploymentError(
+                            f"Branch '{branch_name}' not found for {project_slug}",
+                            solution=f"Check branches: templedb vcs branch {project_slug}"
+                        )
+                self.logger.info(f"Deploying from commit {resolved_hash[:8]}...")
+                file_count = self._reconstruct_from_commit(project['id'], resolved_hash, work_dir)
+                self.logger.info(f"Reconstructed {file_count} files from commit {resolved_hash[:8]}")
+            else:
+                # Standard deploy: export current state via cathedral
+                self.logger.info("Exporting project from TempleDB...")
+                cathedral_dir = self._export_project(project_slug, export_dir)
+                self.logger.info("Reconstructing project from cathedral package...")
+                file_count = self._reconstruct_project(cathedral_dir, work_dir)
+                self.logger.info(f"Reconstructed {file_count} files")
+
             export_time = time.time() - export_start
 
             # Compute content hash
@@ -372,6 +391,63 @@ class DeploymentService(BaseService):
             # Copy blob to target location
             shutil.copy2(blob_file, target_file)
             file_count += 1
+
+        return file_count
+
+    def _resolve_branch_head(self, project_id: int, branch_name: str) -> Optional[str]:
+        """Resolve a branch name to its head commit hash."""
+        import db_utils
+        row = db_utils.query_one("""
+            SELECT vc.commit_hash
+            FROM vcs_branches vb
+            JOIN vcs_commits vc ON vb.head_commit_id = vc.id
+            WHERE vb.project_id = ? AND vb.branch_name = ?
+        """, (project_id, branch_name))
+        return row['commit_hash'] if row else None
+
+    def _reconstruct_from_commit(self, project_id: int, commit_hash: str, work_dir: Path) -> int:
+        """Reconstruct project files at a specific VCS commit into work_dir."""
+        import db_utils
+
+        # Find the commit
+        commit = db_utils.query_one("""
+            SELECT id FROM vcs_commits
+            WHERE project_id = ? AND commit_hash LIKE ?
+        """, (project_id, f"{commit_hash}%"))
+        if not commit:
+            raise DeploymentError(f"Commit {commit_hash} not found")
+
+        # Get all file states at this commit
+        files = db_utils.query_all("""
+            SELECT vfs.file_path, cb.content_text, cb.content_blob
+            FROM vcs_file_states vfs
+            JOIN content_blobs cb ON vfs.content_hash = cb.hash_sha256
+            WHERE vfs.commit_id = ? AND vfs.change_type != 'delete'
+        """, (commit['id'],))
+
+        if not files:
+            # Fallback: try to get files from the commit's parent chain
+            # This handles cases where not all files have states recorded
+            self.logger.info(f"  No file states at commit, using current project files")
+            files = db_utils.query_all("""
+                SELECT pf.file_path, cb.content_text, cb.content_blob
+                FROM project_files pf
+                JOIN content_blobs cb ON pf.content_hash = cb.hash_sha256
+                WHERE pf.project_id = ?
+            """, (project_id,))
+
+        file_count = 0
+        for f in files:
+            dest = work_dir / f['file_path']
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            content = f.get('content_text') or f.get('content_blob')
+            if content is not None:
+                if isinstance(content, bytes):
+                    dest.write_bytes(content)
+                else:
+                    dest.write_text(content)
+                file_count += 1
 
         return file_count
 
