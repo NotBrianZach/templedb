@@ -211,6 +211,93 @@ templedb graph importers bza frontend/lib/supabase.ts  # 44 files import this
 
 ---
 
+## Secrets & Key Management
+
+TempleDB uses [age](https://age-encryption.org/) encryption with support for hardware keys (Yubikey), multi-key encryption, and quorum-based key revocation.
+
+### Multi-key architecture
+
+Every secret is encrypted to **all registered keys simultaneously**. Any single key can decrypt. This means you can lose a key and still access your secrets with any remaining key.
+
+```
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│  Yubikey 1   │   │  Yubikey 2   │   │  Yubikey 3   │   │  Filesystem  │
+│  (daily)     │   │  (backup)    │   │  (offsite)   │   │  (emergency) │
+└──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+       │                  │                  │                  │
+       └──────────────────┴──────────────────┴──────────────────┘
+                          │
+                   age -r key1 -r key2 -r key3 -r key4
+                          │
+                    ┌─────▼─────┐
+                    │  Encrypted │
+                    │   Secret   │
+                    └───────────┘
+```
+
+### Yubikey setup
+
+```bash
+# 1. Generate age identity on Yubikey
+templedb env key setup-yubikey
+
+# 2. Register it (auto-adds to all existing secrets via "lazy mode")
+templedb env key add yubikey --name yubikey-daily --location "keychain"
+
+# 3. Add backup keys
+templedb env key add yubikey --name yubikey-safe --location "fireproof-safe"
+templedb env key add filesystem --name emergency --path /mnt/usb/age-key.txt --location "usb-in-safe"
+
+# 4. Test decryption
+templedb env key test yubikey-daily
+
+# 5. List all keys
+templedb env key list
+templedb env key info yubikey-daily
+```
+
+### Managing secrets
+
+```bash
+# Set a secret (encrypted to all active keys)
+templedb env secret set myproject API_KEY "sk-..." --keys yubikey-daily
+
+# Get (decrypts with any available key)
+templedb env secret get myproject API_KEY
+
+# Unified var interface (--secret flag for encrypted storage)
+templedb env var set myproject DB_PASSWORD "hunter2" --secret --keys yubikey-daily
+templedb env var get myproject DB_PASSWORD --secret
+
+# Export for deployment
+templedb env secret export myproject --format dotenv
+```
+
+### Quorum-based key revocation
+
+Revoking a key requires approval from multiple other keys (2-of-N by default). This prevents a stolen key from being used to lock you out:
+
+```bash
+# Revoke a lost key (prompts for 2 other keys to approve)
+templedb env key revoke yubikey-daily --reason "lost laptop" --quorum 2
+
+# All secrets are re-encrypted without the revoked key
+# The revoked key can no longer decrypt anything
+```
+
+### Recommended key setup
+
+| Key | Location | Purpose |
+|-----|----------|---------|
+| `yubikey-daily` | Keychain | Day-to-day decryption |
+| `yubikey-backup` | Fireproof safe | Recovery if daily key lost |
+| `yubikey-offsite` | Safety deposit box | Disaster recovery |
+| `emergency-fs` | Encrypted USB in safe | Paper-key-level last resort |
+
+See [Key Revocation Guide](docs/KEY_REVOCATION_GUIDE.md) and [Multi-Key Setup](docs/MULTI_YUBIKEY_SETUP.md) for detailed walkthroughs.
+
+---
+
 ## NixOS: DB Generates Everything
 
 Your entire NixOS configuration lives in the database. Import it, edit it, generate nix files:
