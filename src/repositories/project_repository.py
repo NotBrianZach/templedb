@@ -204,3 +204,6 @@ class ProjectRepository(BaseRepository):
         """
         project = self.get_by_slug(slug)
         return project is not None
+
+    # Alias for backward compat with tests/external code
+    get_project_by_slug = get_by_slug

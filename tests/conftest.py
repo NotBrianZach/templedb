@@ -244,6 +244,10 @@ def create_file(path: Path, content: str) -> None:
 
 def modify_file(path: Path, append: str = None, content: str = None) -> None:
     """Modify a file by appending or replacing content"""
+    import os
+    # Ensure file is writable (checkouts may be read-only)
+    if path.exists() and not os.access(path, os.W_OK):
+        path.chmod(0o644)
     if append:
         with open(path, 'a') as f:
             f.write(append)

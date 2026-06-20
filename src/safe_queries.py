@@ -228,8 +228,8 @@ class SafeMigrationQueries(_ProjectContextMixin, BaseRepository):
         """
         proj_id = self._resolve_project_id(project_id, project_slug)
         return self.query_one("""
-            SELECT * FROM database_migrations
-            WHERE project_id = ? AND migration_number = ?
+            SELECT * FROM migration_history
+            WHERE project_id = ? AND migration_file = ?
         """, (proj_id, migration_number))
 
     def list_migrations(self, project_id: Optional[int] = None,
@@ -238,14 +238,14 @@ class SafeMigrationQueries(_ProjectContextMixin, BaseRepository):
         """List migrations for a project."""
         proj_id = self._resolve_project_id(project_id, project_slug)
 
-        sql = "SELECT * FROM database_migrations WHERE project_id = ?"
+        sql = "SELECT * FROM migration_history WHERE project_id = ?"
         params = [proj_id]
 
         if status:
             sql += " AND status = ?"
             params.append(status)
 
-        sql += " ORDER BY migration_number"
+        sql += " ORDER BY applied_at"
         return self.query_all(sql, tuple(params))
 
 

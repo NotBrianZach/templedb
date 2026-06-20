@@ -11,6 +11,10 @@ CREATE TABLE IF NOT EXISTS api_endpoints (
     endpoint_path TEXT NOT NULL,
     http_method TEXT NOT NULL,
     description TEXT,
+    request_schema TEXT,
+    response_schema TEXT,
+    requires_auth BOOLEAN DEFAULT 1,
+    required_permissions TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

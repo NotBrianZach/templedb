@@ -36,7 +36,7 @@ MIGRATION_SEQUENCE = [
     "033_remove_secret_blobs_project_id.sql",
     "034_add_deployment_cache.sql",
     "035_add_code_intelligence_graph.sql",
-    "035_add_nixops4_integration.sql",
+    "036_add_nixops4_integration.sql",
     "039_create_unified_views.sql",
     "042_add_nixos_managed_packages.sql",
     "044_add_checkout_edit_sessions.sql",

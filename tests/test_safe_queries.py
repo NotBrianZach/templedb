@@ -61,13 +61,13 @@ def test_project_with_data(test_project):
 
     # Add migration
     execute("""
-        INSERT INTO database_migrations (project_id, migration_number, migration_name, status)
-        VALUES (?, '001', 'init_schema', 'applied')
+        INSERT INTO migration_history (project_id, target_name, migration_file, migration_checksum, status)
+        VALUES (?, 'production', '001_init_schema.sql', 'test-checksum', 'applied')
     """, (project_id,))
 
     # Add environment
     execute("""
-        INSERT INTO nix_environments (project_id, env_name, nix_packages, is_active)
+        INSERT INTO nix_environments (project_id, env_name, base_packages, is_active)
         VALUES (?, 'dev', '["nodejs"]', 1)
     """, (project_id,))
 
@@ -142,11 +142,10 @@ def test_safe_migrations_query(safe_queries, test_project_with_data):
     """Test SafeMigrationQueries through consolidated API"""
     project_id = test_project_with_data['id']
 
-    migration = safe_queries.migrations.get_migration('001', project_id=project_id)
+    migration = safe_queries.migrations.get_migration('001_init_schema.sql', project_id=project_id)
 
     assert migration is not None
-    assert migration['migration_number'] == '001'
-    assert migration['migration_name'] == 'init_schema'
+    assert migration['migration_file'] == '001_init_schema.sql'
 
 
 @pytest.mark.integration
@@ -363,7 +362,7 @@ def test_queries_support_project_slug(safe_queries, test_project_with_data):
     file = safe_queries.files.get_by_path('src/app.ts', project_slug=project_slug)
     target = safe_queries.targets.get_target('production', project_slug=project_slug)
     endpoint = safe_queries.endpoints.get_endpoint('/api/users', 'GET', project_slug=project_slug)
-    migration = safe_queries.migrations.get_migration('001', project_slug=project_slug)
+    migration = safe_queries.migrations.get_migration('001_init_schema.sql', project_slug=project_slug)
     env = safe_queries.environments.get_environment('dev', project_slug=project_slug)
     branch = safe_queries.branches.get_branch('main', project_slug=project_slug)
 

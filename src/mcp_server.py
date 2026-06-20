@@ -123,6 +123,10 @@ class MCPServer:
             # System config (quick get/set without CLI string composition)
             "templedb_config_get": self.tool_config_get,
             "templedb_config_set": self.tool_config_set,
+            # Deploy pipeline (triggers, rollback, multi-target)
+            "templedb_deploy": self.tool_deploy,
+            # Secret/key management
+            "templedb_secret": self.tool_secret,
         }
 
     def _get_db_connection(self):
@@ -358,6 +362,41 @@ class MCPServer:
                         "host": {"type": "string", "description": "Target a specific host (default: active host from nixos.flake_output)"}
                     },
                     "required": ["key", "value"]
+                }
+            },
+            {
+                "name": "templedb_deploy",
+                "description": "Deploy pipeline operations: run deployments, manage triggers (auto-deploy on commit), list history, rollback. Supports multi-target and commit-specific deploys.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["run", "status", "history", "rollback", "trigger_list", "trigger_add", "trigger_remove", "notify_list"], "description": "Deploy action"},
+                        "project": {"type": "string", "description": "Project slug"},
+                        "target": {"type": "string", "description": "Deployment target (e.g., production, staging)"},
+                        "commit": {"type": "string", "description": "Specific commit hash to deploy (for 'run')"},
+                        "branch": {"type": "string", "description": "Branch pattern (for trigger_add) or branch to deploy from"},
+                        "all_targets": {"type": "boolean", "description": "Deploy to all targets (for 'run')"},
+                        "dry_run": {"type": "boolean", "description": "Simulate without deploying"},
+                        "trigger_id": {"type": "integer", "description": "Trigger ID (for trigger_remove)"}
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "templedb_secret",
+                "description": "Secret and key management: set/get/list secrets, manage encryption keys, export for deployment.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["get", "set", "list", "delete", "export", "key_list", "key_info", "key_test"], "description": "Secret action"},
+                        "project": {"type": "string", "description": "Project slug"},
+                        "name": {"type": "string", "description": "Secret name"},
+                        "value": {"type": "string", "description": "Secret value (for 'set')"},
+                        "keys": {"type": "string", "description": "Comma-separated encryption key names (for 'set')"},
+                        "format": {"type": "string", "enum": ["shell", "dotenv", "json", "yaml"], "description": "Export format"},
+                        "key_name": {"type": "string", "description": "Key name (for key_info, key_test)"}
+                    },
+                    "required": ["action"]
                 }
             }
         ]
@@ -3159,6 +3198,65 @@ class MCPServer:
             })
         except Exception as e:
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy pipeline operations — delegates to CLI."""
+        try:
+            action = args["action"]
+            project = args.get("project", "")
+
+            cmd_map = {
+                "run": f"deploy run {project}",
+                "status": f"deploy status {project}",
+                "history": f"deploy history {project}",
+                "rollback": f"deploy rollback {project}",
+                "trigger_list": f"deploy trigger list {project}",
+                "trigger_add": f"deploy trigger add {project} {args.get('branch', 'main')} {args.get('target', 'production')}",
+                "trigger_remove": f"deploy trigger remove {args.get('trigger_id', '')}",
+                "notify_list": f"deploy notify list",
+            }
+
+            cmd = cmd_map.get(action, f"deploy {action} {project}")
+
+            # Add optional flags
+            if args.get("target") and action == "run":
+                cmd += f" --target {args['target']}"
+            if args.get("commit") and action == "run":
+                cmd += f" --commit {args['commit']}"
+            if args.get("branch") and action == "run":
+                cmd += f" --branch {args['branch']}"
+            if args.get("all_targets") and action == "run":
+                cmd += " --all-targets"
+            if args.get("dry_run"):
+                cmd += " --dry-run"
+
+            return self.tool_cli({"command": cmd.strip()})
+
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_secret(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Secret and key management — delegates to CLI."""
+        try:
+            action = args["action"]
+            project = args.get("project", "")
+
+            cmd_map = {
+                "get": f"env secret get {project} {args.get('name', '')}",
+                "set": f"env secret set {project} {args.get('name', '')} {args.get('value', '')} --keys {args.get('keys', '')}",
+                "list": f"env secret list {project}",
+                "delete": f"env secret delete {project} {args.get('name', '')}",
+                "export": f"env secret export {project} --format {args.get('format', 'dotenv')}",
+                "key_list": "env key list",
+                "key_info": f"env key info {args.get('key_name', '')}",
+                "key_test": f"env key test {args.get('key_name', '')}",
+            }
+
+            cmd = cmd_map.get(action, f"env secret {action} {project}")
+            return self.tool_cli({"command": cmd.strip()})
+
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def tool_cli(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Run any TempleDB CLI command."""
