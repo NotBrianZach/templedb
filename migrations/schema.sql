@@ -888,10 +888,10 @@ CREATE TABLE IF NOT EXISTS nix_service_metadata (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS nixops4_deployment_environments (
+CREATE TABLE IF NOT EXISTS fleet_deployment_environments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  deployment_id INTEGER NOT NULL REFERENCES nixops4_deployments(id) ON DELETE CASCADE,
-  machine_id INTEGER NOT NULL REFERENCES nixops4_machines(id) ON DELETE CASCADE,
+  deployment_id INTEGER NOT NULL REFERENCES fleet_deployments(id) ON DELETE CASCADE,
+  machine_id INTEGER NOT NULL REFERENCES fleet_machines(id) ON DELETE CASCADE,
 
   -- Environment snapshot
   fhs_env_path TEXT,                -- Path to FHS environment used
@@ -913,9 +913,9 @@ CREATE TABLE IF NOT EXISTS nixops4_deployment_environments (
   UNIQUE(deployment_id, machine_id)
 );
 
-CREATE TABLE IF NOT EXISTS nixops4_deployments (
+CREATE TABLE IF NOT EXISTS fleet_deployments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    network_id INTEGER NOT NULL REFERENCES nixops4_networks(id) ON DELETE CASCADE,
+    network_id INTEGER NOT NULL REFERENCES fleet_networks(id) ON DELETE CASCADE,
 
     -- Deployment identification
     deployment_uuid TEXT NOT NULL UNIQUE,
@@ -955,9 +955,9 @@ CREATE TABLE IF NOT EXISTS nixops4_deployments (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS nixops4_local_services (
+CREATE TABLE IF NOT EXISTS fleet_local_services (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  network_id INTEGER NOT NULL REFERENCES nixops4_networks(id) ON DELETE CASCADE,
+  network_id INTEGER NOT NULL REFERENCES fleet_networks(id) ON DELETE CASCADE,
   profile_name TEXT NOT NULL,  -- Which profile uses this service
 
   -- Service identification
@@ -1000,10 +1000,10 @@ CREATE TABLE IF NOT EXISTS nixops4_local_services (
   CHECK(status IN ('stopped', 'starting', 'running', 'failed', 'unhealthy'))
 );
 
-CREATE TABLE IF NOT EXISTS nixops4_machine_deployments (
+CREATE TABLE IF NOT EXISTS fleet_machine_deployments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    deployment_id INTEGER NOT NULL REFERENCES nixops4_deployments(id) ON DELETE CASCADE,
-    machine_id INTEGER NOT NULL REFERENCES nixops4_machines(id) ON DELETE CASCADE,
+    deployment_id INTEGER NOT NULL REFERENCES fleet_deployments(id) ON DELETE CASCADE,
+    machine_id INTEGER NOT NULL REFERENCES fleet_machines(id) ON DELETE CASCADE,
 
     -- Build information
     build_started_at TIMESTAMP,
@@ -1033,12 +1033,12 @@ CREATE TABLE IF NOT EXISTS nixops4_machine_deployments (
     UNIQUE(deployment_id, machine_id)
 );
 
-CREATE TABLE IF NOT EXISTS nixops4_machines (
+CREATE TABLE IF NOT EXISTS fleet_machines (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    network_id INTEGER NOT NULL REFERENCES nixops4_networks(id) ON DELETE CASCADE,
+    network_id INTEGER NOT NULL REFERENCES fleet_networks(id) ON DELETE CASCADE,
 
     -- Machine identification
-    machine_name TEXT NOT NULL,           -- Machine name in nixops4 (e.g., 'web1', 'db1')
+    machine_name TEXT NOT NULL,           -- Machine name in fleet (e.g., 'web1', 'db1')
     machine_uuid TEXT NOT NULL UNIQUE,    -- UUID for machine state
 
     -- Target information
@@ -1069,9 +1069,9 @@ CREATE TABLE IF NOT EXISTS nixops4_machines (
     UNIQUE(network_id, machine_name)
 );
 
-CREATE TABLE IF NOT EXISTS nixops4_network_info (
+CREATE TABLE IF NOT EXISTS fleet_network_info (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    network_id INTEGER NOT NULL REFERENCES nixops4_networks(id) ON DELETE CASCADE,
+    network_id INTEGER NOT NULL REFERENCES fleet_networks(id) ON DELETE CASCADE,
 
     -- Topology
     network_topology TEXT,                -- JSON: graph of machine connectivity
@@ -1089,9 +1089,9 @@ CREATE TABLE IF NOT EXISTS nixops4_network_info (
     external_dns_zone TEXT                -- External DNS zone name
 );
 
-CREATE TABLE IF NOT EXISTS nixops4_network_profiles (
+CREATE TABLE IF NOT EXISTS fleet_network_profiles (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  network_id INTEGER NOT NULL REFERENCES nixops4_networks(id) ON DELETE CASCADE,
+  network_id INTEGER NOT NULL REFERENCES fleet_networks(id) ON DELETE CASCADE,
 
   -- Profile identification
   profile_name TEXT NOT NULL,  -- 'local', 'staging', 'production'
@@ -1122,13 +1122,13 @@ CREATE TABLE IF NOT EXISTS nixops4_network_profiles (
   UNIQUE(network_id, profile_name)
 );
 
-CREATE TABLE IF NOT EXISTS nixops4_networks (
+CREATE TABLE IF NOT EXISTS fleet_networks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
 
     -- Network identification
     network_name TEXT NOT NULL,           -- e.g., 'production', 'staging', 'dev-cluster'
-    network_uuid TEXT NOT NULL UNIQUE,    -- UUID for nixops4 state tracking
+    network_uuid TEXT NOT NULL UNIQUE,    -- UUID for fleet state tracking
 
     -- Configuration
     config_file_path TEXT NOT NULL,       -- Path to network.nix or flake.nix
@@ -1136,7 +1136,7 @@ CREATE TABLE IF NOT EXISTS nixops4_networks (
     nix_options TEXT,                     -- JSON: extra nix options (--option key value)
 
     -- State
-    state_file_path TEXT,                 -- Path to nixops4 state file
+    state_file_path TEXT,                 -- Path to fleet state file
     is_active BOOLEAN DEFAULT 1,          -- Currently active network
 
     -- Metadata
@@ -1148,9 +1148,9 @@ CREATE TABLE IF NOT EXISTS nixops4_networks (
     UNIQUE(project_id, network_name)
 );
 
-CREATE TABLE IF NOT EXISTS nixops4_port_allocations (
+CREATE TABLE IF NOT EXISTS fleet_port_allocations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  network_id INTEGER NOT NULL REFERENCES nixops4_networks(id) ON DELETE CASCADE,
+  network_id INTEGER NOT NULL REFERENCES fleet_networks(id) ON DELETE CASCADE,
   profile_name TEXT NOT NULL,
 
   -- Port details
@@ -1165,10 +1165,10 @@ CREATE TABLE IF NOT EXISTS nixops4_port_allocations (
   UNIQUE(network_id, profile_name, port_number)
 );
 
-CREATE TABLE IF NOT EXISTS nixops4_resources (
+CREATE TABLE IF NOT EXISTS fleet_resources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    network_id INTEGER NOT NULL REFERENCES nixops4_networks(id) ON DELETE CASCADE,
-    machine_id INTEGER REFERENCES nixops4_machines(id) ON DELETE CASCADE,  -- null for network-level resources
+    network_id INTEGER NOT NULL REFERENCES fleet_networks(id) ON DELETE CASCADE,
+    machine_id INTEGER REFERENCES fleet_machines(id) ON DELETE CASCADE,  -- null for network-level resources
 
     -- Resource identification
     resource_name TEXT NOT NULL,
@@ -2339,53 +2339,53 @@ CREATE INDEX IF NOT EXISTS idx_nix_environments_active ON nix_environments(is_ac
 
 CREATE INDEX IF NOT EXISTS idx_nix_environments_project ON nix_environments(project_id);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_deployment_environments_machine
-  ON nixops4_deployment_environments(machine_id);
+CREATE INDEX IF NOT EXISTS idx_fleet_deployment_environments_machine
+  ON fleet_deployment_environments(machine_id);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_deployments_network ON nixops4_deployments(network_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fleet_deployments_network ON fleet_deployments(network_id, started_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_deployments_status ON nixops4_deployments(status);
+CREATE INDEX IF NOT EXISTS idx_fleet_deployments_status ON fleet_deployments(status);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_local_services_network_profile
-  ON nixops4_local_services(network_id, profile_name);
+CREATE INDEX IF NOT EXISTS idx_fleet_local_services_network_profile
+  ON fleet_local_services(network_id, profile_name);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_local_services_status
-  ON nixops4_local_services(status);
+CREATE INDEX IF NOT EXISTS idx_fleet_local_services_status
+  ON fleet_local_services(status);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_machine_deployments ON nixops4_machine_deployments(deployment_id);
+CREATE INDEX IF NOT EXISTS idx_fleet_machine_deployments ON fleet_machine_deployments(deployment_id);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_machine_deployments_machine ON nixops4_machine_deployments(machine_id, deploy_completed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fleet_machine_deployments_machine ON fleet_machine_deployments(machine_id, deploy_completed_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_machines_is_local
-  ON nixops4_machines(is_local)
+CREATE INDEX IF NOT EXISTS idx_fleet_machines_is_local
+  ON fleet_machines(is_local)
   WHERE is_local = TRUE;
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_machines_network ON nixops4_machines(network_id);
+CREATE INDEX IF NOT EXISTS idx_fleet_machines_network ON fleet_machines(network_id);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_machines_status ON nixops4_machines(deployment_status);
+CREATE INDEX IF NOT EXISTS idx_fleet_machines_status ON fleet_machines(deployment_status);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_network_info ON nixops4_network_info(network_id, collected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fleet_network_info ON fleet_network_info(network_id, collected_at DESC);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_nixops4_network_profiles_default
-  ON nixops4_network_profiles(network_id)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_network_profiles_default
+  ON fleet_network_profiles(network_id)
   WHERE is_default = TRUE;
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_network_profiles_network
-  ON nixops4_network_profiles(network_id);
+CREATE INDEX IF NOT EXISTS idx_fleet_network_profiles_network
+  ON fleet_network_profiles(network_id);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_networks_active ON nixops4_networks(project_id, is_active) WHERE is_active = 1;
+CREATE INDEX IF NOT EXISTS idx_fleet_networks_active ON fleet_networks(project_id, is_active) WHERE is_active = 1;
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_networks_project ON nixops4_networks(project_id);
+CREATE INDEX IF NOT EXISTS idx_fleet_networks_project ON fleet_networks(project_id);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_port_allocations_active
-  ON nixops4_port_allocations(network_id, profile_name, is_active)
+CREATE INDEX IF NOT EXISTS idx_fleet_port_allocations_active
+  ON fleet_port_allocations(network_id, profile_name, is_active)
   WHERE is_active = TRUE;
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_resources_machine ON nixops4_resources(machine_id);
+CREATE INDEX IF NOT EXISTS idx_fleet_resources_machine ON fleet_resources(machine_id);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_resources_network ON nixops4_resources(network_id);
+CREATE INDEX IF NOT EXISTS idx_fleet_resources_network ON fleet_resources(network_id);
 
-CREATE INDEX IF NOT EXISTS idx_nixops4_resources_type ON nixops4_resources(resource_type);
+CREATE INDEX IF NOT EXISTS idx_fleet_resources_type ON fleet_resources(resource_type);
 
 CREATE INDEX IF NOT EXISTS idx_nixos_managed_packages_enabled ON nixos_managed_packages(enabled);
 
@@ -3302,7 +3302,7 @@ FROM projects p
 JOIN nix_service_metadata nsm ON p.id = nsm.project_id
 WHERE p.project_category = 'service';
 
-CREATE VIEW IF NOT EXISTS nixops4_deployment_history AS
+CREATE VIEW IF NOT EXISTS fleet_deployment_history AS
 SELECT
     d.id,
     d.deployment_uuid,
@@ -3321,16 +3321,16 @@ SELECT
     COUNT(md.id) AS total_machines,
     COUNT(CASE WHEN md.status = 'success' THEN 1 END) AS successful_machines,
     COUNT(CASE WHEN md.status = 'failed' THEN 1 END) AS failed_machines
-FROM nixops4_deployments d
-JOIN nixops4_networks n ON d.network_id = n.id
+FROM fleet_deployments d
+JOIN fleet_networks n ON d.network_id = n.id
 JOIN projects p ON n.project_id = p.id
-LEFT JOIN nixops4_machine_deployments md ON d.id = md.deployment_id
+LEFT JOIN fleet_machine_deployments md ON d.id = md.deployment_id
 GROUP BY d.id, d.deployment_uuid, d.network_id, n.network_name, n.project_id,
          p.slug, d.operation, d.target_machines, d.config_revision, d.status,
          d.started_at, d.completed_at, d.duration_seconds, d.triggered_by
 ORDER BY d.started_at DESC;
 
-CREATE VIEW IF NOT EXISTS nixops4_local_machines AS
+CREATE VIEW IF NOT EXISTS fleet_local_machines AS
 SELECT
   m.id,
   m.machine_name,
@@ -3343,12 +3343,12 @@ SELECT
   n.network_name,
   n.project_id,
   p.slug as project_slug
-FROM nixops4_machines m
-JOIN nixops4_networks n ON m.network_id = n.id
+FROM fleet_machines m
+JOIN fleet_networks n ON m.network_id = n.id
 JOIN projects p ON n.project_id = p.id
 WHERE m.is_local = TRUE;
 
-CREATE VIEW IF NOT EXISTS nixops4_machine_health AS
+CREATE VIEW IF NOT EXISTS fleet_machine_health AS
 SELECT
     m.id,
     m.machine_name,
@@ -3364,19 +3364,19 @@ SELECT
     m.nixos_version,
     -- Latest deployment info
     (SELECT started_at
-     FROM nixops4_machine_deployments md
-     JOIN nixops4_deployments d ON md.deployment_id = d.id
+     FROM fleet_machine_deployments md
+     JOIN fleet_deployments d ON md.deployment_id = d.id
      WHERE md.machine_id = m.id AND md.status = 'success'
      ORDER BY md.deploy_completed_at DESC LIMIT 1) AS last_successful_deployment,
     (SELECT COUNT(*)
-     FROM nixops4_machine_deployments md
+     FROM fleet_machine_deployments md
      WHERE md.machine_id = m.id AND md.status = 'failed') AS failed_deployment_count
-FROM nixops4_machines m
-JOIN nixops4_networks n ON m.network_id = n.id
+FROM fleet_machines m
+JOIN fleet_networks n ON m.network_id = n.id
 JOIN projects p ON n.project_id = p.id
 ORDER BY n.network_name, m.machine_name;
 
-CREATE VIEW IF NOT EXISTS nixops4_network_summary AS
+CREATE VIEW IF NOT EXISTS fleet_network_summary AS
 SELECT
     n.id,
     n.project_id,
@@ -3391,16 +3391,16 @@ SELECT
     MAX(d.started_at) AS last_deployment_at,
     n.created_at,
     n.updated_at
-FROM nixops4_networks n
+FROM fleet_networks n
 JOIN projects p ON n.project_id = p.id
-LEFT JOIN nixops4_machines m ON n.id = m.network_id
-LEFT JOIN nixops4_resources r ON n.id = r.network_id
-LEFT JOIN nixops4_deployments d ON n.id = d.network_id
+LEFT JOIN fleet_machines m ON n.id = m.network_id
+LEFT JOIN fleet_resources r ON n.id = r.network_id
+LEFT JOIN fleet_deployments d ON n.id = d.network_id
 WHERE n.is_active = 1
 GROUP BY n.id, n.project_id, n.network_name, n.network_uuid, n.is_active,
          p.slug, p.name, n.created_at, n.updated_at;
 
-CREATE VIEW IF NOT EXISTS nixops4_port_usage AS
+CREATE VIEW IF NOT EXISTS fleet_port_usage AS
 SELECT
   pa.port_number,
   pa.allocated_to,
@@ -3409,13 +3409,13 @@ SELECT
   n.network_name,
   p.slug as project_slug,
   pa.allocated_at
-FROM nixops4_port_allocations pa
-JOIN nixops4_networks n ON pa.network_id = n.id
+FROM fleet_port_allocations pa
+JOIN fleet_networks n ON pa.network_id = n.id
 JOIN projects p ON n.project_id = p.id
 WHERE pa.is_active = TRUE
 ORDER BY pa.port_number;
 
-CREATE VIEW IF NOT EXISTS nixops4_profile_summary AS
+CREATE VIEW IF NOT EXISTS fleet_profile_summary AS
 SELECT
   np.id,
   np.profile_name,
@@ -3426,15 +3426,15 @@ SELECT
   COUNT(DISTINCT ls.id) as service_count,
   COUNT(DISTINCT CASE WHEN ls.status = 'running' THEN ls.id END) as running_services,
   np.is_default
-FROM nixops4_network_profiles np
-JOIN nixops4_networks n ON np.network_id = n.id
+FROM fleet_network_profiles np
+JOIN fleet_networks n ON np.network_id = n.id
 JOIN projects p ON n.project_id = p.id
-LEFT JOIN nixops4_local_services ls ON ls.network_id = np.network_id
+LEFT JOIN fleet_local_services ls ON ls.network_id = np.network_id
   AND ls.profile_name = np.profile_name
 GROUP BY np.id, np.profile_name, np.use_local_services, np.enable_mocking,
          n.network_name, p.slug, np.is_default;
 
-CREATE VIEW IF NOT EXISTS nixops4_service_status AS
+CREATE VIEW IF NOT EXISTS fleet_service_status AS
 SELECT
   ls.id,
   ls.service_name,
@@ -3447,9 +3447,9 @@ SELECT
   np.profile_name,
   n.network_name,
   p.slug as project_slug
-FROM nixops4_local_services ls
-JOIN nixops4_networks n ON ls.network_id = n.id
-JOIN nixops4_network_profiles np ON np.network_id = n.id
+FROM fleet_local_services ls
+JOIN fleet_networks n ON ls.network_id = n.id
+JOIN fleet_network_profiles np ON np.network_id = n.id
   AND np.profile_name = ls.profile_name
 JOIN projects p ON n.project_id = p.id;
 
@@ -4140,35 +4140,35 @@ CREATE TRIGGER IF NOT EXISTS nix_configs_updated_at
           UPDATE nix_configs SET updated_at = datetime('now') WHERE id = NEW.id;
         END;
 
-CREATE TRIGGER IF NOT EXISTS nixops4_calculate_deployment_duration
-AFTER UPDATE OF completed_at ON nixops4_deployments
+CREATE TRIGGER IF NOT EXISTS fleet_calculate_deployment_duration
+AFTER UPDATE OF completed_at ON fleet_deployments
 WHEN NEW.completed_at IS NOT NULL AND OLD.completed_at IS NULL
 BEGIN
-    UPDATE nixops4_deployments
+    UPDATE fleet_deployments
     SET duration_seconds = CAST((julianday(NEW.completed_at) - julianday(NEW.started_at)) * 86400 AS INTEGER)
     WHERE id = NEW.id;
 END;
 
-CREATE TRIGGER IF NOT EXISTS nixops4_calculate_machine_build_duration
-AFTER UPDATE OF build_completed_at ON nixops4_machine_deployments
+CREATE TRIGGER IF NOT EXISTS fleet_calculate_machine_build_duration
+AFTER UPDATE OF build_completed_at ON fleet_machine_deployments
 WHEN NEW.build_completed_at IS NOT NULL AND OLD.build_completed_at IS NULL
 BEGIN
-    UPDATE nixops4_machine_deployments
+    UPDATE fleet_machine_deployments
     SET build_duration_seconds = CAST((julianday(NEW.build_completed_at) - julianday(NEW.build_started_at)) * 86400 AS INTEGER)
     WHERE id = NEW.id;
 END;
 
-CREATE TRIGGER IF NOT EXISTS nixops4_calculate_machine_deploy_duration
-AFTER UPDATE OF deploy_completed_at ON nixops4_machine_deployments
+CREATE TRIGGER IF NOT EXISTS fleet_calculate_machine_deploy_duration
+AFTER UPDATE OF deploy_completed_at ON fleet_machine_deployments
 WHEN NEW.deploy_completed_at IS NOT NULL AND OLD.deploy_completed_at IS NULL
 BEGIN
-    UPDATE nixops4_machine_deployments
+    UPDATE fleet_machine_deployments
     SET deploy_duration_seconds = CAST((julianday(NEW.deploy_completed_at) - julianday(NEW.deploy_started_at)) * 86400 AS INTEGER)
     WHERE id = NEW.id;
 END;
 
-CREATE TRIGGER IF NOT EXISTS nixops4_local_services_allocate_port
-  AFTER INSERT ON nixops4_local_services
+CREATE TRIGGER IF NOT EXISTS fleet_local_services_allocate_port
+  AFTER INSERT ON fleet_local_services
   FOR EACH ROW
   WHEN NEW.port_mapping IS NOT NULL
   BEGIN
@@ -4177,47 +4177,47 @@ CREATE TRIGGER IF NOT EXISTS nixops4_local_services_allocate_port
     SELECT 1; -- Placeholder
   END;
 
-CREATE TRIGGER IF NOT EXISTS nixops4_local_services_updated
-  AFTER UPDATE ON nixops4_local_services
+CREATE TRIGGER IF NOT EXISTS fleet_local_services_updated
+  AFTER UPDATE ON fleet_local_services
   FOR EACH ROW
   BEGIN
-    UPDATE nixops4_local_services
+    UPDATE fleet_local_services
     SET updated_at = CURRENT_TIMESTAMP
     WHERE id = NEW.id;
   END;
 
-CREATE TRIGGER IF NOT EXISTS nixops4_machines_set_local_flag
-  AFTER INSERT ON nixops4_machines
+CREATE TRIGGER IF NOT EXISTS fleet_machines_set_local_flag
+  AFTER INSERT ON fleet_machines
   FOR EACH ROW
   WHEN NEW.system_type = 'localhost'
   BEGIN
-    UPDATE nixops4_machines
+    UPDATE fleet_machines
     SET is_local = TRUE
     WHERE id = NEW.id;
   END;
 
-CREATE TRIGGER IF NOT EXISTS nixops4_network_profiles_updated
-  AFTER UPDATE ON nixops4_network_profiles
+CREATE TRIGGER IF NOT EXISTS fleet_network_profiles_updated
+  AFTER UPDATE ON fleet_network_profiles
   FOR EACH ROW
   BEGIN
-    UPDATE nixops4_network_profiles
+    UPDATE fleet_network_profiles
     SET updated_at = CURRENT_TIMESTAMP
     WHERE id = NEW.id;
   END;
 
-CREATE TRIGGER IF NOT EXISTS nixops4_update_machine_timestamp
-AFTER UPDATE ON nixops4_machines
+CREATE TRIGGER IF NOT EXISTS fleet_update_machine_timestamp
+AFTER UPDATE ON fleet_machines
 FOR EACH ROW
 BEGIN
-    UPDATE nixops4_machines
+    UPDATE fleet_machines
     SET updated_at = CURRENT_TIMESTAMP
     WHERE id = NEW.id;
 END;
 
-CREATE TRIGGER IF NOT EXISTS nixops4_update_network_timestamp
-AFTER UPDATE ON nixops4_machines
+CREATE TRIGGER IF NOT EXISTS fleet_update_network_timestamp
+AFTER UPDATE ON fleet_machines
 BEGIN
-    UPDATE nixops4_networks
+    UPDATE fleet_networks
     SET updated_at = CURRENT_TIMESTAMP
     WHERE id = NEW.network_id;
 END;

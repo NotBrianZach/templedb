@@ -88,7 +88,7 @@ Current active migration sequence:
 033_remove_secret_blobs_project_id.sql
 034_add_deployment_cache.sql
 035_add_code_intelligence_graph.sql [CONSOLIDATED]
-035_add_nixops4_integration.sql [TO BE RENUMBERED → 036]
+035_add_fleet_integration.sql [TO BE RENUMBERED → 036]
 039_create_unified_views.sql
 040_safe_cleanup_verified_unused.sql
 041_add_deployment_plugins.sql [SUPERSEDED → see 050]
@@ -181,7 +181,7 @@ git checkout HEAD~N migrations/
 
 Based on the analysis in `SCHEMA_STREAMLINING_PLAN.md`, these migrations could be consolidated in future:
 
-1. **Deployment System** (034_deployment_cache + 035_nixops4 + 049_tracking)
+1. **Deployment System** (034_deployment_cache + 035_fleet + 049_tracking)
    - Large, complex consolidation
    - Requires careful testing
    - Defer to future cleanup phase
@@ -189,7 +189,7 @@ Based on the analysis in `SCHEMA_STREAMLINING_PLAN.md`, these migrations could b
 2. **Renumbering** (resolve remaining duplicate 034)
    - Rename 034_add_code_intelligence_graph → 035 (done)
    - Rename 034_add_deployment_cache → 034 (current)
-   - Rename 035_add_nixops4_integration → 036
+   - Rename 035_add_fleet_integration → 036
    - Continue sequential renumbering
 
 ## Testing

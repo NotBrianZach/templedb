@@ -4,11 +4,9 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    nixops4.url = "github:nixops4/nixops4";
-    nixops4.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils, nixops4 }:
+  outputs = { self, nixpkgs, flake-utils }:
     let
       # cr-sqlite pre-built extension, patched for NixOS
       mkCrsqlite = pkgs: pkgs.stdenv.mkDerivation {
@@ -145,12 +143,32 @@
               default = true;
               description = "Register TempleDB MCP server globally so all Claude Code sessions can access TempleDB tools.";
             };
+
+            devWrapper = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = ''
+                Path to the dev wrapper script (e.g. "/home/zach/templeDB/templedb").
+                When set, systemd services, MCP, and hooks use this instead of the
+                nix-profile binary. The dev wrapper handles its own python/PYTHONPATH
+                resolution and has fallback logic for missing ./result symlinks.
+              '';
+            };
           };
 
-          config = lib.mkIf cfg.enable (lib.mkMerge [
+          config = let
+            templedb-bin = if cfg.devWrapper != null
+              then cfg.devWrapper
+              else "${cfg.package}/bin/templedb";
+          in lib.mkIf cfg.enable (lib.mkMerge [
             {
               home.packages = [ cfg.package ];
             }
+
+            # When devWrapper is set, override hookCommand to use it
+            (lib.mkIf (cfg.devWrapper != null) {
+              programs.templedb.claude.hookCommand = lib.mkDefault "${templedb-bin} ai claude hook";
+            })
 
             (lib.mkIf cfg.mount.enable {
               home.activation.createTempleMount = lib.hm.dag.entryAfter ["writeBoundary"] ''
@@ -164,11 +182,14 @@
                 };
                 Service = {
                   Type = "simple";
-                  ExecStart = "${cfg.package}/bin/templedb mount %h/temple --foreground";
+                  ExecStart = "${templedb-bin} mount %h/temple --foreground";
                   ExecStop = "/run/wrappers/bin/fusermount -u %h/temple";
                   Restart = "on-failure";
                   RestartSec = 5;
-                  Environment = [ "PYTHONUNBUFFERED=1" ];
+                  Environment = [ "PYTHONUNBUFFERED=1" ]
+                    ++ lib.optionals (cfg.devWrapper != null) [
+                      "PATH=/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin"
+                    ];
                 };
                 Install.WantedBy = [ "default.target" ];
               };
@@ -244,7 +265,7 @@
               home.file.".mcp.json".text = builtins.toJSON {
                 mcpServers = {
                   templedb = {
-                    command = "${cfg.package}/bin/templedb";
+                    command = "${templedb-bin}";
                     args = ["ai" "mcp" "serve"];
                   };
                 };
@@ -260,10 +281,13 @@
                 };
                 Service = {
                   Type = "simple";
-                  ExecStart = "${cfg.package}/bin/templedb sync serve --port ${toString cfg.sync.port}";
+                  ExecStart = "${templedb-bin} sync serve --port ${toString cfg.sync.port}";
                   Restart = "on-failure";
                   RestartSec = 10;
-                  Environment = [ "PYTHONUNBUFFERED=1" ];
+                  Environment = [ "PYTHONUNBUFFERED=1" ]
+                    ++ lib.optionals (cfg.devWrapper != null) [
+                      "PATH=/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin"
+                    ];
                 };
                 Install.WantedBy = [ "default.target" ];
               };
@@ -293,9 +317,6 @@
             git
             just
             google-cloud-sdk
-
-            # NixOps4 for deployment orchestration
-            nixops4.packages.${system}.default
 
             # Python env with all templedb dependencies
             (python3.withPackages (ps: with ps; [

@@ -33,7 +33,7 @@ Analysis of 59 migration files revealed critical issues:
 | Migration | Tables | Purpose | Status |
 |-----------|--------|---------|--------|
 | 034_add_deployment_cache | deployment_cache, deployment_cache_stats | Caching layer | Active ✅ |
-| 035_add_nixops4_integration | 9 NixOps4 tables | NixOps4 orchestration | Active ✅ |
+| 035_add_fleet_integration | 9 Fleet tables | Fleet orchestration | Active ✅ |
 | 041_add_deployment_plugins | deployment_scripts | Script execution | Applied ✅ |
 | 049_add_deployment_tracking | deployment_history, deployment_health_checks | History & monitoring | Applied ✅ |
 | 062_add_deployment_docs | ALTER deployment_scripts | Documentation | Applied ✅ |
@@ -75,7 +75,7 @@ mv 034_add_deployment_cache.sql 034_add_deployment_cache.sql.CURRENT
 mv 034_add_code_intelligence_graph.sql 035_add_code_intelligence_graph.sql
 
 # Shift subsequent migrations
-035_add_nixops4_integration.sql → 036_add_nixops4_integration.sql
+035_add_fleet_integration.sql → 036_add_fleet_integration.sql
 # ... continue renumbering
 ```
 
@@ -187,7 +187,7 @@ migrations/
 │   ├── 033_remove_secret_blobs_project_id.sql
 │   ├── 034_add_deployment_cache.sql
 │   ├── 035_add_code_intelligence_graph.sql (CONSOLIDATED)
-│   ├── 036_add_nixops4_integration.sql
+│   ├── 036_add_fleet_integration.sql
 │   ├── 050_consolidate_deployment_scripts.sql (CONSOLIDATED)
 │   └── ...
 └── schema.sql                        # Full current schema snapshot
@@ -200,7 +200,7 @@ migrations/
 033_remove_secret_blobs_project_id.sql
 034_add_deployment_cache.sql
 035_add_code_intelligence_graph.sql           [CONSOLIDATED: 034 + 037]
-036_add_nixops4_integration.sql               [RENUMBERED: was 035]
+036_add_fleet_integration.sql               [RENUMBERED: was 035]
 037_add_checkout_edit_sessions.sql            [RENUMBERED: was 044]
 038_add_git_server_config.sql                 [RENUMBERED: was 045]
 039_add_nix_first_support.sql                 [RENUMBERED: was 046]

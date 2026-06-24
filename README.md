@@ -16,7 +16,7 @@
 
 Files and environment variables are denormalized and heretical... make your codebase instead a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
 
-Or, it's like fossil-scm (sqlite, relational version of git) + claude mcp&stored procedures (api tuned for AI agent interactions) + superpowers (hierarchical agent dispatch&contextualization) + gitnexus (dependency graph/clustering for AI contextualization) + nix based terraform (deployment tool) + sops (secret management).
+Or, it's like a normalized version of fossil-scm (sqlite, relational version of git) + claude mcp&stored procedures (api tuned for AI agent interactions) + superpowers (hierarchical agent dispatch&contextualization) + gitnexus (dependency graph/clustering for AI contextualization) + fleet deploy (native multi-machine NixOS deployment with magic rollback) + sops (secret management).
 
 We throw out of the temple those that would lend us technical debt in the form of state duplication. (though in the case of git it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for nixos to tide us over until the day we can make some much more radical changes to operating systems).
 
@@ -62,7 +62,7 @@ command groups:
     deploy targets     Deployment targets
     deploy migration   Database migrations
     deploy rollback    Roll back to previous successful deployment
-    deploy nixops4     NixOps4 declarative orchestration (network/machine/deploy)
+    deploy fleet       Multi-machine NixOS deployment with magic rollback
     publish            Commit + push to GitHub mirrors
 
   Knowledge Graph
@@ -191,11 +191,13 @@ templedb deploy rollback bza --target production --yes
 NixOps4 orchestration for multi-machine infrastructure:
 
 ```bash
-templedb deploy nixops4 network create bza prod --flake-uri .#
-templedb deploy nixops4 machine add bza prod webserver --host 10.0.0.1
-templedb deploy nixops4 deploy bza prod
-templedb deploy nixops4 check bza prod                # health check
-templedb deploy nixops4 ssh bza prod webserver         # SSH into machine
+templedb deploy fleet network create bza prod --flake-uri .#
+templedb deploy fleet machine add bza prod webserver --host 10.0.0.1 --tags web
+templedb deploy fleet deploy bza prod                  # parallel deploy with magic rollback
+templedb deploy fleet diff bza prod                    # show what would change
+templedb deploy fleet check bza prod                   # health check all machines
+templedb deploy fleet deploy bza prod --on web         # deploy only tagged machines
+templedb deploy fleet ssh bza prod webserver           # SSH into machine
 ```
 
 ### Query the knowledge graph

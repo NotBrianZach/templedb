@@ -791,7 +791,7 @@ class NixDeployBackend(BaseService):
 
     def update_machine_status(self, result: MachineDeployResult,
                               deployment_id: int) -> None:
-        """Write deployment result back to nixops4 DB tables."""
+        """Write deployment result back to fleet DB tables."""
         import db_utils
 
         now = datetime.now().isoformat()

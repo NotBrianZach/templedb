@@ -13,7 +13,7 @@ schema.sql                                  # Full base schema (fresh installs)
 033_remove_secret_blobs_project_id.sql      # Updated secret schema (join table)
 034_add_deployment_cache.sql                # Content-addressable deployment caching
 035_add_code_intelligence_graph.sql         # Code symbols and dependency tracking [consolidated]
-035_add_nixops4_integration.sql             # NixOps4 deployment integration
+035_add_fleet_integration.sql             # Fleet deployment integration
 039_create_unified_views.sql                # Consolidated database views
 042_add_nixos_managed_packages.sql          # NixOS managed packages
 044_add_checkout_edit_sessions.sql          # Checkout edit sessions

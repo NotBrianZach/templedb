@@ -240,7 +240,7 @@ Can be used to:
 - Renumber remaining migrations to eliminate gaps
 - Consolidate deployment system (034_cache + 035_nixops + 049_tracking)
 - Review cleanup migration (040) for consistency
-- Consider splitting large migrations (035_nixops4 is 17KB)
+- Consider splitting large migrations (035_fleet is 17KB)
 
 ## Statistics
 
