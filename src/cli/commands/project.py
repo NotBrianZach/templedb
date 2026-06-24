@@ -34,6 +34,52 @@ class ProjectCommands(Command):
         self.project_repo = self.ctx.project_repo
         self.file_repo = self.ctx.file_repo
 
+    def create_project(self, args) -> int:
+        """Create a new project in the DB — no filesystem directory needed."""
+        from error_handler import ValidationError
+
+        slug = args.slug
+        name = getattr(args, 'name', None) or slug
+
+        try:
+            self.service._validate_slug(slug)
+            project_id = self.service.create_project(
+                slug=slug,
+                name=name,
+                repo_url=f"templedb://{slug}",
+                git_branch='main'
+            )
+
+            # Create default main branch
+            from db_utils import execute
+            execute(
+                "INSERT OR IGNORE INTO vcs_branches (project_id, branch_name, is_default) VALUES (?, 'main', 1)",
+                (project_id,)
+            )
+
+            # Check FUSE mount
+            fuse_path = Path.home() / "temple" / slug
+            fuse_note = f"   FUSE: ~/temple/{slug}/" if fuse_path.exists() else "   FUSE: ~/temple/{slug}/ (mount with: templedb mount ~/temple)".format(slug=slug)
+
+            print(f"Created project: {slug} (ID {project_id})")
+            print(fuse_note)
+            print()
+            print("Start working:")
+            print(f"   echo 'hello' > ~/temple/{slug}/README.md")
+            print(f"   templedb vcs commit -p {slug} -m 'initial commit'")
+
+            return 0
+
+        except ValidationError as e:
+            logger.error(f"{e}")
+            if e.solution:
+                logger.info(f"{e.solution}")
+            return 1
+        except Exception as e:
+            logger.error(f"Failed to create project: {e}")
+            logger.debug("Full error:", exc_info=True)
+            return 1
+
     def init_project(self, args) -> int:
         """Initialize current directory as a TempleDB project"""
         from error_handler import ValidationError
@@ -423,6 +469,12 @@ def register(cli):
         help_text='Project management'
     )
     subparsers = project_parser.add_subparsers(dest='project_subcommand', required=True)
+
+    # project create
+    create_parser = subparsers.add_parser('create', help='Create project in DB (no directory needed, use FUSE)')
+    create_parser.add_argument('slug', help='Project slug')
+    create_parser.add_argument('--name', help='Project name (default: slug)')
+    cli.commands['project.create'] = cmd.create_project
 
     # project init
     init_parser = subparsers.add_parser('init', help='Initialize current directory as TempleDB project')

@@ -4,14 +4,36 @@
 # PYTHON:       resolved from ./result (nix build output — has fastapi/uvicorn/python-multipart)
 # PYTHONPATH:   from ~/.nix-profile/bin/templedb if available, else ./result (fallback)
 #
-# Works without home-manager installed. After a nix build, no manual path editing needed.
+# Resilience: if ./result is missing, falls back to cached nix store path,
+# then tries auto-rebuild. Avoids hard dependency on ~/templeDB/result existing.
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 RESULT="$DIR/result"
+CACHE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/templedb/last-result"
 
 if [ ! -L "$RESULT" ]; then
-  echo "Error: $RESULT symlink not found. Run: nix build .#templedb --no-update-lock-file" >&2
-  exit 1
+  # Fallback 1: use cached nix store path from last successful run
+  if [ -f "$CACHE_FILE" ] && [ -d "$(cat "$CACHE_FILE")" ]; then
+    RESULT="$(cat "$CACHE_FILE")"
+    echo "Warning: $DIR/result missing, using cached build at $RESULT" >&2
+  else
+    # Fallback 2: try to auto-rebuild
+    echo "Warning: $DIR/result missing, attempting nix build..." >&2
+    if (cd "$DIR" && nix build .#templedb --no-update-lock-file 2>&1); then
+      RESULT="$DIR/result"
+    else
+      echo "Error: $DIR/result symlink not found and auto-rebuild failed." >&2
+      echo "  Run manually: cd $DIR && nix build .#templedb --no-update-lock-file" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# Cache the resolved nix store path for future fallback
+_resolved="$(readlink -f "$RESULT" 2>/dev/null)"
+if [ -n "$_resolved" ] && [ -d "$_resolved" ]; then
+  mkdir -p "$(dirname "$CACHE_FILE")"
+  echo "$_resolved" > "$CACHE_FILE"
 fi
 
 # Python from the local nix build (has all GUI deps)
