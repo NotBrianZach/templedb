@@ -375,6 +375,79 @@ class CathedralImporter:
         # This is a simplified version
         return {row['id']: row['id'] for row in rows}
 
+    def _import_deploy_metadata(self, project_id: int, deploy_file: Path) -> None:
+        """Import deployment config, targets, triggers, and notifications from deploy.json."""
+        import json as json_mod
+
+        with open(deploy_file, 'r') as f:
+            meta = json_mod.load(f)
+
+        cursor = self.conn.cursor()
+
+        # Deployment config
+        if 'deployment_config' in meta:
+            cursor.execute(
+                "UPDATE projects SET deployment_config = ? WHERE id = ?",
+                (json_mod.dumps(meta['deployment_config']), project_id)
+            )
+            groups = meta['deployment_config'].get('groups', [])
+            logger.info(f"  Set deployment config ({len(groups)} groups)")
+
+        # Targets
+        for t in meta.get('targets', []):
+            cursor.execute("""
+                INSERT OR REPLACE INTO deployment_targets
+                    (project_id, target_name, target_type, host, region,
+                     provider, requires_vpn, access_url, connection_string)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                project_id, t['target_name'], t.get('target_type'),
+                t.get('host'), t.get('region'), t.get('provider'),
+                t.get('requires_vpn', 0), t.get('access_url'),
+                t.get('connection_string'),
+            ))
+        if meta.get('targets'):
+            logger.info(f"  Imported {len(meta['targets'])} deployment target(s)")
+
+        # Triggers
+        for tr in meta.get('triggers', []):
+            cursor.execute("""
+                INSERT OR REPLACE INTO deployment_triggers
+                    (project_id, branch_pattern, target_name,
+                     auto_rollback, require_health_check, enabled)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                project_id, tr['branch_pattern'], tr['target_name'],
+                tr.get('auto_rollback', 0), tr.get('require_health_check', 1),
+                tr.get('enabled', 1),
+            ))
+        if meta.get('triggers'):
+            logger.info(f"  Imported {len(meta['triggers'])} auto-deploy trigger(s)")
+
+        # Notifications
+        for n in meta.get('notifications', []):
+            config = n.get('config', {})
+            if isinstance(config, dict):
+                config = json_mod.dumps(config)
+            cursor.execute("""
+                INSERT INTO deployment_notifications
+                    (project_id, event, notification_type, config, enabled)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                project_id, n['event'], n['notification_type'],
+                config, n.get('enabled', 1),
+            ))
+        if meta.get('notifications'):
+            logger.info(f"  Imported {len(meta['notifications'])} notification(s)")
+
+        # Print required env vars
+        required = meta.get('required_env_vars', [])
+        if required:
+            logger.info(f"  Required env vars: {', '.join(required)}")
+            logger.info(f"  Set them with: templedb env set <project> <VAR> <value>")
+
+        self.conn.commit()
+
     def import_project(
         self,
         package_path: Path,
@@ -506,6 +579,12 @@ class CathedralImporter:
             tags_msg = f", {len(tags)} tags" if tags else ""
             commit_files_msg = f", {len(commit_files)} file changes" if commit_files else ""
             logger.info(f"✓ Imported {len(branches)} branches, {len(commits)} commits{tags_msg}{commit_files_msg}")
+
+        # Import deployment metadata
+        deploy_file = package.deployments_dir / "deploy.json"
+        if deploy_file.exists():
+            logger.info(f"🚀 Importing deployment config...")
+            self._import_deploy_metadata(project_id, deploy_file)
 
         logger.info(f"\n✅ Import complete!")
         logger.info(f"📊 Imported: {files_imported} files from package")
