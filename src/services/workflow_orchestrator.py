@@ -627,16 +627,16 @@ class WorkflowOrchestrator:
         Execute deployment task.
 
         Supports multiple deployment backends:
-        - nixops4: NixOS deployment orchestration
+        - fleet: Multi-machine NixOS deployment with magic rollback
         - generic: Generic deployment via bash command
 
         Args:
             task_def: Task definition with:
                 - target: deployment target (staging/production)
-                - backend: deployment backend (nixops4/generic, default: generic)
+                - backend: deployment backend (fleet/generic, default: generic)
                 - version: version to deploy (optional, for rollback)
                 - command: custom deployment command (generic backend)
-                - network: NixOps network name (nixops4 backend)
+                - network: fleet network name (fleet backend)
         """
         target = task_def.get('target', 'staging')
         backend = task_def.get('backend', 'generic')
@@ -644,31 +644,33 @@ class WorkflowOrchestrator:
 
         logger.info(f"Deploying to {target} using {backend} backend")
 
-        if backend == 'nixops4':
-            return self._deploy_nixops4(task_def, context)
+        if backend in ('fleet', 'nixops4'):
+            return self._deploy_fleet(task_def, context)
         elif backend == 'generic':
             return self._deploy_generic(task_def, context)
         else:
             raise ValueError(f"Unknown deployment backend: {backend}")
 
-    def _deploy_nixops4(
+    def _deploy_fleet(
         self,
         task_def: Dict[str, Any],
         context: WorkflowContext
     ) -> Any:
-        """Deploy using NixOps4"""
+        """Deploy using TempleDB fleet deployment engine"""
         import subprocess
 
         project = context.get_variable('${project}', 'default')
         network = task_def.get('network', context.get_variable('${network}', 'default'))
         target = task_def.get('target', 'staging')
 
-        # Build nixops4 deploy command
-        cmd = ['./templedb', 'nixops4', 'deploy', project, network]
+        cmd = ['./templedb', 'deploy', 'fleet', 'deploy', project, network]
 
-        # Add target-specific flags if needed
         if task_def.get('dry_run', False):
             cmd.append('--dry-run')
+        if task_def.get('no_watchdog', False):
+            cmd.append('--no-watchdog')
+        if task_def.get('on_tags'):
+            cmd.extend(['--on'] + task_def['on_tags'])
 
         logger.info(f"Running: {' '.join(cmd)}")
 
@@ -682,11 +684,11 @@ class WorkflowOrchestrator:
             )
 
             if result.returncode != 0:
-                raise RuntimeError(f"NixOps4 deployment failed: {result.stderr}")
+                raise RuntimeError(f"Fleet deployment failed: {result.stderr}")
 
             return {
                 'target': target,
-                'backend': 'nixops4',
+                'backend': 'fleet',
                 'status': 'deployed',
                 'network': network,
                 'stdout': result.stdout,

@@ -49,6 +49,7 @@ MIGRATION_SEQUENCE = [
     "063_drop_quiz_tables_rename_vibe_sessions.sql",
     "064_add_branch_operations.sql",
     "065_add_deployment_pipeline.sql",
+    "066_rename_nixops4_to_fleet.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",

@@ -620,7 +620,7 @@ def register(cli):
     subparsers = deploy_parser.add_subparsers(dest='deploy_subcommand', required=True)
 
     # Import deployment backend modules and consolidated subcommands
-    from cli.commands import deploy_nix, nixops4, deploy_script, deploy_appstore, deploy_steam
+    from cli.commands import deploy_nix, fleet as fleet_module, deploy_script, deploy_appstore, deploy_steam
     from cli.commands import target as target_module, migration as migration_module
 
     # deploy run command
@@ -732,8 +732,8 @@ def register(cli):
     # deploy nix - Nix closures backend (from deploy-nix)
     deploy_nix.register_under_deploy(subparsers, cli)
 
-    # deploy nixops4 - NixOps4 declarative orchestration (from nixops4)
-    nixops4.register_under_deploy(subparsers, cli)
+    # deploy fleet - Multi-machine NixOS deployment with magic rollback
+    fleet_module.register_under_deploy(subparsers, cli)
 
     # deploy hooks - Custom deployment hooks (renamed from plugin/script)
     deploy_script.register_under_deploy(subparsers, cli)

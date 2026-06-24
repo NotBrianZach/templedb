@@ -242,7 +242,7 @@ Use 'templedb <command> --help' for details on any command.
                         subcommand = getattr(args, subcommand_attr)
                         # Only use subcommand if it's not None (i.e., actually specified)
                         if subcommand is not None:
-                            # Check for nested subcommands (e.g., env var set, nixops4 network create)
+                            # Check for nested subcommands (e.g., env var set, fleet network create)
                             # Support both _command and _subcommand dest conventions
                             nested_attr = f"{subcommand}_command"
                             if not hasattr(args, nested_attr):

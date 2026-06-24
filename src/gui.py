@@ -136,6 +136,7 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("schema-browser", "/schema-browser", "Schema"),
             ("settings", "/settings", "Settings"),
             ("status",   "/status",   "Status"),
+            ("systemd",  "/systemd",  "Systemd"),
         ]
     )
     page = f"""<!DOCTYPE html>
@@ -1051,12 +1052,71 @@ def vcs_commit_detail(slug: str, commit_hash: str):
         for r in files
     ]
 
-    rc, diff_out, diff_err = _run("vcs", "diff", slug, "--commit", commit_hash[:8])
-    diff_html = (
-        f'<pre>{_colorize_diff(diff_out)}</pre>'
-        if rc == 0 and diff_out
-        else f'<p class="muted">{html.escape(diff_err or "No diff available.")}</p>'
-    )
+    # Generate diffs from vcs_file_states content
+    import difflib
+    diff_parts = []
+    if files:
+        commit_id = query_one(
+            "SELECT id FROM vcs_commits WHERE commit_hash LIKE ? LIMIT 1",
+            (f"{commit_hash}%",)
+        )
+        parent = query_one(
+            "SELECT parent_commit_id FROM vcs_commit_parents WHERE commit_id = ? LIMIT 1",
+            (commit_id["id"],)
+        ) if commit_id else None
+
+        for f in files:
+            fp = f["file_path"]
+            # Get this commit's content
+            fs = query_one(
+                """SELECT content_text FROM vcs_file_states
+                   WHERE commit_id = ? AND file_id = (
+                     SELECT id FROM project_files WHERE project_id = (
+                       SELECT id FROM projects WHERE slug = ?
+                     ) AND file_path = ? LIMIT 1
+                   )""",
+                (commit_id["id"], slug, fp)
+            ) if commit_id else None
+
+            new_text = (fs["content_text"] or "") if fs else ""
+
+            if not new_text:
+                continue
+
+            # Get parent commit's content
+            old_text = ""
+            if parent:
+                pfs = query_one(
+                    """SELECT content_text FROM vcs_file_states
+                       WHERE commit_id = ? AND file_id = (
+                         SELECT id FROM project_files WHERE project_id = (
+                           SELECT id FROM projects WHERE slug = ?
+                         ) AND file_path = ? LIMIT 1
+                       )""",
+                    (parent["parent_commit_id"], slug, fp)
+                )
+                old_text = (pfs["content_text"] or "") if pfs else ""
+
+            change = f["change_type"]
+            if change == "added":
+                old_lines, new_lines = [], new_text.splitlines(keepends=True)
+            elif change == "deleted":
+                old_lines, new_lines = new_text.splitlines(keepends=True), []
+            else:
+                old_lines = old_text.splitlines(keepends=True)
+                new_lines = new_text.splitlines(keepends=True)
+
+            udiff = difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{fp}", tofile=f"b/{fp}", lineterm="")
+            udiff_str = "\n".join(udiff)
+            if udiff_str:
+                diff_parts.append(udiff_str)
+
+    if diff_parts:
+        diff_html = f'<pre>{_colorize_diff(chr(10).join(diff_parts))}</pre>'
+    elif not files:
+        diff_html = '<p class="muted">No file change data recorded for this commit.</p>'
+    else:
+        diff_html = '<p class="muted">No diff content available (file snapshots not stored for this commit).</p>'
 
     body = f"""
 <h2><a href="/vcs">VCS</a> / <a href="/vcs/{html.escape(slug)}">{html.escape(slug)}</a> / {html.escape(commit_hash[:8])}</h2>
@@ -1944,7 +2004,7 @@ def nix_list():
                     f'<strong>{html.escape(hostname)}</strong> {active}',
                     html.escape(h["value"]),
                     str(count),
-                    f'<a href="/graph/{html.escape(hostname)}" style="font-size:0.78rem">view</a>',
+                    f'<a href="/nix/host/{html.escape(hostname)}" style="font-size:0.78rem">view</a>',
                 ])
 
             # Host select dropdown for project selector
@@ -2053,6 +2113,101 @@ def nix_package_toggle(pkg_id: int):
 <td><span class="muted" style="font-size:0.78rem">{html.escape(row["flake_uri"] or "")}</span></td>
 <td>{toggle_btn}</td>
 </tr>""")
+
+
+# ── Nix Host Detail ───────────────────────────────────────────────────────────
+
+@app.get("/nix/host/{hostname}", response_class=HTMLResponse)
+def nix_host_detail(hostname: str):
+    """Detail view for a NixOS host — config keys, overrides, and services."""
+    host_row = query_one(
+        "SELECT key, value FROM system_config WHERE key = ?",
+        (f"nixos.host.{hostname}",)
+    )
+    if not host_row:
+        return _base("Host Not Found",
+                      f'<p class="muted">No host config found for <strong>{html.escape(hostname)}</strong></p>', "nix")
+
+    config_file = host_row["value"]
+
+    # Host-scoped overrides (hostname.key = value)
+    overrides = query_all(
+        "SELECT key, value FROM system_config WHERE key LIKE ? ORDER BY key",
+        (f"{hostname}.%",)
+    )
+    override_rows = [
+        [f'<code>{html.escape(o["key"])}</code>',
+         f'<span class="muted" style="font-size:0.78rem">{html.escape((o["value"] or "")[:120])}</span>']
+        for o in overrides
+    ]
+    override_table = _table(["Key", "Value"], override_rows, "No host-specific overrides.")
+
+    # Global NixOS config keys that apply to this host
+    global_keys = query_all(
+        """SELECT key, value FROM system_config
+           WHERE key LIKE 'nixos.%' AND key NOT LIKE 'nixos.host.%'
+           ORDER BY key""",
+    )
+    # Group by prefix
+    groups = defaultdict(list)
+    for k in global_keys:
+        parts = k["key"].split(".", 2)
+        prefix = parts[1] if len(parts) > 1 else "other"
+        groups[prefix].append(k)
+
+    config_sections = ""
+    for prefix in sorted(groups.keys()):
+        items = groups[prefix]
+        rows = [
+            [f'<code style="font-size:0.78rem">{html.escape(i["key"])}</code>',
+             f'<span class="muted" style="font-size:0.78rem">{html.escape((i["value"] or "")[:100])}</span>']
+            for i in items[:30]  # cap display
+        ]
+        more = f' <span class="muted">... +{len(items)-30} more</span>' if len(items) > 30 else ""
+        config_sections += f"""
+<details style="margin-bottom:0.5rem">
+  <summary style="cursor:pointer;color:#a0a0c0;font-size:0.85rem">
+    nixos.{html.escape(prefix)}.* <span class="badge">{len(items)}</span>{more}
+  </summary>
+  <div style="margin-top:0.3rem">{_table(["Key", "Value"], rows)}</div>
+</details>"""
+
+    # Services configured for this host
+    services = query_all(
+        """SELECT key, value FROM system_config
+           WHERE (key LIKE 'nixos.service.%' OR key LIKE 'nixos.attr.services.%')
+           ORDER BY key"""
+    )
+    svc_rows = []
+    for s in services:
+        name = s["key"].replace("nixos.service.user.", "").replace("nixos.service.", "").replace("nixos.attr.services.", "").replace(".enable", "")
+        svc_rows.append([
+            f'<code>{html.escape(name)}</code>',
+            f'<code class="muted" style="font-size:0.78rem">{html.escape(s["key"])}</code>',
+            f'<span class="muted">{html.escape((s["value"] or "")[:60])}</span>',
+        ])
+    svc_table = _table(["Service", "Config Key", "Value"], svc_rows, "No services configured.") if svc_rows else ""
+
+    body = f"""
+<h2><a href="/nix" style="color:#808098">Nix</a> / {html.escape(hostname)}</h2>
+<p class="muted" style="margin-bottom:1rem">Config file: <code>{html.escape(config_file)}</code></p>
+
+<h3>Host Overrides ({len(overrides)})</h3>
+{override_table}
+
+<h3 style="margin-top:1.5rem">NixOS Config ({len(global_keys)} keys)</h3>
+{config_sections}
+
+<h3 style="margin-top:1.5rem">Configured Services</h3>
+{svc_table}
+
+<div style="margin-top:1.5rem;display:flex;gap:0.5rem">
+  <a href="/systemd?scope=system" class="btn" style="font-size:0.78rem">View System Units</a>
+  <a href="/systemd?scope=user" class="btn" style="font-size:0.78rem">View User Units</a>
+  <button hx-post="/nixos/generate-all" hx-swap="outerHTML" style="font-size:0.78rem">Generate NixOS Config</button>
+</div>
+"""
+    return _base(f"Host: {hostname}", body, "nix")
 
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
@@ -2226,14 +2381,14 @@ def deploy_list():
             flag_html,
         ])
 
-    # ── Local Services (nixops4) ───────────────────────────────────────────────
+    # ── Local Services (fleet) ───────────────────────────────────────────────
     local_svcs = query_all("""
         SELECT nls.id, p.slug, nls.service_name, nls.service_type,
                nls.port_mapping, nls.status, nls.description,
                nls.health_check_url, nls.last_started_at, nls.failure_reason,
                nls.nix_package
-        FROM nixops4_local_services nls
-        JOIN nixops4_networks nn ON nls.network_id = nn.id
+        FROM fleet_local_services nls
+        JOIN fleet_networks nn ON nls.network_id = nn.id
         JOIN projects p ON nn.project_id = p.id
         ORDER BY p.slug, nls.start_order
     """)
@@ -2329,6 +2484,99 @@ def deploy_list():
             html.escape((c["last_used_at"] or "")[:16]),
         ])
 
+    # ── Fleet Networks & Machines ────────────────────────────────────────────
+    fleet_networks = query_all("""
+        SELECT n.id, n.network_name, n.network_uuid, n.is_active,
+               p.slug AS project_slug, n.flake_uri, n.config_file_path,
+               COUNT(DISTINCT m.id) AS machine_count,
+               COUNT(DISTINCT CASE WHEN m.deployment_status = 'deployed' THEN m.id END) AS deployed_count,
+               MAX(d.started_at) AS last_deploy_at
+        FROM fleet_networks n
+        JOIN projects p ON n.project_id = p.id
+        LEFT JOIN fleet_machines m ON n.id = m.network_id
+        LEFT JOIN fleet_deployments d ON n.id = d.network_id
+        WHERE n.is_active = 1
+        GROUP BY n.id
+        ORDER BY n.network_name
+    """)
+    fleet_net_rows = []
+    for fn in fleet_networks:
+        deploy_ratio = f'{fn["deployed_count"]}/{fn["machine_count"]}'
+        last = html.escape((fn["last_deploy_at"] or "never")[:16])
+        fleet_net_rows.append([
+            f'<a href="/projects/{html.escape(fn["project_slug"])}">{html.escape(fn["project_slug"])}</a>',
+            f'<strong>{html.escape(fn["network_name"])}</strong>',
+            f'<code class="muted" style="font-size:0.72rem">{html.escape(fn["network_uuid"][:8])}</code>',
+            deploy_ratio,
+            last,
+            f'<code class="muted" style="font-size:0.72rem">{html.escape(fn["flake_uri"] or fn["config_file_path"] or "")}</code>',
+        ])
+
+    fleet_machines = query_all("""
+        SELECT m.id, m.machine_name, m.target_host, m.target_user, m.target_port,
+               m.deployment_status, m.health_status, m.nixos_version,
+               m.last_deployed_at, m.machine_config,
+               n.network_name, p.slug AS project_slug
+        FROM fleet_machines m
+        JOIN fleet_networks n ON m.network_id = n.id
+        JOIN projects p ON n.project_id = p.id
+        WHERE n.is_active = 1
+        ORDER BY n.network_name, m.machine_name
+    """)
+    fleet_machine_rows = []
+    for fm in fleet_machines:
+        status_cls = {"deployed": " green", "failed": " red", "new": "", "deploying": ""}
+        health_cls = {"healthy": " green", "unhealthy": " red", "unreachable": " red", "reverting": " red"}
+        try:
+            config = json.loads(fm["machine_config"] or "{}")
+        except Exception:
+            config = {}
+        tags = config.get("tags", [])
+        tag_html = " ".join(f'<span class="badge">{html.escape(t)}</span>' for t in tags) if tags else ""
+        watchdog_html = ""
+        if fm["health_status"] == "reverting":
+            watchdog_html = ' <span class="badge" style="color:#c8a040">watchdog</span>'
+
+        fleet_machine_rows.append([
+            html.escape(fm["network_name"]),
+            f'<strong>{html.escape(fm["machine_name"])}</strong>',
+            f'{html.escape(fm["target_user"] or "root")}@{html.escape(fm["target_host"] or "?")}',
+            f'<span class="{status_cls.get(fm["deployment_status"] or "", "")}">'
+            f'{html.escape(fm["deployment_status"] or "new")}</span>{watchdog_html}',
+            f'<span class="{health_cls.get(fm["health_status"] or "", "")}">'
+            f'{html.escape(fm["health_status"] or "unknown")}</span>',
+            html.escape(fm["nixos_version"] or "—"),
+            tag_html,
+            html.escape((fm["last_deployed_at"] or "never")[:16]),
+        ])
+
+    fleet_deploys = query_all("""
+        SELECT d.deployment_uuid, d.operation, d.status,
+               d.started_at, d.duration_seconds, d.triggered_by,
+               n.network_name, p.slug AS project_slug,
+               COUNT(md.id) AS total_machines,
+               COUNT(CASE WHEN md.status = 'success' THEN 1 END) AS ok_machines
+        FROM fleet_deployments d
+        JOIN fleet_networks n ON d.network_id = n.id
+        JOIN projects p ON n.project_id = p.id
+        LEFT JOIN fleet_machine_deployments md ON d.id = md.deployment_id
+        GROUP BY d.id
+        ORDER BY d.started_at DESC LIMIT 20
+    """)
+    fleet_deploy_rows = []
+    for fd in fleet_deploys:
+        dur = f'{fd["duration_seconds"]}s' if fd["duration_seconds"] else "running"
+        ratio = f'{fd["ok_machines"]}/{fd["total_machines"]}'
+        fleet_deploy_rows.append([
+            html.escape(fd["network_name"]),
+            f'<span class="badge">{html.escape(fd["operation"])}</span>',
+            _status_badge(fd["status"]),
+            ratio,
+            html.escape(fd["triggered_by"] or "user"),
+            html.escape((fd["started_at"] or "")[:16]),
+            dur,
+        ])
+
     # ── Assemble ───────────────────────────────────────────────────────────────
     history_summary = query_all("""
         SELECT status, COUNT(*) as n FROM deployment_history GROUP BY status ORDER BY n DESC
@@ -2364,6 +2612,18 @@ def deploy_list():
 
 <h3 style="margin-top:1.5rem">Cache <span class="muted" style="font-weight:normal;font-size:0.85rem">(content-addressable)</span></h3>
 {_table(["Project", "Target", "Content Hash", "Files Hash", "Hits", "Last Used"], cache_rows, "No cached deployments.", "deploy-cache-tbl")}
+
+<h3 style="margin-top:1.5rem">Fleet Networks</h3>
+<p class="muted" style="font-size:0.8rem;margin-bottom:0.5rem">Multi-machine NixOS deployment with magic rollback. Manage with <code>templedb deploy fleet network/machine/deploy</code></p>
+{_table(["Project", "Network", "UUID", "Deployed", "Last Deploy", "Flake/Config"], fleet_net_rows, 'No fleet networks. Create one: <code>templedb deploy fleet network create &lt;project&gt; &lt;name&gt; --flake-uri &lt;uri&gt;</code>', "fleet-net-tbl")}
+
+<h3 style="margin-top:1.5rem">Fleet Machines</h3>
+<p class="muted" style="font-size:0.8rem;margin-bottom:0.5rem">Tag machines for targeted deploys: <code>--on web</code>, <code>--on austin</code>. Magic rollback auto-reverts if SSH fails after activation.</p>
+{_search_bar("fleet-machine-tbl", "Filter by network, machine, host, or tag...")}
+{_table(["Network", "Machine", "Host", "Status", "Health", "NixOS", "Tags", "Last Deploy"], fleet_machine_rows, "No machines. Add one: <code>templedb deploy fleet machine add &lt;project&gt; &lt;network&gt; &lt;name&gt; --host &lt;ip&gt;</code>", "fleet-machine-tbl")}
+
+<h3 style="margin-top:1.5rem">Fleet Deploy History</h3>
+{_table(["Network", "Operation", "Status", "Machines", "By", "Started", "Duration"], fleet_deploy_rows, "No fleet deployments yet.", "fleet-deploy-tbl")}
 
 <h3 style="margin-top:1.5rem">NixOS Switches</h3>
 {_search_bar("nixos-switches-tbl", "Filter by project or date...")}
@@ -4334,3 +4594,256 @@ def status():
 </table>
 """
     return _base("Status", body, "status")
+
+
+# ── Systemd Monitor ──────────────────────────────────────────────────────────
+
+def _systemd_list_units(user: bool = False) -> list[dict]:
+    """List systemd units with their status."""
+    cmd = ["systemctl", "list-units", "--all", "--no-pager", "--no-legend", "--plain"]
+    if user:
+        cmd.insert(1, "--user")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        units = []
+        for line in r.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            parts = line.split(None, 4)
+            if len(parts) >= 4:
+                units.append({
+                    "unit": parts[0],
+                    "load": parts[1],
+                    "active": parts[2],
+                    "sub": parts[3],
+                    "description": parts[4] if len(parts) > 4 else "",
+                })
+        return units
+    except Exception:
+        return []
+
+
+def _systemd_unit_props(unit: str, user: bool = False) -> dict:
+    """Get properties for a single unit."""
+    cmd = ["systemctl", "show", unit,
+           "--property=ActiveState,SubState,MainPID,MemoryCurrent,ActiveEnterTimestamp,"
+           "InactiveEnterTimestamp,NRestarts,ExecMainStartTimestamp,FragmentPath,Description"]
+    if user:
+        cmd.insert(1, "--user")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        props = {}
+        for line in r.stdout.strip().split("\n"):
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k] = v
+        return props
+    except Exception:
+        return {}
+
+
+def _systemd_logs(unit: str, user: bool = False, lines: int = 50) -> str:
+    """Get recent journal logs for a unit."""
+    cmd = ["journalctl", "-u", unit, "--no-pager", f"-n{lines}", "--output=short-iso"]
+    if user:
+        cmd.insert(1, "--user")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except Exception as e:
+        return f"Error fetching logs: {e}"
+
+
+def _systemd_state_cell(active: str, sub: str) -> str:
+    """Render colored state badge."""
+    if active == "active":
+        color = "#4a9a6a"
+    elif active == "failed":
+        color = "#e94560"
+    elif active == "activating" or active == "reloading":
+        color = "#e9a045"
+    else:
+        color = "#808098"
+    return f'<span style="color:{color}">{html.escape(active)}</span> <span class="muted">({html.escape(sub)})</span>'
+
+
+@app.get("/systemd", response_class=HTMLResponse)
+def systemd_page(scope: str = "user", filter: str = "", show: str = "all"):
+    """Systemd unit monitor — view all units, their status, and logs."""
+    is_user = scope == "user"
+    units = _systemd_list_units(user=is_user)
+
+    # Filter by state
+    if show == "active":
+        units = [u for u in units if u["active"] == "active"]
+    elif show == "failed":
+        units = [u for u in units if u["active"] == "failed"]
+    elif show == "inactive":
+        units = [u for u in units if u["active"] == "inactive"]
+
+    # Filter by search term
+    if filter:
+        q = filter.lower()
+        units = [u for u in units if q in u["unit"].lower() or q in u.get("description", "").lower()]
+
+    # Scope tabs
+    scope_tabs = "".join(
+        f'<a href="/systemd?scope={s}&show={html.escape(show)}" class="tab{"  active" if scope == s else ""}">{s.title()}</a>'
+        for s in ["user", "system"]
+    )
+
+    # State filter tabs
+    state_tabs = "".join(
+        f'<a href="/systemd?scope={html.escape(scope)}&show={s}" class="tab{" active" if show == s else ""}">{s.title()}</a>'
+        for s in ["all", "active", "failed", "inactive"]
+    )
+
+    rows = []
+    for u in units:
+        unit_name = u["unit"]
+        state_cell = _systemd_state_cell(u["active"], u["sub"])
+        desc = html.escape(u.get("description", ""))
+        detail_link = f'<a href="/systemd/{html.escape(unit_name)}?scope={html.escape(scope)}">{html.escape(unit_name)}</a>'
+        actions = ""
+        if u["active"] == "active":
+            actions = (
+                f'<button hx-post="/systemd/{html.escape(unit_name)}/restart?scope={html.escape(scope)}" '
+                f'hx-swap="outerHTML" style="font-size:0.72rem;padding:0.15rem 0.4rem">restart</button>'
+            )
+        elif u["active"] in ("inactive", "failed"):
+            actions = (
+                f'<button hx-post="/systemd/{html.escape(unit_name)}/start?scope={html.escape(scope)}" '
+                f'hx-swap="outerHTML" style="font-size:0.72rem;padding:0.15rem 0.4rem">start</button>'
+            )
+        rows.append([detail_link, f'<span class="muted">{u["load"]}</span>', state_cell,
+                     f'<span class="muted" style="font-size:0.78rem">{desc}</span>', actions])
+
+    search = _search_bar("systemd-table", placeholder="Filter units…")
+    table = _table(["Unit", "Load", "State", "Description", ""], rows, table_id="systemd-table")
+
+    summary_active = sum(1 for u in units if u["active"] == "active")
+    summary_failed = sum(1 for u in units if u["active"] == "failed")
+    summary_badge = f'<span class="badge green">{summary_active} active</span>'
+    if summary_failed:
+        summary_badge += f' <span class="badge red">{summary_failed} failed</span>'
+
+    body = f"""
+<h2>Systemd Monitor</h2>
+<div class="tabs">{scope_tabs}</div>
+<div style="display:flex;gap:1rem;align-items:center;margin-bottom:1rem;flex-wrap:wrap">
+  <div class="tabs" style="margin-bottom:0;border-bottom:none">{state_tabs}</div>
+  {summary_badge}
+  <span class="muted" style="font-size:0.8rem">{len(units)} units</span>
+</div>
+{search}
+{table}
+"""
+    return _base("Systemd", body, "systemd")
+
+
+@app.get("/systemd/{unit_name}", response_class=HTMLResponse)
+def systemd_unit_detail(unit_name: str, scope: str = "user", log_lines: int = 50):
+    """Detail view for a single systemd unit with properties and logs."""
+    is_user = scope == "user"
+    props = _systemd_unit_props(unit_name, user=is_user)
+    logs = _systemd_logs(unit_name, user=is_user, lines=log_lines)
+
+    active = props.get("ActiveState", "unknown")
+    sub = props.get("SubState", "unknown")
+    state_cell = _systemd_state_cell(active, sub)
+
+    pid = props.get("MainPID", "0")
+    pid_cell = pid if pid != "0" else "-"
+    mem = props.get("MemoryCurrent", "")
+    if mem and mem not in ("[not set]", ""):
+        try:
+            mem_cell = f"{int(mem) / 1024 / 1024:.1f} MB"
+        except Exception:
+            mem_cell = "-"
+    else:
+        mem_cell = "-"
+    restarts = props.get("NRestarts", "0")
+    started = props.get("ActiveEnterTimestamp", "-")
+    stopped = props.get("InactiveEnterTimestamp", "-")
+    fragment = props.get("FragmentPath", "-")
+    desc = props.get("Description", unit_name)
+
+    # Action buttons
+    actions = '<div style="display:flex;gap:0.5rem;margin:1rem 0">'
+    if active == "active":
+        actions += (
+            f'<button hx-post="/systemd/{html.escape(unit_name)}/restart?scope={html.escape(scope)}" '
+            f'hx-swap="innerHTML" hx-target="#action-result" class="btn">Restart</button>'
+            f'<button hx-post="/systemd/{html.escape(unit_name)}/stop?scope={html.escape(scope)}" '
+            f'hx-swap="innerHTML" hx-target="#action-result" class="btn">Stop</button>'
+        )
+    else:
+        actions += (
+            f'<button hx-post="/systemd/{html.escape(unit_name)}/start?scope={html.escape(scope)}" '
+            f'hx-swap="innerHTML" hx-target="#action-result" class="btn primary">Start</button>'
+        )
+    actions += '</div><div id="action-result"></div>'
+
+    # Log line selector
+    log_opts = "".join(
+        f'<a href="/systemd/{html.escape(unit_name)}?scope={html.escape(scope)}&log_lines={n}" '
+        f'class="tab{" active" if log_lines == n else ""}">{n}</a>'
+        for n in [20, 50, 100, 200]
+    )
+
+    escaped_logs = html.escape(logs)
+
+    body = f"""
+<h2><a href="/systemd?scope={html.escape(scope)}" style="color:#808098">Systemd</a> / {html.escape(unit_name)}</h2>
+<p style="margin-bottom:0.5rem">{html.escape(desc)}</p>
+
+<table style="width:auto;margin-bottom:0.5rem">
+<tr><td style="width:120px;color:#808098">State</td><td>{state_cell}</td></tr>
+<tr><td style="color:#808098">PID</td><td><code>{html.escape(pid_cell)}</code></td></tr>
+<tr><td style="color:#808098">Memory</td><td>{mem_cell}</td></tr>
+<tr><td style="color:#808098">Restarts</td><td>{restarts}</td></tr>
+<tr><td style="color:#808098">Started</td><td><span class="muted">{html.escape(started)}</span></td></tr>
+<tr><td style="color:#808098">Stopped</td><td><span class="muted">{html.escape(stopped)}</span></td></tr>
+<tr><td style="color:#808098">Unit file</td><td><code class="muted" style="font-size:0.78rem">{html.escape(fragment)}</code></td></tr>
+</table>
+
+{actions}
+
+<h3 style="margin-top:1.5rem">Journal Logs</h3>
+<div class="tabs" style="margin-bottom:0.5rem">{log_opts}</div>
+<pre style="max-height:500px;overflow:auto;font-size:0.78rem">{escaped_logs}</pre>
+"""
+    return _base(unit_name, body, "systemd")
+
+
+@app.post("/systemd/{unit_name}/start", response_class=HTMLResponse)
+def systemd_start(unit_name: str, scope: str = "user"):
+    cmd = ["systemctl", "start", unit_name]
+    if scope == "user":
+        cmd.insert(1, "--user")
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if r.returncode == 0:
+        return HTMLResponse(_msg(f"Started {unit_name}", ok=True))
+    return HTMLResponse(_msg(f"Failed: {r.stderr.strip()}", ok=False))
+
+
+@app.post("/systemd/{unit_name}/stop", response_class=HTMLResponse)
+def systemd_stop(unit_name: str, scope: str = "user"):
+    cmd = ["systemctl", "stop", unit_name]
+    if scope == "user":
+        cmd.insert(1, "--user")
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if r.returncode == 0:
+        return HTMLResponse(_msg(f"Stopped {unit_name}", ok=True))
+    return HTMLResponse(_msg(f"Failed: {r.stderr.strip()}", ok=False))
+
+
+@app.post("/systemd/{unit_name}/restart", response_class=HTMLResponse)
+def systemd_restart(unit_name: str, scope: str = "user"):
+    cmd = ["systemctl", "restart", unit_name]
+    if scope == "user":
+        cmd.insert(1, "--user")
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if r.returncode == 0:
+        return HTMLResponse(_msg(f"Restarted {unit_name}", ok=True))
+    return HTMLResponse(_msg(f"Failed: {r.stderr.strip()}", ok=False))

@@ -408,8 +408,8 @@ class MCPServer:
     # file_get, file_set, deploy, env_get/set/list,
     # config_list/delete, secret_list/export/show_keys,
     # cathedral_export/import/inspect,
-    # nixops4_network_create/list/info, nixops4_machine_add/list,
-    # nixops4_deploy/status,
+    # fleet_network_create/list/info, fleet_machine_add/list,
+    # fleet_deploy/status/check/diff,
     # code_search/show_symbol/show_clusters/impact_analysis/
     # extract_symbols/build_graph/detect_clusters/index_search,
     # workflow_execute/status/list/validate,
@@ -1546,10 +1546,10 @@ class MCPServer:
             logger.error(f"Error inspecting cathedral package: {e}")
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
-    # NixOps4 tools
+    # Fleet deployment tools
 
-    def tool_nixops4_network_create(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a NixOps4 network"""
+    def tool_fleet_network_create(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a fleet deployment network"""
         try:
             project = args["project"]
             network_name = args["network_name"]
@@ -1557,7 +1557,7 @@ class MCPServer:
             flake_uri = args.get("flake_uri")
             description = args.get("description")
 
-            cmd = ["nixops4", "network", "create", project, network_name]
+            cmd = ["deploy", "fleet", "network", "create", project, network_name]
             if config_file:
                 cmd.extend(["--config-file", config_file])
             if flake_uri:
@@ -1575,13 +1575,13 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error creating nixops4 network: {e}")
+            logger.error(f"Error creating fleet network: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
-    def tool_nixops4_network_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List NixOps4 networks"""
+    def tool_fleet_network_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List fleet deployment networks"""
         try:
-            cmd = ["nixops4", "network", "list"]
+            cmd = ["deploy", "fleet", "network", "list"]
             if "project" in args and args["project"]:
                 cmd.extend(["--project", args["project"]])
 
@@ -1595,16 +1595,16 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error listing nixops4 networks: {e}")
+            logger.error(f"Error listing fleet networks: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
-    def tool_nixops4_network_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Show NixOps4 network info"""
+    def tool_fleet_network_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show fleet network info"""
         try:
             project = args["project"]
             network = args["network"]
 
-            result = self._run_templedb_cli(["nixops4", "network", "info", project, network])
+            result = self._run_templedb_cli(["deploy", "fleet", "network", "info", project, network])
 
             if result["returncode"] != 0:
                 return self._error_response(
@@ -1614,11 +1614,11 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error getting nixops4 network info: {e}")
+            logger.error(f"Error getting fleet network info: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
-    def tool_nixops4_machine_add(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Add machine to NixOps4 network"""
+    def tool_fleet_machine_add(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Add machine to fleet network"""
         try:
             project = args["project"]
             network = args["network"]
@@ -1627,7 +1627,7 @@ class MCPServer:
             target_user = args.get("target_user", "root")
             system_type = args.get("system_type", "nixos")
 
-            cmd = ["nixops4", "machine", "add", project, network, machine_name,
+            cmd = ["deploy", "fleet", "machine", "add", project, network, machine_name,
                    "--host", target_host, "--user", target_user, "--system-type", system_type]
 
             result = self._run_templedb_cli(cmd)
@@ -1640,16 +1640,16 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error adding nixops4 machine: {e}")
+            logger.error(f"Error adding fleet machine: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
-    def tool_nixops4_machine_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List machines in NixOps4 network"""
+    def tool_fleet_machine_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List machines in fleet network"""
         try:
             project = args["project"]
             network = args["network"]
 
-            result = self._run_templedb_cli(["nixops4", "machine", "list", project, network])
+            result = self._run_templedb_cli(["deploy", "fleet", "machine", "list", project, network])
 
             if result["returncode"] != 0:
                 return self._error_response(
@@ -1659,25 +1659,34 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error listing nixops4 machines: {e}")
+            logger.error(f"Error listing fleet machines: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
-    def tool_nixops4_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Deploy NixOps4 network"""
+    def tool_fleet_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy fleet network with magic rollback"""
         try:
             project = args["project"]
             network = args["network"]
             machines = args.get("machines", [])
             dry_run = args.get("dry_run", False)
             build_only = args.get("build_only", False)
+            no_watchdog = args.get("no_watchdog", False)
+            watchdog_timeout = args.get("watchdog_timeout", 90)
+            on_tags = args.get("on_tags", [])
 
-            cmd = ["nixops4", "deploy", project, network]
+            cmd = ["deploy", "fleet", "deploy", project, network]
             if machines:
                 cmd.extend(["--machines"] + machines)
             if dry_run:
                 cmd.append("--dry-run")
             if build_only:
                 cmd.append("--build-only")
+            if no_watchdog:
+                cmd.append("--no-watchdog")
+            if watchdog_timeout != 90:
+                cmd.extend(["--watchdog-timeout", str(watchdog_timeout)])
+            if on_tags:
+                cmd.extend(["--on"] + on_tags)
 
             result = self._run_templedb_cli(cmd)
 
@@ -1689,17 +1698,17 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error deploying nixops4 network: {e}")
+            logger.error(f"Error deploying fleet network: {e}")
             return self._error_response(ErrorCode.DEPLOYMENT_FAILED, str(e))
 
-    def tool_nixops4_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Show NixOps4 deployment status"""
+    def tool_fleet_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show fleet deployment status"""
         try:
             project = args["project"]
             network = args["network"]
             deployment_uuid = args.get("deployment_uuid")
 
-            cmd = ["nixops4", "status", project, network]
+            cmd = ["deploy", "fleet", "status", project, network]
             if deployment_uuid:
                 cmd.extend(["--deployment-uuid", deployment_uuid])
 
@@ -1713,7 +1722,50 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error getting nixops4 status: {e}")
+            logger.error(f"Error getting fleet status: {e}")
+            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+
+    def tool_fleet_check(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Health check fleet machines"""
+        try:
+            project = args["project"]
+            network = args["network"]
+
+            result = self._run_templedb_cli(["deploy", "fleet", "check", project, network])
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Health check failed: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error checking fleet: {e}")
+            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+
+    def tool_fleet_diff(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show what would change if deployed"""
+        try:
+            project = args["project"]
+            network = args["network"]
+            machine = args.get("machine")
+
+            cmd = ["deploy", "fleet", "diff", project, network]
+            if machine:
+                cmd.extend(["--machine", machine])
+
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Diff failed: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error computing fleet diff: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
     # ========================================================================

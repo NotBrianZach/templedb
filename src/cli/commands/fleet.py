@@ -51,7 +51,7 @@ class FleetCommands(Command):
 
             # Record in DB
             db_utils.execute("""
-                INSERT INTO nixops4_networks
+                INSERT INTO fleet_networks
                 (project_id, network_name, network_uuid, config_file_path, flake_uri, description, created_by)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -89,7 +89,7 @@ class FleetCommands(Command):
                 project_filter = ""
 
             networks = db_utils.query_all(f"""
-                SELECT * FROM nixops4_network_summary
+                SELECT * FROM fleet_network_summary
                 {project_filter}
                 ORDER BY network_name
             """)
@@ -125,21 +125,21 @@ class FleetCommands(Command):
 
             # Get machines
             machines = db_utils.query_all("""
-                SELECT * FROM nixops4_machines
+                SELECT * FROM fleet_machines
                 WHERE network_id = ?
                 ORDER BY machine_name
             """, (network['id'],))
 
             # Get recent deployments
             deployments = db_utils.query_all("""
-                SELECT * FROM nixops4_deployment_history
+                SELECT * FROM fleet_deployment_history
                 WHERE network_id = ?
                 LIMIT 10
             """, (network['id'],))
 
             # Get resources
             resources = db_utils.query_all("""
-                SELECT * FROM nixops4_resources
+                SELECT * FROM fleet_resources
                 WHERE network_id = ?
                 ORDER BY resource_type, resource_name
             """, (network['id'],))
@@ -196,9 +196,18 @@ class FleetCommands(Command):
             # Generate UUID for machine
             machine_uuid = str(uuid.uuid4())
 
+            # Build machine config from args
+            tags = getattr(args, 'tags', None) or []
+            flake_attr = getattr(args, 'flake_attr', None)
+            machine_config = {}
+            if tags:
+                machine_config['tags'] = tags
+            if flake_attr:
+                machine_config['flake_attr'] = flake_attr
+
             # Insert machine
             db_utils.execute("""
-                INSERT INTO nixops4_machines
+                INSERT INTO fleet_machines
                 (network_id, machine_name, machine_uuid, target_host, target_user, target_port,
                  system_type, target_env, machine_config)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -211,13 +220,17 @@ class FleetCommands(Command):
                 args.port or 22,
                 args.system_type or 'nixos',
                 args.target_env or 'none',
-                json.dumps(args.config) if hasattr(args, 'config') and args.config else '{}'
+                json.dumps(machine_config)
             ))
 
             print(f"✅ Added machine '{args.machine}' to network '{args.network}'")
             print(f"   UUID: {machine_uuid}")
             print(f"   Host: {args.host}")
             print(f"   Type: {args.system_type or 'nixos'}")
+            if tags:
+                print(f"   Tags: {', '.join(tags)}")
+            if flake_attr:
+                print(f"   Flake attr: {flake_attr}")
 
             return 0
 
@@ -234,7 +247,7 @@ class FleetCommands(Command):
                 return 1
 
             machines = db_utils.query_all("""
-                SELECT * FROM nixops4_machines
+                SELECT * FROM fleet_machines
                 WHERE network_id = ?
                 ORDER BY machine_name
             """, (network['id'],))
@@ -270,7 +283,7 @@ class FleetCommands(Command):
 
             # Check if machine exists
             machine = db_utils.query_one("""
-                SELECT * FROM nixops4_machines
+                SELECT * FROM fleet_machines
                 WHERE network_id = ? AND machine_name = ?
             """, (network['id'], args.machine))
 
@@ -280,7 +293,7 @@ class FleetCommands(Command):
 
             # Remove machine (cascades to deployments)
             db_utils.execute("""
-                DELETE FROM nixops4_machines
+                DELETE FROM fleet_machines
                 WHERE id = ?
             """, (machine['id'],))
 
@@ -307,14 +320,14 @@ class FleetCommands(Command):
             if hasattr(args, 'machines') and args.machines:
                 target_machines = args.machines
                 machines = db_utils.query_all("""
-                    SELECT * FROM nixops4_machines
+                    SELECT * FROM fleet_machines
                     WHERE network_id = ? AND machine_name IN ({})
                 """.format(','.join('?' * len(target_machines))),
                 (network['id'], *target_machines))
             else:
                 target_machines = None
                 machines = db_utils.query_all("""
-                    SELECT * FROM nixops4_machines
+                    SELECT * FROM fleet_machines
                     WHERE network_id = ?
                 """, (network['id'],))
 
@@ -331,7 +344,7 @@ class FleetCommands(Command):
             # Create deployment record
             deployment_uuid = str(uuid.uuid4())
             deployment_id = db_utils.execute("""
-                INSERT INTO nixops4_deployments
+                INSERT INTO fleet_deployments
                 (network_id, deployment_uuid, operation, target_machines, started_at,
                  triggered_by, triggered_reason, config_revision, deploy_options)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -361,7 +374,7 @@ class FleetCommands(Command):
             # Create machine deployment records
             for machine in machines:
                 db_utils.execute("""
-                    INSERT INTO nixops4_machine_deployments
+                    INSERT INTO fleet_machine_deployments
                     (deployment_id, machine_id, status)
                     VALUES (?, ?, ?)
                 """, (deployment_id, machine['id'], 'pending'))
@@ -371,7 +384,7 @@ class FleetCommands(Command):
             watchdog_timeout = getattr(args, 'watchdog_timeout', 90) or 90
             tag_filter = getattr(args, 'on_tags', None)
 
-            success = self._run_nixops4_deploy(
+            success = self._run_fleet_deploy(
                 network=network,
                 deployment_id=deployment_id,
                 machines=machines,
@@ -384,7 +397,7 @@ class FleetCommands(Command):
 
             if success:
                 db_utils.execute("""
-                    UPDATE nixops4_deployments
+                    UPDATE fleet_deployments
                     SET status = 'success', completed_at = ?
                     WHERE id = ?
                 """, (datetime.now().isoformat(), deployment_id))
@@ -392,7 +405,7 @@ class FleetCommands(Command):
                 return 0
             else:
                 db_utils.execute("""
-                    UPDATE nixops4_deployments
+                    UPDATE fleet_deployments
                     SET status = 'failed', completed_at = ?
                     WHERE id = ?
                 """, (datetime.now().isoformat(), deployment_id))
@@ -419,7 +432,7 @@ class FleetCommands(Command):
 
             # Record destruction in deployment history
             db_utils.execute("""
-                INSERT INTO nixops4_deployments
+                INSERT INTO fleet_deployments
                 (network_id, deployment_uuid, operation, started_at, completed_at,
                  status, triggered_by, triggered_reason)
                 VALUES (?, ?, 'destroy', ?, ?, ?, 'user', ?)
@@ -430,13 +443,13 @@ class FleetCommands(Command):
 
             # Update all machines to terminated
             db_utils.execute("""
-                UPDATE nixops4_machines SET deployment_status = 'terminated'
+                UPDATE fleet_machines SET deployment_status = 'terminated'
                 WHERE network_id = ?
             """, (network['id'],))
 
             # Deactivate network
             db_utils.execute("""
-                UPDATE nixops4_networks SET is_active = 0 WHERE id = ?
+                UPDATE fleet_networks SET is_active = 0 WHERE id = ?
             """, (network['id'],))
 
             print(f"✅ Network '{args.network}' destroyed")
@@ -482,7 +495,7 @@ class FleetCommands(Command):
                 now = datetime.now().isoformat()
                 health = 'healthy' if reachable else 'unreachable'
                 db_utils.execute("""
-                    UPDATE nixops4_machines
+                    UPDATE fleet_machines
                     SET health_status = ?, health_check_at = ?, nixos_version = ?
                     WHERE id = ?
                 """, (health, now, version if reachable else None, target.machine_id))
@@ -506,7 +519,7 @@ class FleetCommands(Command):
                 return 1
 
             machine = db_utils.query_one("""
-                SELECT * FROM nixops4_machines
+                SELECT * FROM fleet_machines
                 WHERE network_id = ? AND machine_name = ?
             """, (network['id'], args.machine))
 
@@ -577,7 +590,7 @@ class FleetCommands(Command):
             if hasattr(args, 'deployment_uuid') and args.deployment_uuid:
                 # Show specific deployment
                 deployment = db_utils.query_one("""
-                    SELECT * FROM nixops4_deployment_history
+                    SELECT * FROM fleet_deployment_history
                     WHERE deployment_uuid = ?
                 """, (args.deployment_uuid,))
 
@@ -589,7 +602,7 @@ class FleetCommands(Command):
             else:
                 # Show recent deployments
                 deployments = db_utils.query_all("""
-                    SELECT * FROM nixops4_deployment_history
+                    SELECT * FROM fleet_deployment_history
                     WHERE network_id = ?
                     LIMIT 20
                 """, (network['id'],))
@@ -629,7 +642,7 @@ class FleetCommands(Command):
             return None
 
         network = db_utils.query_one("""
-            SELECT * FROM nixops4_networks
+            SELECT * FROM fleet_networks
             WHERE project_id = ? AND network_name = ?
         """, (project['id'], network_name))
 
@@ -733,7 +746,7 @@ class FleetCommands(Command):
 
         return total_count
 
-    def _run_nixops4_deploy(
+    def _run_fleet_deploy(
         self,
         network: Dict[str, Any],
         deployment_id: int,
@@ -746,7 +759,7 @@ class FleetCommands(Command):
     ) -> bool:
         """Execute deployment using TempleDB's native nix deploy backend.
 
-        Replaces the nixops4 binary with direct nix build + copy +
+        Uses direct nix build + copy +
         switch-to-configuration, with optional magic rollback watchdog.
         """
         from services.nix_deploy_backend import NixDeployBackend, MachineTarget
@@ -825,7 +838,7 @@ class FleetCommands(Command):
             )
 
         db_utils.execute("""
-            UPDATE nixops4_deployments
+            UPDATE fleet_deployments
             SET stdout_log = ?, exit_code = ?
             WHERE id = ?
         """, ("\n".join(summary_lines), 0 if fleet_result.success else 1, deployment_id))
@@ -848,8 +861,8 @@ class FleetCommands(Command):
         # Get machine-level details
         machine_deployments = db_utils.query_all("""
             SELECT md.*, m.machine_name, m.target_host
-            FROM nixops4_machine_deployments md
-            JOIN nixops4_machines m ON md.machine_id = m.id
+            FROM fleet_machine_deployments md
+            JOIN fleet_machines m ON md.machine_id = m.id
             WHERE md.deployment_id = ?
             ORDER BY m.machine_name
         """, (deployment['id'],))
@@ -913,6 +926,8 @@ def _register_fleet_commands(handler, subparsers, cli, prefix='fleet'):
     add_parser.add_argument('--port', type=int, default=22, help='SSH port (default: 22)')
     add_parser.add_argument('--system-type', default='nixos', help='System type (default: nixos)')
     add_parser.add_argument('--target-env', default='none', help='Target environment (default: none)')
+    add_parser.add_argument('--tags', nargs='+', metavar='TAG', help='Machine tags for targeting (e.g. --tags web austin)')
+    add_parser.add_argument('--flake-attr', help='Flake attribute name (default: machine name)')
     cli.commands[f'{prefix}.machine.add'] = handler.machine_add
 
     # machine list
