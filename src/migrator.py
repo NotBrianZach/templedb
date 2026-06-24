@@ -51,6 +51,7 @@ MIGRATION_SEQUENCE = [
     "065_add_deployment_pipeline.sql",
     "066_rename_nixops4_to_fleet.sql",
     "067_add_edge_function_deployments.sql",
+    "068_add_blue_green_state.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",

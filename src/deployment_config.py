@@ -108,6 +108,7 @@ class DeploymentConfig:
     groups: List[DeploymentGroup] = field(default_factory=list)
     health_check: Optional[HealthCheck] = None
     secret_sources: List[str] = field(default_factory=list)
+    blue_green: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_json(cls, json_str: str) -> 'DeploymentConfig':
@@ -125,8 +126,10 @@ class DeploymentConfig:
         if 'health_check' in data:
             health_check = HealthCheck.from_dict(data['health_check'])
         secret_sources = data.get('secret_sources', [])
+        blue_green = data.get('blue_green')
 
-        return cls(groups=groups, health_check=health_check, secret_sources=secret_sources)
+        return cls(groups=groups, health_check=health_check,
+                   secret_sources=secret_sources, blue_green=blue_green)
 
     def to_json(self) -> str:
         """Serialize to JSON string"""
@@ -137,6 +140,8 @@ class DeploymentConfig:
             data['health_check'] = self.health_check.to_dict()
         if self.secret_sources:
             data['secret_sources'] = self.secret_sources
+        if self.blue_green:
+            data['blue_green'] = self.blue_green
 
         return json.dumps(data, indent=2)
 
