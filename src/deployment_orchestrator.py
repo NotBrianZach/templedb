@@ -127,39 +127,62 @@ class DeploymentOrchestrator:
                 self.env_vars['DATABASE_URL'] = conn_str
 
     def load_environment_variables(self) -> None:
-        """Load environment variables for this project/target"""
-        import re
-        import os
+        """Load environment variables for this project/target.
 
+        Loads from the project itself, then from any secret_sources
+        configured in the deployment config (cross-project secrets).
+        Later sources don't overwrite earlier ones — the project's own
+        vars take precedence.
+        """
+        # Load from this project first
+        self._load_vars_from_project(self.project['id'])
+
+        # Load from cross-project secret sources (e.g. system_config, woofs_projects)
+        if self.config.secret_sources:
+            for source_slug in self.config.secret_sources:
+                source = self.db_utils.query_one(
+                    "SELECT id FROM projects WHERE slug = ?", (source_slug,)
+                )
+                if source:
+                    before = len(self.env_vars)
+                    self._load_vars_from_project(source['id'], overwrite=False)
+                    added = len(self.env_vars) - before
+                    if added > 0:
+                        print(f"      Loaded {added} vars from {source_slug}")
+                else:
+                    print(f"      Warning: secret source '{source_slug}' not found")
+
+    def _load_vars_from_project(self, project_id: int, overwrite: bool = True) -> None:
+        """Load environment variables from a specific project."""
         rows = self.db_utils.query_all("""
             SELECT var_name, var_value, value_type, template
             FROM environment_variables
             WHERE scope_type = 'project'
               AND scope_id = ?
-        """, (self.project['id'],))
+        """, (project_id,))
 
-        # First pass: Load all static values and templates
         templates = {}
         for row in rows:
             var_name = row['var_name']
             value_type = row.get('value_type', 'static')
 
-            # Parse target from var_name (target:varname format)
             actual_name = var_name
             if ':' in var_name:
                 target, actual_name = var_name.split(':', 1)
-                # Only load vars for this target or default
                 if target != self.target_name and target != 'default':
                     continue
 
+            if not overwrite and actual_name in self.env_vars:
+                continue
+
             if value_type == 'compound' and row.get('template'):
-                # Store template for second pass resolution
                 templates[actual_name] = row['template']
             elif value_type == 'static' and row.get('var_value'):
                 self.env_vars[actual_name] = row['var_value']
 
-        # Second pass: Resolve compound values with secrets
         for var_name, template in templates.items():
+            if not overwrite and var_name in self.env_vars:
+                continue
             resolved_value = self._resolve_template(template)
             self.env_vars[var_name] = resolved_value
 
