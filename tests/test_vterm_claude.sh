@@ -60,7 +60,7 @@ echo ""
 # Test 5: Dry-run test
 echo "Test 5: Dry-Run Test (Show What Would Execute)"
 echo "-----------------------------------------------"
-./templedb claude --dry-run 2>&1
+./templedb ai claude --dry-run 2>&1
 echo ""
 
 # Test 6: Test with claude --version (if available)
@@ -81,7 +81,7 @@ echo ""
 echo "Ready to use Claude Code in vterm!"
 echo ""
 echo "Try it now:"
-echo "  ./templedb claude"
+echo "  ./templedb ai claude"
 echo ""
 echo "You should see:"
 echo "  ⚡ Detected Emacs vterm - using PTY wrapper for Claude Code"

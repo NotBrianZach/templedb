@@ -16,7 +16,7 @@
 
 By moving from files and environment variables to sqlite tables your codebase becomes a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
 
-Or, it's like a normalized version of fossil-scm (sqlite, relational version of git) + claude mcp&stored procedures (api tuned for AI agent interactions) + superpowers (hierarchical agent dispatch&contextualization) + gitnexus (dependency graph/clustering for AI contextualization) + nixops4 (deployment tool) + sops (secret management).
+Or, it's like a normalized version of fossil-scm (sqlite, relational version of git) + claude mcp&stored procedures (api tuned for AI agent interactions) + superpowers (hierarchical agent dispatch&contextualization) + gitnexus (dependency graph/clustering for AI contextualization) + fleet deploy (native multi-machine NixOS deployment with magic rollback) + sops (secret management).
 
 We throw out of the temple those that would lend us technical debt in the form of state duplication, namely filesystem centric tools like git, sops, ci/cd like jenkins and deployment tools like docker. (though in the case of git it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for nixos to tide us over until the day we can make some much more radical changes to operating systems).
 
@@ -24,799 +24,532 @@ We throw out of the temple those that would lend us technical debt in the form o
 
 ---
 
-## Table of Contents
-
-- [How It Works](#how-it-works)
-  - [Workflow A: VCS Staging](#workflow-a-vcs-staging-git-like---recommended-for-development)
-  - [Workflow B: Checkout/Commit](#workflow-b-checkoutcommit---for-isolated-workspaces)
-  - [Three-Way Merge Conflict Detection](#why-both-work)
-- [Core Features](#core-features)
-  - [Universal Project Tracking](#1-universal-project-tracking)
-  - [Nix-First Project Management](#2-nix-first-project-management)
-  - [Database-Native Version Control](#3-database-native-version-control)
-  - [File Versioning](#4-complete-file-versioning)
-  - [File Edit Commands](#5-file-edit-commands-quick-single-file-changes)
-  - [AI Agent Sessions](#6-ai-agent-session-management)
-  - [Workflow Orchestration](#7-workflow-orchestration--code-intelligence)
-  - [Git Server](#8-database-native-git-server)
-  - [Natural Language File Queries](#9-natural-language-file-queries)
-  - [High Performance](#10-high-performance)
-- [Installation](#installation)
-  - [Quick Install](#quick-install)
-  - [Requirements](#requirements)
-  - [AI Assistant Integration](#ai-assistant-integration)
-  - [MCP Server](#mcp-server-for-ai-agents)
-- [Quick Start](#quick-start)
-- [Documentation](#documentation)
-- [CLI Commands](#cli-commands)
-- [Contributing](#contributing)
-
----
-
 ## How It Works
 
-TempleDB supports **two workflows** for working with your code:
+TempleDB is a single SQLite database that stores everything: your project files, version history, secrets, environment variables, NixOS configuration, deployment state, and cross-project relationships.
 
-### Workflow A: VCS Staging (Git-like) - Recommended for Development
-
-Work directly in your project directory, just like with git:
-
-```
-┌─────────────┐          ┌──────────────┐          ┌─────────────┐
-│  Database   │          │   Project    │   vcs    │  Database   │
-│  (source of │          │  Directory   │  add +   │  (updated)  │
-│   truth)    │          │  (.templedb) │  commit  │             │
-└─────────────┘          └──────────────┘─────────>└─────────────┘
-                              │
-                              ▼
-                         Edit in place:
-                         vim, vscode, grep, etc.
-
-                         Explicit staging workflow:
-                         1. Edit files
-                         2. tdb vcs add myproject file.py
-                         3. tdb vcs commit -m "message"
-
-                         (Conflict detection on commit)
-```
-
-**Use for:** Normal development, AI agents, continuous coding
-
-**Key Point:** Like git, changes are NOT automatically saved to the database. You must explicitly stage (`vcs add`) and commit (`vcs commit`). The database provides conflict detection using three-way merge logic.
-
-### Workflow B: Checkout/Commit - For Isolated Workspaces
-
-Extract files to a temporary directory for one-off edits:
-
-```
-┌─────────────┐          ┌──────────────┐          ┌─────────────┐
-│  Database   │ checkout │  Filesystem  │  commit  │  Database   │
-│  (source of │─────────>│  (temporary  │─────────>│  (updated)  │
-│   truth)    │          │  workspace)  │          │             │
-└─────────────┘          └──────────────┘          └─────────────┘
-       │                      │
-       │                      ▼
-       │                 Use ANY tool:
-       │                 vim, vscode, grep, etc.
-       │
-       └─> Read-only by default
-           tdb vcs edit → makes writable
-           tdb vcs discard → return to read-only
-
-           Explicit commit workflow:
-           1. tdb project checkout myproject /tmp/work
-           2. tdb vcs edit myproject
-           3. Edit files in /tmp/work
-           4. tdb project commit myproject /tmp/work -m "message"
-
-           (Conflict detection on commit)
-```
-
-**Use for:** Experimentation, one-off changes, isolated testing
-
-**Key Point:** Checkouts are read-only by default to prevent accidental edits. Use `vcs edit` to enable editing. Like Workflow A, changes require an explicit commit - nothing is automatic.
-
-**Why both work:**
-- Database stores **one copy** of each file (content-addressed, versioned)
-- You edit with **familiar tools** (anything that works with files)
-- Commits are **explicit and atomic** - nothing is automatic
-- Changes require **manual staging** (`vcs add`) and **commit** (`vcs commit`)
-- **Conflict detection** on commit (three-way merge logic)
-- Multiple agents can work **safely** (optimistic locking with version tracking)
-- Read-only checkouts prevent accidental modifications
-
-**Three-way merge conflict detection:**
-
-TempleDB uses three content hashes to intelligently detect conflicts:
-
-1. **Base** (cached hash) - What the file was when you started editing
-2. **Yours** (disk hash) - What you have now on disk
-3. **Theirs** (db hash) - What the database has now
-
-```
-Scenario                              Decision
-────────────────────────────────────  ────────────────────
-Only you changed (disk ≠ base, db = base)     ✓ Commit allowed
-Only they changed (db ≠ base, disk = base)    ✓ Pull update first
-Both changed to same (disk = db ≠ base)       ✓ Commit allowed (idempotent)
-Both changed differently (all different)      ✗ CONFLICT - manual merge required
-```
-
-This is the same approach used by git, Subversion, and other modern VCS systems. It prevents false conflicts and enables safe concurrent editing.
-
-**Example conflict scenario:**
+You interact with it through multiple interfaces — a CLI, a FUSE filesystem, a web GUI, an MCP server for AI agents, a git daemon for nix, and a sync engine for multi-machine replication. The `templedb` CLI (or `tdb` for short) is the primary way to manage it:
 
 ```bash
-# You checkout and start editing
-tdb project checkout myproject /tmp/work
-# → TempleDB caches: src/auth.py hash = "abc123"
+$ templedb --help
 
-# You edit the file
-vim /tmp/work/src/auth.py
-# → Disk hash becomes: "xyz999"
+command groups:
 
-# Meanwhile, someone else commits a change to the same file
-# → Database hash becomes: "new456"
+  Getting Started
+    bootstrap          Set up TempleDB on a new machine
+    tutorial           Interactive tutorials
+    status             System overview
 
-# You try to commit
-tdb project commit myproject /tmp/work -m "My changes"
+  Projects & Files
+    project            Import, list, show, sync, checkout
+    vcs                Version control (status, add, commit, log, diff)
+    mount              Mount DB as FUSE filesystem at ~/temple/
+    git-export         Export VCS history as a git repo
 
-# TempleDB detects conflict:
-# - Cached (base): abc123
-# - Yours (disk): xyz999  ← You changed it
-# - Theirs (db): new456   ← They changed it
-# Result: ✗ Conflict! All three are different
+  NixOS Integration
+    nixos              Generate modules, rebuild, doctor, hosts, dotfiles
 
-# Error message:
-# "Conflict detected in src/auth.py
-#  Database version changed since checkout
-#  Pull latest changes and resolve conflicts manually"
+  Secrets & Environment
+    env secret         Encrypted secrets (age/sops)
+    env var            Environment variables per project
+    env key            Key management
+    env direnv         Direnv integration
+
+  Deployment & Publishing
+    deploy run         Deploy project (FHS isolation, caching, health checks)
+    deploy trigger     Auto-deploy on commit (branch->target rules)
+    deploy notify      Webhook/command notifications on deploy events
+    deploy targets     Deployment targets
+    deploy migration   Database migrations
+    deploy rollback    Roll back to previous successful deployment
+    deploy fleet       Multi-machine NixOS deployment with magic rollback
+    publish            Commit + push to GitHub mirrors
+
+  Knowledge Graph
+    graph              Cross-project search, dependency maps, impact analysis
+
+  Search
+    search query       Query project files
+    search query-open  Query and open in editor
+
+  AI & Tooling
+    ai claude          Claude integration
+    ai vibe            Vibe coding quizzes
+    ai prompt          Prompt management
+    ai mcp             MCP server
+
+  Sync & Network
+    sync               cr-sqlite CRDT sync between machines
+    sync network       Tailscale VPN setup
+
+  Storage
+    storage backup     Local and cloud (GCS) backups
+    storage cathedral  Cathedral packages
+    storage blob       Blob storage
+
+  Admin
+    admin db           Migrations, integrity checks
+    admin cache        Cache management
+    admin schema       Schema operations
+    admin gitserver    Git server
 ```
 
-**Example workflow (AI Agent with Claude Code):**
+The database is the single source of truth. Everything else — the FUSE mount, the git daemon, the NixOS config files — is derived from it.
 
-This example uses Workflow A (VCS Staging) where the project directory already exists with files in place.
-
-```bash
-# User initializes project (one-time setup)
-$ cd ~/myproject
-$ templedb project init
-✓ Created .templedb/ marker
-✓ Project 'myproject' initialized in database
-
-# User starts Claude Code in project directory
-$ cd ~/myproject
-$ claude-code
-
-# Interactive session:
-User: "Fix the authentication bug"
-
-Claude: Let me help you fix the authentication bug. I'll search the codebase
-        using TempleDB MCP tools.
-
-# Claude uses MCP tools behind the scenes:
-mcp_templedb_vcs_status(project="myproject")
-mcp_templedb_search_content(query="auth", project="myproject")
-
-Claude: I found the issue in src/auth.py at line 42. Let me read the current code.
-
-# Claude reads directly from database
-mcp_templedb_query(query="""
-  SELECT cb.content_text FROM project_files pf
-  JOIN file_contents fc ON fc.file_id = pf.id
-  JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
-  WHERE pf.file_path = 'src/auth.py' AND pf.project_id =
-    (SELECT id FROM projects WHERE slug = 'myproject')
-""")
-
-Claude: The token validation is missing. I'll fix it using the Edit tool.
-
-# Claude edits the file directly in the project directory
-Edit(file_path="/home/user/myproject/src/auth.py",
-     old_string="...", new_string="...")
-
-Claude: Now I'll commit the changes to TempleDB.
-
-# Claude stages and commits using MCP
-mcp_templedb_vcs_add(project="myproject", files=["src/auth.py"])
-mcp_templedb_vcs_commit(
-  project="myproject",
-  message="Fix authentication token validation",
-  author="Claude <noreply@anthropic.com>"
-)
-
-Claude: ✓ Fixed! The authentication bug has been resolved and committed.
-
-User: "Show me what changed in the last 3 commits"
-
-# Claude queries commit history
-mcp_templedb_vcs_log(project="myproject", limit=3)
-
-Claude: Here are the last 3 commits:
-        1. Fix authentication token validation (just now)
-        2. Add user registration endpoint (2 hours ago)
-        3. Update API documentation (yesterday)
 ```
-
-**See [HOWTO_EXPLORE.md](HOWTO_EXPLORE.md) for complete examples.**
+┌──────────────────────────────────────────────────────────────┐
+│                    SQLite Database                            │
+│  projects · files · VCS · secrets · config · NixOS · deploys │
+└──────┬──────────┬──────────┬──────────┬──────────┬───────────┘
+       │          │          │          │          │
+  ┌────▼───┐ ┌───▼────┐ ┌───▼──┐ ┌────▼───┐ ┌───▼────────┐
+  │ FUSE   │ │  Git   │ │ MCP  │ │  GUI   │ │ cr-sqlite  │
+  │~/temple│ │ Daemon │ │10tool│ │ :8420  │ │   sync     │
+  │  r/w   │ │ :9419  │ │      │ │        │ │            │
+  └────────┘ └────────┘ └──────┘ └────────┘ └────────────┘
+       │          │          │         │           │
+  Edit files  Nix flake  Claude    Settings    Tailscale
+  directly    inputs     sessions  Dashboard    peers
+                                    View
+```
 
 ---
 
-## Core Features
+## The Daily Workflow
 
-### 1. **Universal Project Tracking**
+### Edit files through the FUSE mount
 
-Track all your projects in one unified database:
-
-```sql
--- See all your projects
-SELECT * FROM projects;
-
--- Find all React components across ALL projects
-SELECT project_slug, file_path, lines_of_code
-FROM files_with_types_view
-WHERE type_name = 'jsx_component';
-```
-
-### 2. **Nix-First Project Management**
-
-TempleDB encourages reproducible, declarative projects with Nix flakes:
+TempleDB mounts its database as a real filesystem. Edit files there — writes go straight to the DB and auto-stage for version control:
 
 ```bash
-# Import a Nix project (validates flake automatically)
-templedb project import /path/to/project
-
-# Generate a starter flake for existing projects
-templedb project import /path/to/project --generate-flake
-
-# Support different project types
-templedb project import /path/to/daemon --category service
-
-# List only Nix projects
-templedb project list --nix-only
-
-# Validate flake and extract metadata
-templedb project validate my-project
+templedb mount ~/temple                  # mount the database as a filesystem
+ls ~/temple/bza/frontend/                # browse project files
+vim ~/temple/bza/frontend/lib/queries.ts # edit directly — auto-stages in VCS
 ```
 
-**What TempleDB tracks for Nix projects:**
-- Flake validation status (valid/invalid)
-- Packages, apps, devShells, modules, overlays
-- Flake inputs and nixpkgs commit
-- For services: ports, users, dependencies, systemd config
+See [FUSE + VCS Integration](docs/FUSE_VCS_INTEGRATION.md) for details on the write pipeline, auto-staging, and content-addressable storage.
 
-**Service/daemon projects get special treatment:**
-- Extract NixOS module metadata
-- Detect required services (PostgreSQL, Redis, etc.)
-- Parse systemd configuration
-- Store port bindings and user requirements
+### Commit and publish
 
-```sql
--- View all Nix projects with their flake status
-SELECT slug, project_category, flake_check_status
-FROM projects WHERE is_nix_project = 1;
-
--- See what packages a project provides
-SELECT project_slug, packages, apps, nixosModules
-FROM nix_flake_metadata_view;
-
--- Find all services that use PostgreSQL
-SELECT project_slug, service_name, opens_ports
-FROM nix_service_metadata
-WHERE requires_databases LIKE '%postgresql%';
-```
-
-**System integration:** Generate flake inputs for NixOS configurations automatically. See [TEMPLEDB_INTEGRATION.md](../system_config/TEMPLEDB_INTEGRATION.md) for system_config integration examples.
-
-### 3. **Database-Native Version Control**
-
-Forget git. Use SQL:
-
-```sql
--- View commit history
-SELECT * FROM vcs_commit_history_view;
-
--- See current branches
-SELECT * FROM vcs_branch_summary_view;
-
--- Check uncommitted changes
-SELECT * FROM vcs_changes_view;
-```
-
-### 4. **Complete File Versioning**
-
-Every file's content and history stored in the database:
-
-```sql
--- View file history
-SELECT * FROM file_version_history_view
-WHERE file_path = 'src/App.jsx';
-
--- Get file content from database
-SELECT content_text FROM file_contents fc
-JOIN project_files pf ON fc.file_id = pf.id
-WHERE pf.file_path = 'README.md';
-```
-
-### 5. **File Edit Commands** (Quick Single-File Changes)
-
-For quick edits to individual files:
+When you're done editing, commit to the database and push to GitHub in one step:
 
 ```bash
-# Edit file in $EDITOR (opens from project directory)
-templedb file edit myproject src/config.py
-
-# Stage and commit
-templedb vcs add -p myproject src/config.py
-templedb vcs commit -p myproject -m "Update config"
-
-# Or programmatically set content
-echo "new content" | templedb file set myproject file.txt --stage
-templedb vcs commit -p myproject -m "Update via script"
+templedb publish run bza -m "fix query pagination"
+# → VCS commit to DB
+# → materialize to git repo
+# → push to github mirror
 ```
 
-### 6. **AI Agent Session Management**
-
-Track AI agent sessions with automatic commit linking:
+Or do it step by step:
 
 ```bash
-# Start an agent session
-templedb agent start --project myproject --goal "Implement authentication"
-# → Session ID: 1
+templedb vcs status bza --refresh        # see what changed
+templedb vcs add -p bza --all            # stage changes
+templedb vcs commit -p bza -m "fix"      # commit to DB
 
-# Export session ID to link commits
-export TEMPLEDB_SESSION_ID=1
-
-# Checkout and work
-templedb project checkout myproject /tmp/work
-cd /tmp/work && vim src/auth.py
-
-# Commit - automatically linked to session
-templedb project commit myproject /tmp/work -m "Add auth" --ai-assisted
-
-# View session status
-templedb agent status 1
-# → Shows commits, interactions, duration
-
-# End session
-templedb agent end 1
+# Branch operations
+templedb vcs branch bza feature-x        # create branch from current
+templedb vcs switch bza feature-x        # switch (FUSE updates instantly)
+templedb vcs merge bza feature-x         # merge into current branch
+templedb vcs merge bza feature-x --squash # squash into single commit
+templedb vcs branch bza -d feature-x     # delete merged branch
 ```
 
-Includes session lifecycle tracking, automatic commit linking via `TEMPLEDB_SESSION_ID`, interaction history, context snapshots, and session analytics.
+### Deploy
 
-See [AGENT_SESSIONS.md](AGENT_SESSIONS.md) for details.
-
-### 7. **Workflow Orchestration & Code Intelligence**
-
-Execute multi-phase operations with systematic safety checks:
+Deploy from the database with content-addressable caching, health checks, and environment injection:
 
 ```bash
-# Bootstrap code intelligence (symbol extraction, dependency graphs)
-templedb_workflow_execute {
-  "workflow": "code_intelligence_bootstrap",
-  "project": "myapp"
-}
-
-# Safe deployment with impact analysis and auto-rollback
-templedb_workflow_execute {
-  "workflow": "safe_deployment",
-  "project": "myapp",
-  "variables": {
-    "primary_symbol": "authenticate_user",
-    "production_health_url": "https://myapp.com/health",
-    "previous_version": "v2.1.0"
-  }
-}
-
-# Impact-aware refactoring with blast radius checks
-templedb_workflow_execute {
-  "workflow": "impact_aware_refactoring",
-  "project": "myapp",
-  "variables": {
-    "target_symbol": "process_payment",
-    "max_blast_radius": "150"
-  }
-}
+templedb deploy run bza --target production       # deploy current state
+templedb deploy run bza --commit abc123f           # deploy specific commit
+templedb deploy run bza --branch release/v2        # deploy branch head
+templedb deploy run bza --all-targets              # deploy to all targets
+templedb deploy run bza --targets staging,prod     # deploy to specific targets
 ```
 
-Includes production workflows for bootstrap, deployment, and refactoring. Code intelligence with symbol extraction, dependency graphs, hybrid search (BM25 + graph ranking), and Leiden algorithm for architectural boundaries. Automatic rollback, health checks, and test validation.
-
-See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for details.
-
-### 8. **Database-Native Git Server**
-
-Serve repositories directly from SQLite as standard git repositories via HTTP:
+Set up auto-deploy — commits to matching branches trigger deployment automatically:
 
 ```bash
-# Configure git server (stored in database)
-templedb gitserver config get
-templedb gitserver config set git_server.port 9418
-
-# Start the server
-templedb gitserver start
-# → Git server started at http://localhost:9418
-
-# Clone from database (no filesystem checkout!)
-git clone http://localhost:9418/myproject
-
-# Use in Nix flakes
-{
-  inputs = {
-    myproject.url = "git+http://localhost:9418/myproject";
-  };
-}
-
-# List available repositories
-templedb gitserver list-repos
+templedb deploy trigger add bza main production              # main → production
+templedb deploy trigger add bza "release/*" staging --auto-rollback  # with safety net
+templedb deploy trigger list
 ```
 
-Serves directly from SQLite with zero filesystem checkouts. Implements standard git smart HTTP protocol, works with git/Nix/all git clients. Configurable via database with automatic URL generation and on-the-fly object generation.
-
-See [docs/GIT_SERVER.md](docs/GIT_SERVER.md) for details.
-
-### 9. **Natural Language File Queries**
-
-Find and open files using natural language queries, integrating seamlessly with your editor:
+Get notified on deploy success/failure:
 
 ```bash
-# Query and open files matching natural language description
-templedb query-open myapp "authentication code"
-templedb query-open bza "prompts that do character analysis on a page"
-
-# Preview results without opening
-templedb query myapp "config files" --json
-
-# Limit results
-templedb query-open myapp "test files" --limit 5
-
-# Open in background (no focus stealing)
-templedb query-open myapp "database migrations" --no-select
+templedb deploy notify add "deploy.*" --webhook https://hooks.slack.com/...
+templedb deploy notify add deploy.failure --command "notify-send 'Deploy failed'"
 ```
 
-**From Emacs (⚠️ Experimental - needs testing):**
+Roll back to a previous successful deployment (restores env vars + re-deploys):
 
-```elisp
-;; Load TempleDB query integration
-(require 'templedb-query)
-
-;; Query and open files interactively
-M-x templedb-query-open
-
-;; Quick helpers (if implemented)
-M-x templedb-find-config-files
-M-x templedb-find-tests
-M-x templedb-find-auth-code
+```bash
+templedb deploy rollback bza --target production --yes
 ```
 
-> **Note:** Emacs integration is experimental and under active development.
-> Basic functionality works but helper commands and vterm integration need testing.
+NixOps4 orchestration for multi-machine infrastructure:
 
-**From Claude in vterm (⚠️ Experimental):**
+```bash
+templedb deploy fleet network create bza prod --flake-uri .#
+templedb deploy fleet machine add bza prod webserver --host 10.0.0.1 --tags web
+templedb deploy fleet deploy bza prod                  # parallel deploy with magic rollback
+templedb deploy fleet diff bza prod                    # show what would change
+templedb deploy fleet check bza prod                   # health check all machines
+templedb deploy fleet deploy bza prod --on web         # deploy only tagged machines
+templedb deploy fleet ssh bza prod webserver           # SSH into machine
+```
+
+### Query the knowledge graph
+
+Ask questions across all your projects:
+
+```bash
+templedb graph search supabase           # fuzzy search everything
+templedb graph who-uses STRIPE_SECRET_KEY # what projects use this secret?
+templedb graph deps bza                  # full dependency map
+templedb graph importers bza frontend/lib/supabase.ts  # 44 files import this
+```
+
+---
+
+## Secrets & Key Management
+
+TempleDB uses [age](https://age-encryption.org/) encryption with support for hardware keys (Yubikey), multi-key encryption, and quorum-based key revocation.
+
+### Multi-key architecture
+
+Every secret is encrypted to **all registered keys simultaneously**. Any single key can decrypt. This means you can lose a key and still access your secrets with any remaining key.
 
 ```
-You: "open the bza files with character analysis prompts"
-Claude: [finds and opens matching files in Emacs]
-# Note: Requires proper Emacs server setup and testing
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│  Yubikey 1   │   │  Yubikey 2   │   │  Yubikey 3   │   │  Filesystem  │
+│  (daily)     │   │  (backup)    │   │  (offsite)   │   │  (emergency) │
+└──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+       │                  │                  │                  │
+       └──────────────────┴──────────────────┴──────────────────┘
+                          │
+                   age -r key1 -r key2 -r key3 -r key4
+                          │
+                    ┌─────▼─────┐
+                    │  Encrypted │
+                    │   Secret   │
+                    └───────────┘
 ```
 
-**How it works:**
-- Uses FTS5 full-text search with relevance ranking
-- Can detect Emacs and use `emacsclient` for file opening (when configured)
-- Supports natural queries: "auth code", "config files", "database migrations"
-- Advanced syntax: boolean operators (AND/OR/NOT), phrases, prefix matching
+### Yubikey setup
 
-See [docs/QUERY_OPEN.md](docs/QUERY_OPEN.md) for complete guide and examples.
+```bash
+# 1. Generate age identity on Yubikey
+templedb env key setup-yubikey
 
-> **Emacs Integration Status:** The query system works well from CLI. Emacs elisp
-> integration and vterm workflows are in early development and need thorough testing
-> before being considered stable.
+# 2. Register it (auto-adds to all existing secrets via "lazy mode")
+templedb env key add yubikey --name yubikey-daily --location "keychain"
 
-### 10. **High Performance**
+# 3. Add backup keys
+templedb env key add yubikey --name yubikey-safe --location "fireproof-safe"
+templedb env key add filesystem --name emergency --path /mnt/usb/age-key.txt --location "usb-in-safe"
 
-TempleDB is optimized for speed:
-- **Connection pooling**: 3-5x faster operations
-- **Batch operations**: 50-100x faster imports
-- **SQLite tuning**: WAL mode + 64MB cache + 256MB mmap
-- **Optimized queries**: Proper indexes and query planning
+# 4. Test decryption
+templedb env key test yubikey-daily
 
-See [PERFORMANCE.md](PERFORMANCE.md) for benchmarks and tuning guide.
+# 5. List all keys
+templedb env key list
+templedb env key info yubikey-daily
+```
+
+### Managing secrets
+
+```bash
+# Set a secret (encrypted to all active keys)
+templedb env secret set myproject API_KEY "sk-..." --keys yubikey-daily
+
+# Get (decrypts with any available key)
+templedb env secret get myproject API_KEY
+
+# Unified var interface (--secret flag for encrypted storage)
+templedb env var set myproject DB_PASSWORD "hunter2" --secret --keys yubikey-daily
+templedb env var get myproject DB_PASSWORD --secret
+
+# Export for deployment
+templedb env secret export myproject --format dotenv
+```
+
+### Quorum-based key revocation
+
+Revoking a key requires approval from multiple other keys (2-of-N by default). This prevents a stolen key from being used to lock you out:
+
+```bash
+# Revoke a lost key (prompts for 2 other keys to approve)
+templedb env key revoke yubikey-daily --reason "lost laptop" --quorum 2
+
+# All secrets are re-encrypted without the revoked key
+# The revoked key can no longer decrypt anything
+```
+
+### Recommended key setup
+
+| Key | Location | Purpose |
+|-----|----------|---------|
+| `yubikey-daily` | Keychain | Day-to-day decryption |
+| `yubikey-backup` | Fireproof safe | Recovery if daily key lost |
+| `yubikey-offsite` | Safety deposit box | Disaster recovery |
+| `emergency-fs` | Encrypted USB in safe | Paper-key-level last resort |
+
+See [Key Revocation Guide](docs/KEY_REVOCATION_GUIDE.md) and [Multi-Key Setup](docs/MULTI_YUBIKEY_SETUP.md) for detailed walkthroughs.
+
+---
+
+## NixOS: DB Generates Everything
+
+Your entire NixOS configuration lives in the database. Import it, edit it, generate nix files:
+
+```bash
+# Import existing nix config → 170+ DB keys
+templedb nixos import-config system_config
+
+# Edit via CLI — config-set is host-scoped by default (uses active host)
+templedb nixos config-set nixos.pkg.user.vpn.tailscale true     # → zMothership2.nixos.pkg...
+templedb nixos config-set nixos.service.system.tailscale true   # → zMothership2.nixos.service...
+
+# Use --global for keys that apply to all hosts
+templedb nixos config-set --global nixos.username zach
+templedb nixos config-set --global nixos.flake.input.nixpkgs "github:NixOS/nixpkgs/nixos-25.11"
+
+# Or target a specific host
+templedb nixos config-set --host zStation videoDriver modesetting
+
+# Generate nix files from DB (packages, aliases, services, firewall, flake inputs)
+templedb nixos generate-all system_config
+
+# Apply
+templedb nixos rebuild system_config
+```
+
+### Host scoping
+
+Every machine has an active host identity set via `nixos.flake_output`. Config keys are scoped:
+
+- **Host-scoped** (default): `config-set key value` → stored as `<hostname>.key`
+- **Global**: `config-set --global key value` → stored as `key`, inherited by all hosts
+- **Host override**: `config-set --host zStation key value` → stored as `zStation.key`
+
+`generate-all` merges global keys with host-specific overrides for the active host.
+
+### Multi-host management
+
+Clone host configs for new machines. Each host gets its own overrides (GPU driver, boot loader, hostname):
+
+```bash
+templedb nixos host list
+templedb nixos host clone zMothership2 zMothership3
+templedb nixos config-set --host zMothership3 videoDriver modesetting
+templedb nixos host activate zMothership3
+```
+
+### New machine in one command
+
+```bash
+templedb bootstrap --from-gcs my-bucket --username zach --hostname zMothership3
+# 9 steps: restore DB → migrations → age key → materialize →
+#          dotfiles → identity → NixOS generate → FUSE mount → verify
+```
+
+---
+
+## Machine-to-Machine Sync
+
+cr-sqlite provides conflict-free replication between your machines over Tailscale:
+
+```bash
+templedb sync init                       # initialize CRDTs
+templedb sync network setup               # configure Tailscale
+templedb sync serve                      # start sync server (port 9420)
+
+# On the other machine:
+templedb sync sync zMothership2          # bidirectional sync
+```
+
+Changes merge automatically — last-writer-wins for config, append-only for commits.
+
+See [Machine-to-Machine Sync](docs/MACHINE_TO_MACHINE_SYNC.md) for details on which tables are synced via cr-sqlite and how the protocol works.
+
+---
+
+## Code Intelligence
+
+TempleDB extracts symbols and file dependencies, connecting them to the knowledge graph:
+
+```bash
+templedb graph build-deps bza            # build import graph (427 dependencies)
+templedb graph importers bza frontend/lib/supabase.ts  # who imports this? (44 files)
+templedb graph callers bza uploadDocument # who calls this function?
+```
+
+---
+
+## Web GUI
+
+```bash
+templedb gui                             # launch at :8420
+```
+
+Pages: Projects | VCS | Env | Nix | Deploy | Audit | Domains | Docs | Code | Graph | Schema | Settings | Status
+
+Features: sortable tables, fuzzy search (press /), inline config editing, knowledge graph search, schema browser with sample data, daemon status, host management with clone form, project file tree browser.
+
+---
+
+## MCP Server (Claude Code Integration)
+
+10 core tools — minimal context footprint (~1000 tokens):
+
+```json
+{"mcpServers": {"templedb": {"command": "templedb", "args": ["ai", "mcp", "serve"]}}}
+```
+
+| Tool | Purpose |
+|------|---------|
+| `templedb_cli` | Run any CLI command (universal) |
+| `templedb_query` | Direct SQL |
+| `templedb_project_list/show` | Project info |
+| `templedb_vcs_status/commit` | Version control |
+| `templedb_context_generate` | Session context |
+| `templedb_graph_search` | Cross-project search |
+| `templedb_config_get/set` | System config |
 
 ---
 
 ## Installation
 
-### Quick Install
-
 ```bash
-git clone git@github.com:yourusername/templedb.git
-cd templedb
-./install.sh
+# NixOS (recommended)
+nix build github:NotBrianZach/templedb#templedb
+./result/bin/templedb --help
+
+# Or from source
+git clone https://github.com/NotBrianZach/templedb.git ~/templeDB
+cd ~/templeDB && nix build .#templedb --no-update-lock-file
 ```
 
-The installer will:
-- Check dependencies (Python, SQLite, git, age)
-- Install `templedb` to your PATH
-- Initialize the database at `~/.local/share/templedb/templedb.sqlite`
-- Optionally import an example project
+### Home-Manager Module
 
-### Requirements
+Add TempleDB as a flake input and import the module:
 
-- Python 3.9+
-- SQLite 3.35+
-- git
-- age (optional, for secret management)
-
-See **[GETTING_STARTED.md](docs/GETTING_STARTED.md)** for detailed installation instructions.
-
-### AI Assistant Integration
-
-**For Claude Code users**: TempleDB includes a comprehensive project context file for AI assistants:
-
-```bash
-# Launch Claude Code with full TempleDB context
-templedb claude
-
-# Or if you have templedb in your PATH
-templedb claude
-
-# You can also pass additional arguments
-templedb claude --model opus
-
-# Alternatively, use the claude command directly
-claude --append-system-prompt-file .claude/project-context.md
-```
-
-The project context file (`.claude/project-context.md`) provides:
-- Complete architecture overview
-- CLI command reference
-- Common SQL query patterns
-- Development guidelines
-- MCP integration details
-- Multi-agent coordination guide
-
-This ensures AI assistants have comprehensive understanding of TempleDB's philosophy, commands, and workflows from the start.
-
-### MCP Server for AI Agents
-
-TempleDB includes a Model Context Protocol (MCP) server that exposes the database directly to AI agents like Claude Code:
-
-**Setup (one-time):**
-
-```bash
-# Option 1: Configure in Claude Desktop (~/.config/claude/claude_desktop_config.json)
+```nix
+# flake.nix
 {
-  "mcpServers": {
-    "templedb": {
-      "command": "/path/to/templedb",
-      "args": ["mcp", "serve"]
-    }
-  }
-}
+  inputs.templedb.url = "github:NotBrianZach/templedb";
+  inputs.templedb.inputs.nixpkgs.follows = "nixpkgs";
 
-# Option 2: Or start manually for testing
-templedb mcp serve
+  outputs = { nixpkgs, templedb, ... }: {
+    # Import the home-manager module
+    homeManagerModules = [ templedb.homeManagerModules.default ];
+  };
+}
 ```
 
-**Usage:**
+Then configure in your home-manager config:
+
+```nix
+programs.templedb = {
+  enable = true;
+  package = templedb.packages.${pkgs.system}.templedb;
+
+  # FUSE mount: auto-mount database as ~/temple on login (systemd user service)
+  mount.enable = true;
+
+  # Sync: cr-sqlite replication server between machines over Tailscale
+  sync.enable = true;        # starts systemd user service
+  sync.port = 9420;          # default port
+
+  # Claude Code: hooks that block raw git in TempleDB-managed projects
+  claude.enable = true;      # generates ~/.claude/settings.json
+
+  # MCP: register TempleDB tools globally for all Claude Code sessions
+  claude.mcp = true;         # (default when claude.enable) creates ~/.mcp.json
+
+  # Age key path for secret decryption
+  ageKeyFile = "~/.config/sops/age/keys.txt";  # default
+};
+```
+
+### What the module provides
+
+| Option | What it does |
+|--------|-------------|
+| `enable` | Installs `templedb` and `tdb` (alias) to PATH |
+| `mount.enable` | Systemd user service: FUSE mount at `~/temple` with auto-restart |
+| `sync.enable` | Systemd user service: cr-sqlite sync server on port 9420 |
+| `claude.enable` | Generates `~/.claude/settings.json` with PreToolUse/PostToolUse hooks |
+| `claude.mcp` | Creates `~/.mcp.json` so TempleDB MCP tools work in every Claude Code session, not just the templeDB project |
+
+### Direnv integration
+
+TempleDB provides a direnv helper. Add to `~/.config/direnv/direnvrc`:
 
 ```bash
-# Start Claude Code (MCP server auto-connects if configured)
-$ claude-code
-
-# Now interact naturally - Claude uses TempleDB MCP tools automatically:
-You: "Show me all Python files in myproject"
-Claude: [uses mcp_templedb_search_files to query database]
-
-You: "Fix the bug in auth.py"
-Claude: [reads from DB, edits, commits - all via MCP tools]
-
-You: "What changed in the last 3 commits?"
-Claude: [uses mcp_templedb_vcs_log to show history]
+use_templedb() {
+    eval "$(tdb env direnv "$@")"
+}
 ```
 
-**Available MCP Tools:**
-- `templedb_project_list/show/import/sync` - Project management
-- `templedb_vcs_status/add/commit/log/diff/branch` - Version control operations
-- `templedb_search_files/content` - Code search across all projects
-- `templedb_query` - Direct SQL queries for complex analysis
-- `templedb_context_generate` - Generate LLM context for projects
-- `templedb_commit_list/create` - Commit tracking and creation
-- `templedb_env_get/set/list` - Environment variable management
-- `templedb_deploy` - Deployment orchestration
+Then in any project's `.envrc`:
 
-Agent workflow provides direct database access without filesystem checkouts, atomic operations with ACID guarantees, multi-agent coordination via transactions, SQL queries across all projects, automatic conflict detection, and natural language interface.
+```bash
+use_templedb
+# or: eval "$(templedb env direnv)"
+```
 
-See the interactive example workflow above for a complete session.
+This loads the project's environment variables, secrets, and Nix environment automatically when you `cd` into the directory.
+
+### Shell tips
+
+The nix package installs both `templedb` and `tdb` (symlink). Some useful aliases for your shell:
+
+```bash
+# Recent activity across all projects
+alias tdb-reflog='tdb graph search --recent'
+
+# Quick project status
+alias tdb-ls='tdb project list'
+```
 
 ---
 
 ## Quick Start
 
-### 1. Initialize a Project
-
-TempleDB uses git-like CWD-based project discovery with `.templedb/` markers:
-
 ```bash
-# Initialize current directory as a TempleDB project
-cd ~/myproject
-templedb project init
+# 1. Import a project
+templedb project import ~/myproject --slug myproject
 
-# Or import an existing project from elsewhere
-templedb project import /path/to/project --slug myproject
+# 2. Mount and edit
+templedb mount ~/temple
+vim ~/temple/myproject/src/main.py
+
+# 3. Commit
+templedb vcs status myproject --refresh
+templedb vcs add -p myproject --all
+templedb vcs commit -p myproject -m "initial"
+
+# 4. Search across everything
+templedb graph search "database"
+
+# 5. Launch GUI
+templedb gui
 ```
-
-This creates a `.templedb/` marker in your project root - just like `.git/`!
-
-### 2. View Projects
-
-```bash
-# View database status
-templedb status
-
-# List all projects
-templedb project list
-
-# Show current project details (from anywhere in project tree)
-cd ~/myproject/src
-templedb project show
-
-# Or show specific project
-templedb project show myproject
-```
-
-## Documentation
-
-### Essential Reading
-- **[README.md](README.md)** - You are here! Overview and quick start
-- **[DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md)** - Why TempleDB exists (read this first!)
-- **[GETTING_STARTED.md](docs/GETTING_STARTED.md)** - Installation and beginner's guide
-- **[docs/WORKFLOWS.md](docs/WORKFLOWS.md)** ⭐ NEW - Workflow orchestration with code intelligence
-
-### Workflows & Code Intelligence
-- **[Workflows Guide](docs/WORKFLOWS.md)** - Execute multi-phase operations (deployment, refactoring, etc.)
-- **[Code Intelligence Status](CODE_INTELLIGENCE_STATUS.md)** - Symbol extraction, dependency graphs, impact analysis
-- **[Phase 2 Design](docs/phases/PHASE_2_DESIGN.md)** - Workflow orchestration architecture
-- **[Documentation Index](docs/README.md)** - Complete docs organized by topic
-
-### User Guides
-- **[GUIDE.md](GUIDE.md)** - Complete usage guide (checkout/commit workflow, SQL queries, CLI commands)
-- **[QUICKSTART.md](QUICKSTART.md)** - Advanced workflows for existing users
-- **[DIRENV_INTEGRATION.md](docs/DIRENV_INTEGRATION.md)** ⭐ NEW - Auto-load environments with direnv (v2.0)
-- **[docs/VIBE.md](docs/VIBE.md)** ⭐ NEW - Vibe coding: Interactive learning from AI-generated code changes
-- **[FILES.md](FILES.md)** - How file tracking and versioning works
-- **[TUI.md](docs/TUI.md)** - Terminal UI guide
-- **[EXAMPLES.md](docs/EXAMPLES.md)** - SQL query examples and common patterns
-- **[WORK_COORDINATION.md](docs/WORK_COORDINATION.md)** ⭐ - Work items and multi-agent coordination
-- **[VCS_METADATA_GUIDE.md](docs/VCS_METADATA_GUIDE.md)** - Commit metadata and AI attribution
-
-### Critical Reference
-- **[QUERY_BEST_PRACTICES.md](docs/QUERY_BEST_PRACTICES.md)** - ⚠️ **Critical**: Query constraints and best practices (read this!)
-- **[DATABASE_CONSTRAINTS.md](docs/DATABASE_CONSTRAINTS.md)** - ⚠️ **Critical**: All uniqueness constraints and foreign keys
-
-### Advanced Topics
-- **[Multi-Key Secret Management](docs/MULTI_KEY_SECRET_MANAGEMENT.md)** ⭐ NEW - Multi-recipient encryption with Yubikeys + filesystem keys
-- **[Deployment Guide](docs/DEPLOYMENT_EXAMPLE.md)** ⭐ - Complete deployment workflow for production
-- **[Deployment Resilience](DEPLOYMENT_RESILIENCE.md)** ⭐ NEW - Retry logic, error handling, and production best practices
-- **[Deployment Rollback](DEPLOYMENT_ROLLBACK.md)** - Rollback failed deployments
-- **[Performance & Optimization](docs/advanced/ADVANCED.md)** - Tuning, Nix environments
-- **[Yubikey Secrets](docs/advanced/YUBIKEY_SECRETS.md)** - Hardware-backed encryption
-- **[Multi-User Setup](docs/advanced/CATHEDRAL.md)** - Teams and collaboration
-- **[Building from Source](docs/advanced/BUILD.md)** - Development setup
-- **[Security](docs/advanced/SECURITY.md)** - Security considerations
-
-### Project Info
-- **[ROADMAP.md](ROADMAP.md)** - Future features and development plans
-- **[CHANGELOG.md](CHANGELOG.md)** - Version history
-- **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Latest release notes
-- **[MIGRATIONS.md](docs/MIGRATIONS.md)** - Schema evolution history
-
-### Implementation Details
-- **[Implementation Docs](docs/implementation/)** - Historical analyses, refactors, and completed work
 
 ---
-
-## CLI Commands
-
-```bash
-# Projects
-templedb project init                 # Initialize .templedb/ marker in current directory
-templedb project import <path>        # Import git project
-templedb project list                 # List all projects
-templedb project show <slug>          # Show project details
-templedb project sync <proj>          # Re-import project from filesystem
-
-# Checkout/Edit/Commit Workflow (with read-only protection)
-templedb project checkout <proj> <dir>            # Checkout to filesystem (read-only)
-templedb vcs edit <proj>                          # Make checkout writable
-templedb project commit <proj> <dir> -m <msg>     # Commit changes back
-templedb vcs discard <proj>                       # Discard changes, return to read-only
-templedb project checkout-list [<proj>]           # List active checkouts
-templedb project checkout-status <proj>           # Show checkout status
-templedb project checkout-pull <proj>             # Pull latest changes to checkout
-templedb project checkout-diff <proj>             # Show diff between checkout and DB
-templedb project checkout-cleanup [<proj>]        # Remove stale checkouts
-
-# File Commands (quick single-file editing)
-templedb file show <proj> <path>                  # Display file content
-templedb file edit <proj> <path>                  # Open in $EDITOR
-templedb file get <proj> <path>                   # Get content programmatically
-templedb file set <proj> <path> [--content] [--stage]  # Set content and optionally stage
-
-# Secrets (age encryption)
-templedb secret init <proj> --age-recipient <key>  # Initialize secrets
-templedb secret edit <proj> [--profile <prof>]     # Edit secrets
-templedb secret export <proj> --format <fmt>       # Export (shell/json/yaml/dotenv)
-templedb secret print-raw <proj>                   # Print encrypted blob
-
-# Interactive TUI
-templedb tui                   # Launch terminal UI with VCS features:
-                               # - Interactive staging (stage/unstage files visually)
-                               # - Commit creation dialog
-                               # - Commit history with diff viewing
-                               # - Staged changes diff viewer
-                               # See TUI_VCS_ENHANCEMENTS.md for details
-
-# Environments
-templedb env enter <proj> [<env>]  # Enter Nix environment
-templedb env list [<proj>]         # List environments
-templedb env detect <proj>         # Auto-detect packages
-templedb env new <proj> <env>      # Create new environment
-templedb env generate <proj> <env> # Generate Nix expression
-
-# Version Control (with staging area)
-templedb vcs add -p <proj> [--all] [files...]       # Stage files for commit
-templedb vcs reset -p <proj> [--all] [files...]     # Unstage files
-templedb vcs diff <proj> [--staged]                 # Show diffs (staged or working)
-templedb vcs show <proj> <commit>                   # Show commit details with diff
-templedb vcs commit -m <msg> -p <proj> [-a <author>] # Commit staged changes
-templedb vcs status <proj>                          # Show staged and unstaged changes
-templedb vcs log <proj> [-n <num>]                  # Show commit history
-templedb vcs branch <proj> [<name>]                 # List or create branches
-
-# Agent Sessions (AI tracking)
-templedb agent start --project <proj> [--goal <text>]    # Start AI agent session
-templedb agent end <session-id> [--status <status>]      # End session
-templedb agent list [--project <proj>] [--status <stat>] # List sessions
-templedb agent status <session-id> [--verbose]           # Show session details
-templedb agent history <session-id> [--limit <n>]        # View interaction history
-templedb agent context <session-id> [--output <file>]    # Export session context
-
-# Multi-Agent Coordination (Work Items)
-templedb work create -p <proj> -t <title> [--type <type>] [--priority <pri>]  # Create work item
-templedb work list [-p <proj>] [-s <status>] [--priority <pri>]               # List work items
-templedb work show <item-id>                                                   # Show item details
-templedb work assign <item-id> <session-id>                                    # Assign to agent
-templedb work status <item-id> <status>                                        # Update status
-templedb work stats [-p <proj>]                                                # Show statistics
-templedb work mailbox <session-id> [-s <status>]                              # Show agent mailbox
-templedb work dispatch [-p <proj>] [--priority <pri>]                          # Auto-dispatch work
-templedb work agents [-p <proj>]                                               # List available agents
-templedb work metrics [-p <proj>]                                              # Show coordination metrics
-
-# Search
-templedb search content <pattern> [-p <proj>] [-i]  # Search file contents
-templedb search files <pattern> [-p <proj>]         # Search file names
-
-# LLM Context
-templedb llm context <proj>        # Generate context
-templedb llm export <proj> [<out>] # Export to JSON
-templedb llm schema                # Show schema
-
-# Backup & Restore
-templedb backup [<path>]           # Backup database
-templedb restore <path>            # Restore from backup
-
-# System
-templedb status                    # Show database status
-templedb help                      # Show help
-```
 
 ## Contributing
 
-Contributions or other maintainers are welcome.
+```bash
+cd ~/templeDB
+nix develop                              # enter dev shell
+python3 -m pytest tests/test_integration.py -v  # run tests (29 pass)
+templedb gui --port 8421                 # test GUI
+```
 
 ---
 
-*"An operating system is a temple."* - Terry A. Davis
-
-**TempleDB - Where your code finds sanctuary**
+*In honor of Terry Davis.*

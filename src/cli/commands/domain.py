@@ -264,7 +264,7 @@ class DomainCommands(Command):
 
             if not target:
                 logger.error(f"Target '{target_name}' not found for {project_slug}")
-                print(f"\n💡 Add it first: ./templedb target add {project_slug} {target_name} --host <host>")
+                print(f"\n💡 Add it first: ./templedb deploy targets add {project_slug} {target_name} --host <host>")
                 return 1
 
             print(f"🔧 Configuring DNS for {domain} -> {target_name}")

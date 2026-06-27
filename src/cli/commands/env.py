@@ -183,15 +183,33 @@ class EnvCommands(Command):
             # Store target as part of var_name for now (simplified)
             var_name_with_target = f"{target}:{args.var_name}"
 
+            # Determine value_type and template
+            compound_template = getattr(args, 'compound', None)
+            if compound_template:
+                value_type = 'compound'
+                template = compound_template
+                var_value = None  # Resolved at export time
+            else:
+                value_type = 'static'
+                template = None
+                var_value = args.value
+
             # Insert or update environment variable
             self.env_repo.execute("""
-                INSERT INTO environment_variables (scope_type, scope_id, var_name, var_value)
-                VALUES ('project', ?, ?, ?)
+                INSERT INTO environment_variables (scope_type, scope_id, var_name, var_value, value_type, template)
+                VALUES ('project', ?, ?, ?, ?, ?)
                 ON CONFLICT(scope_type, scope_id, var_name)
-                DO UPDATE SET var_value = excluded.var_value, updated_at = CURRENT_TIMESTAMP
-            """, (project['id'], var_name_with_target, args.value))
+                DO UPDATE SET var_value = excluded.var_value,
+                              value_type = excluded.value_type,
+                              template = excluded.template,
+                              updated_at = CURRENT_TIMESTAMP
+            """, (project['id'], var_name_with_target, var_value, value_type, template))
 
-            print(f"✓ Set {args.var_name} for {args.project} ({target})")
+            if compound_template:
+                print(f"✓ Set {args.var_name} as compound for {args.project} ({target})")
+                print(f"  Template: {compound_template}")
+            else:
+                print(f"✓ Set {args.var_name} for {args.project} ({target})")
             return 0
 
         except Exception as e:
@@ -231,7 +249,7 @@ class EnvCommands(Command):
             project = self.get_project_or_exit(args.project)
 
             rows = self.env_repo.query_all("""
-                SELECT var_name, var_value, created_at
+                SELECT var_name, var_value, value_type, template, created_at
                 FROM environment_variables
                 WHERE scope_type = 'project' AND scope_id = ?
                 ORDER BY var_name
@@ -262,13 +280,18 @@ class EnvCommands(Command):
                     print(f"Target: {target}")
                     current_target = target
 
-                # Mask sensitive values
-                if var_value and len(var_value) > 20:
-                    display_value = f"{var_value[:10]}...{var_value[-5:]}"
-                else:
-                    display_value = var_value or ''
+                value_type = row.get('value_type', 'static')
+                template = row.get('template')
 
-                print(f"  {actual_name}={display_value}")
+                if value_type == 'compound' and template:
+                    print(f"  {actual_name}={template} (compound)")
+                else:
+                    # Mask sensitive values
+                    if var_value and len(var_value) > 20:
+                        display_value = f"{var_value[:10]}...{var_value[-5:]}"
+                    else:
+                        display_value = var_value or ''
+                    print(f"  {actual_name}={display_value}")
 
             print()
             return 0
@@ -345,10 +368,26 @@ class EnvCommands(Command):
                 elif value_type == 'static' and row.get('var_value'):
                     env_vars[actual_name] = row['var_value']
 
+            # Load secrets for compound template resolution
+            secrets = {}
+            if templates:
+                secrets = self._load_secrets_for_project(project['id'], target)
+
             # Second pass: Resolve compound values (templates)
-            for var_name, template in templates.items():
-                resolved_value = self._resolve_template(template, env_vars)
-                env_vars[var_name] = resolved_value
+            # Iterate until all templates are resolved (handles chained compounds
+            # like DB_USER=${PROJECT_REF} and DATABASE_URL=${DB_USER}:...)
+            remaining = dict(templates)
+            for _ in range(10):  # max iterations to prevent infinite loops
+                if not remaining:
+                    break
+                still_unresolved = {}
+                for var_name, tmpl in remaining.items():
+                    resolved_value = self._resolve_template(tmpl, env_vars, secrets)
+                    env_vars[var_name] = resolved_value
+                    # Check if any ${...} references remain unresolved
+                    if '${' in resolved_value:
+                        still_unresolved[var_name] = tmpl
+                remaining = still_unresolved
 
             # Format output based on requested format
             if format_type == 'dotenv':
@@ -393,17 +432,98 @@ class EnvCommands(Command):
             traceback.print_exc()
             return 1
 
-    def _resolve_template(self, template: str, env_vars: dict) -> str:
-        """Resolve template string with variable substitutions"""
+    def _load_secrets_for_project(self, project_id: int, target: str) -> dict:
+        """Load and decrypt secrets for template resolution.
+
+        Returns a dict of secret_name -> decrypted_value, with target-prefixed
+        secrets resolved the same way as in deploy.sh (staging:FOO -> FOO).
+        """
+        try:
+            rows = self.env_repo.query_all("""
+                SELECT sb.secret_name, sb.secret_blob
+                FROM project_secret_blobs psb
+                JOIN secret_blobs sb ON psb.secret_blob_id = sb.id
+                WHERE psb.project_id = ? AND sb.content_type = 'application/text'
+                ORDER BY sb.secret_name
+            """, (project_id,))
+
+            if not rows:
+                return {}
+
+            secrets = {}
+            for row in rows:
+                name = row['secret_name']
+                try:
+                    decrypted = self._age_decrypt(row['secret_blob'])
+                    value = decrypted.decode('utf-8')
+
+                    if name.startswith(f"{target}:"):
+                        # Target-prefixed secret — strip prefix
+                        secrets[name[len(target) + 1:]] = value
+                    elif ':' not in name:
+                        # Global secret — include unless overridden by target-prefixed
+                        if name not in secrets:
+                            secrets[name] = value
+                except Exception as e:
+                    logger.debug(f"Could not decrypt secret '{name}': {e}")
+                    continue
+
+            return secrets
+
+        except Exception as e:
+            logger.debug(f"Failed to load secrets for template resolution: {e}")
+            return {}
+
+    def _age_decrypt(self, encrypted: bytes) -> bytes:
+        """Decrypt age-encrypted data using any available key"""
+        key_file_candidates = [
+            os.environ.get("TEMPLEDB_AGE_KEY_FILE"),
+            os.environ.get("SOPS_AGE_KEY_FILE"),
+            os.path.expanduser("~/.config/sops/age/keys.txt"),
+            os.path.expanduser("~/.age/key.txt"),
+            os.path.expanduser("~/.config/age-plugin-yubikey/identities.txt")
+        ]
+
+        available_key_files = [kf for kf in key_file_candidates if kf and os.path.exists(kf)]
+        if not available_key_files:
+            raise RuntimeError("No age key files found")
+
+        age_cmd = ["age", "-d"]
+        for key_file in available_key_files:
+            age_cmd.extend(["-i", key_file])
+
+        result = subprocess.run(age_cmd, input=encrypted, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"age decrypt failed: {result.stderr.decode()}")
+
+        return result.stdout
+
+    def _resolve_template(self, template: str, env_vars: dict, secrets: dict = None) -> str:
+        """Resolve template string with variable substitutions.
+
+        Supports:
+          ${VAR_NAME}        - reference another env var
+          ${secret:NAME}     - reference a decrypted secret
+        """
         import re
 
         def resolve_var(match):
-            var_name = match.group(1)
-            # First check if it's already in env_vars
-            if var_name in env_vars:
-                return env_vars[var_name]
+            ref = match.group(1)
+            # Handle secret references: ${secret:NAME}
+            if ref.startswith('secret:') and secrets:
+                secret_name = ref[len('secret:'):]
+                if secret_name in secrets:
+                    return secrets[secret_name]
+                logger.warning(f"Secret '{secret_name}' not found for template resolution")
+                return match.group(0)
+            # Check env vars
+            if ref in env_vars:
+                return env_vars[ref]
+            # Check secrets without prefix (for convenience)
+            if secrets and ref in secrets:
+                return secrets[ref]
             # Fall back to environment variable
-            return os.environ.get(var_name, match.group(0))
+            return os.environ.get(ref, match.group(0))
 
         # Resolve ${VAR} style references
         resolved = re.sub(r'\$\{([^}]+)\}', resolve_var, template)
@@ -411,11 +531,14 @@ class EnvCommands(Command):
 
 
 def register(cli):
-    """Register environment commands"""
+    """Register environment commands (including var, secret, key, direnv subcommands)"""
+    from cli.commands import var, secret, key, direnv
+
     cmd = EnvCommands()
 
-    env_parser = cli.register_command('env', None, help_text='Environment management')
-    subparsers = env_parser.add_subparsers(dest='env_subcommand', required=True)
+    env_parser = cli.register_command('env', None,
+        help_text='Environment management (Nix envs, variables, secrets, keys, direnv)')
+    subparsers = env_parser.add_subparsers(dest='env_subcommand')
 
     # env enter
     enter_parser = subparsers.add_parser('enter', help='Enter Nix environment')
@@ -446,38 +569,8 @@ def register(cli):
     new_parser.add_argument('env_name', help='Environment name')
     cli.commands['env.new'] = cmd.new
 
-    # env var set (Quick Win #4)
-    varset_parser = subparsers.add_parser('set', help='Set environment variable')
-    varset_parser.add_argument('project', help='Project slug')
-    varset_parser.add_argument('var_name', help='Variable name')
-    varset_parser.add_argument('value', help='Variable value')
-    varset_parser.add_argument('--target', default='default', help='Deployment target (default: default)')
-    cli.commands['env.set'] = cmd.var_set
-
-    # env var get
-    varget_parser = subparsers.add_parser('get', help='Get environment variable')
-    varget_parser.add_argument('project', help='Project slug')
-    varget_parser.add_argument('var_name', help='Variable name')
-    varget_parser.add_argument('--target', default='default', help='Deployment target (default: default)')
-    cli.commands['env.get'] = cmd.var_get
-
-    # env var list
-    varlist_parser = subparsers.add_parser('vars', help='List environment variables')
-    varlist_parser.add_argument('project', help='Project slug')
-    varlist_parser.add_argument('--target', help='Filter by deployment target')
-    cli.commands['env.vars'] = cmd.var_list
-
-    # env var delete
-    vardel_parser = subparsers.add_parser('unset', help='Delete environment variable')
-    vardel_parser.add_argument('project', help='Project slug')
-    vardel_parser.add_argument('var_name', help='Variable name')
-    vardel_parser.add_argument('--target', default='default', help='Deployment target (default: default)')
-    cli.commands['env.unset'] = cmd.var_delete
-
-    # env export
-    export_parser = subparsers.add_parser('export', help='Export environment variables')
-    export_parser.add_argument('project', help='Project slug')
-    export_parser.add_argument('--target', default='staging', help='Deployment target (default: staging)')
-    export_parser.add_argument('--format', choices=['dotenv', 'shell', 'json', 'yaml'], default='dotenv',
-                                help='Output format (default: dotenv)')
-    cli.commands['env.export'] = cmd.var_export
+    # --- Consolidated subcommands from other modules ---
+    var.register_subcommands(subparsers, cli, prefix='env')
+    secret.register_subcommands(subparsers, cli, prefix='env')
+    key.register_subcommands(subparsers, cli, prefix='env')
+    direnv.register_subcommands(subparsers, cli, prefix='env')

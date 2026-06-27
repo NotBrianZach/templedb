@@ -8,6 +8,8 @@ import sys
 from typing import Callable, Dict, Any, Optional
 from pathlib import Path
 
+from cli._version import __version__
+
 
 class TempleDBArgumentParser(argparse.ArgumentParser):
     """Custom ArgumentParser with better error messages"""
@@ -61,20 +63,73 @@ class TempleDBCLI:
             prog="templedb",
             description="TempleDB - Database-native project management",
             epilog="""
-Use 'templedb <command> --help' for command-specific help
+command groups:
 
-New to TempleDB?
-  templedb tutorial        - Interactive tutorials and guides
-  templedb tutorial basics - Start here for an introduction
-            """,
+  Projects & Code
+    project            Import, list, show, sync, checkout projects
+    vcs                Version control (status, add, commit, log, diff, branch, merge)
+    file               File management commands
+    search             Search files, content, and natural language queries
+    graph              Knowledge graph (search, who-uses, deps, callers)
+    publish            Commit + materialize + push to mirrors
+
+  Environment & Secrets
+    env                Nix environments, variables, secrets, keys, direnv
+                         env enter|list|new|generate|detect
+                         env var set|get|list|export|edit|unset|tag
+                         env secret set|get|list|delete|export|share-key
+                         env key add|list|info|test|enable|disable
+                         env direnv generate|diff|verify
+
+  Deployment
+    deploy             Deploy projects (run, status, history, rollback, shell, exec)
+                         deploy targets add|list|show|update|remove
+                         deploy migration list|show|status|history
+
+  NixOS
+    nixos              Generate modules, rebuild, doctor, dotfiles
+    config             Manage configuration symlinks (link, unlink, verify)
+
+  Storage & Sync
+    storage            Backup, cathedral, mount, blob management
+                         storage backup local|restore|cloud|gcs
+                         storage cathedral export|import|inspect|verify
+                         storage mount|unmount|mount-status
+                         storage blob status|verify|list|migrate
+    sync               CRDT sync + network (init, serve, push, pull, peers)
+                         sync network setup|status|connect|sync-all
+
+  AI Integration
+    ai                 Claude Code, vibe coding, prompts, MCP
+                         ai claude launch|hook|setup|status
+                         ai vibe start
+                         ai prompt list|show|create|render
+                         ai mcp serve
+
+  Admin
+    admin              System status, database, cache, schema, bootstrap
+                         admin status|db|cache|schema|bootstrap|gitserver
+
+  Other
+    gui                Launch web GUI dashboard
+    domain             DNS and domain management
+    workitem           Work item and coordination management
+    tutorial           Interactive tutorials and onboarding
+    dev                Local development server
+    merge              Merge changes from external sources
+
+  Top-level aliases: status, mount, unmount, bootstrap
+
+Use 'templedb <command> --help' for details on any command.
+""",
             formatter_class=argparse.RawDescriptionHelpFormatter
         )
-        self.parser.add_argument('--version', action='version', version='TempleDB 0.7.0')
+        self.parser.add_argument('--version', action='version', version=f'TempleDB {__version__}')
         self.parser.add_argument('--json', '-j', action='store_true', default=False,
                                 help='Output results as JSON (for scripting and agent use)')
         self.parser.add_argument('-C', dest='project_dir', metavar='PATH',
                                 help='Run as if templedb was started in PATH instead of CWD')
-        self.subparsers = self.parser.add_subparsers(dest="command", required=True)
+        self.subparsers = self.parser.add_subparsers(dest="command")
 
         # Command registry: maps command names to handler functions
         self.commands: Dict[str, Callable] = {}
@@ -159,6 +214,11 @@ New to TempleDB?
         try:
             args = self.parser.parse_args(argv)
 
+            # No command given → show help
+            if not args.command:
+                self.parser.print_help()
+                return 0
+
             # Handle -C flag: change directory before executing command
             import os
             original_cwd = None
@@ -182,8 +242,11 @@ New to TempleDB?
                         subcommand = getattr(args, subcommand_attr)
                         # Only use subcommand if it's not None (i.e., actually specified)
                         if subcommand is not None:
-                            # Check for nested subcommands (e.g., nixops4 network create)
+                            # Check for nested subcommands (e.g., env var set, fleet network create)
+                            # Support both _command and _subcommand dest conventions
                             nested_attr = f"{subcommand}_command"
+                            if not hasattr(args, nested_attr):
+                                nested_attr = f"{subcommand}_subcommand"
                             if hasattr(args, nested_attr):
                                 nested_command = getattr(args, nested_attr)
                                 if nested_command is not None:
@@ -300,6 +363,8 @@ class Command:
         project = self.get_project_by_slug(slug)
         if not project:
             print(f"Error: Project '{slug}' not found", file=sys.stderr)
+            print(f"  Run 'templedb project list' to see available projects", file=sys.stderr)
+            print(f"  Or import one: templedb project import /path/to/repo --slug {slug}", file=sys.stderr)
             sys.exit(1)
         return project
 

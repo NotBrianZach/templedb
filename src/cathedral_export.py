@@ -271,6 +271,65 @@ class CathedralExporter:
 
         return stats
 
+    def _export_deploy_metadata(self, project_id: int, project_data: Dict) -> Optional[Dict]:
+        """Export deployment config, targets, triggers, notifications, and blue-green state."""
+        import json as json_mod
+
+        cursor = self.conn.cursor()
+        meta = {}
+
+        # Deployment config (JSON stored in projects table)
+        config_json = project_data.get('deployment_config')
+        if config_json:
+            try:
+                meta['deployment_config'] = json_mod.loads(config_json)
+            except (json_mod.JSONDecodeError, TypeError):
+                pass
+
+        # Deployment targets
+        targets = cursor.execute("""
+            SELECT target_name, target_type, host, region, provider,
+                   requires_vpn, access_url, connection_string
+            FROM deployment_targets WHERE project_id = ?
+        """, (project_id,)).fetchall()
+        if targets:
+            meta['targets'] = [dict_from_row(t) for t in targets]
+
+        # Deployment triggers
+        triggers = cursor.execute("""
+            SELECT branch_pattern, target_name, auto_rollback,
+                   require_health_check, enabled
+            FROM deployment_triggers WHERE project_id = ?
+        """, (project_id,)).fetchall()
+        if triggers:
+            meta['triggers'] = [dict_from_row(t) for t in triggers]
+
+        # Notifications
+        notifications = cursor.execute("""
+            SELECT event, notification_type, config, enabled
+            FROM deployment_notifications WHERE project_id = ?
+        """, (project_id,)).fetchall()
+        if notifications:
+            notifs = []
+            for n in notifications:
+                nd = dict_from_row(n)
+                try:
+                    nd['config'] = json_mod.loads(nd['config'])
+                except (json_mod.JSONDecodeError, TypeError):
+                    pass
+                notifs.append(nd)
+            meta['notifications'] = notifs
+
+        # Required env vars (collected from deployment_config groups)
+        if 'deployment_config' in meta:
+            required = set()
+            for g in meta['deployment_config'].get('groups', []):
+                required.update(g.get('required_env_vars', []))
+            if required:
+                meta['required_env_vars'] = sorted(required)
+
+        return meta if meta else None
+
     def export_project(
         self,
         slug: str,
@@ -450,6 +509,19 @@ class CathedralExporter:
                     with open(env_file, 'w') as f:
                         json.dump(env, f, indent=None if compact_json else 2)
                 logger.info(f"✓ Exported {len(environments)} environments")
+
+        # Export deployment metadata
+        logger.info(f"🚀 Exporting deployment config...")
+        deploy_meta = self._export_deploy_metadata(project_id, project_data)
+        if deploy_meta:
+            import json as json_mod
+            deploy_file = package.deployments_dir / "deploy.json"
+            with open(deploy_file, 'w') as f:
+                json_mod.dump(deploy_meta, f, indent=None if compact_json else 2)
+            logger.info(f"✓ Exported deployment config ({len(deploy_meta.get('targets', []))} targets, "
+                        f"{len(deploy_meta.get('triggers', []))} triggers)")
+        else:
+            logger.info(f"  No deployment config found")
 
         # Create manifest
         creator = getpass.getuser()

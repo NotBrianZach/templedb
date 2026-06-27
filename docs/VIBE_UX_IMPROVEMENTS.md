@@ -88,35 +88,35 @@ Comprehensive 500+ line guide covering:
 ### Before
 ```bash
 # User confusion about which command to use
-$ templedb vibe --help        # Shows quiz commands only
-$ templedb vibe-start --help  # Different command for live sessions?
+$ templedb ai vibe--help        # Shows quiz commands only
+$ templedb ai vibe-start --help  # Different command for live sessions?
 
 # Port collision - second session fails
-$ templedb vibe-start project_a  # Port 8765
-$ templedb vibe-start project_b  # ERROR: Address already in use
+$ templedb ai vibe-start project_a  # Port 8765
+$ templedb ai vibe-start project_b  # ERROR: Address already in use
 
 # Manual workaround required
-$ templedb vibe-start project_b --port 8766
+$ templedb ai vibe-start project_b --port 8766
 ```
 
 ### After
 ```bash
 # Clear unified interface
-$ templedb vibe --help
+$ templedb ai vibe--help
 # Shows all subcommands: generate, take, list, results, progress, start
 
 # Multiple concurrent sessions - just works
-$ templedb vibe start project_a
+$ templedb ai vibestart project_a
 # 🔌 Auto-assigned port 8765
 
-$ templedb vibe start project_b
+$ templedb ai vibestart project_b
 # 🔌 Auto-assigned port 8766
 
-$ templedb vibe start project_c
+$ templedb ai vibestart project_c
 # 🔌 Auto-assigned port 8767
 
 # Clear help text
-$ templedb vibe start --help
+$ templedb ai vibestart --help
 # Shows: --port PORT  (default: auto-assign 8765-8800)
 ```
 
@@ -126,27 +126,27 @@ $ templedb vibe start --help
 
 Old command:
 ```bash
-templedb vibe-start my_project
+templedb ai vibe-start my_project
 ```
 
 New command:
 ```bash
-templedb vibe start my_project
+templedb ai vibestart my_project
 ```
 
 All options work the same:
 ```bash
 # Old
-templedb vibe-start my_project --ui browser --port 8888
+templedb ai vibe-start my_project --ui browser --port 8888
 
 # New
-templedb vibe start my_project --ui browser --port 8888
+templedb ai vibestart my_project --ui browser --port 8888
 ```
 
 ### For Scripts/Automation
 
 Replace instances of:
-- `templedb vibe-start` → `templedb vibe start`
+- `templedb ai vibe-start` → `templedb ai vibestart`
 
 ## Files Modified
 

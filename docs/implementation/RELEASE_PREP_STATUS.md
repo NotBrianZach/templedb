@@ -116,7 +116,7 @@
 ### 1. Final Testing
 ```bash
 # Backup production database
-templedb backup
+templedb storage backup
 
 # Apply migration on test copy
 cp ~/.local/share/templedb/templedb.sqlite test.db

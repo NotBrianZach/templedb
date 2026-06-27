@@ -29,7 +29,7 @@ Vibe coding focuses on questions 2 and 3.
 ### 1. Apply Migration
 
 ```bash
-templedb migration apply 028
+templedb deploy migrationapply 028
 python3 migrations/028_seed_vibe_prompts.py
 ```
 
@@ -37,22 +37,22 @@ python3 migrations/028_seed_vibe_prompts.py
 
 ```bash
 # After making a commit
-templedb vibe generate myproject --commit abc123
+templedb ai vibegenerate myproject --commit abc123
 
 # Or let AI generate questions automatically
-templedb vibe generate myproject --commit abc123 --auto-generate
+templedb ai vibegenerate myproject --commit abc123 --auto-generate
 ```
 
 ### 3. Take the Quiz
 
 ```bash
-templedb vibe take 1
+templedb ai vibetake 1
 ```
 
 ### 4. Review Results
 
 ```bash
-templedb vibe results 1 --detailed
+templedb ai viberesults 1 --detailed
 ```
 
 ## Workflows
@@ -66,13 +66,13 @@ templedb vibe results 1 --detailed
 templedb vcs commit -m "Add authentication" -p myproject
 
 # 2. Generate quiz from commit
-templedb vibe generate myproject --commit HEAD
+templedb ai vibegenerate myproject --commit HEAD
 
 # 3. Take quiz
-templedb vibe take 1 --developer-id alice
+templedb ai vibetake 1 --developer-id alice
 
 # 4. Review what you learned
-templedb vibe results 1 --detailed --show-explanations
+templedb ai viberesults 1 --detailed --show-explanations
 ```
 
 ### Workflow 2: Interactive (Piece-by-Piece)
@@ -81,10 +81,10 @@ templedb vibe results 1 --detailed --show-explanations
 
 ```bash
 # 1. Start a general quiz session
-templedb vibe generate myproject --name "Feature: User Auth" --type feature
+templedb ai vibegenerate myproject --name "Feature: User Auth" --type feature
 
 # 2. As you make changes, add questions
-templedb vibe add-question 1 \
+templedb ai vibeadd-question 1 \
   "Why use bcrypt instead of plain hashing?" \
   "Better security through adaptive cost factor" \
   --type short_answer \
@@ -94,7 +94,7 @@ templedb vibe add-question 1 \
 # 3. Continue adding questions as work progresses
 
 # 4. Take quiz at the end (or incrementally)
-templedb vibe take 1
+templedb ai vibetake 1
 ```
 
 ### Workflow 3: AI-Generated Quizzes
@@ -103,17 +103,17 @@ templedb vibe take 1
 
 ```bash
 # 1. Generate quiz session
-templedb vibe generate myproject --commit abc123
+templedb ai vibegenerate myproject --commit abc123
 
 # 2. Use Claude with vibe prompt template
-templedb claude --from-db --template vibe-quiz-generation
+templedb ai claude--from-db --template vibe-quiz-generation
 
 # Claude will generate questions in JSON format
 
 # 3. Import questions (manual for now, see "AI Integration" below)
 
 # 4. Take quiz
-templedb vibe take 1
+templedb ai vibetake 1
 ```
 
 ### Workflow 4: Pre-Merge Requirement
@@ -124,13 +124,13 @@ templedb vibe take 1
 # In CI/CD or pre-merge hook:
 
 # 1. Auto-generate quiz for PR commits
-templedb vibe generate myproject --commit $COMMIT_HASH
+templedb ai vibegenerate myproject --commit $COMMIT_HASH
 
 # 2. Require developer to take quiz before merge
-templedb vibe take $QUIZ_ID --developer-id $DEV_ID
+templedb ai vibetake $QUIZ_ID --developer-id $DEV_ID
 
 # 3. Check score threshold
-SCORE=$(templedb vibe results $QUIZ_ID --json | jq '.accuracy')
+SCORE=$(templedb ai viberesults $QUIZ_ID --json | jq '.accuracy')
 if (( $(echo "$SCORE < 0.7" | bc -l) )); then
     echo "Quiz score too low - review changes more carefully"
     exit 1
@@ -142,7 +142,7 @@ fi
 ### Generate Quiz
 
 ```bash
-templedb vibe generate <project> [options]
+templedb ai vibegenerate <project> [options]
 
 Options:
   --name TEXT               Quiz session name
@@ -157,19 +157,19 @@ Options:
 Examples:
 ```bash
 # From commit
-templedb vibe generate myproject --commit abc123
+templedb ai vibegenerate myproject --commit abc123
 
 # For work item
-templedb vibe generate myproject --work-item tdb-a4f2e --type work-item
+templedb ai vibegenerate myproject --work-item tdb-a4f2e --type work-item
 
 # General feature quiz
-templedb vibe generate myproject --name "OAuth Integration" --type feature
+templedb ai vibegenerate myproject --name "OAuth Integration" --type feature
 ```
 
 ### Add Questions
 
 ```bash
-templedb vibe add-question <session_id> <question> <answer> [options]
+templedb ai vibeadd-question <session_id> <question> <answer> [options]
 
 Options:
   --type TYPE               multiple_choice|true_false|short_answer|code_snippet
@@ -186,7 +186,7 @@ Options:
 Examples:
 ```bash
 # Multiple choice
-templedb vibe add-question 1 \
+templedb ai vibeadd-question 1 \
   "What pattern does this authentication use?" \
   "JWT with refresh tokens" \
   --type multiple_choice \
@@ -196,7 +196,7 @@ templedb vibe add-question 1 \
   --difficulty medium
 
 # True/False
-templedb vibe add-question 1 \
+templedb ai vibeadd-question 1 \
   "This code is vulnerable to SQL injection" \
   "false" \
   --type true_false \
@@ -205,7 +205,7 @@ templedb vibe add-question 1 \
   --file src/db/queries.py
 
 # Code snippet question
-templedb vibe add-question 1 \
+templedb ai vibeadd-question 1 \
   "What does this function return when given an empty list?" \
   "None" \
   --type code_snippet \
@@ -216,7 +216,7 @@ templedb vibe add-question 1 \
 ### Take Quiz
 
 ```bash
-templedb vibe take <session_id> [options]
+templedb ai vibetake <session_id> [options]
 
 Options:
   --developer-id TEXT       Your identifier
@@ -226,16 +226,16 @@ Options:
 Examples:
 ```bash
 # Interactive mode
-templedb vibe take 1 --developer-id alice
+templedb ai vibetake 1 --developer-id alice
 
 # Review mode (see questions and answers)
-templedb vibe take 1 --auto-answer
+templedb ai vibetake 1 --auto-answer
 ```
 
 ### List Quizzes
 
 ```bash
-templedb vibe list [options]
+templedb ai vibelist [options]
 
 Options:
   --project TEXT            Filter by project
@@ -245,7 +245,7 @@ Options:
 ### Show Results
 
 ```bash
-templedb vibe results <session_id> [options]
+templedb ai viberesults <session_id> [options]
 
 Options:
   --detailed                Show question breakdown
@@ -255,7 +255,7 @@ Options:
 ### Show Progress
 
 ```bash
-templedb vibe progress [--developer-id TEXT]
+templedb ai vibeprogress [--developer-id TEXT]
 ```
 
 ## Question Design Guidelines
@@ -349,7 +349,7 @@ Q: Who wrote this code?
 
 1. **Render quiz generation prompt**:
 ```bash
-templedb prompt render vibe-quiz-generation \
+templedb ai promptrender vibe-quiz-generation \
   --vars '{
     "project_name": "myproject",
     "commit_hash": "abc123",
@@ -361,7 +361,7 @@ templedb prompt render vibe-quiz-generation \
 
 2. **Use with Claude**:
 ```bash
-templedb claude --from-db --template vibe-quiz-generation
+templedb ai claude--from-db --template vibe-quiz-generation
 ```
 
 3. **Claude generates JSON**:
@@ -396,7 +396,7 @@ templedb claude --from-db --template vibe-quiz-generation
 ### Individual Progress
 
 ```bash
-templedb vibe progress --developer-id alice
+templedb ai vibeprogress --developer-id alice
 ```
 
 Shows:
@@ -522,41 +522,41 @@ templedb config set vibe.min_passing_score 0.7
 
 ```bash
 # 1. Start feature work
-templedb vibe generate myproject \
+templedb ai vibegenerate myproject \
   --name "OAuth2 Integration" \
   --type feature
 
 # 2. Add questions as you code
-templedb vibe add-question 1 \
+templedb ai vibeadd-question 1 \
   "What grant type is used for server-to-server auth?" \
   "Client credentials" \
   --type multiple_choice \
   --options "Authorization code|Implicit|Client credentials|Password" \
   --category architecture
 
-templedb vibe add-question 1 \
+templedb ai vibeadd-question 1 \
   "Where are access tokens stored?" \
   "Secure, httpOnly cookies" \
   --type short_answer \
   --category security
 
 # 3. Take quiz to verify understanding
-templedb vibe take 1 --developer-id bob
+templedb ai vibetake 1 --developer-id bob
 ```
 
 ### Example: Security Review
 
 ```bash
 # Generate security-focused quiz
-templedb vibe generate myproject \
+templedb ai vibegenerate myproject \
   --commit abc123 \
   --difficulty hard
 
 # Use security review template with Claude
-templedb claude --from-db --template vibe-security-review
+templedb ai claude--from-db --template vibe-security-review
 
 # Take quiz
-templedb vibe take 1
+templedb ai vibetake 1
 ```
 
 ## Future Enhancements
@@ -589,12 +589,12 @@ Potential additions:
 
 **Quiz has no questions**
 ```bash
-templedb vibe add-question <session_id> ...
+templedb ai vibeadd-question <session_id> ...
 ```
 
 **Can't find quiz session**
 ```bash
-templedb vibe list
+templedb ai vibelist
 ```
 
 **Wrong answer explanations unclear**

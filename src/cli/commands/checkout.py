@@ -50,6 +50,8 @@ class CheckoutCommand:
             project = self.project_repo.get_by_slug(project_slug)
             if not project:
                 logger.error(f"Project '{project_slug}' not found")
+                logger.info("  Run 'templedb project list' to see available projects")
+                logger.info(f"  Or import one: templedb project import /path/to/repo --slug {project_slug}")
                 return 1
 
             # Check if target directory exists and is not empty
@@ -277,6 +279,8 @@ class CheckoutCommand:
             project = self.project_repo.get_by_slug(project_slug)
             if not project:
                 logger.error(f"Project '{project_slug}' not found")
+                logger.info("  Run 'templedb project list' to see available projects")
+                logger.info(f"  Or import one: templedb project import /path/to/repo --slug {project_slug}")
                 return 1
 
             # Get checkout record
@@ -424,6 +428,8 @@ class CheckoutCommand:
             project = self.project_repo.get_by_slug(project_slug)
             if not project:
                 logger.error(f"Project '{project_slug}' not found")
+                logger.info("  Run 'templedb project list' to see available projects")
+                logger.info(f"  Or import one: templedb project import /path/to/repo --slug {project_slug}")
                 return 1
 
             # Get checkout record
@@ -431,6 +437,7 @@ class CheckoutCommand:
 
             if not checkout:
                 logger.error(f"No checkout record found for {checkout_path}")
+                logger.info(f"  Run: templedb project checkout {project_slug} {checkout_path}")
                 return 1
 
             print(f"📥 Pulling latest changes to {checkout_path}...")
@@ -535,6 +542,8 @@ class CheckoutCommand:
             project = self.project_repo.get_by_slug(project_slug)
             if not project:
                 logger.error(f"Project '{project_slug}' not found")
+                logger.info("  Run 'templedb project list' to see available projects")
+                logger.info(f"  Or import one: templedb project import /path/to/repo --slug {project_slug}")
                 return 1
 
             # Get checkout record
@@ -542,6 +551,7 @@ class CheckoutCommand:
 
             if not checkout:
                 logger.error(f"No checkout record found for {checkout_path}")
+                logger.info(f"  Run: templedb project checkout {project_slug} {checkout_path}")
                 return 1
 
             # Get database files

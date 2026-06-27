@@ -6,9 +6,9 @@ Deploy projects from TempleDB to staging/production. Automated migrations, DNS, 
 
 ```bash
 # Setup
-templedb target add myapp production --provider supabase --host db.example.com
-templedb secret init myapp --age-recipient $(age-keygen -y ~/.config/age/keys.txt)
-templedb secret edit myapp  # Add SUPABASE_SERVICE_KEY, etc.
+templedb deploy targetsadd myapp production --provider supabase --host db.example.com
+templedb env secretinit myapp --age-recipient $(age-keygen -y ~/.config/age/keys.txt)
+templedb env secretedit myapp  # Add SUPABASE_SERVICE_KEY, etc.
 
 # Deploy
 templedb deploy run myapp --target production
@@ -30,15 +30,15 @@ templedb deploy rollback myapp --target production
 
 ```bash
 # Add targets
-templedb target add myapp local --provider postgresql --host localhost:5432
-templedb target add myapp staging --provider supabase --host staging.example.com
-templedb target add myapp production --provider supabase --host db.example.com
+templedb deploy targetsadd myapp local --provider postgresql --host localhost:5432
+templedb deploy targetsadd myapp staging --provider supabase --host staging.example.com
+templedb deploy targetsadd myapp production --provider supabase --host db.example.com
 
 # List all targets
-templedb target list --project myapp
+templedb deploy targetslist --project myapp
 
 # Show target details
-templedb target show myapp production
+templedb deploy targetsshow myapp production
 ```
 
 **Target config stored in database:**
@@ -54,10 +54,10 @@ age-keygen -o ~/.config/age/keys.txt
 export TEMPLEDB_AGE_KEY_FILE=~/.config/age/keys.txt
 
 # Per-project: Initialize secrets
-templedb secret init myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
+templedb env secretinit myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
 
 # Edit secrets (opens $EDITOR with decrypted YAML)
-templedb secret edit myapp
+templedb env secretedit myapp
 
 # Example secrets.yaml:
 # supabase:
@@ -67,10 +67,10 @@ templedb secret edit myapp
 #   api_token: xyz123...
 
 # List secrets (shows keys only, not values)
-templedb secret list myapp
+templedb env secretlist myapp
 
 # Export to environment
-eval "$(templedb secret export myapp --format shell)"
+eval "$(templedb env secretexport myapp --format shell)"
 ```
 
 Secrets encrypted with age, stored in database, decrypted on-demand during deployment.
@@ -281,13 +281,13 @@ GROUP BY target_name;
 ```bash
 # 1. Setup project + target
 templedb project import https://github.com/user/myapp
-templedb target add myapp production --provider supabase --host db.example.com
+templedb deploy targetsadd myapp production --provider supabase --host db.example.com
 
 # 2. Setup secrets
 age-keygen -o ~/.config/age/keys.txt
 export TEMPLEDB_AGE_KEY_FILE=~/.config/age/keys.txt
-templedb secret init myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
-templedb secret edit myapp
+templedb env secretinit myapp --age-recipient $(age-keygen -y $TEMPLEDB_AGE_KEY_FILE)
+templedb env secretedit myapp
 # Add: supabase.service_key, supabase.anon_key
 
 # 3. Setup DNS (optional)
@@ -347,15 +347,15 @@ templedb deploy diff myapp --from staging --to production
 
 **"Target not found"**
 ```bash
-templedb target list --project myapp
-templedb target add myapp production --provider supabase --host db.example.com
+templedb deploy targetslist --project myapp
+templedb deploy targetsadd myapp production --provider supabase --host db.example.com
 ```
 
 **"Secrets not found"**
 ```bash
-templedb secret list myapp
-templedb secret init myapp --age-recipient <key>
-templedb secret edit myapp
+templedb env secretlist myapp
+templedb env secretinit myapp --age-recipient <key>
+templedb env secretedit myapp
 ```
 
 **"Migration failed"**
@@ -394,10 +394,10 @@ hooks:
 
 ```bash
 # Targets
-templedb target add <proj> <name> --provider <prov> --host <host>
-templedb target list [--project <proj>]
-templedb target show <proj> <name>
-templedb target remove <proj> <name>
+templedb deploy targetsadd <proj> <name> --provider <prov> --host <host>
+templedb deploy targetslist [--project <proj>]
+templedb deploy targetsshow <proj> <name>
+templedb deploy targetsremove <proj> <name>
 
 # Deployment
 templedb deploy run <proj> --target <target> [--dry-run] [--skip <step>]
@@ -409,10 +409,10 @@ templedb deploy rollback <proj> --target <target> [--to <id>]
 templedb deploy diff <proj> --from <target1> --to <target2>
 
 # Secrets (see docs/SECURITY.md)
-templedb secret init <proj> --age-recipient <key>
-templedb secret edit <proj>
-templedb secret list <proj>
-templedb secret export <proj> --format shell
+templedb env secretinit <proj> --age-recipient <key>
+templedb env secretedit <proj>
+templedb env secretlist <proj>
+templedb env secretexport <proj> --format shell
 
 # DNS (see docs/DNS.md)
 templedb domain register <proj> <domain> --registrar <reg>

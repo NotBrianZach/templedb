@@ -78,7 +78,7 @@ if age-plugin-yubikey --generate; then
 
     # Register in TempleDB
     echo "Registering in TempleDB..."
-    ./templedb key add yubikey \
+    ./templedb env key add yubikey \
         --name "yubikey-1-primary" \
         --location "daily-use" \
         --notes "Primary Yubikey for daily operations"
@@ -121,7 +121,7 @@ if age-plugin-yubikey --generate; then
 
     # Register in TempleDB
     echo "Registering in TempleDB..."
-    ./templedb key add yubikey \
+    ./templedb env key add yubikey \
         --name "yubikey-2-backup" \
         --location "safe" \
         --notes "Backup Yubikey stored in office safe"
@@ -164,7 +164,7 @@ if age-plugin-yubikey --generate; then
 
     # Register in TempleDB
     echo "Registering in TempleDB..."
-    ./templedb key add yubikey \
+    ./templedb env key add yubikey \
         --name "yubikey-3-dr" \
         --location "offsite" \
         --notes "Disaster recovery Yubikey stored offsite"
@@ -213,7 +213,7 @@ fi
 
 # Register in TempleDB
 echo "Registering filesystem backup key..."
-./templedb key add filesystem \
+./templedb env key add filesystem \
     --name "usb-backup" \
     --path "$BACKUP_KEY_PATH" \
     --location "usb-drive" \
@@ -231,7 +231,7 @@ echo
 
 echo "Your encryption keys:"
 echo
-./templedb key list
+./templedb env key list
 echo
 
 echo -e "${BLUE}Next Steps:${NC}"
@@ -245,11 +245,11 @@ echo
 echo "3. Store Yubikey #3 offsite (Serial: $SERIAL3)"
 echo
 echo "4. Initialize secrets for a project with all 4 keys:"
-echo -e "   ${YELLOW}./templedb secret init-multi myproject \\${NC}"
+echo -e "   ${YELLOW}./templedb env secret init-multi myproject \\${NC}"
 echo -e "   ${YELLOW}    --keys yubikey-1-primary,yubikey-2-backup,yubikey-3-dr,usb-backup${NC}"
 echo
 echo "5. Test decryption with your primary Yubikey:"
-echo -e "   ${YELLOW}./templedb secret edit myproject${NC}"
+echo -e "   ${YELLOW}./templedb env secret edit myproject${NC}"
 echo
 echo "Documentation: docs/MULTI_YUBIKEY_SETUP.md"
 echo

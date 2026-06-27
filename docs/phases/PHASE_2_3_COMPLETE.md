@@ -16,8 +16,8 @@ Completed the production-ready safe deployment workflow with real implementation
 
 Replaced placeholder deployment executor with production-ready implementation supporting two backends:
 
-**NixOps4 Backend:**
-- Integrates with TempleDB's NixOps4 deployment system
+**Fleet Backend:**
+- Integrates with TempleDB's Fleet deployment system
 - Supports network-based deployments
 - Handles timeout and error conditions
 - Returns detailed deployment status
@@ -33,14 +33,14 @@ Replaced placeholder deployment executor with production-ready implementation su
 def _execute_deploy_task(task_def, context):
     """Execute deployment with backend selection"""
     backend = task_def.get('backend', 'generic')
-    if backend == 'nixops4':
-        return _deploy_nixops4(task_def, context)
+    if backend == 'fleet':
+        return _deploy_fleet(task_def, context)
     else:
         return _deploy_generic(task_def, context)
 
-def _deploy_nixops4(task_def, context):
-    """Deploy using NixOps4 integration"""
-    # Calls: templedb nixops4 deploy {project} {network}
+def _deploy_fleet(task_def, context):
+    """Deploy using Fleet integration"""
+    # Calls: templedb fleet deploy {project} {network}
 
 def _deploy_generic(task_def, context):
     """Deploy using custom command"""
@@ -48,7 +48,7 @@ def _deploy_generic(task_def, context):
 ```
 
 **Features:**
-- ✅ Multi-backend support (nixops4/generic)
+- ✅ Multi-backend support (fleet/generic)
 - ✅ Version-aware deployments and rollbacks
 - ✅ Timeout handling (default: 600s)
 - ✅ Variable interpolation in commands
@@ -151,7 +151,7 @@ Variables:
   previous_version: version to rollback to
 
   test_command: command to run tests
-  deploy_backend: nixops4 or generic
+  deploy_backend: fleet or generic
   staging_deploy_command: staging deployment command
   production_deploy_command: production deployment command
   rollback_command: rollback command
@@ -245,7 +245,7 @@ Variables:
 **Enhanced methods:**
 
 1. `_execute_deploy_task` - Multi-backend deployment executor
-2. `_deploy_nixops4` - NixOps4 integration
+2. `_deploy_fleet` - Fleet integration
 3. `_deploy_generic` - Generic command-based deployment
 4. `_validate_health_check` - HTTP health check with retries
 5. `_validate_test_results` - Pytest output parser
@@ -290,7 +290,7 @@ Phase 2: Test Validation
   - Validate all tests pass
    ↓
 Phase 3: Staging Deployment
-  - Deploy to staging (nixops4 or generic)
+  - Deploy to staging (fleet or generic)
   - Run smoke tests
   - Health check with retries
   - Validate staging healthy
@@ -367,7 +367,7 @@ Post-flight: Success notification
 - Check https://myapp.com/health
 - Rollback to v2.1.0 if health check fails
 
-### Example 2: NixOps4 Deployment
+### Example 2: Fleet Deployment
 
 **Workflow execution:**
 ```json
@@ -375,7 +375,7 @@ Post-flight: Success notification
   "workflow": "safe_deployment",
   "project": "myapp",
   "variables": {
-    "deploy_backend": "nixops4",
+    "deploy_backend": "fleet",
     "nixops_network": "production-cluster",
     "primary_symbol": "process_payment",
     "production_health_url": "https://api.myapp.com/health"
@@ -385,7 +385,7 @@ Post-flight: Success notification
 
 **Result:**
 - Impact analysis on `process_payment`
-- Deploy using NixOps4 to production-cluster
+- Deploy using Fleet to production-cluster
 - Health check on https://api.myapp.com/health
 - Automatic rollback if deployment fails
 
@@ -448,7 +448,7 @@ Post-flight: Success notification
 
 3. **Integration**
    - Works with existing CI/CD
-   - Compatible with NixOps4
+   - Compatible with Fleet
    - Supports generic deployments
    - Extensible architecture
 
@@ -495,7 +495,7 @@ Zero-downtime secret rotation:
 
 ## Validation
 
-✅ Deploy task executor supports nixops4 backend
+✅ Deploy task executor supports fleet backend
 ✅ Deploy task executor supports generic backend
 ✅ Health check performs HTTP requests with retries
 ✅ Health check validates status code
@@ -518,7 +518,7 @@ Zero-downtime secret rotation:
 - **Workflow phases:** 4
 - **Variable support:** 15+ configurable variables
 - **Health check retries:** 5 (staging), 10 (production)
-- **Deployment backends:** 2 (nixops4, generic)
+- **Deployment backends:** 2 (fleet, generic)
 
 ## Production Readiness
 

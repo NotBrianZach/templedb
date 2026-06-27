@@ -2,7 +2,7 @@
 
 ## Current Security Model
 
-TempleDB uses **age encryption** (https://age-encryption.org) to store secrets encrypted at rest in a SQLite database. When `templedb secret export` is called, secrets are decrypted using your age key and exported as environment variables.
+TempleDB uses **age encryption** (https://age-encryption.org) to store secrets encrypted at rest in a SQLite database. When `templedb env secretexport` is called, secrets are decrypted using your age key and exported as environment variables.
 
 **Key features:**
 - Age encryption (modern, simple, secure)
@@ -18,10 +18,10 @@ Load secrets directly from the database when needed:
 
 ```bash
 # Load secrets for current project
-eval "$(templedb secret export my-project --format shell)"
+eval "$(templedb env secretexport my-project --format shell)"
 
 # Or export to a file with restricted permissions
-templedb secret export my-project --format dotenv > .env
+templedb env secretexport my-project --format dotenv > .env
 chmod 600 .env
 ```
 
@@ -32,9 +32,9 @@ Use profiles to separate secrets by sensitivity:
 ```bash
 # Only load production secrets when explicitly needed
 if [ "$TEMPLEDB_ENV" = "production" ]; then
-  eval "$(templedb secret export my-project --profile prod --format shell)"
+  eval "$(templedb env secretexport my-project --profile prod --format shell)"
 else
-  eval "$(templedb secret export my-project --profile dev --format shell)"
+  eval "$(templedb env secretexport my-project --profile dev --format shell)"
 fi
 ```
 
@@ -58,10 +58,10 @@ After editing secrets, reload them in your current shell:
 
 ```bash
 # Edit secrets
-templedb secret edit my-project
+templedb env secretedit my-project
 
 # Reload in current shell
-eval "$(templedb secret export my-project --format shell)"
+eval "$(templedb env secretexport my-project --format shell)"
 ```
 
 ### 5. Audit Secret Access
@@ -83,7 +83,7 @@ Track secret age and rotate regularly:
 
 ```bash
 # Check when secrets were last updated
-templedb secret export my-app --format json | \
+templedb env secretexport my-app --format json | \
   jq -r '.meta.last_rotated // "NEVER ROTATED"'
 ```
 

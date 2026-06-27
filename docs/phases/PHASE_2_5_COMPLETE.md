@@ -194,7 +194,7 @@ Complete guide with examples for all workflows:
 **Sections:**
 1. Quick Start
 2. Code Intelligence Bootstrap
-3. Safe Deployment (generic & NixOps4)
+3. Safe Deployment (generic & Fleet)
 4. Impact-Aware Refactoring
 5. Custom Workflows
 6. Advanced Patterns
@@ -404,7 +404,7 @@ Failed: 0
 2. **code_search** - Hybrid BM25 + graph search
 3. **code_impact_analysis** - Blast radius analysis
 4. **bash** - Shell command execution
-5. **deploy** - Multi-backend deployment (nixops4, generic)
+5. **deploy** - Multi-backend deployment (fleet, generic)
 6. **python** - Inline Python code
 7. **custom** - Custom Python scripts
 8. **mcp** - MCP tool calls
@@ -518,7 +518,7 @@ Failed: 0
 | **Health Checks** | N/A | ✅ HTTP with retries |
 | **Test Parsing** | N/A | ✅ Pytest output |
 | **MCP Integration** | N/A | ✅ 4 tools |
-| **Deployment Backends** | N/A | ✅ nixops4 + generic |
+| **Deployment Backends** | N/A | ✅ fleet + generic |
 
 ## Phase 2 Complete: All Goals Achieved
 
@@ -548,7 +548,7 @@ Failed: 0
 
 **For Operations:**
 1. Automated deployment with health checks
-2. Multi-backend support (nixops4, generic)
+2. Multi-backend support (fleet, generic)
 3. Automatic rollback on failure
 4. Audit trail via workflow execution logs
 5. Reproducible deployments

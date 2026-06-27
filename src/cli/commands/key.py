@@ -523,7 +523,7 @@ class KeyCommands(Command):
 
         if not keys:
             logger.info("No encryption keys registered")
-            logger.info("Add keys with: templedb key add")
+            logger.info("Add keys with: templedb env key add")
             return 0
 
         print(f"\n{'='*80}")
@@ -746,7 +746,7 @@ class KeyCommands(Command):
                 logger.info(f"Recipient: {recipient}")
                 logger.info("")
                 logger.info("Now you can add it to TempleDB:")
-                logger.info(f"  ./templedb key add yubikey --name yubikey-1 --location \"daily-use\"")
+                logger.info(f"  ./templedb env key add yubikey --name yubikey-1 --location \"daily-use\"")
             else:
                 logger.warning("Could not extract recipient. Check ~/.config/age-plugin-yubikey/identities.txt")
 
@@ -979,6 +979,63 @@ class KeyCommands(Command):
             print()
 
         return 0
+
+
+def register_subcommands(parent_subparsers, cli, prefix='env'):
+    """Register key commands as subcommands under a parent (e.g., env key add)."""
+    cmd = KeyCommands()
+
+    key_parser = parent_subparsers.add_parser('key', help='Manage encryption keys')
+    subparsers = key_parser.add_subparsers(dest='key_subcommand', required=True)
+
+    add_parser = subparsers.add_parser('add', help='Add encryption key to registry')
+    add_parser.add_argument('type', choices=['yubikey', 'filesystem'], help='Key type')
+    add_parser.add_argument('--name', required=True, help='Key name (e.g., yubikey-1-primary)')
+    add_parser.add_argument('--location', help='Physical location (e.g., daily-use, safe, offsite)')
+    add_parser.add_argument('--path', help='Path to key file (for filesystem keys)')
+    add_parser.add_argument('--slot', help='PIV slot for Yubikey (default: 9a)')
+    add_parser.add_argument('--notes', help='Additional notes')
+    add_parser.add_argument('--lazy', action='store_true', default=True,
+                            help='Lazy mode: automatically add key to all existing secrets (default)')
+    add_parser.add_argument('--no-lazy', dest='lazy', action='store_false',
+                            help='Corpo mode: only register key without adding to secrets')
+    cli.commands[f'{prefix}.key.add'] = cmd.key_add
+
+    list_parser = subparsers.add_parser('list', help='List all encryption keys')
+    list_parser.add_argument('--all', action='store_true', help='Include disabled keys')
+    cli.commands[f'{prefix}.key.list'] = cmd.key_list
+
+    info_parser = subparsers.add_parser('info', help='Show detailed key information')
+    info_parser.add_argument('name', help='Key name')
+    cli.commands[f'{prefix}.key.info'] = cmd.key_info
+
+    test_parser = subparsers.add_parser('test', help='Test key encryption/decryption')
+    test_parser.add_argument('name', help='Key name')
+    cli.commands[f'{prefix}.key.test'] = cmd.key_test
+
+    disable_parser = subparsers.add_parser('disable', help='Disable a key')
+    disable_parser.add_argument('name', help='Key name')
+    cli.commands[f'{prefix}.key.disable'] = cmd.key_disable
+
+    enable_parser = subparsers.add_parser('enable', help='Enable a key')
+    enable_parser.add_argument('name', help='Key name')
+    cli.commands[f'{prefix}.key.enable'] = cmd.key_enable
+
+    setup_yubikey_parser = subparsers.add_parser('setup-yubikey',
+                                                   help='Generate age identity on Yubikey')
+    cli.commands[f'{prefix}.key.setup-yubikey'] = cmd.key_setup_yubikey
+
+    revoke_parser = subparsers.add_parser('revoke',
+                                           help='Revoke a key with multi-key approval')
+    revoke_parser.add_argument('name', help='Key name to revoke')
+    revoke_parser.add_argument('--reason', help='Reason for revocation')
+    revoke_parser.add_argument('--quorum', type=int, default=2,
+                               help='Number of keys required for approval (default: 2)')
+    cli.commands[f'{prefix}.key.revoke'] = cmd.key_revoke
+
+    show_revoked_parser = subparsers.add_parser('show-revoked',
+                                                 help='Show all revoked keys')
+    cli.commands[f'{prefix}.key.show-revoked'] = cmd.key_show_revoked
 
 
 def register(cli):

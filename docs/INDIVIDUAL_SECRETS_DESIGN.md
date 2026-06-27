@@ -61,39 +61,39 @@ CREATE TABLE secret_key_assignments (
 
 ```bash
 # Set an individual secret
-templedb secret set <project> <key> <value> [--keys key1,key2]
+templedb env secret set <project> <key> <value> [--keys key1,key2]
 
 # Get an individual secret
-templedb secret get <project> <key>
+templedb env secret get <project> <key>
 
 # List all secrets for a project
-templedb secret list <project>
+templedb env secret list <project>
 
 # Delete a secret from a project
-templedb secret delete <project> <key>
+templedb env secret delete <project> <key>
 ```
 
 #### Sharing Secrets
 
 ```bash
 # Share a specific secret from one project to another
-templedb secret share-key <source-project> <target-project> <key>
+templedb env secret share-key <source-project> <target-project> <key>
 
 # Example:
-templedb secret share-key woofs_projects bza OPENROUTER_API_KEY
+templedb env secret share-key woofs_projects bza OPENROUTER_API_KEY
 ```
 
 #### Bulk Import/Export
 
 ```bash
 # Import from .env file or YAML
-templedb secret import <project> --from-file secrets.env
+templedb env secret import <project> --from-file secrets.env
 
 # Export to various formats
-templedb secret export <project> --format dotenv
-templedb secret export <project> --format yaml
-templedb secret export <project> --format json
-templedb secret export <project> --format shell
+templedb env secret export <project> --format dotenv
+templedb env secret export <project> --format yaml
+templedb env secret export <project> --format json
+templedb env secret export <project> --format shell
 ```
 
 ### Migration Strategy
@@ -106,7 +106,7 @@ templedb secret export <project> --format shell
 **Phase 2: Migration command**
 ```bash
 # Convert YAML blob to individual secrets
-templedb secret migrate-to-individual <project>
+templedb env secret migrate-to-individual <project>
 ```
 
 **Phase 3: Deprecate YAML-based commands**
@@ -139,26 +139,26 @@ templedb secret migrate-to-individual <project>
 
 ```bash
 # Initialize encryption keys (one-time setup)
-templedb key add my-yubikey --recipient age1yubikey1...
+templedb env key add my-yubikey --recipient age1yubikey1...
 
 # Set individual secrets
-templedb secret set woofs_projects OPENROUTER_API_KEY "sk-or-..." --keys my-yubikey
-templedb secret set woofs_projects DATABASE_URL "postgres://..." --keys my-yubikey
+templedb env secret set woofs_projects OPENROUTER_API_KEY "sk-or-..." --keys my-yubikey
+templedb env secret set woofs_projects DATABASE_URL "postgres://..." --keys my-yubikey
 
 # Share a specific secret with another project
-templedb secret share-key woofs_projects bza OPENROUTER_API_KEY
+templedb env secret share-key woofs_projects bza OPENROUTER_API_KEY
 
 # List secrets (shows which are shared)
-templedb secret list bza
+templedb env secret list bza
 # Output:
 # OPENROUTER_API_KEY (shared from woofs_projects)
 
 # Get a secret value
-templedb secret get bza OPENROUTER_API_KEY
+templedb env secret get bza OPENROUTER_API_KEY
 # Output: sk-or-...
 
 # Export all secrets for deployment
-templedb secret export bza --format dotenv > .env
+templedb env secret export bza --format dotenv > .env
 ```
 
 ### Benefits

@@ -122,7 +122,7 @@ _HEADER_TEMPLATE = """\
 # Source: templedb nixos config keys (system_config table)
 # Generated: {timestamp}
 # To update:
-#   templedb var set <key> <value> --nixos
+#   templedb env var set <key> <value> --nixos
 #   templedb nixos generate {slug}
 """
 
@@ -231,7 +231,23 @@ def _nixos_status(slug: str):
     else:
         live_status = "UP TO DATE"
 
+    # Migration status
+    migration_status = "?"
+    try:
+        from migrator import Migrator
+        from db_utils import DB_PATH
+        m = Migrator(DB_PATH)
+        status_entries = m.status()
+        pending_migrations = sum(1 for s in status_entries if not s["applied"])
+        if pending_migrations == 0:
+            migration_status = "OK"
+        else:
+            migration_status = f"{pending_migrations} PENDING — run: templedb admin db migrate"
+    except Exception:
+        migration_status = "unknown"
+
     print()
+    print(f"  Migrations:    {migration_status}")
     if count > 0:
         noun = "change" if count == 1 else "changes"
         since = f" since last generate ({_fmt_ts(last_gen)})" if last_gen else ""
@@ -283,15 +299,20 @@ class NixOSCommand(Command):
 
             project_slug = args.slug
 
+            # Always resolve the project first: it is referenced later regardless
+            # of whether an explicit output dir was given via -o/--output.
+            project = self.get_project_or_exit(project_slug)
+
             # Auto-detect output directory for nixos-config projects
             if args.output:
                 output_dir = Path(args.output)
+                output_dir.mkdir(parents=True, exist_ok=True)
             else:
-                project = self.get_project_or_exit(project_slug)
+                # Check if this is a nixos-config project
                 if project['project_type'] == 'nixos-config' and project['repo_url']:
                     config_path = Path(project['repo_url'])
                     modules_dir = config_path / 'modules'
-                    modules_dir.mkdir(exist_ok=True)
+                    modules_dir.mkdir(parents=True, exist_ok=True)
                     output_dir = modules_dir
                     print(f"\n🔧 Generating NixOS configuration for {project_slug}...")
                     print(f"   Auto-detected nixos-config project")
@@ -473,6 +494,18 @@ class NixOSCommand(Command):
 
     def rebuild(self, args) -> int:
         """Rebuild NixOS system"""
+        # Check for pending migrations before rebuilding
+        try:
+            from migrator import Migrator
+            from db_utils import DB_PATH
+            m = Migrator(DB_PATH)
+            pending = sum(1 for s in m.status() if not s["applied"])
+            if pending > 0:
+                print(f"⚠ {pending} pending database migration(s)")
+                print(f"  Run: templedb admin db migrate\n")
+        except Exception:
+            pass
+
         if not _check_dirty_and_prompt():
             return 1
 
@@ -650,16 +683,34 @@ class NixOSCommand(Command):
         return 0
 
     def config_set(self, args) -> int:
-        """Set system configuration value"""
+        """Set system configuration value, scoped to the active host by default."""
         try:
-            from db_utils import execute
+            from db_utils import execute, get_connection
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+            key = args.key
+
+            if not args.glob:
+                # Determine host scope
+                host = getattr(args, 'host', None)
+                if not host:
+                    conn = get_connection()
+                    row = conn.execute(
+                        "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+                    ).fetchone()
+                    host = row[0] if row else None
+
+                if host:
+                    key = f"{host}.{key}"
+                else:
+                    print("⚠  No active host found (nixos.flake_output not set). Writing as global key.", file=sys.stderr)
+
             execute(
                 "INSERT INTO system_config (key, value, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (args.key, args.value, now),
+                (key, args.value, now),
             )
-            print(f"✓ Set {args.key} = {args.value}")
+            print(f"✓ Set {key} = {args.value}")
             return 0
         except Exception as e:
             logger.error(f"Failed to set config: {e}", exc_info=True)
@@ -764,6 +815,1005 @@ class NixOSCommand(Command):
         _sp.run([editor] + [str(t) for t in templates])
         return 0
 
+    def doctor(self, args) -> int:
+        """Diagnose common NixOS-config activation problems (read-only).
+
+        Checks the templedb CLI symlinks, the database, each nixos-config
+        project's checkout/modules, generated modules for the unquoted
+        dotted-key bug, and whether /etc/nixos actually imports them.
+        """
+        import os
+        import re as _re
+        from services.system_service import SystemService
+
+        problems = 0
+        warnings = 0
+
+        def ok(msg):
+            print(f"  ✓ {msg}")
+
+        def warn(msg):
+            nonlocal warnings
+            warnings += 1
+            print(f"  ⚠ {msg}")
+
+        def err(msg):
+            nonlocal problems
+            problems += 1
+            print(f"  ✗ {msg}")
+
+        print("\n\U0001f489 TempleDB NixOS doctor\n")
+
+        # 1. CLI launcher symlinks (the templedb vs templeDB casing trap)
+        print("CLI launchers:")
+        home = Path.home()
+        for name in ("templedb", "tdb"):
+            link = home / ".local" / "bin" / name
+            if not link.exists() and not link.is_symlink():
+                warn(f"~/.local/bin/{name} not installed")
+            elif link.is_symlink() and not link.resolve().exists():
+                err(f"~/.local/bin/{name} is a dangling symlink -> {os.readlink(link)}")
+            else:
+                ok(f"~/.local/bin/{name} -> {link.resolve()}")
+
+        # 2. Database
+        print("\nDatabase:")
+        db_path = Path(getattr(self, 'db_path', '') or
+                       os.environ.get('DB_PATH', '') or
+                       (home / ".local/share/templedb/templedb.sqlite"))
+        if db_path.exists():
+            ok(f"{db_path} ({db_path.stat().st_size // (1024*1024)} MB)")
+        else:
+            err(f"database not found at {db_path}")
+
+        # 2b. Migration status
+        print("\nMigrations:")
+        try:
+            from migrator import Migrator
+            m = Migrator(str(db_path))
+            status = m.status()
+            pending = sum(1 for s in status if not s["applied"])
+            applied = sum(1 for s in status if s["applied"])
+            if pending == 0:
+                ok(f"all {applied} migrations applied")
+            else:
+                warn(f"{pending} pending migration(s) — run: templedb admin db migrate")
+        except Exception as e:
+            warn(f"could not check migrations: {e}")
+
+        # 3. nixos-config projects
+        service = SystemService()
+        projects = service.get_nixos_config_projects()
+        if args.slug:
+            projects = [p for p in projects if p['slug'] == args.slug]
+            if not projects:
+                err(f"no nixos-config project named '{args.slug}'")
+                return 1
+        if not projects:
+            warn("no nixos-config projects (templedb nixos set-type <slug> nixos-config)")
+
+        # What `nixos generate` writes for a nixos-config project today:
+        generated_names = {"templedb-managed-system.nix", "templedb-managed.nix"}
+        # Read /etc/nixos config text once for drift detection.
+        etc_text = ""
+        for f in (Path("/etc/nixos/configuration.nix"), Path("/etc/nixos/flake.nix")):
+            try:
+                etc_text += f.read_text()
+            except OSError:
+                pass
+
+        # A dotted attr key like `git_server.url = ...`. Only a problem *inside*
+        # a string-valued attrset (environment.variables / home.sessionVariables),
+        # where Nix would read the dot as a nested attrset and break the type.
+        dotted_key = _re.compile(r"^\s*([A-Za-z_][\w'-]*(?:\.[A-Za-z_][\w'-]*)+)\s*=")
+        env_block = _re.compile(r"\b(?:environment\.variables|home\.sessionVariables)\s*=\s*\{")
+
+        def find_bad_env_keys(text):
+            bad, depth, in_env = [], 0, False
+            for line in text.splitlines():
+                if not in_env:
+                    if env_block.search(line):
+                        in_env = True
+                        depth = line.count("{") - line.count("}")
+                    continue
+                m = dotted_key.match(line)
+                if m:
+                    bad.append(m.group(1))
+                depth += line.count("{") - line.count("}")
+                if depth <= 0:
+                    in_env = False
+            return bad
+
+        for proj in projects:
+            slug = proj['slug']
+            print(f"\nProject '{slug}':")
+            repo = proj.get('repo_url')
+            if not repo:
+                err("no repo_url set (templedb has nowhere to write modules)")
+                continue
+            checkout = Path(repo)
+            if not checkout.exists():
+                err(f"checkout missing: {checkout}")
+                continue
+            ok(f"checkout: {checkout}")
+
+            modules_dir = checkout / "modules"
+            module_files = sorted(modules_dir.glob("*.nix")) if modules_dir.exists() else []
+            if not module_files:
+                warn(f"no generated modules in {modules_dir} (run: templedb nixos generate {slug})")
+            for mf in module_files:
+                text = mf.read_text()
+                # Unquoted dotted attr keys -> Nix reads them as nested attrsets,
+                # which breaks environment.variables / home.sessionVariables.
+                bad = find_bad_env_keys(text)
+                if bad:
+                    err(f"{mf.name}: unquoted dotted key(s) {bad} - will fail eval; "
+                        f"regenerate with a fixed templedb or quote them")
+                else:
+                    ok(f"{mf.name}: no unquoted dotted keys")
+
+                # Drift: is this file actually imported by /etc/nixos?
+                if etc_text and mf.name in etc_text:
+                    ok(f"{mf.name}: imported by /etc/nixos")
+                elif etc_text:
+                    warn(f"{mf.name}: not referenced in /etc/nixos (won't take effect)")
+
+            # Naming drift between what's deployed and what generate produces now.
+            deployed = {mf.name for mf in module_files}
+            if deployed and not (deployed & generated_names) and \
+                    any(n in etc_text for n in deployed):
+                warn(f"deployed module names {sorted(deployed)} differ from what "
+                     f"`nixos generate` now writes {sorted(generated_names)} - "
+                     f"regeneration will not overwrite the imported files")
+
+        # Summary
+        print(f"\n─────\nSummary: {problems} error(s), {warnings} warning(s)")
+        if problems == 0 and warnings == 0:
+            print("All checks passed ✨")
+        return 1 if problems else 0
+
+
+    # ── Dotfiles ──────────────────────────────────────────────────────────────
+
+    def dotfiles_apply(self, args) -> int:
+        """Apply dotfile symlinks from the system_config dotfiles manifest."""
+        conn = _get_conn()
+        manifest = self._get_dotfiles_manifest(conn)
+
+        if not manifest:
+            print("No dotfiles configured.")
+            print("Add entries with: templedb nixos dotfiles-add <project> <source> <target>")
+            return 0
+
+        from repositories import ConfigLinkRepository
+        config_repo = ConfigLinkRepository()
+
+        created = 0
+        skipped = 0
+        already_ok = 0
+
+        for entry in manifest:
+            project_slug = entry['project']
+            source_rel = entry['source']
+            target_path = Path(entry['target']).expanduser()
+
+            checkout_dir = Path.home() / '.config' / 'templedb' / 'checkouts' / project_slug
+            source_abs = checkout_dir / source_rel
+
+            if not source_abs.exists():
+                print(f"  SKIP {source_rel} (source missing: {source_abs})")
+                skipped += 1
+                continue
+
+            if target_path.is_symlink() and target_path.resolve() == source_abs.resolve():
+                if args.verbose:
+                    print(f"  OK   {target_path} -> {source_abs}")
+                already_ok += 1
+                continue
+
+            # Back up existing file if not a symlink
+            backup_path = None
+            if target_path.exists() and not target_path.is_symlink():
+                if not args.force:
+                    print(f"  SKIP {target_path} (exists, use --force to replace)")
+                    skipped += 1
+                    continue
+                backup_path = str(target_path) + '.templedb-backup'
+                import shutil
+                shutil.move(str(target_path), backup_path)
+                print(f"  BACKUP {target_path} -> {backup_path}")
+            elif target_path.is_symlink():
+                target_path.unlink()
+
+            # Create parent dirs and symlink
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.symlink_to(source_abs)
+            print(f"  LINK {target_path} -> {source_abs}")
+            created += 1
+
+        print(f"\nDotfiles: {created} created, {already_ok} already OK, {skipped} skipped")
+        return 0
+
+    def dotfiles_add(self, args) -> int:
+        """Add a dotfile mapping to the manifest."""
+        conn = _get_conn()
+        manifest = self._get_dotfiles_manifest(conn)
+
+        # Check for duplicate
+        for entry in manifest:
+            if entry['project'] == args.project and entry['source'] == args.source:
+                print(f"Already mapped: {args.source} -> {entry['target']}")
+                return 0
+
+        manifest.append({
+            'project': args.project,
+            'source': args.source,
+            'target': args.target,
+        })
+
+        self._set_dotfiles_manifest(conn, manifest)
+        conn.commit()
+        print(f"Added: {args.project}:{args.source} -> {args.target}")
+        return 0
+
+    def dotfiles_remove(self, args) -> int:
+        """Remove a dotfile mapping from the manifest."""
+        conn = _get_conn()
+        manifest = self._get_dotfiles_manifest(conn)
+
+        new_manifest = [
+            e for e in manifest
+            if not (e['project'] == args.project and e['source'] == args.source)
+        ]
+
+        if len(new_manifest) == len(manifest):
+            print(f"No mapping found for {args.project}:{args.source}")
+            return 1
+
+        self._set_dotfiles_manifest(conn, new_manifest)
+        conn.commit()
+        print(f"Removed: {args.project}:{args.source}")
+        return 0
+
+    def dotfiles_list(self, args) -> int:
+        """List all dotfile mappings."""
+        conn = _get_conn()
+        manifest = self._get_dotfiles_manifest(conn)
+
+        if not manifest:
+            print("No dotfiles configured.")
+            return 0
+
+        checkout_base = Path.home() / '.config' / 'templedb' / 'checkouts'
+
+        for entry in manifest:
+            source_abs = checkout_base / entry['project'] / entry['source']
+            target = Path(entry['target']).expanduser()
+
+            if target.is_symlink() and target.resolve() == source_abs.resolve():
+                status = "OK"
+            elif target.exists():
+                status = "CONFLICT"
+            elif not source_abs.exists():
+                status = "NO SOURCE"
+            else:
+                status = "NOT LINKED"
+
+            print(f"  [{status:>10}] {entry['project']}:{entry['source']} -> {entry['target']}")
+
+        return 0
+
+    def _get_dotfiles_manifest(self, conn) -> list:
+        row = conn.execute(
+            "SELECT value FROM system_config WHERE key = 'nixos.dotfiles'"
+        ).fetchone()
+        if row:
+            return json.loads(row[0])
+        return []
+
+    def _set_dotfiles_manifest(self, conn, manifest: list):
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES ('nixos.dotfiles', ?, datetime('now'))",
+            (json.dumps(manifest),)
+        )
+
+    # ── Host Management ────────────────────────────────────────────────
+
+    def host_list(self, args) -> int:
+        """List all registered NixOS hosts."""
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT key, value FROM system_config WHERE key LIKE 'nixos.host.%' ORDER BY key"
+        ).fetchall()
+
+        if not rows:
+            print("No hosts registered.")
+            print("  Import with: templedb nixos host import <hostname>")
+            return 0
+
+        current = conn.execute(
+            "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+        ).fetchone()
+        active_host = current[0] if current else None
+
+        print(f"\nNixOS Hosts ({len(rows)}):\n")
+        for r in rows:
+            hostname = r[0].replace("nixos.host.", "")
+            active = " (active)" if hostname == active_host else ""
+            host_file = r[1]
+
+            # Count host-scoped config keys
+            count = conn.execute(
+                "SELECT COUNT(*) FROM system_config WHERE key LIKE ?",
+                (f"{hostname}.%",)
+            ).fetchone()[0]
+
+            print(f"  {hostname:30s} {host_file:40s} {count} overrides{active}")
+
+        return 0
+
+    def host_show(self, args) -> int:
+        """Show host-specific configuration."""
+        conn = _get_conn()
+        hostname = args.hostname
+
+        # Get host-scoped overrides
+        overrides = conn.execute(
+            "SELECT key, value FROM system_config WHERE key LIKE ? ORDER BY key",
+            (f"{hostname}.%",)
+        ).fetchall()
+
+        # Get host file
+        host_file = conn.execute(
+            "SELECT value FROM system_config WHERE key = ?",
+            (f"nixos.host.{hostname}",)
+        ).fetchone()
+
+        print(f"\nHost: {hostname}")
+        if host_file:
+            print(f"  Config file: {host_file[0]}")
+
+        if overrides:
+            print(f"\n  Host-scoped overrides ({len(overrides)}):")
+            for r in overrides:
+                key = r[0][len(hostname) + 1:]  # strip hostname prefix
+                print(f"    {key:40s} {r[1][:60]}")
+        else:
+            print(f"\n  No host-scoped overrides.")
+            print(f"  Set with: templedb nixos host set {hostname} <key> <value>")
+
+        # Show what this host would inherit (non-host-scoped keys)
+        defaults = conn.execute(
+            "SELECT key, value FROM system_config "
+            "WHERE key LIKE 'nixos.let.%' ORDER BY key"
+        ).fetchall()
+        if defaults:
+            print(f"\n  Inherited defaults (from system-wide config):")
+            for r in defaults:
+                print(f"    {r[0]:40s} {r[1][:60]}")
+
+        return 0
+
+    def host_set(self, args) -> int:
+        """Set a host-scoped config override."""
+        conn = _get_conn()
+        hostname = args.hostname
+        key = f"{hostname}.{args.key}"
+        value = args.value
+
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now'))", (key, value)
+        )
+        conn.commit()
+        print(f"Set {key} = {value}")
+        return 0
+
+    def host_import(self, args) -> int:
+        """Import host-specific values from an existing host .nix file."""
+        import re as _re
+
+        conn = _get_conn()
+        hostname = args.hostname
+
+        slug = _resolve_slug(getattr(args, 'slug', None))
+        if not slug:
+            return 1
+
+        proj = conn.execute("SELECT repo_url FROM projects WHERE slug = ?", (slug,)).fetchone()
+        if not proj or not proj[0]:
+            print(f"Project '{slug}' has no repo_url set.", file=sys.stderr)
+            return 1
+
+        repo = Path(proj[0])
+
+        # Find host file
+        host_file = repo / "hosts" / f"{hostname}.nix"
+        if not host_file.exists():
+            print(f"Host file not found: {host_file}")
+            print(f"  Available: {', '.join(f.stem for f in (repo / 'hosts').glob('*.nix'))}")
+            return 1
+
+        content = host_file.read_text()
+        imported = 0
+
+        # Extract key values
+        # hostname
+        m = _re.search(r'hostName\s*=\s*"([^"]+)"', content)
+        if m:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"{hostname}.networking.hostName", m.group(1))
+            )
+            print(f"  {hostname}.networking.hostName = {m.group(1)}")
+            imported += 1
+
+        # Video drivers
+        m = _re.search(r'videoDrivers\s*=\s*\[\s*"([^"]+)"', content)
+        if m:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"{hostname}.videoDriver", m.group(1))
+            )
+            print(f"  {hostname}.videoDriver = {m.group(1)}")
+            imported += 1
+
+        # Boot loader type
+        if "systemd-boot.enable = true" in content:
+            boot_type = "systemd-boot"
+        elif "grub.enable = true" in content:
+            boot_type = "grub"
+        else:
+            boot_type = "unknown"
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (f"{hostname}.bootLoader", boot_type)
+        )
+        print(f"  {hostname}.bootLoader = {boot_type}")
+        imported += 1
+
+        # GRUB device
+        m = _re.search(r'grub\.device\s*=\s*"([^"]+)"', content)
+        if m:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"{hostname}.grubDevice", m.group(1))
+            )
+            print(f"  {hostname}.grubDevice = {m.group(1)}")
+            imported += 1
+
+        # Location
+        m = _re.search(r'location\.latitude\s*=\s*([0-9.]+)', content)
+        if m:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"{hostname}.location.latitude", m.group(1))
+            )
+            print(f"  {hostname}.location.latitude = {m.group(1)}")
+            imported += 1
+
+        m = _re.search(r'location\.longitude\s*=\s*(-?[0-9.]+)', content)
+        if m:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (f"{hostname}.location.longitude", m.group(1))
+            )
+            print(f"  {hostname}.location.longitude = {m.group(1)}")
+            imported += 1
+
+        # Register the host file
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (f"nixos.host.{hostname}", f"hosts/{hostname}.nix")
+        )
+
+        conn.commit()
+        print(f"\nImported {imported} host-specific values for {hostname}")
+        return 0
+
+    def host_activate(self, args) -> int:
+        """Set which host this machine is (sets nixos.flake_output)."""
+        conn = _get_conn()
+        hostname = args.hostname
+
+        # Verify host exists
+        host = conn.execute(
+            "SELECT value FROM system_config WHERE key = ?",
+            (f"nixos.host.{hostname}",)
+        ).fetchone()
+        if not host:
+            print(f"Host '{hostname}' not registered.")
+            print(f"  Available hosts: templedb nixos host list")
+            return 1
+
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES ('nixos.flake_output', ?, datetime('now'))", (hostname,)
+        )
+        conn.commit()
+        print(f"Activated host: {hostname}")
+        print(f"  Rebuild with: templedb nixos rebuild system_config")
+        return 0
+
+    def host_clone(self, args) -> int:
+        """Clone an existing host config to a new hostname."""
+        conn = _get_conn()
+        source = args.source
+        target = args.target
+
+        # Verify source exists
+        source_keys = conn.execute(
+            "SELECT key, value FROM system_config WHERE key LIKE ?",
+            (f"{source}.%",)
+        ).fetchall()
+
+        if not source_keys:
+            print(f"Source host '{source}' has no config keys.")
+            print(f"  Import first: templedb nixos host import {source}")
+            return 1
+
+        # Check source host registration
+        source_host = conn.execute(
+            "SELECT value FROM system_config WHERE key = ?",
+            (f"nixos.host.{source}",)
+        ).fetchone()
+
+        # Clone all host-scoped keys
+        cloned = 0
+        for row in source_keys:
+            old_key = row[0]
+            new_key = old_key.replace(f"{source}.", f"{target}.", 1)
+            new_value = row[1]
+
+            # Update hostname references in values
+            if source in str(new_value):
+                new_value = new_value.replace(source, target)
+
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))", (new_key, new_value)
+            )
+            cloned += 1
+
+        # Register the new host
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (f"nixos.host.{target}", f"hosts/{target}.nix")
+        )
+
+        conn.commit()
+
+        print(f"Cloned {source} → {target} ({cloned} keys)")
+        print(f"\n  Host-specific overrides for {target}:")
+        new_keys = conn.execute(
+            "SELECT key, value FROM system_config WHERE key LIKE ? ORDER BY key",
+            (f"{target}.%",)
+        ).fetchall()
+        for r in new_keys:
+            k = r[0][len(target) + 1:]
+            print(f"    {k:40s} {r[1][:60]}")
+
+        print(f"\n  Customize: templedb nixos host set {target} <key> <value>")
+        print(f"  Activate:  templedb nixos host activate {target}")
+        print(f"  Generate:  templedb nixos generate-all --host {target}")
+        return 0
+
+    # ── Import / Generate-All ────────────────────────────────────────────
+
+    def import_config(self, args) -> int:
+        """Comprehensively import NixOS config into system_config table."""
+        import re as _re
+
+        slug = _resolve_slug(getattr(args, 'slug', None))
+        if not slug:
+            return 1
+
+        conn = _get_conn()
+        proj = conn.execute("SELECT repo_url FROM projects WHERE slug = ?", (slug,)).fetchone()
+        if not proj or not proj[0]:
+            print(f"Project '{slug}' has no repo_url set.", file=sys.stderr)
+            return 1
+
+        repo = Path(proj[0])
+        imported = 0
+
+        def _set(key, value):
+            nonlocal imported
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now'))", (key, value)
+            )
+            imported += 1
+
+        # ── home.nix ──────────────────────────────────────────────────────
+        home_path = repo / 'home.nix'
+        if home_path.exists():
+            content = home_path.read_text()
+            print("home.nix:")
+
+            # Portable path let-bindings
+            let_section = _re.search(
+                r'# === Portable path definitions ===\n(.*?)(?=\n\n|\n  \w+\s*=\s*pkgs\.)',
+                content, _re.DOTALL
+            )
+            if let_section:
+                for m in _re.finditer(r'^\s+(\w+)\s*=\s*"(/[^"]*)";\s*$', let_section.group(1), _re.MULTILINE):
+                    _set(f"nixos.let.home.{m.group(1)}", m.group(2))
+                    print(f"  nixos.let.home.{m.group(1)} = {m.group(2)}")
+
+            # Packages — extract from home.packages = with pkgs; [ ... ];
+            pkg_block = _re.search(r'home\.packages\s*=\s*with pkgs;\s*\[(.*?)\];', content, _re.DOTALL)
+            if pkg_block:
+                current_category = "uncategorized"
+                for line in pkg_block.group(1).split('\n'):
+                    line = line.strip()
+                    if line.startswith('#') and not line.startswith('# Custom'):
+                        current_category = line.lstrip('# ').strip().lower().replace(' ', '_')
+                        continue
+                    # Skip flake-input packages and local packages
+                    if not line or line.startswith('#') or '.' in line or line.startswith('my') or line == 'voiceAIPackage' or line == 'ghcNPackages':
+                        continue
+                    pkg = line.rstrip(';').strip()
+                    if pkg and _re.match(r'^[a-zA-Z][\w-]*$', pkg):
+                        _set(f"nixos.pkg.user.{current_category}.{pkg}", "true")
+                print(f"  Packages: {sum(1 for k in [] if True)} (see nixos.pkg.user.*)")
+
+            # Shell aliases
+            alias_block = _re.search(r'shellAliases\s*=\s*\{(.*?)\};', content, _re.DOTALL)
+            if alias_block:
+                for m in _re.finditer(r'(\w+)\s*=\s*"([^"]*)"', alias_block.group(1)):
+                    _set(f"nixos.alias.{m.group(1)}", m.group(2))
+                print(f"  Aliases: imported")
+
+            # Programs enabled
+            for m in _re.finditer(r'programs\.(\w+)\s*=\s*\{\s*\n\s*enable\s*=\s*true', content):
+                _set(f"nixos.attr.programs.{m.group(1)}.enable", "true")
+                print(f"  nixos.attr.programs.{m.group(1)}.enable = true")
+
+            # home.username and homeDirectory
+            m = _re.search(r'home\.username\s*=\s*"([^"]+)"', content)
+            if m:
+                _set("nixos.username", m.group(1))
+            m = _re.search(r'home\.homeDirectory\s*=\s*(\w+)', content)
+            if m and m.group(1) != 'homeDir':  # skip if it's a variable reference
+                _set("nixos.home_directory", m.group(1))
+
+            # home.stateVersion
+            m = _re.search(r'home\.stateVersion\s*=\s*"([^"]+)"', content)
+            if m:
+                _set("nixos.home.stateVersion", m.group(1))
+
+            # home.file entries
+            for m in _re.finditer(r'"([^"]+)"\s*=\s*\{[^}]*source\s*=\s*\./([^;]+)', content):
+                _set(f"nixos.home.file.{m.group(1)}", m.group(2).strip())
+                print(f"  nixos.home.file.{m.group(1)} = {m.group(2).strip()}")
+
+            # systemd user services
+            for m in _re.finditer(r'systemd\.user\.services\.(\w[\w-]*)\s*=', content):
+                _set(f"nixos.service.user.{m.group(1)}", "true")
+                print(f"  nixos.service.user.{m.group(1)} = true")
+
+        # ── configuration.nix ─────────────────────────────────────────────
+        conf_path = repo / 'configuration.nix'
+        if conf_path.exists():
+            content = conf_path.read_text()
+            print("\nconfiguration.nix:")
+
+            # Portable path let-bindings
+            let_section = _re.search(
+                r'# === Portable path definitions ===\n(.*?)(?=\n\n|\n  # Port)',
+                content, _re.DOTALL
+            )
+            if let_section:
+                for m in _re.finditer(r'^\s+(\w+)\s*=\s*"(/[^"]*)";\s*$', let_section.group(1), _re.MULTILINE):
+                    _set(f"nixos.let.configuration.{m.group(1)}", m.group(2))
+                    print(f"  nixos.let.configuration.{m.group(1)} = {m.group(2)}")
+
+            # System packages
+            sys_pkg_block = _re.search(r'environment\.systemPackages\s*=\s*with pkgs;\s*\[(.*?)\];', content, _re.DOTALL)
+            if sys_pkg_block:
+                for line in sys_pkg_block.group(1).split('\n'):
+                    line = line.strip()
+                    if line.startswith('#'):
+                        continue
+                    pkg = line.rstrip(';').strip()
+                    if pkg and _re.match(r'^[a-zA-Z][\w-]*$', pkg):
+                        _set(f"nixos.pkg.system.{pkg}", "true")
+                print(f"  System packages: imported")
+
+            # Services enabled
+            for m in _re.finditer(r'services\.(\w[\w.]*?)\.enable\s*=\s*true', content):
+                _set(f"nixos.attr.services.{m.group(1)}.enable", "true")
+                print(f"  nixos.attr.services.{m.group(1)}.enable = true")
+
+            # Programs enabled
+            for m in _re.finditer(r'programs\.(\w[\w.]*?)\.enable\s*=\s*true', content):
+                _set(f"nixos.attr.programs.{m.group(1)}.enable", "true")
+
+            # system.stateVersion
+            m = _re.search(r'system\.stateVersion\s*=\s*"([^"]+)"', content)
+            if m:
+                _set("nixos.system.stateVersion", m.group(1))
+                print(f"  nixos.system.stateVersion = {m.group(1)}")
+
+            # time.timeZone
+            m = _re.search(r'time\.timeZone\s*=\s*"([^"]+)"', content)
+            if m:
+                _set("nixos.timeZone", m.group(1))
+                print(f"  nixos.timeZone = {m.group(1)}")
+
+            # Firewall TCP ports
+            tcp_block = _re.search(r'firewall\.allowedTCPPorts\s*=\s*\[(.*?)\];', content, _re.DOTALL)
+            if tcp_block:
+                ports = []
+                for line in tcp_block.group(1).split('\n'):
+                    line = _re.sub(r'#.*', '', line).strip()
+                    for p in _re.findall(r'\b(\d+)\b', line):
+                        ports.append(p)
+                _set("nixos.firewall.tcp", json.dumps(sorted(set(ports), key=int)))
+                print(f"  Firewall TCP: {len(ports)} ports")
+
+            # Networking hostname
+            m = _re.search(r'networking\.hostName\s*=\s*"([^"]+)"', content)
+            if m:
+                _set("nixos.networking.hostName", m.group(1))
+
+            # Hardware settings
+            for m in _re.finditer(r'hardware\.(\w[\w.]*?)\s*=\s*(true|false)', content):
+                _set(f"nixos.attr.hardware.{m.group(1)}", m.group(2))
+
+            # Virtualisation
+            for m in _re.finditer(r'virtualisation\.(\w[\w.]*?)\.enable\s*=\s*(true|false)', content):
+                _set(f"nixos.attr.virtualisation.{m.group(1)}.enable", m.group(2))
+
+            # Nix settings
+            m = _re.search(r'experimental-features\s*=\s*\[([^\]]+)\]', content)
+            if m:
+                features = [f.strip().strip('"') for f in m.group(1).split()]
+                _set("nixos.nix.experimental-features", json.dumps(features))
+
+            # Git daemon
+            m = _re.search(r'gitDaemon\.port\s*=\s*(\d+)', content)
+            if m:
+                _set("nixos.gitDaemon.port", m.group(1))
+
+        # ── flake.nix ─────────────────────────────────────────────────────
+        flake_path = repo / 'flake.nix'
+        if flake_path.exists():
+            content = flake_path.read_text()
+            print("\nflake.nix:")
+            for m in _re.finditer(r'^\s+(\S+)\.url\s*=\s*"([^"]+)";\s*$', content, _re.MULTILINE):
+                _set(f"nixos.flake.input.{m.group(1)}", m.group(2))
+                print(f"  nixos.flake.input.{m.group(1)} = {m.group(2)}")
+
+        # ── hosts/ ────────────────────────────────────────────────────────
+        hosts_dir = repo / 'hosts'
+        if hosts_dir.exists():
+            print("\nhosts/:")
+            for host_file in hosts_dir.glob('*.nix'):
+                host_name = host_file.stem
+                _set(f"nixos.host.{host_name}", str(host_file.relative_to(repo)))
+                print(f"  nixos.host.{host_name} = {host_file.relative_to(repo)}")
+
+        conn.commit()
+        print(f"\nImported {imported} config values from {slug}")
+        print(f"  View with: templedb nixos config-list")
+        print(f"  Generate:  templedb nixos generate-all {slug}")
+        return 0
+
+    def generate_all(self, args) -> int:
+        """Generate all NixOS config from DB: render templates + generate managed modules."""
+        slug = _resolve_slug(getattr(args, 'slug', None))
+        if not slug:
+            return 1
+
+        conn = _get_conn()
+        proj = conn.execute("SELECT id, repo_url FROM projects WHERE slug = ?", (slug,)).fetchone()
+        if not proj or not proj[1]:
+            print(f"Project '{slug}' has no repo_url set.", file=sys.stderr)
+            return 1
+
+        repo = Path(proj[1])
+        dry_run = getattr(args, 'dry_run', False)
+
+        # Determine active host
+        host = getattr(args, 'host', None)
+        if not host:
+            host_row = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+            ).fetchone()
+            host = host_row[0] if host_row else None
+
+        print(f"Generating all NixOS config for {slug}")
+        print(f"  Config dir: {repo}")
+        if host:
+            print(f"  Host: {host}")
+        print()
+
+        # Unlock checkout for modifications (will re-lock at end)
+        try:
+            from services.system_service import SystemService
+            svc = SystemService()
+            svc.unlock_checkout(slug)
+        except Exception:
+            pass
+
+        # Step 1: Update let-bindings in nix files from system_config
+        # Host-scoped keys override system-wide keys
+        nix_files = {'home': 'home.nix', 'configuration': 'configuration.nix'}
+        let_updated = 0
+
+        for prefix_name, nix_file in nix_files.items():
+            fpath = repo / nix_file
+            if not fpath.exists():
+                continue
+
+            content = fpath.read_text()
+            db_prefix = f"nixos.let.{prefix_name}."
+
+            # Get all let-binding values from DB (system-wide defaults)
+            rows = conn.execute(
+                "SELECT key, value FROM system_config WHERE key LIKE ?",
+                (f"{db_prefix}%",)
+            ).fetchall()
+
+            # Build var map with host overrides
+            var_map = {}
+            for row in rows:
+                var_name = row[0][len(db_prefix):]
+                var_map[var_name] = row[1]
+
+            # Apply host-scoped overrides (e.g., zStation.nixos.let.home.homeDir)
+            if host:
+                host_prefix = f"{host}.{db_prefix}"
+                host_rows = conn.execute(
+                    "SELECT key, value FROM system_config WHERE key LIKE ?",
+                    (f"{host_prefix}%",)
+                ).fetchall()
+                for row in host_rows:
+                    var_name = row[0][len(host_prefix):]
+                    var_map[var_name] = row[1]
+
+            if not var_map:
+                continue
+
+            for var_name, new_value in var_map.items():
+
+                # Replace in content: varName = "old_value"; → varName = "new_value";
+                import re as _re
+                pattern = _re.compile(
+                    rf'(\s+{_re.escape(var_name)}\s*=\s*)"[^"]*"(;\s*$)',
+                    _re.MULTILINE
+                )
+                new_content = pattern.sub(rf'\1"{new_value}"\2', content)
+                if new_content != content:
+                    content = new_content
+                    let_updated += 1
+
+            if not dry_run:
+                fpath.write_text(content)
+                print(f"  Updated {nix_file} ({let_updated} bindings)")
+            else:
+                print(f"  [DRY RUN] Would update {nix_file} ({let_updated} bindings)")
+
+        # Step 2: Generate nix code from DB (packages, aliases, services, firewall)
+        try:
+            from nix_codegen import update_home_nix, update_configuration_nix, update_flake_inputs
+
+            home_path = repo / 'home.nix'
+            conf_path = repo / 'configuration.nix'
+            flake_path = repo / 'flake.nix'
+
+            if flake_path.exists():
+                if not dry_run:
+                    n = update_flake_inputs(flake_path)
+                    print(f"  Updated flake.nix ({n} input URLs)")
+                else:
+                    print(f"  [DRY RUN] Would update flake.nix input URLs")
+
+            if home_path.exists():
+                if not dry_run:
+                    n = update_home_nix(home_path)
+                    print(f"  Updated home.nix ({n} managed sections)")
+                else:
+                    print(f"  [DRY RUN] Would update home.nix managed sections")
+
+            if conf_path.exists():
+                if not dry_run:
+                    n = update_configuration_nix(conf_path)
+                    print(f"  Updated configuration.nix ({n} managed sections)")
+                else:
+                    print(f"  [DRY RUN] Would update configuration.nix managed sections")
+        except Exception as e:
+            print(f"  Nix codegen: {e}")
+
+        # Step 3: Render .nix.template files (woofs config, etc.)
+        try:
+            from template_renderer import TemplateRenderer
+            renderer = TemplateRenderer()
+            machine_name = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+            ).fetchone()
+            machine = machine_name[0] if machine_name else None
+
+            if not dry_run:
+                count = renderer.render_project_templates(
+                    slug, repo, machine_name=machine
+                )
+                print(f"  Rendered {count} template(s)")
+            else:
+                templates = list(repo.rglob("*.template"))
+                print(f"  [DRY RUN] Would render {len(templates)} template(s)")
+        except Exception as e:
+            print(f"  Template rendering: {e}")
+
+        # Step 3: Run generate-templedb-inputs.py if it exists
+        inputs_script = repo / 'generate-templedb-inputs.py'
+        if inputs_script.exists():
+            if not dry_run:
+                import subprocess
+                result = subprocess.run(
+                    [sys.executable, str(inputs_script)],
+                    cwd=str(repo), capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    print(f"  Updated flake inputs")
+                else:
+                    print(f"  Flake inputs update failed: {result.stderr[:200]}")
+            else:
+                print(f"  [DRY RUN] Would run generate-templedb-inputs.py")
+
+        # Step 4: Generate managed modules (existing generate logic)
+        if not dry_run:
+            import argparse
+            gen_args = argparse.Namespace(
+                slug=slug, output=None, cathedral_path=None,
+                no_home_manager=False, include_templedb=True
+            )
+            print()
+            self.generate(gen_args)
+        else:
+            print(f"  [DRY RUN] Would generate managed modules")
+
+        # Step 5: Git stage + lock checkout read-only
+        if not dry_run:
+            import subprocess
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=str(repo), capture_output=True
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "TempleDB generate-all"],
+                cwd=str(repo), capture_output=True, check=False,
+                env={**__import__('os').environ, "GIT_AUTHOR_NAME": "TempleDB",
+                     "GIT_AUTHOR_EMAIL": "templedb@localhost",
+                     "GIT_COMMITTER_NAME": "TempleDB",
+                     "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+            )
+
+            # Lock files read-only (DB is source of truth, not checkout)
+            try:
+                from services.system_service import SystemService
+                svc = SystemService()
+                locked = svc.lock_checkout(slug)
+                print(f"\n  Committed and locked {locked} files read-only")
+                print(f"  (Edit via ~/temple/ FUSE mount or GUI, not the checkout)")
+            except Exception:
+                print(f"\n  Staged all generated files for nix evaluation")
+
+        print(f"\nNext steps:")
+        print(f"  templedb nixos rebuild {slug}")
+        return 0
+
 
 # ── Register ──────────────────────────────────────────────────────────────────
 
@@ -855,14 +1905,22 @@ def register(cli):
     subparsers.add_parser('list-configs', help='List all nixos-config projects')
     cli.commands['nixos.list-configs'] = cmd.list_configs
 
+    # nixos doctor command
+    doctor_parser = subparsers.add_parser('doctor', help='Diagnose NixOS-config activation problems')
+    doctor_parser.add_argument('slug', nargs='?', help='Limit checks to one project slug')
+    cli.commands['nixos.doctor'] = cmd.doctor
+
     # config-get / config-set / config-list
     cg = subparsers.add_parser('config-get', help='Get system configuration value')
     cg.add_argument('key')
     cli.commands['nixos.config-get'] = cmd.config_get
 
-    cs = subparsers.add_parser('config-set', help='Set system configuration value')
+    cs = subparsers.add_parser('config-set', help='Set system configuration value (host-scoped by default)')
     cs.add_argument('key')
     cs.add_argument('value')
+    cs.add_argument('--global', '-g', dest='glob', action='store_true',
+                    help='Write as global key (not scoped to active host)')
+    cs.add_argument('--host', help='Scope to a specific host (default: active host from nixos.flake_output)')
     cli.commands['nixos.config-set'] = cmd.config_set
 
     subparsers.add_parser('config-list', help='List all system configuration')
@@ -894,3 +1952,69 @@ def register(cli):
     et = subparsers.add_parser('edit-template', help='Open .nix.template files in $EDITOR')
     et.add_argument('slug', nargs='?', help='NixOS config project slug (auto-detect)')
     cli.commands['nixos.edit-template'] = cmd.nixos_edit_template
+
+    # dotfiles-apply
+    da = subparsers.add_parser('dotfiles-apply', help='Apply dotfile symlinks from manifest')
+    da.add_argument('--force', '-f', action='store_true', help='Replace existing files')
+    da.add_argument('--verbose', '-v', action='store_true', help='Show already-OK links')
+    cli.commands['nixos.dotfiles-apply'] = cmd.dotfiles_apply
+
+    # dotfiles-add
+    dadd = subparsers.add_parser('dotfiles-add', help='Add dotfile mapping')
+    dadd.add_argument('project', help='Project slug (e.g. system_config)')
+    dadd.add_argument('source', help='Relative path in checkout (e.g. .spacemacs)')
+    dadd.add_argument('target', help='Target path (e.g. ~/.spacemacs)')
+    cli.commands['nixos.dotfiles-add'] = cmd.dotfiles_add
+
+    # dotfiles-remove
+    drm = subparsers.add_parser('dotfiles-remove', help='Remove dotfile mapping')
+    drm.add_argument('project', help='Project slug')
+    drm.add_argument('source', help='Relative path in checkout')
+    cli.commands['nixos.dotfiles-remove'] = cmd.dotfiles_remove
+
+    # dotfiles-list
+    dl = subparsers.add_parser('dotfiles-list', help='List dotfile mappings and status')
+    cli.commands['nixos.dotfiles-list'] = cmd.dotfiles_list
+
+    # import-config
+    ic = subparsers.add_parser('import-config', help='Import existing NixOS config into DB')
+    ic.add_argument('slug', nargs='?', help='NixOS config project slug')
+    cli.commands['nixos.import-config'] = cmd.import_config
+
+    # generate-all
+    ga = subparsers.add_parser('generate-all', help='Generate all NixOS config from DB (templates + modules + inputs)')
+    ga.add_argument('slug', nargs='?', help='NixOS config project slug')
+    ga.add_argument('--host', help='Generate for specific host (default: active host from nixos.flake_output)')
+    ga.add_argument('--dry-run', action='store_true', help='Show what would be generated')
+    cli.commands['nixos.generate-all'] = cmd.generate_all
+
+    # host subcommands
+    hl = subparsers.add_parser('host', help='Manage NixOS host configurations')
+    host_sub = hl.add_subparsers(dest='host_command', required=True)
+
+    hlist = host_sub.add_parser('list', help='List all hosts')
+    cli.commands['nixos.host.list'] = cmd.host_list
+
+    hshow = host_sub.add_parser('show', help='Show host-specific config')
+    hshow.add_argument('hostname', help='Host name')
+    cli.commands['nixos.host.show'] = cmd.host_show
+
+    hset = host_sub.add_parser('set', help='Set host-scoped config override')
+    hset.add_argument('hostname', help='Host name')
+    hset.add_argument('key', help='Config key (will be prefixed with hostname.)')
+    hset.add_argument('value', help='Config value')
+    cli.commands['nixos.host.set'] = cmd.host_set
+
+    himp = host_sub.add_parser('import', help='Import host-specific values from .nix file')
+    himp.add_argument('hostname', help='Host name')
+    himp.add_argument('slug', nargs='?', help='NixOS config project slug')
+    cli.commands['nixos.host.import'] = cmd.host_import
+
+    hact = host_sub.add_parser('activate', help='Set this machine to a host')
+    hact.add_argument('hostname', help='Host name to activate')
+    cli.commands['nixos.host.activate'] = cmd.host_activate
+
+    hclone = host_sub.add_parser('clone', help='Clone host config to a new hostname')
+    hclone.add_argument('source', help='Source host to clone from')
+    hclone.add_argument('target', help='New host name')
+    cli.commands['nixos.host.clone'] = cmd.host_clone

@@ -38,20 +38,139 @@ class SystemService:
             ORDER BY slug
         """)
 
-    def get_project_checkout_path(self, project_slug: str) -> Optional[Path]:
-        """Get the checkout path for a project
+    def materialize_from_db(self, project_slug: str) -> Optional[Path]:
+        """Write project files from DB to checkout dir for nix evaluation.
 
-        Looks in standard TempleDB checkout locations.
+        This is the FUSE-first bridge: the DB is the source of truth,
+        but nix needs real files in a git repo. This method materializes
+        the DB content to disk and ensures git tracks it.
+
+        Returns:
+            Path to materialized checkout, or None on failure.
         """
-        # Get real user's home (works with sudo)
-        # When run with sudo, SUDO_USER contains the original user
         sudo_user = os.environ.get('SUDO_USER')
-        if sudo_user:
-            real_home = Path(f'/home/{sudo_user}')
-        else:
-            real_home = Path.home()
+        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
+        checkout_dir = real_home / ".config" / "templedb" / "checkouts" / project_slug
 
-        # Standard checkout locations
+        try:
+            conn = get_connection()
+            proj = conn.execute(
+                "SELECT id FROM projects WHERE slug = ?", (project_slug,)
+            ).fetchone()
+            if not proj:
+                return None
+
+            # Get all current files with content
+            files = conn.execute("""
+                SELECT pf.file_path, cb.content_text, cb.content_blob, cb.content_type
+                FROM project_files pf
+                JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
+                JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+                WHERE pf.project_id = ? AND pf.status = 'active'
+            """, (proj["id"],)).fetchall()
+
+            if not files:
+                logger.warning(f"No files to materialize for {project_slug}")
+                return None
+
+            checkout_dir.mkdir(parents=True, exist_ok=True)
+
+            written = 0
+            for f in files:
+                fpath = checkout_dir / f["file_path"]
+                fpath.parent.mkdir(parents=True, exist_ok=True)
+
+                if f["content_text"] is not None:
+                    fpath.write_text(f["content_text"], encoding="utf-8")
+                elif f["content_blob"] is not None:
+                    fpath.write_bytes(bytes(f["content_blob"]))
+                else:
+                    fpath.write_bytes(b"")
+                written += 1
+
+            # Ensure git repo with committed files (git daemon needs commits to serve)
+            git_dir = checkout_dir / ".git"
+            if not git_dir.exists():
+                subprocess.run(["git", "init"], cwd=str(checkout_dir),
+                               capture_output=True, check=False)
+                # Enable git daemon export
+                (git_dir / "git-daemon-export-ok").touch()
+
+            subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
+                           capture_output=True, check=False)
+
+            # Commit so git daemon can serve the content
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m",
+                 f"TempleDB materialize ({written} files)"],
+                cwd=str(checkout_dir), capture_output=True, check=False,
+                env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
+                     "GIT_AUTHOR_EMAIL": "templedb@localhost",
+                     "GIT_COMMITTER_NAME": "TempleDB",
+                     "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+            )
+
+            logger.info(f"Materialized {written} files to {checkout_dir}")
+            return checkout_dir
+
+        except Exception as e:
+            logger.error(f"Materialize failed: {e}")
+            return None
+
+    def lock_checkout(self, project_slug: str):
+        """Make checkout files read-only after generate-all.
+
+        DB is the source of truth — edits should go through FUSE (~/ temple/)
+        or the GUI, not the checkout directory.
+        """
+        sudo_user = os.environ.get('SUDO_USER')
+        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
+        checkout_dir = real_home / ".config" / "templedb" / "checkouts" / project_slug
+
+        if not checkout_dir.exists():
+            return 0
+
+        locked = 0
+        for fpath in checkout_dir.rglob("*"):
+            if fpath.is_file() and '.git' not in fpath.parts:
+                fpath.chmod(0o444)
+                locked += 1
+
+        # Final git commit
+        subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
+                       capture_output=True, check=False)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m",
+             f"TempleDB locked ({locked} files read-only)"],
+            cwd=str(checkout_dir), capture_output=True, check=False,
+            env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
+                 "GIT_AUTHOR_EMAIL": "templedb@localhost",
+                 "GIT_COMMITTER_NAME": "TempleDB",
+                 "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+        )
+        return locked
+
+    def unlock_checkout(self, project_slug: str):
+        """Make checkout files writable for generate-all to modify."""
+        sudo_user = os.environ.get('SUDO_USER')
+        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
+        checkout_dir = real_home / ".config" / "templedb" / "checkouts" / project_slug
+
+        if not checkout_dir.exists():
+            return
+        for fpath in checkout_dir.rglob("*"):
+            if fpath.is_file() and '.git' not in fpath.parts:
+                fpath.chmod(0o644)
+
+    def get_project_checkout_path(self, project_slug: str) -> Optional[Path]:
+        """Get the checkout path for a project.
+
+        If no checkout exists, auto-materializes from DB.
+        """
+        sudo_user = os.environ.get('SUDO_USER')
+        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
+
+        # Check standard locations
         checkout_paths = [
             real_home / ".config" / "templedb" / "checkouts" / project_slug,
             real_home / "projects" / project_slug,
@@ -64,7 +183,9 @@ class SystemService:
             elif path.exists() and (path / "configuration.nix").exists():
                 return path
 
-        return None
+        # No checkout found — auto-materialize from DB
+        logger.info(f"No checkout found for {project_slug}, materializing from DB...")
+        return self.materialize_from_db(project_slug)
 
     def get_config_file_path(self, checkout_path: Path) -> Optional[Path]:
         """Find the main config file (flake.nix or configuration.nix)"""
@@ -507,15 +628,20 @@ class SystemService:
         Returns:
             Dict with rebuild results including home-manager if applicable
         """
-        # Render templates before switching
-        self._render_templates(project_slug)
+        # Materialize DB content to checkout (FUSE-first: DB is source of truth)
+        checkout_path = self.materialize_from_db(project_slug)
+        if not checkout_path:
+            # Fall back to existing checkout
+            checkout_path = self.get_project_checkout_path(project_slug)
 
-        checkout_path = self.get_project_checkout_path(project_slug)
         if not checkout_path:
             raise SystemServiceError(
-                f"Could not find checkout for {project_slug}. "
-                f"Expected at ~/.config/templedb/checkouts/{project_slug}"
+                f"Could not find or materialize checkout for {project_slug}. "
+                f"Import files first: templedb project import /path/to/config"
             )
+
+        # Render templates after materialize
+        self._render_templates(project_slug)
 
         config_path = self.get_config_file_path(checkout_path)
         if not config_path:

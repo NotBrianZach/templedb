@@ -376,7 +376,9 @@ class SafeFileQueries(BaseRepository):
             return  # Has project_id filter
 
         # Check for JOIN with projects table (sometimes used for filtering)
-        if 'join projects' in sql_normalized and 'projects.id' in sql_normalized:
+        # Handles both: JOIN projects ON pf.project_id = projects.id
+        # and:          JOIN projects p ON pf.project_id = p.id
+        if 'join projects' in sql_normalized and ('project_id' in sql_normalized or 'p.slug' in sql_normalized):
             return  # Likely filtering via JOIN
 
         # Query appears unsafe

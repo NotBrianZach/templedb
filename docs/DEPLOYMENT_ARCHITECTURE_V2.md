@@ -156,13 +156,13 @@ For web services, prefer **systemd** over containers:
 **Implementation**:
 ```bash
 # Source system
-templedb cathedral export bza --output /tmp/bza.cathedral --compress
+templedb storage cathedralexport bza --output /tmp/bza.cathedral --compress
 
 # Transfer
 scp /tmp/bza.cathedral build-server:/opt/cathedral/
 
 # Build server (with TempleDB)
-templedb cathedral import /opt/cathedral/bza.cathedral
+templedb storage cathedralimport /opt/cathedral/bza.cathedral
 templedb deploy build bza --target macos-appstore
 templedb deploy build bza --target windows-store
 templedb deploy build bza --target homebrew
@@ -802,7 +802,7 @@ templedb deploy vercel woofs_projects --frontend-only --sync-secrets
 
 ```bash
 # Apply migrations on production database
-templedb migration apply woofs_projects --target production
+templedb deploy migrationapply woofs_projects --target production
 
 # Internally runs:
 # 1. Connect to DATABASE_URL (from TempleDB secrets)
@@ -1372,7 +1372,7 @@ def get_secret(key: str, project: Optional[str] = None, interactive: bool = Fals
     # 6. Error
     raise ValueError(
         f"Secret '{key}' not found. Set it via:\n"
-        f"  • TempleDB: templedb secret set {project or 'PROJECT'} {key} VALUE\n"
+        f"  • TempleDB: templedb env secretset {project or 'PROJECT'} {key} VALUE\n"
         f"  • Environment: export {key}=VALUE\n"
         f"  • File: echo '{key}=VALUE' >> .env\n"
         f"  • Config: ~/.config/{project or 'app'}/config.json"
@@ -1392,7 +1392,7 @@ export async function getSecret(key, project = null, interactive = false) {
   if (project) {
     try {
       const result = execSync(
-        `templedb secret get ${project} ${key}`,
+        `templedb env secretget ${project} ${key}`,
         { encoding: 'utf-8', stdio: 'pipe' }
       );
       if (result.trim()) return result.trim();
@@ -1437,7 +1437,7 @@ export async function getSecret(key, project = null, interactive = false) {
   // 6. Error
   throw new Error(
     `Secret '${key}' not found. Set it via:\n` +
-    `  • TempleDB: templedb secret set ${project || 'PROJECT'} ${key} VALUE\n` +
+    `  • TempleDB: templedb env secretset ${project || 'PROJECT'} ${key} VALUE\n` +
     `  • Environment: export ${key}=VALUE\n` +
     `  • File: echo '${key}=VALUE' >> .env\n` +
     `  • Config: ~/.config/${project || 'app'}/config.json`
@@ -1532,7 +1532,7 @@ myproject.cathedral
 
 ```bash
 # Export project with build artifacts
-templedb cathedral export mygame \
+templedb storage cathedralexport mygame \
   --include-builds windows,macos,linux \
   --output /tmp/mygame.cathedral
 
@@ -1540,7 +1540,7 @@ templedb cathedral export mygame \
 scp /tmp/mygame.cathedral build-server:/opt/cathedral/
 
 # Import and rebuild for Steam
-templedb cathedral import /opt/cathedral/mygame.cathedral
+templedb storage cathedralimport /opt/cathedral/mygame.cathedral
 templedb deploy steam mygame --app-id 123456
 ```
 

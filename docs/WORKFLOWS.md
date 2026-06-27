@@ -6,13 +6,13 @@ Quick reference for using TempleDB workflows with code intelligence.
 
 ```bash
 # List available workflows
-templedb mcp serve <<< '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"templedb_workflow_list"}}'
+templedb ai mcpserve <<< '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"templedb_workflow_list"}}'
 
 # Validate a workflow
-templedb mcp serve <<< '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"templedb_workflow_validate","arguments":{"workflow":"safe_deployment"}}}'
+templedb ai mcpserve <<< '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"templedb_workflow_validate","arguments":{"workflow":"safe_deployment"}}}'
 
 # Execute workflow (dry run)
-templedb mcp serve <<< '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"templedb_workflow_execute","arguments":{"workflow":"code_intelligence_bootstrap","project":"myapp","dry_run":true}}}'
+templedb ai mcpserve <<< '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"templedb_workflow_execute","arguments":{"workflow":"code_intelligence_bootstrap","project":"myapp","dry_run":true}}}'
 ```
 
 ## Available Workflows
@@ -58,7 +58,7 @@ templedb mcp serve <<< '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
 - `production_health_url` - Production health check URL
 - `previous_version` - Version to rollback to on failure
 - `test_command` - Override test command (default: pytest)
-- `deploy_backend` - nixops4 or generic (default: generic)
+- `deploy_backend` - fleet or generic (default: generic)
 
 **What it does:**
 1. Analyzes blast radius of changes
@@ -108,7 +108,7 @@ Always preview before executing:
 ```json
 {
   "variables": {
-    "deploy_backend": "nixops4",
+    "deploy_backend": "fleet",
     "nixops_network": "production-cluster"
   }
 }

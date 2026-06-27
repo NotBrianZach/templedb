@@ -327,7 +327,7 @@ class DeploymentCacheService(BaseService):
             Cache entry ID
         """
         cache_id = db_utils.execute("""
-            INSERT INTO deployment_cache (
+            INSERT OR REPLACE INTO deployment_cache (
                 project_id, target,
                 content_hash, files_hash, deps_hash,
                 cathedral_path, fhs_env_path, work_dir_path,

@@ -150,10 +150,10 @@ TempleDB already has comprehensive CLI:
 
 ```bash
 # Secrets
-templedb secret init <project> --age-recipient <key>
-templedb secret edit <project> --profile <profile>
-templedb secret export <project> --format [shell|json|yaml|dotenv]
-templedb secret print-sops <project>
+templedb env secretinit <project> --age-recipient <key>
+templedb env secretedit <project> --profile <profile>
+templedb env secretexport <project> --format [shell|json|yaml|dotenv]
+templedb env secretprint-sops <project>
 
 # Environment Variables
 templedb env add <key> <value>
@@ -394,10 +394,10 @@ PUB_KEY=$(grep "public key:" ~/.config/sops/age/keys.txt | cut -d: -f2 | xargs)
 templedb project import /path/to/project
 
 # 4. Initialize secrets
-templedb secret init my-project --profile production --age-recipient "$PUB_KEY"
+templedb env secretinit my-project --profile production --age-recipient "$PUB_KEY"
 
 # 5. Edit secrets
-templedb secret edit my-project --profile production
+templedb env secretedit my-project --profile production
 
 # 6. Set required variables
 ./prompt_missing_vars.sh my-project production
@@ -411,10 +411,10 @@ templedb secret edit my-project --profile production
 ./setup_yubikey_age.sh --init-project my-project
 
 # 2. Edit secrets (requires Yubikey)
-templedb secret edit my-project --profile prod
+templedb env secretedit my-project --profile prod
 
 # 3. Deploy (requires Yubikey)
-templedb secret export my-project --profile prod --format dotenv > .env
+templedb env secretexport my-project --profile prod --format dotenv > .env
 ./deploy.sh
 
 # 4. Check audit trail
@@ -436,7 +436,7 @@ fi
 # 2. Export secrets (age key from CI secret)
 echo "$SOPS_AGE_KEY" > /tmp/age-key.txt
 export SOPS_AGE_KEY_FILE=/tmp/age-key.txt
-templedb secret export my-project --profile ci --format dotenv > .env
+templedb env secretexport my-project --profile ci --format dotenv > .env
 
 # 3. Run tests
 npm test
@@ -480,7 +480,7 @@ templedb env ls | grep -E "DATABASE_URL|API_KEY"
 ./setup_yubikey_age.sh --init-project test-secrets
 
 # Edit secrets (requires Yubikey touch)
-templedb secret edit test-secrets --profile production
+templedb env secretedit test-secrets --profile production
 ```
 
 ### Test 3: Secrets Workflow
@@ -489,14 +489,14 @@ templedb secret edit test-secrets --profile production
 # Initialize
 age-keygen -o /tmp/test-key.txt
 KEY=$(grep "public key:" /tmp/test-key.txt | cut -d: -f2 | xargs)
-templedb secret init test-secrets --age-recipient "$KEY"
+templedb env secretinit test-secrets --age-recipient "$KEY"
 
 # Edit (add secrets)
-EDITOR=vim templedb secret edit test-secrets
+EDITOR=vim templedb env secretedit test-secrets
 
 # Export
-templedb secret export test-secrets --format yaml
-templedb secret export test-secrets --format shell
+templedb env secretexport test-secrets --format yaml
+templedb env secretexport test-secrets --format shell
 
 # Audit
 sqlite3 ~/.local/share/templedb/templedb.sqlite \

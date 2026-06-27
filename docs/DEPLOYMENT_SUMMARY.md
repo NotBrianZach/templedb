@@ -57,7 +57,7 @@ templedb deploy systemd woofs_projects --target vps
 templedb deploy vercel woofs_projects --frontend-only --sync-secrets
 
 # Database migrations
-templedb migration apply woofs_projects --target production
+templedb deploy migration apply woofs_projects --target production
 ```
 
 **Architecture**:
@@ -187,13 +187,13 @@ const STEAM_API_KEY = getSecret('STEAM_API_KEY', 'mygame');
 
 ```bash
 # Production (encrypted with age)
-templedb secret set myproject DATABASE_URL postgresql://... --env production
+templedb env secret set myproject DATABASE_URL postgresql://... --env production
 
 # Development (unencrypted)
-templedb secret set myproject DATABASE_URL sqlite:///dev.db --env development
+templedb env secret set myproject DATABASE_URL sqlite:///dev.db --env development
 
 # Steam API key
-templedb secret set mygame STEAM_API_KEY abc123 --env production
+templedb env secret set mygame STEAM_API_KEY abc123 --env production
 ```
 
 ---
@@ -204,13 +204,13 @@ templedb secret set mygame STEAM_API_KEY abc123 --env production
 
 ```bash
 # Source system
-templedb cathedral export myproject --compress --output /tmp/myproject.cathedral
+templedb storage cathedral export myproject --compress --output /tmp/myproject.cathedral
 
 # Transfer
 scp /tmp/myproject.cathedral build-server:/opt/cathedral/
 
 # Build server
-templedb cathedral import /opt/cathedral/myproject.cathedral
+templedb storage cathedral import /opt/cathedral/myproject.cathedral
 templedb deploy run myproject --target production
 ```
 
@@ -406,7 +406,7 @@ templedb deploy windows-msix bza --sign --upload
 
 # Web Services
 templedb deploy run woofs_projects --target production-vps
-templedb migration apply woofs_projects --target production
+templedb deploy migration apply woofs_projects --target production
 
 # Games (Unity)
 templedb steam init mygame --app-id 123456 --engine unity
@@ -422,12 +422,12 @@ templedb deploy build mygame --format html5
 templedb deploy itch mygame --type html5
 
 # Secrets
-templedb secret set myproject API_KEY value --env production
-templedb secret get myproject API_KEY --env production
+templedb env secret set myproject API_KEY value --env production
+templedb env secret get myproject API_KEY --env production
 
 # Cathedral
-templedb cathedral export myproject --compress
-templedb cathedral import myproject.cathedral
+templedb storage cathedral export myproject --compress
+templedb storage cathedral import myproject.cathedral
 ```
 
 ---
@@ -438,7 +438,7 @@ templedb cathedral import myproject.cathedral
 
 ```bash
 # Set the secret
-templedb secret set myproject DATABASE_URL postgresql://...
+templedb env secret set myproject DATABASE_URL postgresql://...
 
 # Or use environment variable
 export DATABASE_URL=postgresql://...

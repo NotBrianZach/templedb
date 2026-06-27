@@ -6,7 +6,7 @@ Vibe coding is TempleDB's interactive learning system that helps developers lear
 
 ```bash
 # Start a real-time vibe coding session
-templedb vibe start my_project
+templedb ai vibestart my_project
 
 # The system will:
 # 1. Launch a web-based quiz UI in your browser
@@ -76,18 +76,18 @@ The traditional quiz commands let you manually manage quizzes:
 
 ```bash
 # Start with default settings (auto-assigns port 8765-8800)
-templedb vibe start my_project
+templedb ai vibestart my_project
 
 # Specify UI mode
-templedb vibe start my_project --ui browser
-templedb vibe start my_project --ui emacs
-templedb vibe start my_project --ui terminal
+templedb ai vibestart my_project --ui browser
+templedb ai vibestart my_project --ui emacs
+templedb ai vibestart my_project --ui terminal
 
 # Manual port assignment (useful for specific setups)
-templedb vibe start my_project --port 8888
+templedb ai vibestart my_project --port 8888
 
 # Pass arguments to Claude Code
-templedb vibe start my_project -- --model opus
+templedb ai vibestart my_project -- --model opus
 ```
 
 ### Session Components
@@ -105,22 +105,22 @@ By default, TempleDB automatically finds an available port in the range 8765-880
 
 ```bash
 # Terminal 1
-templedb vibe start project_a
+templedb ai vibestart project_a
 # Auto-assigned port 8765
 
 # Terminal 2
-templedb vibe start project_b
+templedb ai vibestart project_b
 # Auto-assigned port 8766 (8765 was in use)
 
 # Terminal 3
-templedb vibe start project_c
+templedb ai vibestart project_c
 # Auto-assigned port 8767
 ```
 
 You can also specify ports manually:
 
 ```bash
-templedb vibe start my_project --port 9000
+templedb ai vibestart my_project --port 9000
 ```
 
 ### During a Session
@@ -151,10 +151,10 @@ Create a quiz from a commit:
 
 ```bash
 # Generate from latest commit
-templedb vibe generate my_project --commit abc123
+templedb ai vibegenerate my_project --commit abc123
 
 # Create with custom name and difficulty
-templedb vibe generate my_project \
+templedb ai vibegenerate my_project \
   --commit abc123 \
   --name "Authentication refactor review" \
   --difficulty hard \
@@ -165,7 +165,7 @@ templedb vibe generate my_project \
 
 ```bash
 # Add a multiple choice question
-templedb vibe add-question 42 \
+templedb ai vibeadd-question 42 \
   "What pattern is used here?" \
   "Singleton" \
   --type multiple_choice \
@@ -176,14 +176,14 @@ templedb vibe add-question 42 \
   --points 2
 
 # Add a true/false question
-templedb vibe add-question 42 \
+templedb ai vibeadd-question 42 \
   "Does this code use async/await?" \
   "true" \
   --type true_false \
   --explanation "Notice the async def and await keywords"
 
 # Add a code snippet question
-templedb vibe add-question 42 \
+templedb ai vibeadd-question 42 \
   "What will this function return?" \
   "42" \
   --type short_answer \
@@ -195,47 +195,47 @@ templedb vibe add-question 42 \
 
 ```bash
 # Take a quiz interactively
-templedb vibe take 42
+templedb ai vibetake 42
 
 # Take with developer tracking
-templedb vibe take 42 --developer-id john_doe
+templedb ai vibetake 42 --developer-id john_doe
 
 # Auto-answer mode (see questions and answers)
-templedb vibe take 42 --auto-answer
+templedb ai vibetake 42 --auto-answer
 ```
 
 ### Viewing Results
 
 ```bash
 # Show quiz results
-templedb vibe results 42
+templedb ai viberesults 42
 
 # Detailed breakdown with explanations
-templedb vibe results 42 --detailed --show-explanations
+templedb ai viberesults 42 --detailed --show-explanations
 ```
 
 ### Listing Quizzes
 
 ```bash
 # List all quizzes
-templedb vibe list
+templedb ai vibelist
 
 # Filter by project
-templedb vibe list --project my_project
+templedb ai vibelist --project my_project
 
 # Filter by status
-templedb vibe list --status completed
-templedb vibe list --status in_progress
+templedb ai vibelist --status completed
+templedb ai vibelist --status in_progress
 ```
 
 ### Tracking Progress
 
 ```bash
 # Show your learning progress
-templedb vibe progress --developer-id john_doe
+templedb ai vibeprogress --developer-id john_doe
 
 # Show all developer progress
-templedb vibe progress
+templedb ai vibeprogress
 ```
 
 ## Command Reference
@@ -245,7 +245,7 @@ templedb vibe progress
 Launch interactive vibe coding session with Claude Code.
 
 ```bash
-templedb vibe start [PROJECT] [OPTIONS] [-- CLAUDE_ARGS...]
+templedb ai vibestart [PROJECT] [OPTIONS] [-- CLAUDE_ARGS...]
 
 Arguments:
   PROJECT              Project name or slug (required)
@@ -256,10 +256,10 @@ Options:
   -- CLAUDE_ARGS       Additional arguments passed to Claude Code
 
 Examples:
-  templedb vibe start my_project
-  templedb vibe start my_project --port 8888
-  templedb vibe start my_project --ui emacs
-  templedb vibe start my_project -- --model opus
+  templedb ai vibestart my_project
+  templedb ai vibestart my_project --port 8888
+  templedb ai vibestart my_project --ui emacs
+  templedb ai vibestart my_project -- --model opus
 ```
 
 ### `vibe generate` - Create Quiz from Commit
@@ -267,7 +267,7 @@ Examples:
 Generate a new quiz session from a commit or work item.
 
 ```bash
-templedb vibe generate PROJECT [OPTIONS]
+templedb ai vibegenerate PROJECT [OPTIONS]
 
 Arguments:
   PROJECT              Project name or slug (required)
@@ -286,7 +286,7 @@ Options:
 Add a question to an existing quiz session.
 
 ```bash
-templedb vibe add-question SESSION_ID QUESTION ANSWER [OPTIONS]
+templedb ai vibeadd-question SESSION_ID QUESTION ANSWER [OPTIONS]
 
 Arguments:
   SESSION_ID           Quiz session ID
@@ -311,7 +311,7 @@ Options:
 Take a quiz interactively in the terminal.
 
 ```bash
-templedb vibe take SESSION_ID [OPTIONS]
+templedb ai vibetake SESSION_ID [OPTIONS]
 
 Arguments:
   SESSION_ID           Quiz session ID
@@ -326,7 +326,7 @@ Options:
 List quiz sessions with optional filtering.
 
 ```bash
-templedb vibe list [OPTIONS]
+templedb ai vibelist [OPTIONS]
 
 Options:
   --project PROJECT    Filter by project
@@ -339,7 +339,7 @@ Options:
 Display results for a completed quiz.
 
 ```bash
-templedb vibe results SESSION_ID [OPTIONS]
+templedb ai viberesults SESSION_ID [OPTIONS]
 
 Arguments:
   SESSION_ID           Quiz session ID
@@ -354,7 +354,7 @@ Options:
 View learning progress and statistics.
 
 ```bash
-templedb vibe progress [OPTIONS]
+templedb ai vibeprogress [OPTIONS]
 
 Options:
   --developer-id ID    Show progress for specific developer
@@ -366,7 +366,7 @@ Options:
 
 ```bash
 # Start a session
-templedb vibe start my_app
+templedb ai vibestart my_app
 
 # Claude opens, you work on a feature
 # Quiz questions appear in browser
@@ -378,15 +378,15 @@ templedb vibe start my_app
 
 ```bash
 # Terminal 1 - Working on frontend
-templedb vibe start frontend_app
+templedb ai vibestart frontend_app
 # Port 8765, browser opens at http://localhost:8765
 
 # Terminal 2 - Working on backend
-templedb vibe start backend_api
+templedb ai vibestart backend_api
 # Port 8766, browser opens at http://localhost:8766
 
 # Terminal 3 - Working on infrastructure
-templedb vibe start infra_tools
+templedb ai vibestart infra_tools
 # Port 8767, browser opens at http://localhost:8767
 ```
 
@@ -394,7 +394,7 @@ templedb vibe start infra_tools
 
 ```bash
 # Generate quiz from a specific commit
-templedb vibe generate my_project \
+templedb ai vibegenerate my_project \
   --commit a1b2c3d \
   --name "New authentication system review" \
   --difficulty hard
@@ -402,37 +402,37 @@ templedb vibe generate my_project \
 # Output: Created quiz session (ID: 15)
 
 # Add custom questions
-templedb vibe add-question 15 \
+templedb ai vibeadd-question 15 \
   "What hashing algorithm is used for passwords?" \
   "bcrypt" \
   --type short_answer \
   --file "src/auth/password.py" \
   --explanation "bcrypt is used for its adaptive cost factor"
 
-templedb vibe add-question 15 \
+templedb ai vibeadd-question 15 \
   "Is the JWT secret stored securely?" \
   "true" \
   --type true_false \
   --explanation "Secret is loaded from environment variable"
 
 # Share with team
-echo "Take the auth review quiz: templedb vibe take 15"
+echo "Take the auth review quiz: templedb ai vibetake 15"
 
 # Check who's completed it
-templedb vibe results 15 --detailed
+templedb ai viberesults 15 --detailed
 ```
 
 ### Example 4: Teaching a New Developer
 
 ```bash
 # Create learning quiz about the codebase
-templedb vibe generate my_project \
+templedb ai vibegenerate my_project \
   --name "Onboarding: Understanding the API layer" \
   --type general \
   --difficulty easy
 
 # Add questions about architecture
-templedb vibe add-question 16 \
+templedb ai vibeadd-question 16 \
   "What framework do we use for the API?" \
   "FastAPI" \
   --type short_answer \
@@ -440,10 +440,10 @@ templedb vibe add-question 16 \
   --learning-objective "Understand our tech stack"
 
 # New developer takes it
-templedb vibe take 16 --developer-id alice
+templedb ai vibetake 16 --developer-id alice
 
 # Track their progress
-templedb vibe progress --developer-id alice
+templedb ai vibeprogress --developer-id alice
 ```
 
 ## Architecture
@@ -505,13 +505,13 @@ Key tables:
 
 **Solution 1:** Let TempleDB auto-assign a port (default behavior)
 ```bash
-templedb vibe start my_project
+templedb ai vibestart my_project
 # Automatically finds available port
 ```
 
 **Solution 2:** Specify a different port manually
 ```bash
-templedb vibe start my_project --port 9000
+templedb ai vibestart my_project --port 9000
 ```
 
 **Solution 3:** Find and kill existing session
@@ -530,7 +530,7 @@ kill <PID>
 **Solution:** Enter the Nix environment first
 ```bash
 nix develop
-templedb vibe start my_project
+templedb ai vibestart my_project
 ```
 
 ### Multiple Sessions Not Working
@@ -605,12 +605,12 @@ You can integrate vibe with custom UIs:
 
 **Emacs:**
 ```bash
-templedb vibe start my_project --ui emacs
+templedb ai vibestart my_project --ui emacs
 ```
 
 **Terminal UI (coming soon):**
 ```bash
-templedb vibe start my_project --ui terminal
+templedb ai vibestart my_project --ui terminal
 ```
 
 ### WebSocket Protocol

@@ -280,10 +280,10 @@ Include it in configuration.nix for system-wide integration.
                     'content': '''
 Securely manage deployment secrets:
                     ''',
-                    'example': './templedb secret set my-project API_KEY <value> --keys primary',
+                    'example': './templedb env secret set my-project API_KEY <value> --keys primary',
                     'explanation': '''
 Encrypted with age. Available during deployment.
-Use ./templedb secret export to load in scripts.
+Use ./templedb env secret export to load in scripts.
                     '''
                 },
                 {
@@ -325,7 +325,7 @@ Add to your project's .mcp.json:
   "mcpServers": {
     "templedb": {
       "command": "./templedb",
-      "args": ["mcp", "serve"]
+      "args": ["ai", "mcp", "serve"]
     }
   }
 }''',
@@ -343,16 +343,16 @@ Key tools for Claude:
   - templedb_file_get: Read file from database
   - templedb_file_set: Write file to database
 
-See full list: ./templedb mcp serve --help
+See full list: ./templedb ai mcp serve --help
                     ''',
-                    'example': './templedb mcp serve'
+                    'example': './templedb ai mcp serve'
                 },
                 {
                     'title': 'Using MCP with Claude',
                     'content': '''
 Launch Claude with project context:
                     ''',
-                    'example': './templedb claude --from-db --project my-project',
+                    'example': './templedb ai claude --from-db --project my-project',
                     'explanation': '''
 Loads project-specific prompt from database.
 Claude can now use MCP tools to explore and modify your project.
@@ -397,10 +397,10 @@ Link commits to work items for traceability.
                     'content': '''
 Age-encrypted secrets stored in database:
                     ''',
-                    'example': './templedb secret set my-project DB_PASSWORD <value>',
+                    'example': './templedb env secret set my-project DB_PASSWORD <value>',
                     'explanation': '''
 Encrypted with age keys.
-Export for use: ./templedb secret export my-project
+Export for use: ./templedb env secret export my-project
                     '''
                 },
                 {
@@ -408,11 +408,11 @@ Export for use: ./templedb secret export my-project
                     'content': '''
 Export projects as portable bundles:
                     ''',
-                    'example': './templedb cathedral export my-project',
+                    'example': './templedb storage cathedral export my-project',
                     'explanation': '''
 Creates a .cathedral archive with all project data.
 Share projects without git history.
-Import: ./templedb cathedral import project.cathedral
+Import: ./templedb storage cathedral import project.cathedral
                     '''
                 },
                 {
@@ -442,7 +442,7 @@ Useful for understanding large codebases.
                     'content': '''
 Launch Claude with auto-generated project context:
                     ''',
-                    'example': './templedb vibe start my-project',
+                    'example': './templedb ai vibe start my-project',
                     'explanation': '''
 Launches Claude Code with project-specific context.
 Auto-generates a prompt from your project if none exists.

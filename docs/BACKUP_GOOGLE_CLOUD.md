@@ -101,7 +101,7 @@ gsutil lifecycle set lifecycle.json gs://YOUR-BUCKET-NAME
 ### Option 1: Interactive Setup
 
 ```bash
-templedb backup cloud init gcs
+templedb storage backup cloud init gcs
 ```
 
 This will guide you through creating the configuration file.
@@ -142,10 +142,10 @@ Create `~/.config/templedb/backup-gcs.json`:
 
 ```bash
 # Push backup to Google Cloud Storage
-templedb backup cloud push gcs --config ~/.config/templedb/backup-gcs.json
+templedb storage backup cloud push gcs --config ~/.config/templedb/backup-gcs.json
 
 # Or if config is in default location:
-templedb backup cloud push gcs
+templedb storage backup cloud push gcs
 ```
 
 **What happens:**
@@ -157,20 +157,20 @@ templedb backup cloud push gcs
 **Options:**
 ```bash
 # Keep local backup copy after upload
-templedb backup cloud push gcs --keep-local
+templedb storage backup cloud push gcs --keep-local
 
 # Don't cleanup old backups
-templedb backup cloud push gcs --no-cleanup
+templedb storage backup cloud push gcs --no-cleanup
 
 # Specify custom database path
-templedb backup cloud push gcs --db-path /custom/path/db.sqlite
+templedb storage backup cloud push gcs --db-path /custom/path/db.sqlite
 ```
 
 ### List Cloud Backups
 
 ```bash
 # See all backups in GCS
-templedb backup cloud status gcs --config ~/.config/templedb/backup-gcs.json
+templedb storage backup cloud status gcs --config ~/.config/templedb/backup-gcs.json
 ```
 
 Example output:
@@ -195,13 +195,13 @@ Found 5 backup(s):
 
 ```bash
 # List available backups first
-templedb backup cloud status gcs
+templedb storage backup cloud status gcs
 
 # Restore specific backup
-templedb backup cloud pull gcs BACKUP_ID
+templedb storage backup cloud pull gcs BACKUP_ID
 
 # Example:
-templedb backup cloud pull gcs gs://templedb-backups-john/templedb_backup_20240315_143022.sqlite.gz
+templedb storage backup cloud pull gcs gs://templedb-backups-john/templedb_backup_20240315_143022.sqlite.gz
 ```
 
 **Safety features:**
@@ -213,17 +213,17 @@ templedb backup cloud pull gcs gs://templedb-backups-john/templedb_backup_202403
 
 ```bash
 # Verify GCS configuration works
-templedb backup cloud test gcs --config ~/.config/templedb/backup-gcs.json
+templedb storage backup cloud test gcs --config ~/.config/templedb/backup-gcs.json
 ```
 
 ### Cleanup Old Backups
 
 ```bash
 # Remove backups older than 30 days
-templedb backup cloud cleanup gcs --days 30
+templedb storage backup cloud cleanup gcs --days 30
 
 # Remove all but most recent N backups
-templedb backup cloud cleanup gcs --keep 10
+templedb storage backup cloud cleanup gcs --keep 10
 ```
 
 ## Automation
@@ -243,11 +243,11 @@ CONFIG="$HOME/.config/templedb/backup-gcs.json"
 
 echo "[$(date)] Starting backup..." >> "$LOG_FILE"
 
-if ~/templeDB/templedb backup cloud push gcs --config "$CONFIG" >> "$LOG_FILE" 2>&1; then
+if ~/templeDB/templedb storage backup cloud push gcs --config "$CONFIG" >> "$LOG_FILE" 2>&1; then
     echo "[$(date)] ✅ Backup successful" >> "$LOG_FILE"
 
     # Cleanup old backups
-    ~/templeDB/templedb backup cloud cleanup gcs --days 30 --config "$CONFIG" >> "$LOG_FILE" 2>&1
+    ~/templeDB/templedb storage backup cloud cleanup gcs --days 30 --config "$CONFIG" >> "$LOG_FILE" 2>&1
 else
     echo "[$(date)] ❌ Backup failed" >> "$LOG_FILE"
 
@@ -286,7 +286,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/YOUR_USERNAME/templeDB/templedb backup cloud push gcs --config %h/.config/templedb/backup-gcs.json
+ExecStart=/home/YOUR_USERNAME/templeDB/templedb storage backup cloud push gcs --config %h/.config/templedb/backup-gcs.json
 StandardOutput=journal
 StandardError=journal
 
@@ -419,7 +419,7 @@ tail -f ~/.local/share/templedb/backup.log
 
 ```bash
 # Test restore without overwriting current DB
-templedb backup cloud pull gcs BACKUP_ID \
+templedb storage backup cloud pull gcs BACKUP_ID \
   --db-path /tmp/test-restore.sqlite \
   --no-safety-backup
 
@@ -489,25 +489,25 @@ gsutil mb -p YOUR_PROJECT_ID -c STANDARD -l US gs://YOUR-BUCKET-NAME
 
 ```bash
 # 1. List available backups
-templedb backup cloud status gcs
+templedb storage backup cloud status gcs
 
 # 2. Choose most recent backup
 # 3. Restore (no current DB exists, so no safety backup needed)
-templedb backup cloud pull gcs BACKUP_ID --no-safety-backup
+templedb storage backup cloud pull gcs BACKUP_ID --no-safety-backup
 ```
 
 ### Partial Corruption
 
 ```bash
 # 1. Create local backup first
-templedb backup local
+templedb storage backup local
 
 # 2. Try SQLite repair
 sqlite3 ~/.local/share/templedb/templedb.sqlite ".recover" | \
   sqlite3 recovered.sqlite
 
 # 3. If repair fails, restore from cloud
-templedb backup cloud pull gcs LATEST_BACKUP_ID
+templedb storage backup cloud pull gcs LATEST_BACKUP_ID
 ```
 
 ### Accidental Data Deletion
@@ -519,7 +519,7 @@ gsutil ls -a gs://YOUR-BUCKET-NAME/ | grep templedb_backup
 # Restore specific version
 gsutil cp gs://YOUR-BUCKET-NAME/FILE#VERSION /tmp/restore.sqlite.gz
 gunzip /tmp/restore.sqlite.gz
-templedb backup restore /tmp/restore.sqlite
+templedb storage backup restore /tmp/restore.sqlite
 ```
 
 ## Alternative: Google Drive Backup
@@ -528,10 +528,10 @@ TempleDB also supports Google Drive:
 
 ```bash
 # Initialize Google Drive
-templedb backup cloud init gdrive
+templedb storage backup cloud init gdrive
 
 # Push to Google Drive
-templedb backup cloud push gdrive
+templedb storage backup cloud push gdrive
 
 # Advantage: 15GB free storage
 # Disadvantage: Slower, less automation-friendly

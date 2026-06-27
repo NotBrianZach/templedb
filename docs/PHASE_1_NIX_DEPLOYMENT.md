@@ -343,10 +343,10 @@ Add production secrets to TempleDB:
 
 ```bash
 # Database URL
-templedb secret set woofs_projects DATABASE_URL postgresql://user:pass@db.example.com/woofs --env production
+templedb env secretset woofs_projects DATABASE_URL postgresql://user:pass@db.example.com/woofs --env production
 
 # API keys
-templedb secret set woofs_projects OPENAI_API_KEY sk-... --env production
+templedb env secretset woofs_projects OPENAI_API_KEY sk-... --env production
 
 # Other config
 templedb env set woofs_projects LOG_LEVEL info --target production
@@ -357,7 +357,7 @@ templedb env set woofs_projects LOG_LEVEL info --target production
 Add deployment target to TempleDB:
 
 ```bash
-templedb target add woofs_projects production \
+templedb deploy targetsadd woofs_projects production \
   --type native_service \
   --host vps.example.com \
   --provider self_hosted \

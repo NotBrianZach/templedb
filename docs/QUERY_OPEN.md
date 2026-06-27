@@ -11,14 +11,14 @@ Query your TempleDB projects using natural language and open matching files inst
 
 ```bash
 # Query and open files
-templedb query-open myproject "authentication code"
-templedb query-open bza "prompts that do character analysis"
+templedb search query-open myproject "authentication code"
+templedb search query-open bza "prompts that do character analysis"
 
 # Just query without opening
-templedb query myproject "config files" --json
+templedb search querymyproject "config files" --json
 
 # Dry run to see what would be opened
-templedb query-open myproject "database migrations" --dry-run
+templedb search query-open myproject "database migrations" --dry-run
 ```
 
 ### From Emacs
@@ -50,7 +50,7 @@ When running Claude in an Emacs vterm, just use natural language:
 
 ```
 You: "open the bza files with character analysis prompts"
-Claude: [uses templedb query-open automatically]
+Claude: [uses templedb search query-open automatically]
 ```
 
 Claude will detect that you want to query and open files, and use the appropriate command.
@@ -70,31 +70,31 @@ Use plain English to describe what you're looking for:
 
 ```bash
 # Find authentication-related code
-templedb query-open myapp "auth OR authentication OR login"
+templedb search query-open myapp "auth OR authentication OR login"
 
 # Find configuration
-templedb query-open myapp "config OR settings OR environment"
+templedb search query-open myapp "config OR settings OR environment"
 
 # Find specific feature
-templedb query-open myapp "password reset"
+templedb search query-open myapp "password reset"
 
 # Find by file type
-templedb query-open myapp "database migration"
+templedb search query-open myapp "database migration"
 
 # Limit results
-templedb query-open myapp "test files" --limit 5
+templedb search query-open myapp "test files" --limit 5
 
 # Don't steal focus (background opening)
-templedb query-open myapp "utility functions" --no-select
+templedb search query-open myapp "utility functions" --no-select
 ```
 
 ## Command Reference
 
-### `templedb query-open`
+### `templedb search query-open`
 
 Query and open files in your editor.
 
-**Usage**: `templedb query-open PROJECT QUERY [OPTIONS]`
+**Usage**: `templedb search query-open PROJECT QUERY [OPTIONS]`
 
 **Arguments**:
 - `PROJECT` - Project slug (e.g., "myapp", "bza")
@@ -108,17 +108,17 @@ Query and open files in your editor.
 
 **Examples**:
 ```bash
-templedb query-open myapp "authentication"
-templedb query-open bza "character analysis" --limit 3
-templedb query-open myapp "config" --dry-run
-templedb query-open myapp "tests" --no-select
+templedb search query-open myapp "authentication"
+templedb search query-open bza "character analysis" --limit 3
+templedb search query-open myapp "config" --dry-run
+templedb search query-open myapp "tests" --no-select
 ```
 
 ### `templedb query`
 
 Query files without opening them (show results only).
 
-**Usage**: `templedb query PROJECT QUERY [OPTIONS]`
+**Usage**: `templedb search queryPROJECT QUERY [OPTIONS]`
 
 **Arguments**:
 - `PROJECT` - Project slug
@@ -130,9 +130,9 @@ Query files without opening them (show results only).
 
 **Examples**:
 ```bash
-templedb query myapp "authentication"
-templedb query myapp "config" --json
-templedb query bza "prompts" --limit 50
+templedb search querymyapp "authentication"
+templedb search querymyapp "config" --json
+templedb search querybza "prompts" --limit 50
 ```
 
 ## How It Works
@@ -159,19 +159,19 @@ Basic queries use natural language, but you can also use FTS5 operators:
 **Examples**:
 ```bash
 # Exact phrase
-templedb query myapp '"user authentication"'
+templedb search querymyapp '"user authentication"'
 
 # Multiple terms (AND)
-templedb query myapp "password AND reset"
+templedb search querymyapp "password AND reset"
 
 # Alternative terms (OR)
-templedb query myapp "config OR configuration OR settings"
+templedb search querymyapp "config OR configuration OR settings"
 
 # Exclusion (NOT)
-templedb query myapp "test NOT integration"
+templedb search querymyapp "test NOT integration"
 
 # Prefix matching
-templedb query myapp "auth*"
+templedb search querymyapp "auth*"
 ```
 
 ### Editor Integration
@@ -194,12 +194,12 @@ Add to your `.bashrc` or `.zshrc`:
 
 ```bash
 # Quick query-open alias
-alias tqo='templedb query-open'
+alias tqo='templedb search query-open'
 alias tq='templedb query'
 
 # Project-specific aliases
-alias bza-query='templedb query-open bza'
-alias myapp-query='templedb query-open myapp'
+alias bza-query='templedb search query-open bza'
+alias myapp-query='templedb search query-open myapp'
 ```
 
 Then use:
@@ -246,7 +246,7 @@ When running Claude in Emacs vterm:
    - "show me the config code"
    - "find database migration files"
 
-2. **Claude detects intent**: Uses `templedb query-open` automatically
+2. **Claude detects intent**: Uses `templedb search query-open` automatically
 
 3. **Files open in Emacs**: Opens in your current Emacs instance
 
@@ -260,13 +260,13 @@ Get file paths as JSON and process them:
 
 ```bash
 # Get JSON output
-templedb query myapp "authentication" --json | jq -r '.[].file_path'
+templedb search querymyapp "authentication" --json | jq -r '.[].file_path'
 
 # Count matching files
-templedb query myapp "test" --json | jq 'length'
+templedb search querymyapp "test" --json | jq 'length'
 
 # Open with custom editor
-templedb query myapp "config" --json | \
+templedb search querymyapp "config" --json | \
   jq -r '.[].file_path' | \
   xargs code  # Opens in VS Code
 ```
@@ -283,7 +283,7 @@ PROJECT="myapp"
 QUERY="test"
 
 # Get test files as JSON
-FILES=$(templedb query "$PROJECT" "$QUERY" --json)
+FILES=$(templedb search query"$PROJECT" "$QUERY" --json)
 
 # Process each file
 echo "$FILES" | jq -r '.[].file_path' | while read -r file; do
@@ -298,7 +298,7 @@ Find modified files matching a pattern:
 
 ```bash
 # Find all modified auth files
-templedb query myapp "authentication" --json | \
+templedb search querymyapp "authentication" --json | \
   jq -r '.[].file_path' | \
   xargs git status --short
 ```
@@ -371,53 +371,53 @@ templedb query myapp "authentication" --json | \
 
 ```bash
 # All config files
-templedb query-open myapp "config OR configuration OR settings"
+templedb search query-open myapp "config OR configuration OR settings"
 
 # Specific config type
-templedb query-open myapp "database config"
-templedb query-open myapp "environment variables"
-templedb query-open myapp "logging configuration"
+templedb search query-open myapp "database config"
+templedb search query-open myapp "environment variables"
+templedb search query-open myapp "logging configuration"
 ```
 
 ### Finding Tests
 
 ```bash
 # All tests
-templedb query-open myapp "test OR tests OR spec"
+templedb search query-open myapp "test OR tests OR spec"
 
 # Specific test type
-templedb query-open myapp "unit test"
-templedb query-open myapp "integration test"
-templedb query-open myapp "authentication test"
+templedb search query-open myapp "unit test"
+templedb search query-open myapp "integration test"
+templedb search query-open myapp "authentication test"
 ```
 
 ### Finding Features
 
 ```bash
 # Authentication
-templedb query-open myapp "auth OR authentication OR login"
+templedb search query-open myapp "auth OR authentication OR login"
 
 # User management
-templedb query-open myapp "user management OR user crud"
+templedb search query-open myapp "user management OR user crud"
 
 # API endpoints
-templedb query-open myapp "api OR endpoint OR route"
+templedb search query-open myapp "api OR endpoint OR route"
 
 # Database queries
-templedb query-open myapp "database OR sql OR query"
+templedb search query-open myapp "database OR sql OR query"
 ```
 
 ### Finding by Technology
 
 ```bash
 # React components
-templedb query-open frontend "react component"
+templedb search query-open frontend "react component"
 
 # SQL migrations
-templedb query-open backend "migration OR schema"
+templedb search query-open backend "migration OR schema"
 
 # API clients
-templedb query-open myapp "http client OR api client"
+templedb search query-open myapp "http client OR api client"
 ```
 
 ## See Also

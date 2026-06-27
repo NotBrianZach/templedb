@@ -37,7 +37,7 @@ cd ~/myproject
 templedb project init
 
 # Generate and write .envrc
-templedb direnv generate --write
+templedb env direnv generate --write
 
 # Allow direnv to load it
 direnv allow
@@ -51,7 +51,7 @@ The generated `.envrc` includes a `watch_file` directive that automatically relo
 
 ```bash
 # Update a secret
-templedb secret edit myproject
+templedb env secret edit myproject
 
 # cd into the directory - direnv auto-reloads!
 cd ~/myproject
@@ -63,13 +63,13 @@ cd ~/myproject
 
 ## Commands
 
-### `templedb direnv generate`
+### `templedb env direnv generate`
 
 Generate `.envrc` output (stdout or write to file)
 
 **Syntax:**
 ```bash
-templedb direnv generate [OPTIONS] [PROJECT_SLUG]
+templedb env direnv generate [OPTIONS] [PROJECT_SLUG]
 ```
 
 **Options:**
@@ -86,37 +86,37 @@ templedb direnv generate [OPTIONS] [PROJECT_SLUG]
 **Examples:**
 ```bash
 # Preview what would be generated (stdout)
-templedb direnv generate
+templedb env direnv generate
 
 # Write to .envrc
-templedb direnv generate --write
+templedb env direnv generate --write
 
 # Use production profile explicitly
-templedb direnv generate --profile production --write
+templedb env direnv generate --profile production --write
 
 # Use development environment
-templedb direnv generate --env development --write
+templedb env direnv generate --env development --write
 
 # No Nix environment
-templedb direnv generate --no-nix --write
+templedb env direnv generate --no-nix --write
 ```
 
-### `templedb direnv diff`
+### `templedb env direnv diff`
 
 Show diff between current `.envrc` and what would be generated
 
 **Syntax:**
 ```bash
-templedb direnv diff [OPTIONS] [PROJECT_SLUG]
+templedb env direnv diff [OPTIONS] [PROJECT_SLUG]
 ```
 
 **Examples:**
 ```bash
 # See what changed since last generation
-templedb direnv diff
+templedb env direnv diff
 
 # Check diff for production profile
-templedb direnv diff --profile production
+templedb env direnv diff --profile production
 ```
 
 **Output:**
@@ -130,19 +130,19 @@ templedb direnv diff --profile production
  export API_KEY='sk-...'
 ```
 
-### `templedb direnv verify`
+### `templedb env direnv verify`
 
 Verify `.envrc` matches current TempleDB state
 
 **Syntax:**
 ```bash
-templedb direnv verify [OPTIONS] [PROJECT_SLUG]
+templedb env direnv verify [OPTIONS] [PROJECT_SLUG]
 ```
 
 **Examples:**
 ```bash
 # Check if .envrc is up-to-date
-templedb direnv verify
+templedb env direnv verify
 
 # Exit codes:
 #   0 = up-to-date
@@ -157,8 +157,8 @@ templedb direnv verify
 Or:
 ```
 ⚠️  .envrc differs from TempleDB state
-   Run 'templedb direnv diff' to see changes
-   Run 'templedb direnv --write' to update
+   Run 'templedb env direnv diff' to see changes
+   Run 'templedb env direnv --write' to update
 ```
 
 ---
@@ -180,7 +180,7 @@ watch_file /home/user/.local/share/templedb/templedb.sqlite
 
 **Disable if not wanted:**
 ```bash
-templedb direnv generate --no-auto-reload --write
+templedb env direnv generate --no-auto-reload --write
 ```
 
 ### 2. Profile Auto-Detection from Git Branch
@@ -198,19 +198,19 @@ If no `--profile` specified, auto-detects from git branch:
 ```bash
 # On main branch
 git checkout main
-templedb direnv generate --write
+templedb env direnv generate --write
 # Auto-detects profile='production'
 
 # On develop branch
 git checkout develop
-templedb direnv generate --write
+templedb env direnv generate --write
 # Auto-detects profile='development'
 ```
 
 **Override auto-detection:**
 ```bash
 # Force specific profile
-templedb direnv generate --profile staging --write
+templedb env direnv generate --profile staging --write
 ```
 
 ### 3. Environment-Specific Configuration
@@ -219,10 +219,10 @@ Use `--env` to select different environment variable sets:
 
 ```bash
 # Development environment
-templedb direnv generate --env development --write
+templedb env direnv generate --env development --write
 
 # Production environment
-templedb direnv generate --env production --write
+templedb env direnv generate --env production --write
 ```
 
 This loads different values from the `env_vars` table based on the `environment` column.
@@ -243,7 +243,7 @@ Generated `.envrc` is validated for:
 
 **Disable if needed:**
 ```bash
-templedb direnv generate --no-validate --write
+templedb env direnv generate --no-validate --write
 ```
 
 ### 5. Comprehensive Output Comments
@@ -290,7 +290,7 @@ export MIGRATION_URL='...'
 When using `--write`, existing `.envrc` is backed up:
 
 ```bash
-$ templedb direnv generate --write
+$ templedb env direnv generate --write
 ⚠️  .envrc exists, will be overwritten
    Backup saved to .envrc.backup
 ✓ Set .envrc permissions to 600 (secrets present)
@@ -315,7 +315,7 @@ Slug is auto-detected from:
 ```bash
 # No need to specify project if in project directory
 cd ~/myproject
-templedb direnv generate --write
+templedb env direnv generate --write
 # Auto-detects project="myproject"
 ```
 
@@ -333,14 +333,14 @@ cd ~/myproject
 templedb project init
 
 # 3. Configure secrets (one-time)
-templedb secret edit myproject
+templedb env secret edit myproject
 # Add secrets in YAML format:
 #   env:
 #     DATABASE_URL: postgresql://...
 #     API_KEY: sk-...
 
 # 4. Generate .envrc
-templedb direnv generate --write
+templedb env direnv generate --write
 
 # 5. Allow direnv
 direnv allow
@@ -352,7 +352,7 @@ direnv allow
 
 ```bash
 # Edit secrets
-templedb secret edit myproject
+templedb env secret edit myproject
 
 # Auto-reload happens on next cd
 cd ~/myproject
@@ -370,14 +370,14 @@ direnv reload
 # On production branch - uses production secrets
 git checkout main
 cd ~/myproject
-templedb direnv generate --write
+templedb env direnv generate --write
 direnv allow
 # Uses profile='production' (auto-detected)
 
 # On development branch - uses dev secrets
 git checkout develop
 cd ~/myproject
-templedb direnv generate --write
+templedb env direnv generate --write
 direnv allow
 # Uses profile='development' (auto-detected)
 ```
@@ -394,23 +394,23 @@ templedb env set NODE_ENV production --environment production
 templedb env set DEBUG 'false' --environment production
 
 # Generate for development
-templedb direnv generate --env development --write
+templedb env direnv generate --env development --write
 
 # Or for production
-templedb direnv generate --env production --write
+templedb env direnv generate --env production --write
 ```
 
 ### Checking for Changes
 
 ```bash
 # See if .envrc is out of date
-templedb direnv verify
+templedb env direnv verify
 
 # See what changed
-templedb direnv diff
+templedb env direnv diff
 
 # Update if needed
-templedb direnv generate --write
+templedb env direnv generate --write
 direnv allow
 ```
 
@@ -435,7 +435,7 @@ direnv allow
 
 2. **Regenerate with auto-reload:**
    ```bash
-   templedb direnv generate --write
+   templedb env direnv generate --write
    direnv allow
    ```
 
@@ -462,13 +462,13 @@ direnv allow
 
 2. **Verify secrets exist:**
    ```bash
-   templedb secret export myproject --format yaml
+   templedb env secret export myproject --format yaml
    ```
 
 3. **Re-initialize secrets:**
    ```bash
-   templedb secret init myproject --age-recipient age1...
-   templedb secret edit myproject
+   templedb env secret init myproject --age-recipient age1...
+   templedb env secret edit myproject
    ```
 
 ### Issue: Validation warnings
@@ -494,10 +494,10 @@ direnv allow
 3. **Fix or disable validation:**
    ```bash
    # Fix the issue in TempleDB, then:
-   templedb direnv generate --write
+   templedb env direnv generate --write
 
    # Or skip validation if false positive:
-   templedb direnv generate --no-validate --write
+   templedb env direnv generate --no-validate --write
    ```
 
 ### Issue: Wrong profile loaded
@@ -517,7 +517,7 @@ direnv allow
 
 2. **Override explicitly:**
    ```bash
-   templedb direnv generate --profile production --write
+   templedb env direnv generate --profile production --write
    ```
 
 3. **Check .envrc header:**
@@ -583,11 +583,11 @@ fi
 **If `.envrc` contains secrets:**
 - Add `.envrc` to `.gitignore`
 - Document the generation command in README
-- Use `templedb direnv generate --write` in setup scripts
+- Use `templedb env direnv generate --write` in setup scripts
 
 **If no secrets (only Nix environment):**
 - Can commit `.envrc`
-- Add note: "Generated by TempleDB, regenerate with: `templedb direnv generate --write`"
+- Add note: "Generated by TempleDB, regenerate with: `templedb env direnv generate --write`"
 
 ### 3. Use profile-per-branch strategy
 
@@ -600,13 +600,13 @@ BRANCH=$(git branch --show-current)
 
 case "$BRANCH" in
   main|master)
-    templedb direnv generate --profile production --write
+    templedb env direnv generate --profile production --write
     ;;
   develop|dev)
-    templedb direnv generate --profile development --write
+    templedb env direnv generate --profile development --write
     ;;
   staging*)
-    templedb direnv generate --profile staging --write
+    templedb env direnv generate --profile staging --write
     ;;
 esac
 ```
@@ -615,7 +615,7 @@ esac
 
 ```bash
 # In CI/CD or pre-deploy check
-templedb direnv verify --profile production
+templedb env direnv verify --profile production
 if [ $? -ne 0 ]; then
   echo "ERROR: .envrc out of sync with TempleDB"
   exit 1
@@ -630,8 +630,8 @@ In `README.md`:
 
 1. Install direnv: `brew install direnv` (or `apt install direnv`)
 2. Initialize project: `templedb project init`
-3. Configure secrets: `templedb secret edit myproject`
-4. Generate .envrc: `templedb direnv generate --write`
+3. Configure secrets: `templedb env secret edit myproject`
+4. Generate .envrc: `templedb env direnv generate --write`
 5. Allow direnv: `direnv allow`
 
 Now `cd` into the directory auto-loads your environment!
@@ -645,11 +645,11 @@ Now `cd` into the directory auto-loads your environment!
 
 ```bash
 # Generate .envrc (manual redirect)
-templedb direnv > .envrc
+templedb env direnv > .envrc
 
 # No auto-reload - must regenerate manually
-templedb secret edit myproject
-templedb direnv > .envrc  # Manual step!
+templedb env secret edit myproject
+templedb env direnv > .envrc  # Manual step!
 
 # No diff/verify
 # Can't see what changed
@@ -665,18 +665,18 @@ templedb direnv > .envrc  # Manual step!
 
 ```bash
 # Generate .envrc (direct write)
-templedb direnv generate --write
+templedb env direnv generate --write
 
 # Auto-reload via watch_file
-templedb secret edit myproject
+templedb env secret edit myproject
 cd ~/myproject  # Auto-reloads!
 
 # Diff and verify
-templedb direnv diff    # See changes
-templedb direnv verify  # Check sync
+templedb env direnv diff    # See changes
+templedb env direnv verify  # Check sync
 
 # Environment selection
-templedb direnv generate --env production --write
+templedb env direnv generate --env production --write
 
 # Security validation
 # Warns about injection risks

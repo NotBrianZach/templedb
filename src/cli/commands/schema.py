@@ -4,10 +4,10 @@ Schema command - introspect CLI command structure and output JSON schemas.
 
 Enables agent-loop capability discovery without documentation:
 
-    templedb schema                  # list all commands
-    templedb schema vcs              # list vcs subcommands
-    templedb schema vcs status       # full param schema for vcs status
-    templedb schema --json           # machine-readable (default for schema)
+    templedb admin schema                  # list all commands
+    templedb admin schema vcs              # list vcs subcommands
+    templedb admin schema vcs status       # full param schema for vcs status
+    templedb admin schema --json           # machine-readable (default for schema)
 """
 import json
 import sys

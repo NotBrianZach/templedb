@@ -11,6 +11,7 @@ Generates NixOS modules from TempleDB projects, including:
 """
 
 import os
+import re
 import sys
 import json
 import sqlite3
@@ -20,6 +21,50 @@ from dataclasses import dataclass, field
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
+
+# A Nix attribute name is "bare" only if it matches this; anything else
+# (e.g. a key containing a dot like "git_server.url") MUST be quoted, otherwise
+# Nix parses the dot as a nested attribute path and the value's type no longer
+# matches the option (e.g. environment.variables wants a string, not an attrset).
+_NIX_BARE_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_'-]*$")
+
+# POSIX-portable environment variable name.
+_POSIX_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def nix_attr_key(key: str) -> str:
+    """Return a key safe to use as a Nix attribute name, quoting if needed."""
+    if _NIX_BARE_IDENT.match(key):
+        return key
+    escaped = key.replace('\\', '\\\\').replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def is_valid_env_name(key: str) -> bool:
+    """Whether ``key`` can be a real shell environment variable name.
+
+    A name that isn't POSIX-valid (e.g. contains a dot, like the internal
+    ``git_server.url`` config key) is useless as an env var: NixOS would emit
+    ``export git_server.url=...`` into /etc/set-environment, which every shell
+    rejects as "not a valid identifier". Such keys are skipped, not exported.
+    """
+    return bool(_POSIX_ENV_NAME.match(key))
+
+
+def env_vars_for_nix(environment_vars):
+    """Return only the env vars safe to export, warning about any skipped."""
+    valid = {}
+    for key, value in environment_vars.items():
+        if is_valid_env_name(key):
+            valid[key] = value
+        else:
+            print(
+                f"warning: skipping environment variable {key!r}: not a valid "
+                f"POSIX name (shells cannot reference it). If this is internal "
+                f"TempleDB config, it stays in the database and is not exported.",
+                file=sys.stderr,
+            )
+    return valid
 
 from nix_env_generator import NixEnvGenerator
 
@@ -265,8 +310,11 @@ class NixOSGenerator:
         if include_managed_packages:
             managed_pkgs = self.get_managed_packages()
             for pkg in managed_pkgs:
-                # Get flake URI (defaults to local path if not specified)
-                flake_uri = pkg.get('flake_uri') or f"path:{pkg['git_path']}"
+                # Use git daemon URL (portable across machines, served from checkouts)
+                if pkg.get('flake_uri'):
+                    flake_uri = pkg['flake_uri']
+                else:
+                    flake_uri = f"git://localhost:9419/{pkg['project_slug']}"
                 pkg_ref = f"inputs.{pkg['package_name']}.packages.${{pkgs.system}}.default"
 
                 if pkg['install_scope'] == 'system':
@@ -324,15 +372,16 @@ class NixOSGenerator:
 
 '''
 
-        # Environment variables (system-wide)
-        if config.environment_vars:
+        # Environment variables (system-wide); skip names shells can't use.
+        sys_env = env_vars_for_nix(config.environment_vars)
+        if sys_env:
             module += f'''    # System environment variables
     environment.variables = {{
 '''
-            for key, value in sorted(config.environment_vars.items()):
+            for key, value in sorted(sys_env.items()):
                 # Escape special characters
                 escaped_value = value.replace('"', '\\"').replace('$', '\\$')
-                module += f'      {key} = "{escaped_value}";\n'
+                module += f'      {nix_attr_key(key)} = "{escaped_value}";\n'
 
             module += '    };\n\n'
 
@@ -422,14 +471,15 @@ class NixOSGenerator:
 
         module += ';\n\n'
 
-        # Environment variables (user-level)
-        if config.environment_vars:
+        # Environment variables (user-level); skip names shells can't use.
+        user_env = env_vars_for_nix(config.environment_vars)
+        if user_env:
             module += f'''  # User environment variables
   home.sessionVariables = {{
 '''
-            for key, value in sorted(config.environment_vars.items()):
+            for key, value in sorted(user_env.items()):
                 escaped_value = value.replace('"', '\\"').replace('$', '\\$')
-                module += f'    {key} = "{escaped_value}";\n'
+                module += f'    {nix_attr_key(key)} = "{escaped_value}";\n'
 
             module += '  };\n\n'
 

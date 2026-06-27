@@ -97,7 +97,7 @@ if age-plugin-yubikey --list 2>/dev/null | grep -q "slot"; then
         echo -e "${GREEN}Recipient:${NC} $YUBIKEY_RECIPIENT"
         echo
         echo "Use this recipient to initialize secrets:"
-        echo -e "${BLUE}  ./templedb secret init <project> --age-recipient $YUBIKEY_RECIPIENT${NC}"
+        echo -e "${BLUE}  ./templedb env secret init <project> --age-recipient $YUBIKEY_RECIPIENT${NC}"
         exit 0
     fi
 fi
@@ -188,13 +188,13 @@ echo
 echo "Next steps:"
 echo
 echo "1. Initialize secrets for a project:"
-echo -e "   ${BLUE}./templedb secret init woofs_projects --age-recipient $YUBIKEY_RECIPIENT${NC}"
+echo -e "   ${BLUE}./templedb env secret init woofs_projects --age-recipient $YUBIKEY_RECIPIENT${NC}"
 echo
 echo "2. Edit secrets (will prompt for PIN):"
-echo -e "   ${BLUE}./templedb secret edit woofs_projects${NC}"
+echo -e "   ${BLUE}./templedb env secret edit woofs_projects${NC}"
 echo
 echo "3. Export secrets:"
-echo -e "   ${BLUE}./templedb secret export woofs_projects --format shell${NC}"
+echo -e "   ${BLUE}./templedb env secret export woofs_projects --format shell${NC}"
 echo
 echo "4. Deploy (requires Yubikey + PIN):"
 echo -e "   ${BLUE}./templedb deploy run woofs_projects --target staging${NC}"

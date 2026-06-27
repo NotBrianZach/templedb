@@ -12,7 +12,7 @@ templedb domain provider add cloudflare
 templedb domain register myapp example.com --registrar cloudflare
 
 # Add deployment target
-templedb target add myapp production --provider supabase --host db.example.com
+templedb deploy targets add myapp production --provider supabase --host db.example.com
 
 # Configure DNS
 templedb domain dns configure myapp example.com --target production
@@ -182,10 +182,10 @@ templedb domain dns verify myapp example.com
 **"Target not found"**
 ```bash
 # List targets
-templedb target list --project myapp
+templedb deploy targets list --project myapp
 
 # Add missing target
-templedb target add myapp production --provider supabase --host db.example.com
+templedb deploy targets add myapp production --provider supabase --host db.example.com
 ```
 
 ## Database Schema
@@ -238,7 +238,7 @@ templedb domain provider add cloudflare
 templedb domain register myapp example.com --registrar cloudflare
 
 # 3. Add Supabase target
-templedb target add myapp production \
+templedb deploy targets add myapp production \
   --provider supabase \
   --host db.example.com \
   --project-ref abc123xyz
@@ -264,11 +264,11 @@ templedb deploy run myapp --target production
 
 ```bash
 # Production
-templedb target add myapp production --provider supabase --host prod.db.example.com
+templedb deploy targets add myapp production --provider supabase --host prod.db.example.com
 templedb domain dns configure myapp example.com --target production
 
 # Staging
-templedb target add myapp staging --provider supabase --host staging.db.example.com
+templedb deploy targets add myapp staging --provider supabase --host staging.db.example.com
 templedb domain dns configure myapp staging.example.com --target staging
 
 # Apply both

@@ -153,8 +153,8 @@ class QueryOpenCommands(Command):
         Query files using natural language and open them in editor
 
         Examples:
-          templedb query-open bza "prompts that do character analysis"
-          templedb query-open myproject "authentication code" --limit 3
+          templedb search query-open bza "prompts that do character analysis"
+          templedb search query-open myproject "authentication code" --limit 3
         """
         project_slug = args.project
         query = args.query
@@ -217,8 +217,8 @@ class QueryOpenCommands(Command):
         Query files using natural language (without opening them)
 
         Examples:
-          templedb query bza "authentication functions"
-          templedb query myproject "config files" --json
+          templedb search query bza "authentication functions"
+          templedb search query myproject "config files" --json
         """
         project_slug = args.project
         query = args.query

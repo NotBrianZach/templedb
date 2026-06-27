@@ -2,9 +2,7 @@
 """
 Vibe - Launch Claude Code with auto-generated project context
 """
-import os
 import sys
-import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -42,7 +40,7 @@ class VibeCommands(Command):
                 display = f"{slug}" + (f" ({name})" if name != slug else "")
                 print(f"  • {display}  [{file_count} files]")
             print()
-            print(f"Usage: templedb vibe start <project>")
+            print(f"Usage: templedb ai vibe start <project>")
             print()
 
         finally:
@@ -80,47 +78,66 @@ class VibeCommands(Command):
             """, (project_id,))
             extensions = {Path(row[0]).suffix for row in cursor.fetchall() if Path(row[0]).suffix}
 
+            # Get checkout path and repo_url
+            cursor.execute("SELECT repo_url FROM projects WHERE id = ?", (project_id,))
+            repo_row = cursor.fetchone()
+            repo_url = repo_row[0] if repo_row else None
+
+            checkout_dir = Path.home() / ".config" / "templedb" / "checkouts" / slug
+            checkout_exists = checkout_dir.exists()
+
+            # Check for FUSE mount
+            fuse_path = Path.home() / "temple" / slug
+            fuse_mounted = fuse_path.exists()
+
             prompt_text = f"""# {name or slug} - Project Context
 
-## Session Rules
+## Rules
 
-**MCP Tool Usage Policy**
-
-1. MCP tools ALWAYS preferred over bash commands
-2. Check available tools BEFORE every operation
-3. Bash is ONLY for actual shell operations (npm, docker, system commands)
-4. For TempleDB operations: Use `templedb_*` MCP tools
-5. For file operations: Use Read/Write/Edit/Grep/Glob tools
-
-**Common mistakes to avoid:**
-- `bash sqlite3 ~/.local/share/templedb/templedb.sqlite` → Use `templedb_query` MCP tool
-- `bash ./templedb project list` → Use `templedb_project_list` MCP tool
-- `bash ./templedb vcs status` → Use `templedb_vcs_status` MCP tool
-- `bash cat file.txt` → Use `Read` tool
-- `bash grep pattern` → Use `Grep` tool
+1. **Read files** from FUSE mount at `~/temple/{slug}/` or use Claude's Read/Grep/Glob tools on that path
+2. **Write files** via FUSE mount (`~/temple/{slug}/`) — writes go to DB and auto-stage in VCS
+3. **TempleDB operations**: use `templedb_cli` MCP tool (e.g. `templedb_cli({{command: "vcs status {slug}"}})`)
+4. **SQL queries**: use `templedb_query` MCP tool
+5. **DO NOT** use `git` commands — use `templedb publish` and `templedb vcs` instead
+6. **DO NOT** edit files in `~/.config/templedb/checkouts/` — that's read-only, auto-generated
 
 ---
 
-You are working on the **{name or slug}** project.
+## Project: {name or slug}
+- Slug: `{slug}`
+- Files: {file_count}
+- Types: {', '.join(sorted(extensions)[:10]) if extensions else 'Unknown'}
+{f'- FUSE: `{fuse_path}/`' if fuse_mounted else '- FUSE: not mounted (run: templedb mount ~/temple)'}
 
-## Project Information
-- Project slug: {slug}
-- Total files: {file_count}
+## Workflow
 
-## Primary file types
-{', '.join(sorted(extensions)[:10]) if extensions else 'Unknown'}
+```bash
+# Edit via FUSE (auto-stages)
+vim ~/temple/{slug}/src/file.py
 
-## Instructions
-- Focus all assistance on this project ({slug})
-- When asked about files, refer to files in this project
-- Use project-specific context when answering questions
-- This is NOT the TempleDB project itself - this is a separate project tracked by TempleDB
+# Or commit + push in one step
+templedb publish run {slug} -m "description"
 
-## Getting Started
-You can help with:
-- Understanding the codebase structure
-- Writing new features
-- Fixing bugs
+# Individual steps if needed
+templedb vcs status {slug} --refresh
+templedb vcs add -p {slug} --all
+templedb vcs commit -p {slug} -m "msg"
+
+# Build with nix
+templedb publish build {slug}
+
+# NixOS config changes
+templedb nixos config-set <key> <value>
+templedb nixos generate-all
+```
+
+## MCP Tools Available
+- `templedb_cli` — run any CLI command (e.g. `vcs status {slug}`, `graph search X`)
+- `templedb_query` — SQL against the database
+- `templedb_project_list/show` — project info
+- `templedb_vcs_status/commit` — VCS operations
+- `templedb_graph_search` — cross-project search
+- `templedb_config_get/set` — system config
 - Refactoring code
 - Reviewing changes
 
@@ -140,6 +157,9 @@ What would you like to work on?
 
     def start(self, args) -> int:
         """Launch Claude Code with project context"""
+        from types import SimpleNamespace
+        from .claude import ClaudeCommands
+
         project = args.project if hasattr(args, 'project') and args.project else None
 
         if not project:
@@ -147,17 +167,15 @@ What would you like to work on?
 
         self._ensure_project_prompt(project)
 
-        templedb_path = Path(__file__).parent.parent.parent.parent / "templedb"
-        cmd = [str(templedb_path), "claude", "--from-db", "--project", project]
-
-        if hasattr(args, 'claude_args') and args.claude_args:
-            cmd.extend(args.claude_args)
-
-        try:
-            os.execvp(cmd[0], cmd)
-        except Exception as e:
-            print(f"Error launching Claude: {e}", file=sys.stderr)
-            return 1
+        claude_args = list(args.claude_args) if getattr(args, 'claude_args', None) else []
+        ns = SimpleNamespace(
+            from_db=True,
+            project=project,
+            template=None,
+            claude_args=claude_args,
+            dry_run=False,
+        )
+        return ClaudeCommands().launch_claude(ns)
 
 
 def register(cli):

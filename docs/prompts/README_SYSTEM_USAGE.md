@@ -140,7 +140,7 @@ templedb_readme_generate_index({
 ## Related Documentation
 
 - **[Nix Setup Guide](../NIX_SETUP.md)** - Get started with Nix development
-- **[Deployment Guide](../DEPLOYMENT.md)** - Deploy with NixOps4
+- **[Deployment Guide](../DEPLOYMENT.md)** - Deploy with Fleet
 - **[Flake Configuration](../FLAKE_SCHEMA.md)** - Understanding flake.nix
 ```
 
@@ -229,7 +229,7 @@ templedb_readme_list({
     "project_slug": "templedb",
     "file_path": "docs/DEPLOYMENT.md",
     "title": "Deployment Guide",
-    "description": "This guide explains deployment with NixOps4",
+    "description": "This guide explains deployment with Fleet",
     "category": "deployment",
     "topics": "nix, nixos, deployment",
     "auto_index": 1,
@@ -277,7 +277,7 @@ templedb_readme_verify_links({ project: "myproject" })
 // 1. Create README with topics
 const content = `# Deployment Guide
 
-This guide explains how to deploy TempleDB services with NixOps4.
+This guide explains how to deploy TempleDB services with Fleet.
 
 ## Prerequisites
 ...
@@ -289,7 +289,7 @@ templedb_readme_create({
   title: "Deployment Guide",
   content: content,
   category: "deployment",
-  topics: ["nix", "nixos", "deployment", "nixops4"]
+  topics: ["nix", "nixos", "deployment", "fleet"]
 })
 
 // 2. Get the README ID from the response
@@ -398,7 +398,7 @@ INSERT INTO readme_index_templates (
 Use standardized topic tags across all documentation:
 - Core: `nix`, `deployment`, `vcs`, `api`, `database`
 - Features: `workflow`, `secrets`, `environment`, `configuration`
-- Tools: `nixops4`, `cathedral`, `mcp`
+- Tools: `fleet`, `cathedral`, `mcp`
 
 ### 2. **Hierarchical Categories**
 - `setup` - Getting started, installation

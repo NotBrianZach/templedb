@@ -114,16 +114,16 @@ init_project() {
 
   # Initialize secrets
   echo ""
-  echo "🔨 Running: templedb secret init $PROJECT --profile $profile --age-recipient $RECIPIENT"
-  templedb secret init "$PROJECT" --profile "$profile" --age-recipient "$RECIPIENT"
+  echo "🔨 Running: templedb env secret init $PROJECT --profile $profile --age-recipient $RECIPIENT"
+  templedb env secret init "$PROJECT" --profile "$profile" --age-recipient "$RECIPIENT"
 
   echo ""
   echo "✅ Secrets initialized successfully!"
   echo ""
   echo "Next steps:"
-  echo "  1. Edit secrets: templedb secret edit $PROJECT --profile $profile"
+  echo "  1. Edit secrets: templedb env secret edit $PROJECT --profile $profile"
   echo "     (Will require Yubikey touch)"
-  echo "  2. Export secrets: templedb secret export $PROJECT --profile $profile"
+  echo "  2. Export secrets: templedb env secret export $PROJECT --profile $profile"
   echo "     (Will require Yubikey touch)"
   echo ""
   echo "⚠️  IMPORTANT: All secret operations will now require your Yubikey to be connected!"

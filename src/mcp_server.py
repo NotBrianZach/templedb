@@ -104,85 +104,29 @@ class MCPServer:
         # Default project context (for context switching feature)
         self._default_project = None
 
-        # Register available tools
+        # ── Core MCP tools (minimal set — use templedb_cli for everything else) ──
         self.tools = {
+            # Universal CLI wrapper — covers ALL commands
+            "templedb_cli": self.tool_cli,
+            # Direct DB query (can't do via CLI)
+            "templedb_query": self.tool_query,
+            # High-frequency project operations
             "templedb_project_list": self.tool_project_list,
             "templedb_project_show": self.tool_project_show,
-            "templedb_project_import": self.tool_project_import,
-            "templedb_project_sync": self.tool_project_sync,
-            "templedb_query": self.tool_query,
-            "templedb_context_generate": self.tool_context_generate,
-            "templedb_commit_list": self.tool_commit_list,
-            "templedb_commit_create": self.tool_commit_create,
-            "templedb_search_files": self.tool_search_files,
-            "templedb_search_content": self.tool_search_content,
-            # VCS operations
+            # VCS (used constantly during coding sessions)
             "templedb_vcs_status": self.tool_vcs_status,
-            "templedb_vcs_add": self.tool_vcs_add,
-            "templedb_vcs_reset": self.tool_vcs_reset,
             "templedb_vcs_commit": self.tool_vcs_commit,
-            "templedb_vcs_log": self.tool_vcs_log,
-            "templedb_vcs_edit": self.tool_vcs_edit,
-            "templedb_vcs_discard": self.tool_vcs_discard,
-            "templedb_vcs_diff": self.tool_vcs_diff,
-            "templedb_vcs_branch": self.tool_vcs_branch,
-            # File operations
-            "templedb_file_get": self.tool_file_get,
-            "templedb_file_set": self.tool_file_set,
-            # Deployment operations
-            "templedb_deploy": self.tool_deploy,
-            "templedb_env_get": self.tool_env_get,
-            "templedb_env_set": self.tool_env_set,
-            "templedb_env_list": self.tool_env_list,
-            # System configuration management
+            # Context generation for sessions
+            "templedb_context_generate": self.tool_context_generate,
+            # Cross-project search (unique to TempleDB)
+            "templedb_graph_search": self.tool_graph_search,
+            # System config (quick get/set without CLI string composition)
             "templedb_config_get": self.tool_config_get,
             "templedb_config_set": self.tool_config_set,
-            "templedb_config_list": self.tool_config_list,
-            "templedb_config_delete": self.tool_config_delete,
-            # Secret management operations
-            "templedb_secret_list": self.tool_secret_list,
-            "templedb_secret_export": self.tool_secret_export,
-            "templedb_secret_show_keys": self.tool_secret_show_keys,
-            # Cathedral package operations
-            "templedb_cathedral_export": self.tool_cathedral_export,
-            "templedb_cathedral_import": self.tool_cathedral_import,
-            "templedb_cathedral_inspect": self.tool_cathedral_inspect,
-            # NixOps4 deployment orchestration
-            "templedb_nixops4_network_create": self.tool_nixops4_network_create,
-            "templedb_nixops4_network_list": self.tool_nixops4_network_list,
-            "templedb_nixops4_network_info": self.tool_nixops4_network_info,
-            "templedb_nixops4_machine_add": self.tool_nixops4_machine_add,
-            "templedb_nixops4_machine_list": self.tool_nixops4_machine_list,
-            "templedb_nixops4_deploy": self.tool_nixops4_deploy,
-            "templedb_nixops4_status": self.tool_nixops4_status,
-            # Code Intelligence (Phase 1.7)
-            "templedb_code_search": self.tool_code_search,
-            "templedb_code_show_symbol": self.tool_code_show_symbol,
-            "templedb_code_show_clusters": self.tool_code_show_clusters,
-            "templedb_code_impact_analysis": self.tool_code_impact_analysis,
-            "templedb_code_extract_symbols": self.tool_code_extract_symbols,
-            "templedb_code_build_graph": self.tool_code_build_graph,
-            "templedb_code_detect_clusters": self.tool_code_detect_clusters,
-            "templedb_code_index_search": self.tool_code_index_search,
-            # Workflow Orchestration (Phase 2.2)
-            "templedb_workflow_execute": self.tool_workflow_execute,
-            "templedb_workflow_status": self.tool_workflow_status,
-            "templedb_workflow_list": self.tool_workflow_list,
-            "templedb_workflow_validate": self.tool_workflow_validate,
-            # Context management
-            "templedb_context_set_default": self.tool_context_set_default,
-            "templedb_context_get_default": self.tool_context_get_default,
-            # Schema exploration
-            "templedb_schema_explore": self.tool_schema_explore,
-            # README cross-reference system
-            "templedb_readme_scan": self.tool_readme_scan,
-            "templedb_readme_create": self.tool_readme_create,
-            "templedb_readme_add_topic": self.tool_readme_add_topic,
-            "templedb_readme_add_reference": self.tool_readme_add_reference,
-            "templedb_readme_generate_index": self.tool_readme_generate_index,
-            "templedb_readme_find_related": self.tool_readme_find_related,
-            "templedb_readme_verify_links": self.tool_readme_verify_links,
-            "templedb_readme_list": self.tool_readme_list,
+            # Deploy pipeline (triggers, rollback, multi-target)
+            "templedb_deploy": self.tool_deploy,
+            # Secret/key management
+            "templedb_secret": self.tool_secret,
         }
 
     def _get_db_connection(self):
@@ -296,1290 +240,194 @@ class MCPServer:
         }
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
-        """Return MCP tool definitions"""
+        """Return MCP tool definitions — minimal core set.
+
+        Only 10 tools exposed. Use templedb_cli for everything else.
+        This saves ~6000 context tokens vs the old 77-tool set.
+        """
         return [
             {
-                "name": "templedb_project_list",
-                "description": "List all projects tracked in TempleDB. Returns project names, IDs, slugs, and repository metadata.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            {
-                "name": "templedb_project_show",
-                "description": "Show detailed information about a specific project including file counts, commits, and metadata.",
+                "name": "templedb_cli",
+                "description": "Run any TempleDB CLI command. Covers ALL TempleDB operations: nixos, graph, sync, network, backup, deploy, vcs, env, secret, config, mount, etc. Returns stdout/stderr/exit_code. Examples: 'project list', 'vcs status myproject --refresh', 'nixos host clone src dest', 'graph who-uses SUPABASE_URL', 'backup gcs', 'sync status'.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project": {
+                        "command": {
                             "type": "string",
-                            "description": "Project name or slug"
+                            "description": "CLI command and arguments (without 'templedb' prefix)"
                         }
                     },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_project_import",
-                "description": "Import a repository into TempleDB. Clones the repository and indexes all files for database-native tracking.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "repo_url": {
-                            "type": "string",
-                            "description": "Repository URL (http/https/ssh format)"
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "Optional project name (defaults to repo name)"
-                        }
-                    },
-                    "required": ["repo_url"]
-                }
-            },
-            {
-                "name": "templedb_project_sync",
-                "description": "Sync project with filesystem - scan for new/modified/deleted files and update database.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        }
-                    },
-                    "required": ["project"]
+                    "required": ["command"]
                 }
             },
             {
                 "name": "templedb_query",
-                "description": "Execute SQL query against TempleDB. Use for complex queries across projects, files, commits.",
+                "description": "Execute a read-only SQL query against the TempleDB SQLite database. For exploring data, checking state, or custom analysis.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "SQL query to execute"
-                        },
-                        "format": {
-                            "type": "string",
-                            "enum": ["json", "table", "csv"],
-                            "description": "Output format (default: json)"
-                        }
+                        "sql": {"type": "string", "description": "SQL query to execute (SELECT only)"},
+                        "params": {"type": "array", "items": {"type": "string"}, "description": "Query parameters"}
                     },
-                    "required": ["query"]
+                    "required": ["sql"]
                 }
             },
             {
-                "name": "templedb_context_generate",
-                "description": "Generate LLM context for a project - includes schema, file tree, and key files.",
+                "name": "templedb_project_list",
+                "description": "List all projects tracked in TempleDB with file counts and metadata.",
+                "inputSchema": {"type": "object", "properties": {}, "required": []}
+            },
+            {
+                "name": "templedb_project_show",
+                "description": "Show detailed information about a specific project.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project": {
                             "type": "string",
                             "description": "Project name or slug"
-                        },
-                        "max_files": {
-                            "type": "integer",
-                            "description": "Maximum number of files to include (default: 50)"
                         }
                     },
                     "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_commit_list",
-                "description": "List recent commits for a project with messages and metadata.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Number of commits to return (default: 20)"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_commit_create",
-                "description": "Record a commit in TempleDB with ACID transaction. This tracks commits in the database for version control. Provide the commit hash from the underlying VCS, commit message, and project. TempleDB uses database-native version control.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "commit_hash": {
-                            "type": "string",
-                            "description": "VCS commit hash (SHA)"
-                        },
-                        "message": {
-                            "type": "string",
-                            "description": "Commit message"
-                        },
-                        "session_id": {
-                            "type": "integer",
-                            "description": "Optional agent session ID to associate"
-                        }
-                    },
-                    "required": ["project", "commit_hash", "message"]
-                }
-            },
-            {
-                "name": "templedb_search_files",
-                "description": "Search for files by path pattern across all projects or specific project.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": {
-                            "type": "string",
-                            "description": "Search pattern (SQL LIKE syntax, e.g. '%.py' or '%test%')"
-                        },
-                        "project": {
-                            "type": "string",
-                            "description": "Optional project to limit search"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum results (default: 50)"
-                        }
-                    },
-                    "required": ["pattern"]
-                }
-            },
-            {
-                "name": "templedb_search_content",
-                "description": "Search file contents across projects. Uses full-text search if available.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search term or phrase"
-                        },
-                        "project": {
-                            "type": "string",
-                            "description": "Optional project to limit search"
-                        },
-                        "file_pattern": {
-                            "type": "string",
-                            "description": "Optional file pattern to filter (e.g. '%.py')"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum results (default: 50)"
-                        }
-                    },
-                    "required": ["query"]
                 }
             },
             {
                 "name": "templedb_vcs_status",
-                "description": "Show working directory status for a project. This is the database-native equivalent of checking uncommitted changes. Shows staged, modified, and untracked files, as well as checkout mode (read-only or writable edit mode) and edit session information.",
+                "description": "Show VCS working directory status for a project (staged, modified, added, deleted files).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        }
+                        "project": {"type": "string", "description": "Project slug"},
+                        "refresh": {"type": "boolean", "description": "Re-scan filesystem for changes"}
                     },
                     "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_vcs_add",
-                "description": "Stage files for commit in TempleDB. Use this to add files to the staging area before committing. This is database-native staging, not git.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "files": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "List of file paths to stage. Pass an empty array or [\".\"] to stage all changes."
-                        }
-                    },
-                    "required": ["project", "files"]
-                }
-            },
-            {
-                "name": "templedb_vcs_reset",
-                "description": "Unstage files from the staging area. Removes files from staging without discarding changes.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "files": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "List of file paths to unstage (use '.' for all)"
-                        }
-                    },
-                    "required": ["project", "files"]
                 }
             },
             {
                 "name": "templedb_vcs_commit",
-                "description": "Create a commit in TempleDB with ACID transaction. This commits staged changes with a message and author. Database-native commit with full transaction safety. Automatically ends any active edit session and returns checkout to read-only mode.",
+                "description": "Create a VCS commit for staged changes in a project.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "message": {
-                            "type": "string",
-                            "description": "Commit message"
-                        },
-                        "author": {
-                            "type": "string",
-                            "description": "Author name and email (e.g. 'Name <email@example.com>')"
-                        },
-                        "all": {
-                            "type": "boolean",
-                            "description": "Stage all modified files before committing (default: false)"
-                        }
+                        "project": {"type": "string", "description": "Project slug"},
+                        "message": {"type": "string", "description": "Commit message"},
+                        "author": {"type": "string", "description": "Author name"},
+                        "stage_all": {"type": "boolean", "description": "Stage all changes before committing"}
                     },
-                    "required": ["project", "message", "author"]
+                    "required": ["project", "message"]
                 }
             },
             {
-                "name": "templedb_vcs_log",
-                "description": "Show commit history for a project. View the version control log with commits, messages, and timestamps.",
+                "name": "templedb_context_generate",
+                "description": "Generate LLM context for a project — file listing, structure, key metadata.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Number of commits to show (default: 20)"
-                        }
+                        "project": {"type": "string", "description": "Project slug"}
                     },
                     "required": ["project"]
                 }
             },
             {
-                "name": "templedb_vcs_diff",
-                "description": "Show differences between file versions. Compare working directory with staged/committed versions.",
+                "name": "templedb_graph_search",
+                "description": "Fuzzy search across ALL projects, files, env vars, secrets, commits, symbols, and config. Returns categorized results.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "file": {
-                            "type": "string",
-                            "description": "Optional specific file path to diff"
-                        }
+                        "query": {"type": "string", "description": "Search query"}
                     },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_vcs_branch",
-                "description": "List or create branches in TempleDB. Manage version control branches with database transactions.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "Optional branch name to create"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_vcs_edit",
-                "description": "Enter edit mode for a project checkout. Makes the checkout writable and starts an edit session. Checkouts are read-only by default; use this to enable editing. Use vcs_commit to save changes or vcs_discard to revert.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "reason": {
-                            "type": "string",
-                            "description": "Optional reason for entering edit mode (for tracking)"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_vcs_discard",
-                "description": "Discard uncommitted changes and return to read-only mode. Reverts the checkout to the last committed state and ends the edit session. Use --force to discard without confirmation.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "force": {
-                            "type": "boolean",
-                            "description": "Force discard without confirmation (default: false)"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_file_get",
-                "description": "Get file content as string from TempleDB. Returns file content from TempleDB-tracked file. Use this to read files before editing them with file_set.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "file_path": {
-                            "type": "string",
-                            "description": "Path to file within project"
-                        }
-                    },
-                    "required": ["project", "file_path"]
-                }
-            },
-            {
-                "name": "templedb_file_set",
-                "description": "Set file content from string. Writes content to file in project working directory. Optionally stages the file after writing. Note: Checkout must be in edit mode (use vcs_edit) to write files.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "file_path": {
-                            "type": "string",
-                            "description": "Path to file within project"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Content to write to file"
-                        },
-                        "stage": {
-                            "type": "boolean",
-                            "description": "Whether to stage file after writing (default: false)"
-                        }
-                    },
-                    "required": ["project", "file_path", "content"]
-                }
-            },
-            {
-                "name": "templedb_deploy",
-                "description": "Deploy a project from TempleDB to a deployment target. Executes deployment orchestration including migrations, builds, and environment setup.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "target": {
-                            "type": "string",
-                            "description": "Deployment target name (e.g., 'production', 'staging')"
-                        },
-                        "dry_run": {
-                            "type": "boolean",
-                            "description": "If true, show what would be deployed without executing (default: false)"
-                        },
-                        "only": {
-                            "type": "string",
-                            "enum": ["frontend", "functions", "migrations", "secrets"],
-                            "description": "Deploy only a specific component instead of the full stack"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_env_get",
-                "description": "Get an environment variable value for a project. Retrieves configuration from TempleDB database.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "key": {
-                            "type": "string",
-                            "description": "Environment variable name"
-                        }
-                    },
-                    "required": ["project", "key"]
-                }
-            },
-            {
-                "name": "templedb_env_set",
-                "description": "Set an environment variable for a project. Stores configuration in TempleDB database with optional encryption.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "key": {
-                            "type": "string",
-                            "description": "Environment variable name"
-                        },
-                        "value": {
-                            "type": "string",
-                            "description": "Environment variable value"
-                        },
-                        "target": {
-                            "type": "string",
-                            "description": "Optional deployment target (e.g., 'production', 'development')"
-                        }
-                    },
-                    "required": ["project", "key", "value"]
-                }
-            },
-            {
-                "name": "templedb_env_list",
-                "description": "List all environment variables for a project. Shows configuration stored in TempleDB.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "target": {
-                            "type": "string",
-                            "description": "Optional filter by deployment target"
-                        }
-                    },
-                    "required": ["project"]
+                    "required": ["query"]
                 }
             },
             {
                 "name": "templedb_config_get",
-                "description": "Get a system configuration value (simple key-value store)",
+                "description": "Get a system_config value by key.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "key": {
-                            "type": "string",
-                            "description": "Configuration key (e.g., 'nginx.workers', 'woofs.enable', 'nixos.hostname')"
-                        }
+                        "key": {"type": "string", "description": "Config key (e.g. 'nixos.flake_output')"}
                     },
                     "required": ["key"]
                 }
             },
             {
                 "name": "templedb_config_set",
-                "description": "Set a system configuration value (simple key-value store)",
+                "description": "Set a system_config key-value pair. Host-scoped by default (prefixes active host). Use scope='global' for keys shared across all hosts.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "key": {
-                            "type": "string",
-                            "description": "Configuration key (e.g., 'nixos.hostname', 'nixos.username', 'templedb.executable_path')"
-                        },
-                        "value": {
-                            "type": "string",
-                            "description": "Configuration value"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Optional description of this config value"
-                        }
+                        "key": {"type": "string", "description": "Config key"},
+                        "value": {"type": "string", "description": "Config value"},
+                        "scope": {"type": "string", "enum": ["host", "global"], "description": "Scope: 'host' (default, prefixes active host) or 'global'"},
+                        "host": {"type": "string", "description": "Target a specific host (default: active host from nixos.flake_output)"}
                     },
                     "required": ["key", "value"]
                 }
             },
             {
-                "name": "templedb_config_list",
-                "description": "List system configuration values with optional key pattern filter",
+                "name": "templedb_deploy",
+                "description": "Deploy pipeline operations: run deployments, manage triggers (auto-deploy on commit), list history, rollback. Supports multi-target and commit-specific deploys.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "key_pattern": {
-                            "type": "string",
-                            "description": "Filter by key pattern (SQL LIKE syntax, e.g., 'nixos%' for all nixos keys)"
-                        }
+                        "action": {"type": "string", "enum": ["run", "status", "history", "rollback", "trigger_list", "trigger_add", "trigger_remove", "notify_list"], "description": "Deploy action"},
+                        "project": {"type": "string", "description": "Project slug"},
+                        "target": {"type": "string", "description": "Deployment target (e.g., production, staging)"},
+                        "commit": {"type": "string", "description": "Specific commit hash to deploy (for 'run')"},
+                        "branch": {"type": "string", "description": "Branch pattern (for trigger_add) or branch to deploy from"},
+                        "all_targets": {"type": "boolean", "description": "Deploy to all targets (for 'run')"},
+                        "dry_run": {"type": "boolean", "description": "Simulate without deploying"},
+                        "trigger_id": {"type": "integer", "description": "Trigger ID (for trigger_remove)"}
                     },
-                    "required": []
+                    "required": ["action"]
                 }
             },
             {
-                "name": "templedb_config_delete",
-                "description": "Delete a system configuration value (simple key-value store)",
+                "name": "templedb_secret",
+                "description": "Secret and key management: set/get/list secrets, manage encryption keys, export for deployment.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "key": {
-                            "type": "string",
-                            "description": "Configuration key to delete"
-                        }
+                        "action": {"type": "string", "enum": ["get", "set", "list", "delete", "export", "key_list", "key_info", "key_test"], "description": "Secret action"},
+                        "project": {"type": "string", "description": "Project slug"},
+                        "name": {"type": "string", "description": "Secret name"},
+                        "value": {"type": "string", "description": "Secret value (for 'set')"},
+                        "keys": {"type": "string", "description": "Comma-separated encryption key names (for 'set')"},
+                        "format": {"type": "string", "enum": ["shell", "dotenv", "json", "yaml"], "description": "Export format"},
+                        "key_name": {"type": "string", "description": "Key name (for key_info, key_test)"}
                     },
-                    "required": ["key"]
-                }
-            },
-            {
-                "name": "templedb_secret_list",
-                "description": "List secrets for a project. Shows which secrets exist and their encryption status. Does not decrypt secret values.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "profile": {
-                            "type": "string",
-                            "description": "Secret profile (default: 'default')"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_secret_export",
-                "description": "Export and decrypt secrets for a project in various formats (shell, yaml, json, dotenv). Requires decryption keys to be available.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "profile": {
-                            "type": "string",
-                            "description": "Secret profile (default: 'default')"
-                        },
-                        "format": {
-                            "type": "string",
-                            "enum": ["shell", "yaml", "json", "dotenv"],
-                            "description": "Output format (default: shell)"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_secret_show_keys",
-                "description": "Show which encryption keys protect a secret. Lists key names, types, and status.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug"
-                        },
-                        "profile": {
-                            "type": "string",
-                            "description": "Secret profile (default: 'default')"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_cathedral_export",
-                "description": "Export a project as a .cathedral package (portable bundle with files, VCS history, and metadata).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug to export"
-                        },
-                        "output_dir": {
-                            "type": "string",
-                            "description": "Output directory for package (default: current directory)"
-                        },
-                        "compress": {
-                            "type": "boolean",
-                            "description": "Compress the package (default: true)"
-                        },
-                        "include_files": {
-                            "type": "boolean",
-                            "description": "Include file contents (default: true)"
-                        },
-                        "include_vcs": {
-                            "type": "boolean",
-                            "description": "Include VCS history (default: true)"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_cathedral_import",
-                "description": "Import a .cathedral package into TempleDB. Restores project with files, history, and metadata.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "package_path": {
-                            "type": "string",
-                            "description": "Path to .cathedral package file"
-                        },
-                        "overwrite": {
-                            "type": "boolean",
-                            "description": "Overwrite if project already exists (default: false)"
-                        },
-                        "new_slug": {
-                            "type": "string",
-                            "description": "Import with a different project slug (optional)"
-                        }
-                    },
-                    "required": ["package_path"]
-                }
-            },
-            {
-                "name": "templedb_cathedral_inspect",
-                "description": "Inspect a .cathedral package without importing it. Shows package metadata, file count, and structure.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "package_path": {
-                            "type": "string",
-                            "description": "Path to .cathedral package file"
-                        }
-                    },
-                    "required": ["package_path"]
-                }
-            },
-            {
-                "name": "templedb_nixops4_network_create",
-                "description": "Create a new NixOps4 deployment network for declarative infrastructure management.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "network_name": {
-                            "type": "string",
-                            "description": "Network name (e.g., 'production', 'staging')"
-                        },
-                        "config_file": {
-                            "type": "string",
-                            "description": "Path to network configuration file (optional)"
-                        },
-                        "flake_uri": {
-                            "type": "string",
-                            "description": "Flake URI for network configuration (optional)"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Network description (optional)"
-                        }
-                    },
-                    "required": ["project", "network_name"]
-                }
-            },
-            {
-                "name": "templedb_nixops4_network_list",
-                "description": "List all NixOps4 deployment networks, optionally filtered by project.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Filter by project slug (optional)"
-                        }
-                    },
-                    "required": []
-                }
-            },
-            {
-                "name": "templedb_nixops4_network_info",
-                "description": "Show detailed information about a NixOps4 network including machines, resources, and deployment history.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "network": {
-                            "type": "string",
-                            "description": "Network name"
-                        }
-                    },
-                    "required": ["project", "network"]
-                }
-            },
-            {
-                "name": "templedb_nixops4_machine_add",
-                "description": "Add a machine to a NixOps4 network for deployment.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "network": {
-                            "type": "string",
-                            "description": "Network name"
-                        },
-                        "machine_name": {
-                            "type": "string",
-                            "description": "Machine name"
-                        },
-                        "target_host": {
-                            "type": "string",
-                            "description": "Target hostname or IP address"
-                        },
-                        "target_user": {
-                            "type": "string",
-                            "description": "SSH user (default: root)"
-                        },
-                        "system_type": {
-                            "type": "string",
-                            "description": "System type: nixos, linux, darwin (default: nixos)"
-                        }
-                    },
-                    "required": ["project", "network", "machine_name", "target_host"]
-                }
-            },
-            {
-                "name": "templedb_nixops4_machine_list",
-                "description": "List all machines in a NixOps4 network with their deployment status.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "network": {
-                            "type": "string",
-                            "description": "Network name"
-                        }
-                    },
-                    "required": ["project", "network"]
-                }
-            },
-            {
-                "name": "templedb_nixops4_deploy",
-                "description": "Deploy a NixOps4 network to all machines or specific machines. Executes declarative NixOS deployment.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "network": {
-                            "type": "string",
-                            "description": "Network name"
-                        },
-                        "machines": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Specific machines to deploy (optional, default: all)"
-                        },
-                        "dry_run": {
-                            "type": "boolean",
-                            "description": "Dry run mode (default: false)"
-                        },
-                        "build_only": {
-                            "type": "boolean",
-                            "description": "Only build, don't deploy (default: false)"
-                        }
-                    },
-                    "required": ["project", "network"]
-                }
-            },
-            {
-                "name": "templedb_nixops4_status",
-                "description": "Show deployment status for a NixOps4 network including recent deployments and machine status.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "network": {
-                            "type": "string",
-                            "description": "Network name"
-                        },
-                        "deployment_uuid": {
-                            "type": "string",
-                            "description": "Show specific deployment by UUID (optional)"
-                        }
-                    },
-                    "required": ["project", "network"]
-                }
-            },
-            # Code Intelligence Tools (Phase 1.7)
-            {
-                "name": "templedb_code_search",
-                "description": "Search code using hybrid search (BM25 + graph ranking). Searches symbol names, docstrings, and signatures. Returns relevance-ranked results with scoring breakdown. Requires search index (run templedb_code_index_search first).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "query": {
-                            "type": "string",
-                            "description": "Search query (keywords, phrases, or FTS5 expressions)"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of results (default: 10)",
-                            "default": 10
-                        },
-                        "symbol_type": {
-                            "type": "string",
-                            "description": "Filter by symbol type: function, class, method (optional)",
-                            "enum": ["function", "class", "method"]
-                        }
-                    },
-                    "required": ["project", "query"]
-                }
-            },
-            {
-                "name": "templedb_code_show_symbol",
-                "description": "Show detailed information about a code symbol including callers, callees, complexity, and cluster membership. Provides 360-degree view of a symbol's role in the codebase.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "symbol_name": {
-                            "type": "string",
-                            "description": "Symbol name or qualified name (e.g., 'get_connection' or 'MyClass.method')"
-                        }
-                    },
-                    "required": ["project", "symbol_name"]
-                }
-            },
-            {
-                "name": "templedb_code_show_clusters",
-                "description": "Show code clusters (architectural boundaries) discovered by community detection. Clusters represent tightly-coupled groups of symbols that form logical modules. High cohesion (>0.7) indicates strong module boundaries.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "include_members": {
-                            "type": "boolean",
-                            "description": "Include list of symbols in each cluster (default: false)",
-                            "default": False
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of clusters to return (default: 20)",
-                            "default": 20
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_code_impact_analysis",
-                "description": "Analyze blast radius (impact) of changing a symbol. Shows all symbols that would be affected by modifying this symbol (direct and transitive dependents). Use this before making changes to understand scope of impact.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "symbol_name": {
-                            "type": "string",
-                            "description": "Symbol to analyze"
-                        }
-                    },
-                    "required": ["project", "symbol_name"]
-                }
-            },
-            {
-                "name": "templedb_code_extract_symbols",
-                "description": "Extract public/exported symbols from project files (Phase 1.2). Uses tree-sitter to parse code and extract functions, classes, and methods. Run this first before other code intelligence operations.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "force": {
-                            "type": "boolean",
-                            "description": "Force re-extraction even if symbols exist (default: false)",
-                            "default": False
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_code_build_graph",
-                "description": "Build dependency graph for project (Phase 1.3). Analyzes function/method calls and builds cross-file dependency graph. Required for impact analysis and clustering.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "force": {
-                            "type": "boolean",
-                            "description": "Force rebuild even if graph exists (default: false)",
-                            "default": False
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_code_detect_clusters",
-                "description": "Detect code clusters using Leiden algorithm (Phase 1.5). Automatically discovers architectural boundaries and module structure. Use lower resolution (0.3-0.5) for fewer, larger clusters; higher (1.5-2.0) for more granular clustering.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        },
-                        "resolution": {
-                            "type": "number",
-                            "description": "Leiden resolution parameter (default: 1.0). Higher = more clusters.",
-                            "default": 1.0
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_code_index_search",
-                "description": "Index project for hybrid code search (Phase 1.6). Builds FTS5 full-text search index for fast keyword search. Run this after extracting symbols or when code changes.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            # Workflow Orchestration Tools (Phase 2.2)
-            {
-                "name": "templedb_workflow_execute",
-                "description": "Execute a workflow with given variables. Workflows are multi-phase orchestration definitions that coordinate code intelligence, testing, deployment, and validation. Use dry_run=true to preview execution without making changes.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "workflow": {
-                            "type": "string",
-                            "description": "Workflow name (without .yaml extension, e.g., 'safe-deployment', 'code-intelligence-bootstrap')"
-                        },
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug (optional, required by some workflows)"
-                        },
-                        "variables": {
-                            "type": "object",
-                            "description": "Workflow variables as key-value pairs (e.g., {'primary_symbol': 'authenticate_user', 'previous_version': 'v2.1.0'})",
-                            "additionalProperties": True
-                        },
-                        "dry_run": {
-                            "type": "boolean",
-                            "description": "Preview workflow execution without making changes (default: false)",
-                            "default": False
-                        }
-                    },
-                    "required": ["workflow"]
-                }
-            },
-            {
-                "name": "templedb_workflow_status",
-                "description": "Get status of a running or completed workflow. Note: Async workflow execution tracking not yet implemented - workflows currently run synchronously.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "workflow_id": {
-                            "type": "string",
-                            "description": "Workflow execution ID"
-                        }
-                    },
-                    "required": []
-                }
-            },
-            {
-                "name": "templedb_workflow_list",
-                "description": "List all available workflow definitions. Workflows are stored in the workflows/ directory as YAML files.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            {
-                "name": "templedb_workflow_validate",
-                "description": "Validate a workflow definition. Checks YAML syntax and required workflow structure (name, version, phases, tasks).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "workflow": {
-                            "type": "string",
-                            "description": "Workflow name (without .yaml extension)"
-                        }
-                    },
-                    "required": ["workflow"]
-                }
-            },
-            {
-                "name": "templedb_context_set_default",
-                "description": "Set a default project context for the session. Once set, tools that require a 'project' parameter can omit it and use the default. Useful for reducing repetition when working with a single project.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project name or slug to set as default (use null or empty to clear)"
-                        }
-                    },
-                    "required": []
-                }
-            },
-            {
-                "name": "templedb_context_get_default",
-                "description": "Get the current default project context (if any is set).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            {
-                "name": "templedb_schema_explore",
-                "description": "Explore database schema with natural language queries. Answers questions about database structure, table relationships, and statistics. Examples: 'What tables exist?', 'Show me the projects schema', 'What file types are tracked?', 'How many commits per project?'",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Natural language question about the database schema or statistics"
-                        },
-                        "project": {
-                            "type": "string",
-                            "description": "Optional project to scope the query to (uses default if not specified)"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "templedb_readme_scan",
-                "description": "Scan a project for README files and register them in the cross-reference system. Extracts title, description, and sections from each README.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug to scan for README files"
-                        }
-                    },
-                    "required": ["project"]
-                }
-            },
-            {
-                "name": "templedb_readme_create",
-                "description": "Create a new README file with proper metadata and auto-generated cross-references. Optionally generates index sections based on templates.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Project slug for the README"
-                        },
-                        "file_path": {
-                            "type": "string",
-                            "description": "Path relative to project root (e.g., 'docs/DEPLOYMENT.md')"
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "README title"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "README content (markdown)"
-                        },
-                        "category": {
-                            "type": "string",
-                            "description": "Optional category: setup, api, deployment, architecture"
-                        },
-                        "topics": {
-                            "type": "array",
-                            "description": "Optional topic tags (e.g., ['nix', 'deployment'])",
-                            "items": {"type": "string"}
-                        }
-                    },
-                    "required": ["project", "file_path", "title", "content"]
-                }
-            },
-            {
-                "name": "templedb_readme_add_topic",
-                "description": "Tag a README with topics for better discovery and cross-referencing.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "readme_id": {
-                            "type": "integer",
-                            "description": "README file ID"
-                        },
-                        "topic": {
-                            "type": "string",
-                            "description": "Topic tag (e.g., 'nix', 'deployment', 'vcs')"
-                        },
-                        "relevance": {
-                            "type": "number",
-                            "description": "Relevance score 0.0-1.0 (default: 1.0)"
-                        }
-                    },
-                    "required": ["readme_id", "topic"]
-                }
-            },
-            {
-                "name": "templedb_readme_add_reference",
-                "description": "Create a cross-reference link between two README files.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "source_readme_id": {
-                            "type": "integer",
-                            "description": "Source README ID"
-                        },
-                        "target_readme_id": {
-                            "type": "integer",
-                            "description": "Target README ID (or use target_url for external links)"
-                        },
-                        "target_url": {
-                            "type": "string",
-                            "description": "External URL (if not linking to another README)"
-                        },
-                        "link_text": {
-                            "type": "string",
-                            "description": "Text for the link"
-                        },
-                        "section": {
-                            "type": "string",
-                            "description": "Section containing the reference"
-                        }
-                    },
-                    "required": ["source_readme_id", "link_text"]
-                }
-            },
-            {
-                "name": "templedb_readme_generate_index",
-                "description": "Generate auto-index section for a README based on related documentation. Uses templates to create 'Related Documentation' sections.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "readme_id": {
-                            "type": "integer",
-                            "description": "README to generate index for"
-                        },
-                        "template": {
-                            "type": "string",
-                            "description": "Optional template name (default: auto-detect based on category)"
-                        }
-                    },
-                    "required": ["readme_id"]
-                }
-            },
-            {
-                "name": "templedb_readme_find_related",
-                "description": "Find READMEs related to a given README based on shared topics, categories, or explicit references.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "readme_id": {
-                            "type": "integer",
-                            "description": "README ID to find related docs for"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Max number of results (default: 10)"
-                        }
-                    },
-                    "required": ["readme_id"]
-                }
-            },
-            {
-                "name": "templedb_readme_verify_links",
-                "description": "Verify all links in README files and report broken references. Updates is_broken status for each reference.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Optional project slug to scope verification"
-                        }
-                    },
-                    "required": []
-                }
-            },
-            {
-                "name": "templedb_readme_list",
-                "description": "List all registered README files with their topics and metadata.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": "Optional project slug to filter by"
-                        },
-                        "category": {
-                            "type": "string",
-                            "description": "Optional category to filter by"
-                        },
-                        "topic": {
-                            "type": "string",
-                            "description": "Optional topic to filter by"
-                        }
-                    },
-                    "required": []
+                    "required": ["action"]
                 }
             }
         ]
+
+    # ── Legacy tool definitions removed ──────────────────────────────────
+    # The following 67 tools were removed and consolidated into templedb_cli:
+    # project_import, project_sync, commit_list, commit_create,
+    # search_files, search_content, vcs_add/reset/log/edit/discard/diff/branch,
+    # file_get, file_set, deploy, env_get/set/list,
+    # config_list/delete, secret_list/export/show_keys,
+    # cathedral_export/import/inspect,
+    # fleet_network_create/list/info, fleet_machine_add/list,
+    # fleet_deploy/status/check/diff,
+    # code_search/show_symbol/show_clusters/impact_analysis/
+    # extract_symbols/build_graph/detect_clusters/index_search,
+    # workflow_execute/status/list/validate,
+    # context_set_default/get_default, schema_explore,
+    # readme_scan/create/add_topic/add_reference/generate_index/
+    # find_related/verify_links/list,
+    # mount_status, db_status/migrate, git_export,
+    # dotfiles_list, bootstrap_status,
+    # graph_deps, nixos_host_list, nixos_generate_all
+    #
+    # Use templedb_cli({command: "..."}) for any of these.
+
+    # Keep old method stubs so the code doesn't break if something
+    # references them internally. They're just not exposed as MCP tools.
+
+    def _LEGACY_get_tool_definitions(self):
+        """Old 77-tool definition list — kept for reference only."""
+        pass
 
     def get_resource_definitions(self) -> List[Dict[str, Any]]:
         """Return MCP resource definitions"""
@@ -2434,16 +1282,27 @@ class MCPServer:
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
     def tool_config_set(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Set system config value (simple key-value store)"""
+        """Set system config value, host-scoped by default."""
         try:
             key = args["key"]
             value = args["value"]
             description = args.get("description", "")
+            scope = args.get("scope", "host")
 
             conn = self._get_db_connection()
             cursor = conn.cursor()
 
-            # Use INSERT OR REPLACE
+            if scope != "global":
+                host = args.get("host")
+                if not host:
+                    row = cursor.execute(
+                        "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+                    ).fetchone()
+                    host = row[0] if row else None
+
+                if host:
+                    key = f"{host}.{key}"
+
             cursor.execute("""
                 INSERT OR REPLACE INTO system_config
                 (key, value, description, updated_at)
@@ -2687,10 +1546,10 @@ class MCPServer:
             logger.error(f"Error inspecting cathedral package: {e}")
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
-    # NixOps4 tools
+    # Fleet deployment tools
 
-    def tool_nixops4_network_create(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a NixOps4 network"""
+    def tool_fleet_network_create(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a fleet deployment network"""
         try:
             project = args["project"]
             network_name = args["network_name"]
@@ -2698,7 +1557,7 @@ class MCPServer:
             flake_uri = args.get("flake_uri")
             description = args.get("description")
 
-            cmd = ["nixops4", "network", "create", project, network_name]
+            cmd = ["deploy", "fleet", "network", "create", project, network_name]
             if config_file:
                 cmd.extend(["--config-file", config_file])
             if flake_uri:
@@ -2716,13 +1575,13 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error creating nixops4 network: {e}")
+            logger.error(f"Error creating fleet network: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
-    def tool_nixops4_network_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List NixOps4 networks"""
+    def tool_fleet_network_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List fleet deployment networks"""
         try:
-            cmd = ["nixops4", "network", "list"]
+            cmd = ["deploy", "fleet", "network", "list"]
             if "project" in args and args["project"]:
                 cmd.extend(["--project", args["project"]])
 
@@ -2736,16 +1595,16 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error listing nixops4 networks: {e}")
+            logger.error(f"Error listing fleet networks: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
-    def tool_nixops4_network_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Show NixOps4 network info"""
+    def tool_fleet_network_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show fleet network info"""
         try:
             project = args["project"]
             network = args["network"]
 
-            result = self._run_templedb_cli(["nixops4", "network", "info", project, network])
+            result = self._run_templedb_cli(["deploy", "fleet", "network", "info", project, network])
 
             if result["returncode"] != 0:
                 return self._error_response(
@@ -2755,11 +1614,11 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error getting nixops4 network info: {e}")
+            logger.error(f"Error getting fleet network info: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
-    def tool_nixops4_machine_add(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Add machine to NixOps4 network"""
+    def tool_fleet_machine_add(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Add machine to fleet network"""
         try:
             project = args["project"]
             network = args["network"]
@@ -2768,7 +1627,7 @@ class MCPServer:
             target_user = args.get("target_user", "root")
             system_type = args.get("system_type", "nixos")
 
-            cmd = ["nixops4", "machine", "add", project, network, machine_name,
+            cmd = ["deploy", "fleet", "machine", "add", project, network, machine_name,
                    "--host", target_host, "--user", target_user, "--system-type", system_type]
 
             result = self._run_templedb_cli(cmd)
@@ -2781,16 +1640,16 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error adding nixops4 machine: {e}")
+            logger.error(f"Error adding fleet machine: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
-    def tool_nixops4_machine_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List machines in NixOps4 network"""
+    def tool_fleet_machine_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List machines in fleet network"""
         try:
             project = args["project"]
             network = args["network"]
 
-            result = self._run_templedb_cli(["nixops4", "machine", "list", project, network])
+            result = self._run_templedb_cli(["deploy", "fleet", "machine", "list", project, network])
 
             if result["returncode"] != 0:
                 return self._error_response(
@@ -2800,25 +1659,34 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error listing nixops4 machines: {e}")
+            logger.error(f"Error listing fleet machines: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
-    def tool_nixops4_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Deploy NixOps4 network"""
+    def tool_fleet_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy fleet network with magic rollback"""
         try:
             project = args["project"]
             network = args["network"]
             machines = args.get("machines", [])
             dry_run = args.get("dry_run", False)
             build_only = args.get("build_only", False)
+            no_watchdog = args.get("no_watchdog", False)
+            watchdog_timeout = args.get("watchdog_timeout", 90)
+            on_tags = args.get("on_tags", [])
 
-            cmd = ["nixops4", "deploy", project, network]
+            cmd = ["deploy", "fleet", "deploy", project, network]
             if machines:
                 cmd.extend(["--machines"] + machines)
             if dry_run:
                 cmd.append("--dry-run")
             if build_only:
                 cmd.append("--build-only")
+            if no_watchdog:
+                cmd.append("--no-watchdog")
+            if watchdog_timeout != 90:
+                cmd.extend(["--watchdog-timeout", str(watchdog_timeout)])
+            if on_tags:
+                cmd.extend(["--on"] + on_tags)
 
             result = self._run_templedb_cli(cmd)
 
@@ -2830,17 +1698,17 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error deploying nixops4 network: {e}")
+            logger.error(f"Error deploying fleet network: {e}")
             return self._error_response(ErrorCode.DEPLOYMENT_FAILED, str(e))
 
-    def tool_nixops4_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Show NixOps4 deployment status"""
+    def tool_fleet_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show fleet deployment status"""
         try:
             project = args["project"]
             network = args["network"]
             deployment_uuid = args.get("deployment_uuid")
 
-            cmd = ["nixops4", "status", project, network]
+            cmd = ["deploy", "fleet", "status", project, network]
             if deployment_uuid:
                 cmd.extend(["--deployment-uuid", deployment_uuid])
 
@@ -2854,7 +1722,50 @@ class MCPServer:
 
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
-            logger.error(f"Error getting nixops4 status: {e}")
+            logger.error(f"Error getting fleet status: {e}")
+            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+
+    def tool_fleet_check(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Health check fleet machines"""
+        try:
+            project = args["project"]
+            network = args["network"]
+
+            result = self._run_templedb_cli(["deploy", "fleet", "check", project, network])
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Health check failed: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error checking fleet: {e}")
+            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+
+    def tool_fleet_diff(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show what would change if deployed"""
+        try:
+            project = args["project"]
+            network = args["network"]
+            machine = args.get("machine")
+
+            cmd = ["deploy", "fleet", "diff", project, network]
+            if machine:
+                cmd.extend(["--machine", machine])
+
+            result = self._run_templedb_cli(cmd)
+
+            if result["returncode"] != 0:
+                return self._error_response(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Diff failed: {result['stderr']}"
+                )
+
+            return self._success_response(result["stdout"], format_json=False)
+        except Exception as e:
+            logger.error(f"Error computing fleet diff: {e}")
             return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
 
     # ========================================================================
@@ -4201,6 +3112,300 @@ class MCPServer:
 
         except Exception as e:
             logger.error(f"Error listing READMEs: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    # ── New tools: mount, db, git-export, dotfiles, bootstrap ─────────
+
+    def tool_mount_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Check FUSE mount status"""
+        try:
+            mounts = []
+            with open("/proc/mounts") as f:
+                for line in f:
+                    if "fuse" in line.lower() and "temple" in line.lower():
+                        parts = line.split()
+                        mounts.append({"mountpoint": parts[1], "type": parts[2]})
+            return self._success_response({
+                "mounted": len(mounts) > 0,
+                "mounts": mounts,
+                "hint": "Mount with: templedb mount ~/temple" if not mounts else None,
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_db_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show migration status"""
+        try:
+            from migrator import Migrator
+            m = Migrator(DB_PATH)
+            status = m.status()
+            return self._success_response({
+                "applied": sum(1 for s in status if s["applied"]),
+                "pending": sum(1 for s in status if not s["applied"]),
+                "migrations": status,
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_db_migrate(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply pending migrations"""
+        try:
+            from migrator import Migrator
+            dry_run = args.get("dry_run", False)
+            m = Migrator(DB_PATH)
+            applied, skipped = m.migrate(dry_run=dry_run)
+            return self._success_response({
+                "applied": applied,
+                "skipped": skipped,
+                "dry_run": dry_run,
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_git_export(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Export VCS history as git repo"""
+        try:
+            from git_export import export_to_git
+            project = args["project"]
+            output_dir = args.get("output_dir", f"/tmp/templedb-git-{project}")
+            remote_url = args.get("remote_url")
+            result = export_to_git(
+                project_slug=project,
+                output_dir=output_dir,
+                remote_url=remote_url,
+            )
+            return self._success_response(result)
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_dotfiles_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List dotfile mappings and status"""
+        try:
+            import json
+            from pathlib import Path
+            conn = self._get_db_connection()
+            row = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.dotfiles'"
+            ).fetchone()
+            if not row:
+                return self._success_response({"dotfiles": [], "count": 0})
+
+            manifest = json.loads(row[0])
+            checkouts = Path.home() / ".config/templedb/checkouts"
+            result = []
+            for entry in manifest:
+                src = checkouts / entry["project"] / entry["source"]
+                tgt = Path(entry["target"]).expanduser()
+                if tgt.is_symlink() and tgt.resolve() == src.resolve():
+                    status = "linked"
+                elif tgt.exists():
+                    status = "conflict"
+                elif not src.exists():
+                    status = "no_source"
+                else:
+                    status = "not_linked"
+                result.append({**entry, "status": status})
+            return self._success_response({"dotfiles": result, "count": len(result)})
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_bootstrap_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Check bootstrap readiness"""
+        try:
+            import json
+            from pathlib import Path
+            from migrator import Migrator
+            home = Path.home()
+
+            # Age key
+            age_paths = [home / ".age/key.txt", home / ".config/sops/age/keys.txt"]
+            age_ok = any(p.exists() for p in age_paths)
+
+            # Migrations
+            m = Migrator(DB_PATH)
+            status = m.status()
+            mig_pending = sum(1 for s in status if not s["applied"])
+
+            # Checkouts
+            co_dir = home / ".config/templedb/checkouts"
+            checkouts = sum(1 for p in co_dir.iterdir() if p.is_dir()) if co_dir.exists() else 0
+
+            # Dotfiles
+            conn = self._get_db_connection()
+            df_row = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.dotfiles'"
+            ).fetchone()
+            dotfiles_count = len(json.loads(df_row[0])) if df_row else 0
+
+            # Projects
+            proj_count = conn.execute("SELECT COUNT(*) as n FROM projects").fetchone()[0]
+
+            return self._success_response({
+                "age_key_found": age_ok,
+                "migrations_pending": mig_pending,
+                "checkouts": checkouts,
+                "projects": proj_count,
+                "dotfiles_configured": dotfiles_count,
+                "ready": age_ok and mig_pending == 0,
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy pipeline operations — delegates to CLI."""
+        try:
+            action = args["action"]
+            project = args.get("project", "")
+
+            cmd_map = {
+                "run": f"deploy run {project}",
+                "status": f"deploy status {project}",
+                "history": f"deploy history {project}",
+                "rollback": f"deploy rollback {project}",
+                "trigger_list": f"deploy trigger list {project}",
+                "trigger_add": f"deploy trigger add {project} {args.get('branch', 'main')} {args.get('target', 'production')}",
+                "trigger_remove": f"deploy trigger remove {args.get('trigger_id', '')}",
+                "notify_list": f"deploy notify list",
+            }
+
+            cmd = cmd_map.get(action, f"deploy {action} {project}")
+
+            # Add optional flags
+            if args.get("target") and action == "run":
+                cmd += f" --target {args['target']}"
+            if args.get("commit") and action == "run":
+                cmd += f" --commit {args['commit']}"
+            if args.get("branch") and action == "run":
+                cmd += f" --branch {args['branch']}"
+            if args.get("all_targets") and action == "run":
+                cmd += " --all-targets"
+            if args.get("dry_run"):
+                cmd += " --dry-run"
+
+            return self.tool_cli({"command": cmd.strip()})
+
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_secret(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Secret and key management — delegates to CLI."""
+        try:
+            action = args["action"]
+            project = args.get("project", "")
+
+            cmd_map = {
+                "get": f"env secret get {project} {args.get('name', '')}",
+                "set": f"env secret set {project} {args.get('name', '')} {args.get('value', '')} --keys {args.get('keys', '')}",
+                "list": f"env secret list {project}",
+                "delete": f"env secret delete {project} {args.get('name', '')}",
+                "export": f"env secret export {project} --format {args.get('format', 'dotenv')}",
+                "key_list": "env key list",
+                "key_info": f"env key info {args.get('key_name', '')}",
+                "key_test": f"env key test {args.get('key_name', '')}",
+            }
+
+            cmd = cmd_map.get(action, f"env secret {action} {project}")
+            return self.tool_cli({"command": cmd.strip()})
+
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_cli(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Run any TempleDB CLI command."""
+        try:
+            import subprocess, shlex, shutil
+            command = args["command"]
+            cmd_parts = shlex.split(command)
+
+            # Find templedb binary
+            templedb = shutil.which("templedb")
+            if not templedb:
+                templedb_path = Path(__file__).parent.parent / "result" / "bin" / "templedb"
+                if templedb_path.exists():
+                    templedb = str(templedb_path)
+                else:
+                    templedb = str(Path(__file__).parent.parent / "templedb")
+
+            result = subprocess.run(
+                [templedb] + cmd_parts,
+                capture_output=True, text=True, timeout=120
+            )
+            return self._success_response({
+                "exit_code": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "command": f"templedb {command}",
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_graph_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Search across everything."""
+        try:
+            from knowledge_graph import search_everywhere
+            results = search_everywhere(args["query"], limit=30)
+            return self._success_response(results)
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_graph_deps(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Project dependency graph."""
+        try:
+            from knowledge_graph import project_dependencies
+            results = project_dependencies(args["project"])
+            return self._success_response(results)
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_nixos_host_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List NixOS hosts."""
+        try:
+            conn = self._get_db_connection()
+            hosts = conn.execute(
+                "SELECT key, value FROM system_config WHERE key LIKE 'nixos.host.%' ORDER BY key"
+            ).fetchall()
+            active = conn.execute(
+                "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+            ).fetchone()
+            active_host = active[0] if active else None
+
+            result = []
+            for h in hosts:
+                hostname = h["key"].replace("nixos.host.", "")
+                overrides = conn.execute(
+                    "SELECT COUNT(*) as n FROM system_config WHERE key LIKE ?",
+                    (f"{hostname}.%",)
+                ).fetchone()
+                result.append({
+                    "hostname": hostname,
+                    "config_file": h["value"],
+                    "overrides": overrides["n"],
+                    "active": hostname == active_host,
+                })
+            return self._success_response({"hosts": result})
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_nixos_generate_all(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Regenerate all NixOS config."""
+        try:
+            import subprocess, shutil
+            host = args.get("host", "")
+            cmd_parts = ["nixos", "generate-all"]
+            if host:
+                cmd_parts.extend(["--host", host])
+
+            templedb = shutil.which("templedb") or str(Path(__file__).parent.parent / "templedb")
+            result = subprocess.run(
+                [templedb] + cmd_parts,
+                capture_output=True, text=True, timeout=120
+            )
+            return self._success_response({
+                "exit_code": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            })
+        except Exception as e:
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
 

@@ -477,7 +477,7 @@
   (templedb-vibe-start project)
   ;; Launch Claude in background
   (start-process "templedb-claude" nil
-                "templedb" "claude" "--from-db" "--project" project))
+                "templedb" "ai" "claude" "--from-db" "--project" project))
 
 (provide 'templedb-vibe)
 

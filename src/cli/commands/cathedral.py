@@ -75,11 +75,11 @@ def _show_post_import_hints(package_path: Path, slug: str):
     if required_vars:
         print("\nConfiguration keys for this project:")
         for key in sorted(set(required_vars)):
-            print(f"  templedb var set {slug} {key} <value>")
+            print(f"  templedb env var set {slug} {key} <value>")
     else:
         print(f"\nNext steps:")
-        print(f"  templedb var list {slug}            # view vars")
-        print(f"  templedb var set {slug} KEY VALUE   # set a config value")
+        print(f"  templedb env var list {slug}            # view vars")
+        print(f"  templedb env var set {slug} KEY VALUE   # set a config value")
 
 
 class CathedralCommands(Command):

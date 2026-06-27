@@ -17,14 +17,14 @@ focused on:
 - Environment variables
 - Deployment caching
 - Code intelligence
-- NixOps4 integration
+- Fleet integration
 
 ## Applied Migrations (still in migrations/)
 - 032_add_encryption_key_registry.sql
 - 033_remove_secret_blobs_project_id.sql
 - 034_add_deployment_cache.sql
 - 034_add_code_intelligence_graph.sql
-- 035_add_nixops4_integration.sql
+- 035_add_fleet_integration.sql
 - 037_fix_code_search_fts.sql
 - 039_create_unified_views.sql
 - 040_safe_cleanup_verified_unused.sql

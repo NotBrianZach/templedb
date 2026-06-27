@@ -79,7 +79,7 @@ Every `vibe start` session now includes:
 
 ```bash
 # Start vibe session (guidance auto-loaded)
-./templedb vibe start myproject
+./templedb ai vibestart myproject
 
 # The project prompt now includes:
 # - MCP tool usage policy
@@ -220,7 +220,7 @@ bash cat /path/to/file.py
 ### Manual Test
 ```bash
 # 1. Start vibe session
-./templedb vibe start testproject
+./templedb ai vibestart testproject
 
 # 2. Verify prompt includes:
 # - SESSION RULES section at top
