@@ -12,13 +12,13 @@
 ## What is TempleDB?
 
 <img src="assets/logo.svg" align="right" width="150" alt="TempleDB Logo"/>
-  TempleDB is a project management and version control system focused on simplifying and unifying underlying abstractions to create a clean and introspectable environment for AI-assisted development and deployment.
+  TempleDB is a project management and version control system that create a clean and introspectable environment for AI-assisted development and deployment by cramming everything it can into sql.
 
-By moving from files and environment variables to sqlite tables your codebase becomes a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
+Files and environment variables are denormalized and heretical... make your codebase instead a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
 
-Or, it's like a normalized version of fossil-scm (sqlite, relational version of git) + claude mcp&stored procedures (api tuned for AI agent interactions) + superpowers (hierarchical agent dispatch&contextualization) + gitnexus (dependency graph/clustering for AI contextualization) + nixops4 (deployment tool) + sops (secret management).
+Or, it's like fossil-scm (sqlite, relational version of git) + claude mcp&stored procedures (api tuned for AI agent interactions) + superpowers (hierarchical agent dispatch&contextualization) + gitnexus (dependency graph/clustering for AI contextualization) + nix based terraform (deployment tool) + sops (secret management).
 
-We throw out of the temple those that would lend us technical debt in the form of state duplication, namely filesystem centric tools like git, sops, ci/cd like jenkins and deployment tools like docker. (though in the case of git it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for nixos to tide us over until the day we can make some much more radical changes to operating systems).
+We throw out of the temple those that would lend us technical debt in the form of state duplication. (though in the case of git it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for nixos to tide us over until the day we can make some much more radical changes to operating systems).
 
 **Read [DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md) for the complete rationale.**
 
