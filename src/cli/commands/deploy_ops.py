@@ -504,6 +504,7 @@ class DeployOpsMixin:
 
             system_config_slug = args.system_config if hasattr(args, 'system_config') else 'system_config'
             dry_run = hasattr(args, 'dry_run') and args.dry_run
+            quiet = hasattr(args, 'quiet') and args.quiet
 
             print(f"\nInstalling {project_slug} to NixOS config\n")
 
@@ -630,7 +631,7 @@ class DeployOpsMixin:
             print(f"\nDeploying to NixOS with home-manager...")
             from services.system_service import SystemService
             service = SystemService()
-            result = service.switch_system(system_config_slug, with_home_manager=True)
+            result = service.switch_system(system_config_slug, with_home_manager=True, quiet=quiet)
 
             if result['success']:
                 print(f"\n{project_slug} installed successfully!")

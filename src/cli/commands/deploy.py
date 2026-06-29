@@ -713,6 +713,7 @@ def register(cli):
     nixos_install_parser.add_argument('slug', help='Project slug (must have flake.nix)')
     nixos_install_parser.add_argument('--system-config', default='system_config', help='System config project slug (default: system_config)')
     nixos_install_parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
+    nixos_install_parser.add_argument('--quiet', '-q', action='store_true', help='Hide nix store paths and copying lines from output')
     cli.commands['deploy.nixos-install'] = deploy_handler.nixos_install
 
     # deploy shell command
