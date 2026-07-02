@@ -1355,8 +1355,6 @@ CREATE TABLE IF NOT EXISTS prompt_usage_log (
     prompt_type TEXT NOT NULL,               -- 'template', 'project'
     prompt_id INTEGER NOT NULL,
     project_id INTEGER REFERENCES projects(id),
-    work_item_id TEXT REFERENCES work_items(id),
-
     -- Usage context
     used_by TEXT,                            -- Agent/user identifier
     usage_context TEXT,                      -- 'agent-launch', 'work-assignment', 'code-review'
@@ -1377,8 +1375,6 @@ CREATE TABLE IF NOT EXISTS vibe_sessions (
     session_name TEXT NOT NULL,              -- e.g., "Fix auth bug", "Add search feature"
     session_type TEXT DEFAULT 'coding',      -- coding, review, debug, research, general
     related_commit_id INTEGER REFERENCES vcs_commits(id),
-    related_work_item_id TEXT REFERENCES work_items(id),
-
     -- Status
     status TEXT NOT NULL DEFAULT 'active',   -- active, completed, abandoned
 
@@ -2056,72 +2052,6 @@ CREATE TABLE IF NOT EXISTS vibe_session_stats (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS work_item_notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            recipient TEXT NOT NULL,
-            message_type TEXT NOT NULL,
-            work_item_id TEXT,
-            convoy_id INTEGER,
-            message_content TEXT NOT NULL,
-            priority TEXT DEFAULT 'normal',
-            status TEXT NOT NULL DEFAULT 'unread',
-            delivered_at TEXT DEFAULT (datetime('now')),
-            read_at TEXT,
-            acknowledged_at TEXT,
-
-            FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
-
-            CHECK (message_type IN ('work_assignment', 'notification', 'coordination_request', 'status_update')),
-            CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
-            CHECK (status IN ('unread', 'read', 'acknowledged', 'completed'))
-        );
-
-CREATE TABLE IF NOT EXISTS work_item_transitions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    work_item_id TEXT NOT NULL,
-    from_status TEXT NOT NULL,
-    to_status TEXT NOT NULL,
-    changed_by TEXT,
-    reason TEXT,
-    transitioned_at TEXT DEFAULT (datetime('now')),
-
-    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS "work_items" (
-    id TEXT PRIMARY KEY,
-    project_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    priority TEXT DEFAULT 'medium',
-    item_type TEXT DEFAULT 'task',
-
-    -- Assignment with TEXT identifiers (not foreign keys)
-    assigned_to TEXT,
-    created_by TEXT,
-    parent_item_id TEXT,
-
-    -- Metadata
-    estimated_effort TEXT,
-    tags TEXT,
-    metadata TEXT,
-
-    -- Timestamps
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now')),
-    assigned_at TEXT,
-    started_at TEXT,
-    completed_at TEXT,
-
-    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-    FOREIGN KEY (parent_item_id) REFERENCES work_items(id) ON DELETE SET NULL,
-
-    CHECK (status IN ('pending', 'assigned', 'in_progress', 'completed', 'blocked', 'cancelled')),
-    CHECK (priority IN ('low', 'medium', 'high', 'critical')),
-    CHECK (item_type IN ('task', 'bug', 'feature', 'refactor', 'research', 'documentation'))
-);
-
 CREATE INDEX IF NOT EXISTS idx_bookmarks_filepath ON bookmarks(filePath);
 
 CREATE INDEX IF NOT EXISTS idx_bookmarks_title ON bookmarks(bTitle);
@@ -2455,8 +2385,6 @@ CREATE INDEX IF NOT EXISTS idx_prompt_usage_project ON prompt_usage_log(project_
 
 CREATE INDEX IF NOT EXISTS idx_prompt_usage_used_at ON prompt_usage_log(used_at);
 
-CREATE INDEX IF NOT EXISTS idx_prompt_usage_work_item ON prompt_usage_log(work_item_id);
-
 CREATE INDEX IF NOT EXISTS idx_vibe_sessions_project ON vibe_sessions(project_id);
 
 CREATE INDEX IF NOT EXISTS idx_vibe_sessions_status ON vibe_sessions(status);
@@ -2523,9 +2451,6 @@ CREATE INDEX IF NOT EXISTS idx_topics_name
 
 CREATE INDEX IF NOT EXISTS idx_topics_session
     ON vibe_interaction_topics(session_id);
-
-CREATE INDEX IF NOT EXISTS idx_transitions_work_item
-    ON work_item_transitions(work_item_id, transitioned_at);
 
 CREATE INDEX IF NOT EXISTS idx_transitive_cache_affected ON impact_transitive_cache(affected_symbol_id);
 
@@ -2597,18 +2522,6 @@ CREATE INDEX IF NOT EXISTS idx_vibe_events_time ON vibe_session_events(occurred_
 
 CREATE INDEX IF NOT EXISTS idx_vibe_events_type ON vibe_session_events(event_type);
 
-CREATE INDEX IF NOT EXISTS idx_work_items_assigned
-    ON work_items(assigned_to, status);
-
-CREATE INDEX IF NOT EXISTS idx_work_items_parent
-    ON work_items(parent_item_id);
-
-CREATE INDEX IF NOT EXISTS idx_work_items_project_status
-    ON work_items(project_id, status);
-
-CREATE INDEX IF NOT EXISTS idx_work_items_status_priority
-    ON work_items(status, priority, created_at);
-
 CREATE VIEW IF NOT EXISTS active_project_prompts_view AS
 SELECT
     pp.id,
@@ -2653,37 +2566,6 @@ LEFT JOIN vibe_claude_interactions ci ON ci.session_id = vs.id
 LEFT JOIN vibe_session_stats vss ON vss.session_id = vs.id
 WHERE vs.status = 'active'
 GROUP BY vs.id;
-
-CREATE VIEW IF NOT EXISTS active_work_items_view AS
-SELECT
-    wi.id,
-    wi.title,
-    wi.status,
-    wi.priority,
-    wi.item_type,
-    p.slug as project_slug,
-    p.name as project_name,
-    wi.assigned_to,
-    wi.created_at,
-    wi.assigned_at,
-    wi.started_at,
-    (SELECT COUNT(*) FROM work_items sub WHERE sub.parent_item_id = wi.id) as subtask_count
-FROM work_items wi
-JOIN projects p ON wi.project_id = p.id
-WHERE wi.status IN ('pending', 'assigned', 'in_progress', 'blocked');
-
-CREATE VIEW IF NOT EXISTS assignee_workload_view AS
-SELECT
-    wi.assigned_to,
-    p.slug as project_slug,
-    COUNT(wi.id) as assigned_items,
-    SUM(CASE WHEN wi.status = 'in_progress' THEN 1 ELSE 0 END) as active_items,
-    SUM(CASE WHEN wi.priority IN ('high', 'critical') THEN 1 ELSE 0 END) as high_priority_items,
-    (SELECT COUNT(*) FROM work_item_notifications WHERE recipient = wi.assigned_to AND status = 'unread') as unread_messages
-FROM work_items wi
-JOIN projects p ON wi.project_id = p.id
-WHERE wi.assigned_to IS NOT NULL
-GROUP BY wi.assigned_to, p.slug;
 
 CREATE VIEW IF NOT EXISTS blob_storage_stats AS
 SELECT
@@ -4032,40 +3914,6 @@ LEFT JOIN vibe_claude_interactions ci_first ON t.first_interaction_id = ci_first
 LEFT JOIN vibe_claude_interactions ci_last ON t.last_interaction_id = ci_last.id
 ORDER BY t.session_id, t.created_at;
 
-CREATE VIEW IF NOT EXISTS work_item_stats_view AS
-SELECT
-    p.slug as project_slug,
-    p.name as project_name,
-    COUNT(*) as total_items,
-    SUM(CASE WHEN wi.status = 'pending' THEN 1 ELSE 0 END) as pending_count,
-    SUM(CASE WHEN wi.status = 'in_progress' THEN 1 ELSE 0 END) as in_progress_count,
-    SUM(CASE WHEN wi.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
-    SUM(CASE WHEN wi.status = 'blocked' THEN 1 ELSE 0 END) as blocked_count,
-    SUM(CASE WHEN wi.priority = 'critical' THEN 1 ELSE 0 END) as critical_count,
-    SUM(CASE WHEN wi.priority = 'high' THEN 1 ELSE 0 END) as high_priority_count
-FROM projects p
-LEFT JOIN work_items wi ON p.id = wi.project_id
-GROUP BY p.id;
-
-CREATE VIEW IF NOT EXISTS work_items_with_prompts_view AS
-SELECT
-    wi.id as work_item_id,
-    wi.title,
-    wi.status,
-    wi.project_id,
-    p.slug as project_slug,
-    wip.id as prompt_id,
-    COALESCE(wip.custom_prompt, pt.prompt_text) as prompt_text,
-    pt.name as template_name,
-    wip.variable_overrides,
-    wip.priority as prompt_priority,
-    wip.created_at as prompt_created_at
-FROM work_items wi
-JOIN projects p ON wi.project_id = p.id
-LEFT JOIN work_item_prompts wip ON wi.id = wip.work_item_id AND wip.is_active = 1
-LEFT JOIN prompt_templates pt ON wip.template_id = pt.id
-WHERE wi.status IN ('pending', 'assigned', 'in_progress');
-
 CREATE TRIGGER IF NOT EXISTS decrement_blob_reference
 AFTER DELETE ON file_contents
 FOR EACH ROW
@@ -4228,33 +4076,6 @@ CREATE TRIGGER IF NOT EXISTS projects_updated_at
           UPDATE projects SET updated_at = datetime('now') WHERE id = NEW.id;
         END;
 
-CREATE TRIGGER IF NOT EXISTS record_work_item_transition
-AFTER UPDATE OF status ON work_items
-WHEN OLD.status != NEW.status
-BEGIN
-    INSERT INTO work_item_transitions (
-        work_item_id,
-        from_status,
-        to_status,
-        changed_by,
-        transitioned_at
-    ) VALUES (
-        NEW.id,
-        OLD.status,
-        NEW.status,
-        NEW.assigned_to,
-        datetime('now')
-    );
-
-    -- Update timestamps based on new status
-    UPDATE work_items
-    SET
-        assigned_at = CASE WHEN NEW.status = 'assigned' THEN datetime('now') ELSE assigned_at END,
-        started_at = CASE WHEN NEW.status = 'in_progress' THEN datetime('now') ELSE started_at END,
-        completed_at = CASE WHEN NEW.status = 'completed' THEN datetime('now') ELSE completed_at END
-    WHERE id = NEW.id;
-END;
-
 CREATE TRIGGER IF NOT EXISTS update_branch_head_on_commit
 AFTER INSERT ON vcs_commits
 FOR EACH ROW
@@ -4353,12 +4174,4 @@ BEGIN
     UPDATE system_config SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
 
-CREATE TRIGGER IF NOT EXISTS update_work_item_timestamp
-AFTER UPDATE ON work_items
-FOR EACH ROW
-BEGIN
-    UPDATE work_items
-    SET updated_at = datetime('now')
-    WHERE id = NEW.id;
-END;
 
