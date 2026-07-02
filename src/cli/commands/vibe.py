@@ -90,6 +90,24 @@ class VibeCommands(Command):
             fuse_path = Path.home() / "temple" / slug
             fuse_mounted = fuse_path.exists()
 
+            # Check for project-scoped MCP servers
+            project_mcp_tools = ""
+            mcp_json_path = checkout_dir / ".mcp.json"
+            if mcp_json_path.exists():
+                import json as _json
+                try:
+                    mcp_cfg = _json.loads(mcp_json_path.read_text())
+                    servers = mcp_cfg.get("mcpServers", {})
+                    if servers:
+                        lines = [f"\n## Project-Scoped MCP Tools"]
+                        lines.append(f"This project has its own MCP server(s) (via `.mcp.json`):")
+                        for sname in servers:
+                            lines.append(f"- **{sname}** — project-specific tools (auto-discovered by Claude Code)")
+                        lines.append("")
+                        project_mcp_tools = "\n".join(lines)
+                except Exception:
+                    pass
+
             prompt_text = f"""# {name or slug} - Project Context
 
 ## Rules
@@ -138,9 +156,7 @@ templedb nixos generate-all
 - `templedb_vcs_status/commit` — VCS operations
 - `templedb_graph_search` — cross-project search
 - `templedb_config_get/set` — system config
-- Refactoring code
-- Reviewing changes
-
+{project_mcp_tools}
 What would you like to work on?
 """
 

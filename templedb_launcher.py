@@ -108,6 +108,11 @@ try:
     if _llm_py.exists():
         _load_local("templedb_local_llm", _llm_py).register(_templedb_cli)
 
+    # Register test command from local source
+    _test_py = _LOCAL / "src" / "cli" / "commands" / "test.py"
+    if _test_py.exists():
+        _load_local("templedb_local_test", _test_py).register(_templedb_cli)
+
     # Fix MCP server: templedb_root pointed to the wrong nix-store path;
     # also add templedb_var_* tools.
     from mcp_server import MCPServer as _MCPServer

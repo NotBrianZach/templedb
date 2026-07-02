@@ -188,7 +188,7 @@ Roll back to a previous successful deployment (restores env vars + re-deploys):
 templedb deploy rollback bza --target production --yes
 ```
 
-NixOps4 orchestration for multi-machine infrastructure:
+Fleet deployment for multi-machine NixOS infrastructure:
 
 ```bash
 templedb deploy fleet network create bza prod --flake-uri .#

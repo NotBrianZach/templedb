@@ -716,6 +716,21 @@ def register(cli):
     nixos_install_parser.add_argument('--quiet', '-q', action='store_true', help='Hide nix store paths and copying lines from output')
     cli.commands['deploy.nixos-install'] = deploy_handler.nixos_install
 
+    # deploy bootstrap command
+    bootstrap_parser = subparsers.add_parser('bootstrap', help='Bootstrap NixOS on this machine from TempleDB database')
+    bootstrap_parser.add_argument('--hostname', default=None, help='Hostname for flake target (default: current hostname)')
+    bootstrap_parser.add_argument('--system-config', default='system_config', help='System config project slug (default: system_config)')
+    bootstrap_parser.add_argument('--quiet', '-q', action='store_true', help='Hide nix store paths from output')
+    bootstrap_parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
+    cli.commands['deploy.bootstrap'] = deploy_handler.bootstrap
+
+    # deploy hardware-config command
+    hw_config_parser = subparsers.add_parser('hardware-config', help='Generate and save hardware config for this machine')
+    hw_config_parser.add_argument('--hostname', default=None, help='Hostname (default: current hostname)')
+    hw_config_parser.add_argument('--system-config', default='system_config', help='System config project slug (default: system_config)')
+    hw_config_parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
+    cli.commands['deploy.hardware-config'] = deploy_handler.hardware_config
+
     # deploy shell command
     shell_parser = subparsers.add_parser('shell', help='Enter interactive shell in deployment environment (FHS if available)')
     shell_parser.add_argument('slug', help='Project slug')

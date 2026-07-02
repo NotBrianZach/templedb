@@ -123,6 +123,7 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
     nav = "\n".join(
         f'<a href="{href}" class="{"active" if active == k else ""}">{label}</a>'
         for k, href, label in [
+            ("dashboard", "/",         "Dashboard"),
             ("projects", "/projects", "Projects"),
             ("vcs",      "/vcs",      "VCS"),
             ("env",      "/env",      "Env"),
@@ -137,6 +138,8 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("settings", "/settings", "Settings"),
             ("status",   "/status",   "Status"),
             ("systemd",  "/systemd",  "Systemd"),
+            ("fleet-sync", "/fleet-sync", "Fleet Sync"),
+            ("tests", "/tests", "Tests"),
         ]
     )
     page = f"""<!DOCTYPE html>
@@ -301,8 +304,260 @@ def _highlight_template(template: str) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 def root():
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse("/projects")
+    # ── Stats ──────────────────────────────────────────────────────────────────
+    project_count = (query_one("SELECT COUNT(*) AS n FROM projects") or {}).get("n", 0)
+    file_count = (query_one("SELECT COUNT(*) AS n FROM project_files") or {}).get("n", 0)
+    commit_count = (query_one("SELECT COUNT(*) AS n FROM vcs_commits") or {}).get("n", 0)
+    loc = (query_one("SELECT COALESCE(SUM(lines_of_code),0) AS n FROM project_files") or {}).get("n", 0)
+
+    try:
+        from config import default_db_path
+        db_path = default_db_path()
+        db_size_mb = os.path.getsize(db_path) / 1024 / 1024
+        db_size_str = f'{db_size_mb:.1f} MB'
+    except Exception:
+        db_size_str = "?"
+
+    stats_html = "".join(
+        f'<div class="stat"><div class="val">{v}</div><div class="key">{k}</div></div>'
+        for v, k in [
+            (project_count, "Projects"),
+            (f"{file_count:,}", "Files"),
+            (f"{commit_count:,}", "Commits"),
+            (f"{loc:,}", "Lines of Code"),
+            (db_size_str, "Database"),
+        ]
+    )
+
+    # ── Recent commits ─────────────────────────────────────────────────────────
+    recent_commits = query_all("""
+        SELECT p.slug, vc.commit_hash, vc.commit_message, vc.commit_timestamp, vc.author
+        FROM vcs_commits vc JOIN projects p ON vc.project_id = p.id
+        ORDER BY vc.commit_timestamp DESC LIMIT 8
+    """)
+    commit_rows = []
+    for c in recent_commits:
+        commit_rows.append([
+            f'<a href="/projects/{html.escape(c["slug"])}">{html.escape(c["slug"])}</a>',
+            f'<a href="/vcs/{html.escape(c["slug"])}/commits/{html.escape(c["commit_hash"])}">'
+            f'<code>{html.escape(c["commit_hash"][:8])}</code></a>',
+            html.escape((c["commit_message"] or "").split("\n")[0][:72]),
+            html.escape(c["author"] or ""),
+            html.escape((c["commit_timestamp"] or "")[:16]),
+        ])
+
+    # ── Recent deploys ─────────────────────────────────────────────────────────
+    recent_deploys = query_all("""
+        SELECT p.slug, dh.target_name, dh.status, dh.started_at, dh.duration_ms,
+               SUBSTR(dh.commit_hash, 1, 8) AS short_hash, dh.error_message
+        FROM deployment_history dh JOIN projects p ON dh.project_id = p.id
+        ORDER BY dh.started_at DESC LIMIT 6
+    """)
+    deploy_rows = []
+    for d in recent_deploys:
+        dur = f'{d["duration_ms"] // 1000}s' if d["duration_ms"] else ""
+        deploy_rows.append([
+            f'<a href="/projects/{html.escape(d["slug"])}">{html.escape(d["slug"])}</a>',
+            html.escape(d["target_name"] or ""),
+            _status_badge(d["status"]),
+            f'<code class="muted">{html.escape(d["short_hash"] or "")}</code>',
+            html.escape((d["started_at"] or "")[:16]),
+            dur,
+        ])
+
+    # ── Fleet health ───────────────────────────────────────────────────────────
+    fleet_machines = query_all("""
+        SELECT m.machine_name, m.target_host, m.deployment_status, m.health_status,
+               n.network_name
+        FROM fleet_machines m
+        JOIN fleet_networks n ON m.network_id = n.id
+        WHERE n.is_active = 1
+        ORDER BY n.network_name, m.machine_name
+    """)
+    fleet_html = ""
+    if fleet_machines:
+        fleet_items = []
+        for fm in fleet_machines:
+            h = fm["health_status"] or "unknown"
+            s = fm["deployment_status"] or "new"
+            color = "#4a9a6a" if h == "healthy" else "#e94560" if h in ("unhealthy", "unreachable") else "#808098"
+            fleet_items.append(
+                f'<div style="display:inline-block;background:#13131f;border:1px solid #1e1e3a;'
+                f'border-radius:4px;padding:0.4rem 0.7rem;margin:0.2rem">'
+                f'<span style="color:{color};font-size:0.9rem">{"●" if h == "healthy" else "○"}</span> '
+                f'<strong>{html.escape(fm["machine_name"])}</strong> '
+                f'<span class="muted" style="font-size:0.75rem">{html.escape(fm["target_host"] or "")}</span>'
+                f'</div>'
+            )
+        fleet_html = f"""
+<h3 style="margin-top:1.5rem">Fleet <a href="/deploy" class="muted" style="font-size:0.75rem">view all</a></h3>
+<div style="display:flex;flex-wrap:wrap;gap:0.2rem">{"".join(fleet_items)}</div>
+"""
+
+    # ── Alerts ─────────────────────────────────────────────────────────────────
+    alerts = []
+    failed_deploys = query_one(
+        "SELECT COUNT(*) AS n FROM deployment_history WHERE status = 'failed' AND started_at > datetime('now', '-7 days')"
+    )
+    if failed_deploys and failed_deploys["n"]:
+        alerts.append(f'{failed_deploys["n"]} failed deploy(s) in last 7 days')
+
+    unhealthy = [m for m in fleet_machines if m["health_status"] in ("unhealthy", "unreachable")]
+    if unhealthy:
+        names = ", ".join(m["machine_name"] for m in unhealthy[:3])
+        alerts.append(f'Fleet machines need attention: {names}')
+
+    last_backup = query_one("SELECT backed_up_at FROM backup_history ORDER BY backed_up_at DESC LIMIT 1") if _backup_history_exists() else None
+    if not last_backup:
+        alerts.append("No backups recorded")
+
+    try:
+        from migrator import Migrator
+        from db_utils import DB_PATH
+        m = Migrator(DB_PATH)
+        pending = sum(1 for s in m.status() if not s["applied"])
+        if pending:
+            alerts.append(f'{pending} pending DB migration(s)')
+    except Exception:
+        pass
+
+    fuse_mounted = False
+    try:
+        with open("/proc/mounts") as fm:
+            for line in fm:
+                if "fuse" in line.lower() and "temple" in line.lower():
+                    fuse_mounted = True
+                    break
+    except Exception:
+        pass
+    if not fuse_mounted:
+        alerts.append("FUSE mount is down (~/temple)")
+
+    alerts_html = ""
+    if alerts:
+        items = "".join(
+            f'<div style="background:#3a1a22;border:1px solid #4a2a32;border-radius:4px;'
+            f'padding:0.4rem 0.75rem;margin-bottom:0.3rem;font-size:0.85rem;color:#e94560">{html.escape(a)}</div>'
+            for a in alerts
+        )
+        alerts_html = f'<div style="margin-bottom:1rem">{items}</div>'
+
+    # ── Quick Actions ──────────────────────────────────────────────────────────
+    quick_actions = """
+<div style="display:flex;gap:0.5rem;margin-bottom:1.5rem;flex-wrap:wrap">
+  <button hx-post="/backup/gcs" hx-swap="outerHTML" style="font-size:0.78rem">Backup to GCS</button>
+  <button hx-post="/mount/toggle" hx-swap="outerHTML" style="font-size:0.78rem">Toggle FUSE Mount</button>
+  <button hx-post="/projects/sync-all" hx-target="#dash-sync-result" hx-swap="innerHTML" style="font-size:0.78rem">Sync All</button>
+  <button hx-post="/db/migrate" hx-swap="outerHTML" style="font-size:0.78rem">Run Migrations</button>
+  <span id="dash-sync-result" class="muted"></span>
+</div>
+"""
+
+    # ── Navigation Guide ───────────────────────────────────────────────────────
+    nav_guide = """
+<h3 style="margin-top:1.5rem">About TempleDB</h3>
+<div style="color:#a0a0c0;font-size:0.85rem;line-height:1.7;margin-bottom:1.2rem;max-width:700px">
+<p style="margin-bottom:0.6rem">
+Terry Davis built an entire operating system alone because he believed a single
+mind could hold a whole cathedral. TempleDB carries that conviction forward:
+one SQLite file <em>is</em> the project &mdash; source, history, secrets, config,
+deployments, domains, documentation, and the knowledge graph that connects them.
+Not scattered across <code>.git/</code>, <code>.env</code>, CI YAML, and a dozen SaaS dashboards.
+One artifact. One truth.
+</p>
+<p style="margin-bottom:0.6rem">
+The FUSE mount at <code>~/temple/</code> projects the database back into the
+filesystem so legacy tools still work, but the filesystem is the shadow on the
+cave wall &mdash; the database is the reality. Writes through the mount go
+straight to SQLite with ACID guarantees. Version control is native:
+commits are rows, branches are foreign keys, merges are transactions.
+</p>
+<p>
+Every tab below is a different <em>view</em> into the same data. Projects are
+the central entity; everything else &mdash; commits, deploys, secrets, nix
+configs, domains &mdash; hangs off them. The system is designed so that
+a single <code>templedb.sqlite</code> backup is a complete, portable snapshot
+of your entire digital life as a developer.
+</p>
+</div>
+<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));gap:0.5rem">
+  <a href="/projects" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Projects</strong>
+    <div class="muted" style="margin-top:0.2rem">Every git repo you've imported. Files, LOC, sync status, backups. The central entity everything else hangs off of.</div>
+  </a>
+  <a href="/vcs" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">VCS</strong>
+    <div class="muted" style="margin-top:0.2rem">Database-native version control. Commits, branches, staging, diffs. Replaces git with ACID-guaranteed history stored in SQLite.</div>
+  </a>
+  <a href="/env" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Env</strong>
+    <div class="muted" style="margin-top:0.2rem">Environment variables and secrets across projects and profiles. Templated values, secret masking, scoped to project or global.</div>
+  </a>
+  <a href="/nix" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Nix</strong>
+    <div class="muted" style="margin-top:0.2rem">NixOS configuration stored in the DB. Flake configs, host-specific options, packages, and the system config that gets materialized into your flake.</div>
+  </a>
+  <a href="/deploy" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Deploy</strong>
+    <div class="muted" style="margin-top:0.2rem">Deployment engine. Auto-deploy triggers, fleet NixOS rollouts with magic rollback, deploy history, health checks, and caching.</div>
+  </a>
+  <a href="/audit" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Audit</strong>
+    <div class="muted" style="margin-top:0.2rem">Every action TempleDB takes gets logged. Filter by project or action type. The immutable record of what happened and when.</div>
+  </a>
+  <a href="/domains" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Domains</strong>
+    <div class="muted" style="margin-top:0.2rem">Domain names, DNS records, SSL certs, and registrar info. Track which project owns which domain.</div>
+  </a>
+  <a href="/docs" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Docs</strong>
+    <div class="muted" style="margin-top:0.2rem">READMEs and documentation files across all projects. Scanned, categorized, and searchable by topic.</div>
+  </a>
+  <a href="/code" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Code</strong>
+    <div class="muted" style="margin-top:0.2rem">Extracted code symbols &mdash; functions, classes, methods. Complexity analysis, dependency tracking, and cross-project call graphs.</div>
+  </a>
+  <a href="/graph" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Graph</strong>
+    <div class="muted" style="margin-top:0.2rem">The knowledge graph. Cross-project search, dependency visualization, and relationship mapping. How everything connects.</div>
+  </a>
+  <a href="/schema-browser" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Schema</strong>
+    <div class="muted" style="margin-top:0.2rem">Browse the TempleDB schema itself. Every table, column, index, and trigger in the SQLite database.</div>
+  </a>
+  <a href="/settings" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Settings</strong>
+    <div class="muted" style="margin-top:0.2rem">System configuration. Host-specific NixOS attrs, dotfile links, config checkouts, and TempleDB's own settings.</div>
+  </a>
+  <a href="/status" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Status</strong>
+    <div class="muted" style="margin-top:0.2rem">System health. DB stats, migration status, FUSE mount, bootstrap readiness, daemon status, and active services.</div>
+  </a>
+  <a href="/systemd" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
+    <strong style="color:#e94560">Systemd</strong>
+    <div class="muted" style="margin-top:0.2rem">Live systemd unit monitor. View user and system services, filter by state, read logs. Your machine at a glance.</div>
+  </a>
+</div>
+"""
+
+    body = f"""
+<h2>TempleDB</h2>
+<p style="color:#606080;font-size:0.8rem;margin-bottom:1rem;font-style:italic">In Honor of Terry Davis</p>
+{alerts_html}
+{stats_html}
+{quick_actions}
+
+<h3 style="margin-top:1rem">Recent Commits</h3>
+{_table(["Project", "Hash", "Message", "Author", "Time"], commit_rows, "No commits yet.")}
+
+<h3 style="margin-top:1rem">Recent Deploys <a href="/deploy" class="muted" style="font-size:0.75rem">view all</a></h3>
+{_table(["Project", "Target", "Status", "Commit", "Started", "Dur"], deploy_rows, "No deployments yet.")}
+
+{fleet_html}
+
+{nav_guide}
+"""
+    return _base("Dashboard", body, "dashboard")
 
 
 # ── Projects ──────────────────────────────────────────────────────────────────
@@ -465,13 +720,13 @@ def projects_sync_all():
 
 @app.post("/backup/local", response_class=HTMLResponse)
 def backup_local():
-    rc, out, err = _run("backup", "local")
+    rc, out, err = _run("storage", "backup", "local")
     return HTMLResponse(_msg(out or err or "Done", ok=rc == 0))
 
 
 @app.post("/backup/gcs", response_class=HTMLResponse)
 def backup_gcs():
-    rc, out, err = _run("backup", "gcs")
+    rc, out, err = _run("storage", "backup", "gcs")
     return HTMLResponse(_msg(out or err or "Done", ok=rc == 0))
 
 
@@ -3212,7 +3467,15 @@ def _project_config_links() -> str:
 # ── Code Intelligence ─────────────────────────────────────────────────────────
 
 @app.get("/code", response_class=HTMLResponse)
-def code_list(project: str = Query(""), kind: str = Query("")):
+def code_redirect(project: str = Query(""), kind: str = Query("")):
+    from fastapi.responses import RedirectResponse
+    params = ["view=symbols"]
+    if project: params.append(f"project={project}")
+    if kind: params.append(f"kind={kind}")
+    return RedirectResponse(f"/graph?{'&'.join(params)}")
+
+
+def _code_symbols_html(project: str = "", kind: str = ""):
     symbols = query_all("""
         SELECT cs.id, p.slug, cs.symbol_name, cs.symbol_type,
                pf.file_path, cs.start_line, cs.end_line,
@@ -3360,20 +3623,19 @@ def code_list(project: str = Query(""), kind: str = Query("")):
   {_table(["Name", "Project", "Type", "Cohesion", "Description"], cluster_rows, "No clusters.", "cluster-tbl")}
 </div>"""
 
-    body = f"""
-<h2>Code Intelligence</h2>
+    return f"""
 <div style="display:flex;gap:0.75rem;flex-wrap:wrap;margin-bottom:1.25rem;align-items:center">
-  <form method="get" style="display:flex;gap:0.5rem;align-items:center">
+  <form method="get" action="/graph" style="display:flex;gap:0.5rem;align-items:center">
+    <input type="hidden" name="view" value="symbols">
     <select name="project" onchange="this.form.submit()" style="font-size:0.85rem;padding:0.3rem">{proj_opts}</select>
     <select name="kind" onchange="this.form.submit()" style="font-size:0.85rem;padding:0.3rem">{kind_opts}</select>
-    {"" if not (project or kind) else '<a href="/code" style="font-size:0.8rem">clear</a>'}
+    {"" if not (project or kind) else '<a href="/graph?view=symbols" style="font-size:0.8rem">clear</a>'}
   </form>
 </div>
 {symbols_section}
 {deps_section}
 {clusters_section}
 """
-    return _base("Code", body, "code")
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -3381,7 +3643,7 @@ def code_list(project: str = Query(""), kind: str = Query("")):
 # ── Graph ─────────────────────────────────────────────────────────────────────
 
 @app.get("/graph", response_class=HTMLResponse)
-def graph_page(q: str = Query(""), view: str = Query("overview")):
+def graph_page(q: str = Query(""), view: str = Query("overview"), project: str = Query(""), kind: str = Query("")):
 
     search_result = ""
     if q:
@@ -3562,6 +3824,17 @@ def graph_page(q: str = Query(""), view: str = Query("overview")):
     except Exception:
         pass
 
+    # ── View tabs ────────────────────────────────────────────────────────────
+    view_tabs = "".join(
+        f'<a href="/graph?view={k}" class="tab{"active" if view == k else ""}">{label}</a>'
+        for k, label in [("overview", "Overview"), ("symbols", "Code Intelligence")]
+    )
+
+    # ── Symbols view ──────────────────────────────────────────────────────────
+    symbols_html = ""
+    if view == "symbols":
+        symbols_html = _code_symbols_html(project=project, kind=kind)
+
     body = f"""
 <h2>Graph
   <span class="help-tip" style="position:relative">?<span class="tip">Knowledge graph: explore relationships across projects, secrets, env vars, deployments, and code. Use the search bar to find anything.</span></span>
@@ -3575,8 +3848,10 @@ def graph_page(q: str = Query(""), view: str = Query("overview")):
 </form>
 
 {search_result}
+<div class="tabs">{view_tabs}</div>
 {fuse_html}
-{overview_html}
+{overview_html if view == "overview" else ""}
+{symbols_html}
 """
     return _base("Graph", body, "graph")
 
@@ -3879,7 +4154,23 @@ def schema_browser(table: str = Query(""), q: str = Query("")):
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 @app.get("/settings", response_class=HTMLResponse)
-def settings_page(q: str = Query(""), host: str = Query("")):
+def settings_redirect(q: str = Query(""), host: str = Query("")):
+    from fastapi.responses import RedirectResponse
+    params = []
+    if q: params.append(f"q={q}")
+    if host: params.append(f"host={host}")
+    qs = "?" + "&".join(params) if params else ""
+    return RedirectResponse(f"/system{qs}")
+
+
+@app.get("/status", response_class=HTMLResponse)
+def status_redirect():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse("/system")
+
+
+@app.get("/system", response_class=HTMLResponse)
+def system_page(q: str = Query(""), host: str = Query("")):
     import socket
     current_host = socket.gethostname()
 
@@ -3909,7 +4200,7 @@ def settings_page(q: str = Query(""), host: str = Query("")):
         for h in all_hosts
     )
     host_filter = f"""
-<form method="get" action="/settings" style="margin-bottom:1rem;display:flex;gap:0.5rem;align-items:center">
+<form method="get" action="/system" style="margin-bottom:1rem;display:flex;gap:0.5rem;align-items:center">
   <select name="host" onchange="this.form.submit()"
     style="background:#13131f;border:1px solid #2a2a4a;color:#d0d0e8;padding:0.3rem 0.5rem;border-radius:4px;font-family:monospace;font-size:0.85rem">
     <option value="">All hosts ({len(configs)} keys)</option>
@@ -4163,41 +4454,7 @@ def settings_page(q: str = Query(""), host: str = Query("")):
     except Exception as e:
         nixos_hosts_html = f'<p class="muted">Could not parse NixOS configs: {html.escape(str(e))}</p>'
 
-    body = f"""
-<h2>Settings</h2>
-
-<h3>System Config
-  <span class="help-tip" style="position:relative">?<span class="tip">Key-value pairs stored in system_config table, grouped by host. Edit inline — changes save on blur. Used by NixOS generation, dotfiles, backups.</span></span>
-</h3>
-{host_filter}
-{config_sections_html}
-{add_config}
-
-<hr class="sep">
-
-<h3>NixOS Host Configs
-  <span class="help-tip" style="position:relative">?<span class="tip">Parsed from configuration.nix, home.nix, and hosts/*.nix in the system_config project. Shows packages, services, and key settings per host.</span></span>
-</h3>
-{nixos_hosts_html if nixos_hosts_html else '<p class="muted">No NixOS config files found in system_config project.</p>'}
-
-<hr class="sep">
-
-<h3>Dotfiles
-  <span class="help-tip" style="position:relative">?<span class="tip">Symlinks from TempleDB project checkouts to your home directory. Apply with: templedb nixos dotfiles-apply</span></span>
-</h3>
-{dotfiles_html}
-{add_dotfile}
-<div style="margin-top:0.5rem">
-  <button hx-post="/nixos/dotfiles-apply" hx-swap="outerHTML" class="sm">Apply All Dotfiles</button>
-</div>
-
-{help_html}
-"""
-    return _base("Settings", body, "settings")
-
-
-@app.get("/status", response_class=HTMLResponse)
-def status():
+    # ── Stats (from old Status page) ─────────────────────────────────────────
     project_count = (query_one("SELECT COUNT(*) AS n FROM projects") or {}).get("n", 0)
     file_count = (query_one("SELECT COUNT(*) AS n FROM project_files") or {}).get("n", 0)
     commit_count = (query_one("SELECT COUNT(*) AS n FROM vcs_commits") or {}).get("n", 0)
@@ -4264,81 +4521,6 @@ def status():
             migration_html += '<p style="margin-top:0.5rem;color:#e94560;font-size:0.85rem">Run <code>templedb admin db migrate</code> to apply pending migrations</p>'
     except Exception as e:
         migration_html = f'<p class="muted" style="margin-top:1rem">Migrations: could not check ({html.escape(str(e))})</p>'
-
-    # ── Config links / dotfiles ───────────────────────────────────────────────
-    dotfiles_html = ""
-    try:
-        dotfiles_row = query_one("SELECT value FROM system_config WHERE key = 'nixos.dotfiles'")
-        if dotfiles_row and dotfiles_row["value"]:
-            manifest = json.loads(dotfiles_row["value"])
-            if manifest:
-                checkouts_dir = Path.home() / ".config" / "templedb" / "checkouts"
-                df_rows = []
-                for entry in manifest:
-                    source_abs = checkouts_dir / entry["project"] / entry["source"]
-                    target = Path(entry["target"]).expanduser()
-
-                    if target.is_symlink() and target.resolve() == source_abs.resolve():
-                        st = '<span style="color:#4a9a6a">linked</span>'
-                    elif target.exists():
-                        st = '<span style="color:#e9a045">conflict</span>'
-                    elif not source_abs.exists():
-                        st = '<span style="color:#e94560">no source</span>'
-                    else:
-                        st = '<span style="color:#808098">not linked</span>'
-
-                    df_rows.append([
-                        f'<code>{html.escape(entry["source"])}</code>',
-                        f'<span class="badge">{html.escape(entry["project"])}</span>',
-                        f'<code class="muted" style="font-size:0.78rem">{html.escape(entry["target"])}</code>',
-                        st,
-                    ])
-
-                linked = sum(1 for e in manifest
-                             if (Path(e["target"]).expanduser().is_symlink() and
-                                 Path(e["target"]).expanduser().resolve() == (checkouts_dir / e["project"] / e["source"]).resolve()))
-                total_df = len(manifest)
-                df_badge = (
-                    f'<span class="badge green">{linked}/{total_df} linked</span>'
-                    if linked == total_df
-                    else f'<span class="badge">{linked}/{total_df} linked</span>'
-                )
-
-                df_table = _table(["Source", "Project", "Target", "Status"], df_rows)
-                dotfiles_html = f"""
-<h3 style="margin-top:1.5rem">Dotfiles {df_badge}</h3>
-{df_table}
-<p class="muted" style="font-size:0.8rem">Manage: <code>templedb nixos dotfiles-add/remove/apply</code></p>
-"""
-    except Exception:
-        pass
-
-    # ── Config links (from config_links table) ────────────────────────────────
-    config_links_html = ""
-    try:
-        links = query_all("""
-            SELECT l.target_path, l.source_absolute, l.status, l.link_type, p.slug
-            FROM config_links l
-            JOIN config_checkouts c ON l.checkout_id = c.id
-            JOIN projects p ON c.project_id = p.id
-            ORDER BY p.slug, l.target_path
-        """)
-        if links:
-            link_rows = []
-            for l in links:
-                st_color = {"active": "#4a9a6a", "broken": "#e94560"}.get(l["status"], "#808098")
-                link_rows.append([
-                    f'<span class="badge">{html.escape(l["slug"])}</span>',
-                    f'<code style="font-size:0.78rem">{html.escape(l["target_path"])}</code>',
-                    f'<code class="muted" style="font-size:0.78rem">{html.escape(l["source_absolute"])}</code>',
-                    f'<span style="color:{st_color}">{html.escape(l["status"])}</span>',
-                ])
-            config_links_html = f"""
-<h3 style="margin-top:1.5rem">Config Links ({len(links)})</h3>
-{_table(["Project", "Target", "Source", "Status"], link_rows)}
-"""
-    except Exception:
-        pass
 
     # ── Bootstrap readiness ───────────────────────────────────────────────────
     bootstrap_html = ""
@@ -4502,15 +4684,91 @@ def status():
     except Exception:
         pass
 
+    # ── Backup History (moved from Projects page) ──────────────────────────────
+    backup_html = ""
+    try:
+        backups = query_all("""
+            SELECT backed_up_at, provider, backup_path, size_bytes
+            FROM backup_history ORDER BY backed_up_at DESC LIMIT 10
+        """) if _backup_history_exists() else []
+        backup_rows = [
+            [
+                html.escape((r["backed_up_at"] or "")[:16]),
+                html.escape(r["provider"] or ""),
+                f'<span class="muted" style="font-size:0.75rem">{html.escape(r["backup_path"] or "")}</span>',
+                f'{r["size_bytes"] // 1024 // 1024} MB' if r["size_bytes"] else "",
+            ]
+            for r in backups
+        ]
+        backup_html = f"""
+<h3 style="margin-top:1.5rem">Backups</h3>
+<div class="row" style="margin-bottom:0.5rem">
+  <form hx-post="/backup/local" hx-target="#sys-backup-result" hx-swap="innerHTML">
+    <button type="submit" style="font-size:0.78rem">Backup Now (local)</button>
+  </form>
+  <form hx-post="/backup/gcs" hx-target="#sys-backup-result" hx-swap="innerHTML">
+    <button type="submit" style="font-size:0.78rem">Backup to GCS</button>
+  </form>
+  <span id="sys-backup-result"></span>
+</div>
+{_table(["Time", "Provider", "Path", "Size"], backup_rows, "No backups recorded yet.")}
+"""
+    except Exception:
+        pass
+
+    # ── Schema Browser link ───────────────────────────────────────────────────
+    schema_link = '<p style="margin-top:1rem"><a href="/schema-browser">Schema Browser</a> <span class="muted">— browse all tables, columns, indexes, and sample data</span></p>'
+
+    # ── Assemble merged System page ───────────────────────────────────────────
     body = f"""
-<h2>Status</h2>
+<h2>System</h2>
 <div style="margin-bottom:1.5rem">{stats_html}</div>
 <p class="muted">Database: {db_info}</p>
+
+<div style="display:flex;gap:0.5rem;margin:1rem 0;flex-wrap:wrap">
+  <button hx-post="/mount/toggle" hx-swap="outerHTML" style="font-size:0.78rem">Toggle FUSE Mount</button>
+  <button hx-post="/db/migrate" hx-swap="outerHTML" style="font-size:0.78rem">Run Migrations</button>
+  <button hx-post="/nixos/dotfiles-apply" hx-swap="outerHTML" style="font-size:0.78rem">Apply Dotfiles</button>
+  <button hx-post="/nixos/generate-all" hx-swap="outerHTML" style="font-size:0.78rem">Generate NixOS</button>
+  <button hx-post="/backup/gcs" hx-swap="outerHTML" style="font-size:0.78rem">Backup to GCS</button>
+</div>
+
 {migration_html}
-{dotfiles_html}
-{config_links_html}
 {bootstrap_html}
 {daemon_html}
+
+<hr class="sep">
+
+{backup_html}
+
+<hr class="sep">
+
+<h3>System Config
+  <span class="help-tip" style="position:relative">?<span class="tip">Key-value pairs stored in system_config table, grouped by host. Edit inline — changes save on blur. Used by NixOS generation, dotfiles, backups.</span></span>
+</h3>
+{host_filter}
+{config_sections_html}
+{add_config}
+
+<hr class="sep">
+
+<h3>NixOS Host Configs
+  <span class="help-tip" style="position:relative">?<span class="tip">Parsed from configuration.nix, home.nix, and hosts/*.nix in the system_config project. Shows packages, services, and key settings per host.</span></span>
+</h3>
+{nixos_hosts_html if nixos_hosts_html else '<p class="muted">No NixOS config files found in system_config project.</p>'}
+
+<hr class="sep">
+
+<h3>Dotfiles
+  <span class="help-tip" style="position:relative">?<span class="tip">Symlinks from TempleDB project checkouts to your home directory. Apply with: templedb nixos dotfiles-apply</span></span>
+</h3>
+{dotfiles_html}
+{add_dotfile}
+<div style="margin-top:0.5rem">
+  <button hx-post="/nixos/dotfiles-apply" hx-swap="outerHTML" class="sm">Apply All Dotfiles</button>
+</div>
+
+<hr class="sep">
 
 <h3 style="margin-top:1.5rem">Third-Party Services &amp; APIs
   <span class="help-tip" style="position:relative">?<span class="tip">External services TempleDB integrates with. Not all are required — most are optional depending on your workflow.</span></span>
@@ -4518,82 +4776,25 @@ def status():
 <table>
 <thead><tr><th>Service</th><th>Used For</th><th>Required?</th><th>Config</th></tr></thead>
 <tbody>
-<tr>
-  <td><strong>SQLite</strong></td>
-  <td>Core database — all project data, VCS, config, secrets stored here</td>
-  <td><span class="badge green">core</span></td>
-  <td><code>~/.local/share/templedb/templedb.sqlite</code></td>
-</tr>
-<tr>
-  <td><strong>cr-sqlite</strong></td>
-  <td>CRDT sync between machines — conflict-free replication of DB tables</td>
-  <td><span class="badge">optional</span></td>
-  <td><code>templedb sync init</code></td>
-</tr>
-<tr>
-  <td><strong>Git</strong></td>
-  <td>Project checkout management, git daemon (port 9419) for LAN flake inputs, git-export for GitHub</td>
-  <td><span class="badge green">core</span></td>
-  <td>Built-in</td>
-</tr>
-<tr>
-  <td><strong>Nix / NixOS</strong></td>
-  <td>System config generation, managed packages, flake inputs, <code>nixos-rebuild switch</code></td>
-  <td><span class="badge green">core</span></td>
-  <td><code>templedb nixos status</code></td>
-</tr>
-<tr>
-  <td><strong>FUSE</strong> (fusepy)</td>
-  <td>Mount DB as filesystem at <code>~/temple/</code> — primary file access, auto-stages writes</td>
-  <td><span class="badge blue">recommended</span></td>
-  <td><code>templedb mount ~/temple</code></td>
-</tr>
-<tr>
-  <td><strong>SOPS / Age</strong></td>
-  <td>Secret encryption — age keys for encrypt/decrypt, SOPS for YAML secret management</td>
-  <td><span class="badge blue">recommended</span></td>
-  <td><code>~/.age/key.txt</code> or <code>~/.config/sops/age/keys.txt</code></td>
-</tr>
-<tr>
-  <td><strong>Google Cloud Storage</strong></td>
-  <td>Cloud backup — upload/download DB snapshots to GCS bucket</td>
-  <td><span class="badge">optional</span></td>
-  <td><code>gcs.backup_bucket</code> in system_config</td>
-</tr>
-<tr>
-  <td><strong>Tailscale</strong></td>
-  <td>VPN for machine-to-machine sync — peer discovery, direct TCP sync over Tailnet</td>
-  <td><span class="badge">optional</span></td>
-  <td><code>templedb sync peers</code></td>
-</tr>
-<tr>
-  <td><strong>GitHub</strong></td>
-  <td>Flake inputs (<code>github:user/repo</code>), <code>git-export --remote</code>, project hosting</td>
-  <td><span class="badge">optional</span></td>
-  <td><code>gh</code> CLI or git credentials</td>
-</tr>
-<tr>
-  <td><strong>Cloudflare</strong></td>
-  <td>DNS management — create/update DNS records for project domains</td>
-  <td><span class="badge">optional</span></td>
-  <td><code>CF_API_TOKEN</code> env var</td>
-</tr>
-<tr>
-  <td><strong>Supabase</strong></td>
-  <td>Used by projects (bza, woofs) — not TempleDB itself. Env vars/secrets managed by TempleDB</td>
-  <td><span class="badge">project-specific</span></td>
-  <td>Per-project env vars</td>
-</tr>
-<tr>
-  <td><strong>Claude / Anthropic</strong></td>
-  <td>AI-assisted coding via <code>templedb ai vibe start</code>, MCP server for Claude Code integration</td>
-  <td><span class="badge">optional</span></td>
-  <td><code>claude</code> CLI installed</td>
-</tr>
+<tr><td><strong>SQLite</strong></td><td>Core database</td><td><span class="badge green">core</span></td><td><code>~/.local/share/templedb/templedb.sqlite</code></td></tr>
+<tr><td><strong>cr-sqlite</strong></td><td>CRDT sync between machines</td><td><span class="badge">optional</span></td><td><code>templedb sync init</code></td></tr>
+<tr><td><strong>Git</strong></td><td>Checkout management, git daemon, git-export</td><td><span class="badge green">core</span></td><td>Built-in</td></tr>
+<tr><td><strong>Nix / NixOS</strong></td><td>System config generation, flake inputs</td><td><span class="badge green">core</span></td><td><code>templedb nixos status</code></td></tr>
+<tr><td><strong>FUSE</strong></td><td>Mount DB as filesystem at <code>~/temple/</code></td><td><span class="badge blue">recommended</span></td><td><code>templedb mount ~/temple</code></td></tr>
+<tr><td><strong>SOPS / Age</strong></td><td>Secret encryption</td><td><span class="badge blue">recommended</span></td><td><code>~/.age/key.txt</code></td></tr>
+<tr><td><strong>GCS</strong></td><td>Cloud backup</td><td><span class="badge">optional</span></td><td><code>gcs.backup_bucket</code></td></tr>
+<tr><td><strong>Tailscale</strong></td><td>Machine-to-machine sync</td><td><span class="badge">optional</span></td><td><code>templedb sync peers</code></td></tr>
+<tr><td><strong>GitHub</strong></td><td>Flake inputs, git-export</td><td><span class="badge">optional</span></td><td><code>gh</code> CLI</td></tr>
+<tr><td><strong>Cloudflare</strong></td><td>DNS management</td><td><span class="badge">optional</span></td><td><code>CF_API_TOKEN</code></td></tr>
+<tr><td><strong>Claude / Anthropic</strong></td><td>AI-assisted coding, MCP server</td><td><span class="badge">optional</span></td><td><code>claude</code> CLI</td></tr>
 </tbody>
 </table>
+
+{schema_link}
+
+{help_html}
 """
-    return _base("Status", body, "status")
+    return _base("System", body, "system")
 
 
 # ── Systemd Monitor ──────────────────────────────────────────────────────────
@@ -4847,3 +5048,727 @@ def systemd_restart(unit_name: str, scope: str = "user"):
     if r.returncode == 0:
         return HTMLResponse(_msg(f"Restarted {unit_name}", ok=True))
     return HTMLResponse(_msg(f"Failed: {r.stderr.strip()}", ok=False))
+
+
+# ── Fleet Sync Dashboard ─────────────────────────────────────────────────────
+
+def _fleet_sync_get_hosts() -> list[dict]:
+    """Discover NixOS hosts from system_config flake.nix and known IPs."""
+    hosts = []
+    checkout = Path.home() / ".config" / "templedb" / "checkouts" / "system_config"
+    flake = checkout / "flake.nix"
+    if flake.exists():
+        content = flake.read_text()
+        for m in re.finditer(r'nixosConfigurations\.(\w+)\s*=', content):
+            name = m.group(1)
+            hosts.append({"name": name, "host": None, "user": "zach", "port": 22})
+
+    # Resolve IPs from fleet_machines
+    ip_map = {}
+    try:
+        machines = query_all("SELECT machine_name, target_host FROM fleet_machines")
+        for m in machines:
+            ip_map[m["machine_name"]] = m["target_host"]
+    except Exception:
+        pass
+
+    # Known host fallbacks
+    import socket
+    hostname = socket.gethostname()
+    known = {"zMothership2": "localhost" if hostname == "zMothership2" else "192.168.8.164",
+             "zMothership3": "localhost" if hostname == "zMothership3" else "192.168.8.172"}
+    for k, v in known.items():
+        if k not in ip_map:
+            ip_map[k] = v
+
+    for h in hosts:
+        h["host"] = ip_map.get(h["name"])
+    return hosts
+
+
+def _fleet_sync_probe(host_info: dict, projects: list[str]) -> dict:
+    """SSH into a host and get its DB sync state."""
+    import socket
+    name = host_info["name"]
+    host = host_info["host"]
+    user = host_info.get("user", "zach")
+
+    result = {"name": name, "host": host or "unknown", "ssh": False, "projects": {}, "error": None}
+
+    if not host:
+        result["error"] = "No IP configured"
+        return result
+
+    # Local machine
+    if host == "localhost" or name == socket.gethostname():
+        result["ssh"] = True
+        for slug in projects:
+            head = query_one("""
+                SELECT c.commit_hash, c.commit_message, c.commit_timestamp
+                FROM vcs_commits c
+                JOIN vcs_branches b ON c.id = b.head_commit_id
+                JOIN projects p ON b.project_id = p.id
+                WHERE p.slug = ? AND b.branch_name = 'main'
+            """, (slug,))
+            if head:
+                result["projects"][slug] = {
+                    "hash": head["commit_hash"], "message": head["commit_message"], "date": head["commit_timestamp"]}
+        return result
+
+    # Remote machine
+    try:
+        ssh_base = ["ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
+                     "-o", "BatchMode=yes", f"{user}@{host}"]
+
+        r = subprocess.run(ssh_base + ["echo ok"], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            result["error"] = "SSH failed"
+            return result
+        result["ssh"] = True
+
+        for slug in projects:
+            r = subprocess.run(
+                ssh_base + [f"~/templeDB/templedb vcs log {slug} 2>/dev/null | head -5"],
+                capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                for line in r.stdout.strip().split("\n"):
+                    if line.startswith("commit "):
+                        result["projects"][slug] = {"hash": line.split()[1], "message": "", "date": ""}
+                        break
+
+    except subprocess.TimeoutExpired:
+        result["error"] = "SSH timeout"
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def _fleet_sync_format_probe(result: dict, sync_projects: list[str]) -> str:
+    """Format probe result as HTML."""
+    if result.get("error"):
+        return f'<span style="color:#e94560">{html.escape(result["error"])}</span>'
+    if not result.get("ssh"):
+        return '<span class="muted">not probed</span>'
+
+    parts = []
+    for slug in sync_projects:
+        local_head = query_one("""
+            SELECT c.commit_hash FROM vcs_commits c
+            JOIN vcs_branches b ON c.id = b.head_commit_id
+            JOIN projects p ON b.project_id = p.id
+            WHERE p.slug = ? AND b.branch_name = 'main'
+        """, (slug,))
+        remote = result.get("projects", {}).get(slug, {})
+        remote_hash = remote.get("hash", "—")
+        local_hash = local_head["commit_hash"] if local_head else "—"
+
+        if remote_hash == "—":
+            badge = '<span style="color:#606080">no data</span>'
+        elif remote_hash == local_hash:
+            badge = '<span style="color:#4a9a6a">&#x2713; in-sync</span>'
+        else:
+            badge = f'<span style="color:#e9a045">&#x26a0; stale ({html.escape(remote_hash[:8])})</span>'
+        parts.append(f'{html.escape(slug)}: {badge}')
+
+    return f'<span style="color:#4a9a6a">SSH &#x2713;</span> | {" | ".join(parts)}'
+
+
+@app.get("/fleet-sync", response_class=HTMLResponse)
+def fleet_sync_page():
+    """Fleet Sync Dashboard — visualize DB sync state across machines."""
+    hosts = _fleet_sync_get_hosts()
+    sync_projects = ["system_config", "templedb"]
+
+    # Local commit reference
+    local_heads = {}
+    for slug in sync_projects:
+        head = query_one("""
+            SELECT c.commit_hash, c.commit_message, c.commit_timestamp
+            FROM vcs_commits c
+            JOIN vcs_branches b ON c.id = b.head_commit_id
+            JOIN projects p ON b.project_id = p.id
+            WHERE p.slug = ? AND b.branch_name = 'main'
+        """, (slug,))
+        if head:
+            local_heads[slug] = head
+
+    ref_rows = []
+    for slug in sync_projects:
+        head = local_heads.get(slug)
+        if head:
+            ref_rows.append([
+                f'<strong>{html.escape(slug)}</strong>',
+                f'<code>{html.escape(head["commit_hash"][:12])}</code>',
+                html.escape((head["commit_message"] or "")[:60]),
+                f'<span class="muted">{html.escape((head["commit_timestamp"] or "")[:19])}</span>',
+            ])
+
+    ref_table = _table(["Project", "Latest Commit", "Message", "Date"], ref_rows,
+                       "No projects with commits", "fleet-sync-refs")
+
+    # Machine rows with probe/sync buttons
+    machine_rows = []
+    for h in hosts:
+        name = html.escape(h["name"])
+        ip = html.escape(h["host"] or "—")
+        probe_btn = (
+            f'<button hx-post="/fleet-sync/probe/{h["name"]}" '
+            f'hx-target="#probe-{h["name"]}" hx-swap="innerHTML" '
+            f'style="background:#1a1a3a;border:1px solid #2a2a4a;color:#d0d0e8;'
+            f'padding:2px 8px;border-radius:3px;cursor:pointer;font-family:monospace;font-size:0.78rem">'
+            f'Probe</button>')
+        is_local = h["host"] == "localhost"
+        sync_btn = ('<span class="muted">local</span>' if is_local else
+            f'<button hx-post="/fleet-sync/push/{h["name"]}" '
+            f'hx-target="#sync-{h["name"]}" hx-swap="innerHTML" '
+            f'hx-confirm="Push DB to {h["name"]}?" '
+            f'style="background:#1a3a1a;border:1px solid #2a4a2a;color:#8f8;'
+            f'padding:2px 8px;border-radius:3px;cursor:pointer;font-family:monospace;font-size:0.78rem">'
+            f'Sync DB</button>')
+        machine_rows.append([
+            f'<strong>{name}</strong>', ip,
+            f'{probe_btn} {sync_btn}',
+            f'<span id="probe-{h["name"]}" class="muted">click Probe</span>',
+            f'<span id="sync-{h["name"]}"></span>',
+        ])
+
+    machine_table = _table(
+        ["Machine", "IP", "Actions", "Status", "Sync Result"],
+        machine_rows, "No hosts found in system_config flake.nix", "fleet-sync-machines")
+
+    probe_all = (
+        '<button hx-post="/fleet-sync/probe-all" '
+        'hx-target="#probe-all-results" hx-swap="innerHTML" '
+        'style="background:#1a1a3a;border:1px solid #3a3a5a;color:#d0d0e8;'
+        'padding:4px 12px;border-radius:4px;cursor:pointer;font-family:monospace;'
+        'font-size:0.85rem;margin-bottom:1rem">Probe All Machines</button>')
+
+    body = f"""
+<h2>Fleet Sync Dashboard</h2>
+<p class="muted" style="margin-bottom:1rem">
+  Compare TempleDB database state across machines. Probe checks latest commits via SSH.
+  Sync pushes the local DB (with WAL checkpoint) to remote machines.
+</p>
+<h3>This Machine (Local Reference)</h3>
+{ref_table}
+<h3 style="margin-top:2rem">Machines</h3>
+{probe_all}
+<div id="probe-all-results"></div>
+{_search_bar("fleet-sync-machines", "Filter machines...")}
+{machine_table}
+"""
+    return _base("Fleet Sync", body, "fleet-sync")
+
+
+@app.post("/fleet-sync/probe/{machine_name}", response_class=HTMLResponse)
+def fleet_sync_probe(machine_name: str):
+    """Probe a single machine's sync state."""
+    hosts = _fleet_sync_get_hosts()
+    host_info = next((h for h in hosts if h["name"] == machine_name), None)
+    if not host_info:
+        return HTMLResponse('<span style="color:#e94560">Unknown machine</span>')
+    result = _fleet_sync_probe(host_info, ["system_config", "templedb"])
+    return HTMLResponse(_fleet_sync_format_probe(result, ["system_config", "templedb"]))
+
+
+@app.post("/fleet-sync/probe-all", response_class=HTMLResponse)
+def fleet_sync_probe_all():
+    """Probe all machines in parallel."""
+    import concurrent.futures
+    hosts = _fleet_sync_get_hosts()
+    sync_projects = ["system_config", "templedb"]
+
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fleet_sync_probe, h, sync_projects): h["name"] for h in hosts}
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                results[name] = future.result()
+            except Exception as e:
+                results[name] = {"name": name, "error": str(e), "ssh": False, "projects": {}}
+
+    # OOB swaps to update each machine's probe span
+    oob = []
+    summary_parts = []
+    for h in hosts:
+        r = results.get(h["name"], {})
+        probe_html = _fleet_sync_format_probe(r, sync_projects)
+        oob.append(f'<span id="probe-{html.escape(h["name"])}" hx-swap-oob="innerHTML">{probe_html}</span>')
+        if r.get("error"):
+            summary_parts.append(f'<strong>{html.escape(h["name"])}</strong>: <span style="color:#e94560">{html.escape(r["error"])}</span>')
+        elif r.get("ssh"):
+            summary_parts.append(f'<strong>{html.escape(h["name"])}</strong>: <span style="color:#4a9a6a">OK</span>')
+        else:
+            summary_parts.append(f'<strong>{html.escape(h["name"])}</strong>: <span class="muted">?</span>')
+
+    return HTMLResponse(
+        f'<p>{"&nbsp; | &nbsp;".join(summary_parts)}</p>' + "".join(oob))
+
+
+@app.post("/fleet-sync/push/{machine_name}", response_class=HTMLResponse)
+def fleet_sync_push(machine_name: str):
+    """Checkpoint WAL and SCP the DB to a remote machine."""
+    import sqlite3 as _sqlite3
+    hosts = _fleet_sync_get_hosts()
+    host_info = next((h for h in hosts if h["name"] == machine_name), None)
+    if not host_info or not host_info["host"]:
+        return HTMLResponse(_msg("Unknown machine or no IP", ok=False))
+    if host_info["host"] == "localhost":
+        return HTMLResponse(_msg("Cannot push to localhost", ok=False))
+
+    user = host_info.get("user", "zach")
+    host = host_info["host"]
+    db_path = Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite"
+
+    try:
+        conn = _sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+
+        r = subprocess.run(
+            ["scp", "-o", "ConnectTimeout=10", str(db_path), f"{user}@{host}:~/.local/share/templedb/templedb.sqlite"],
+            capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            return HTMLResponse(_msg(f"SCP failed: {r.stderr.strip()}", ok=False))
+        return HTMLResponse(_msg(f"DB synced to {machine_name}", ok=True))
+
+    except subprocess.TimeoutExpired:
+        return HTMLResponse(_msg("SCP timed out", ok=False))
+    except Exception as e:
+        return HTMLResponse(_msg(f"Error: {e}", ok=False))
+
+
+# ── Tests Dashboard ──────────────────────────────────────────────────────────
+
+@app.get("/tests", response_class=HTMLResponse)
+def tests_page():
+    """Tests Dashboard — run QA tests against projects."""
+    from test_runner import detect_project_type, PROJECT_TESTS, STRUCTURE_TESTS
+
+    projects = query_all("SELECT slug, repo_url, name FROM projects ORDER BY slug")
+
+    rows = []
+    for p in projects:
+        slug = p["slug"]
+        checkout = Path.home() / ".config" / "templedb" / "checkouts" / slug
+        repo_path = Path(p.get("repo_url") or "") if p.get("repo_url") else None
+
+        # Pick best path
+        if repo_path and repo_path.exists() and (
+            (repo_path / "src" / "gui.py").exists() or
+            (repo_path / "frontend" / "package.json").exists() or
+            (repo_path / "package.json").exists() or
+            (repo_path / "backend" / "app.py").exists() or
+            (repo_path / "app.py").exists()
+        ):
+            project_path = repo_path
+        elif checkout.exists():
+            project_path = checkout
+        elif repo_path and repo_path.exists():
+            project_path = repo_path
+        else:
+            project_path = None
+
+        if not project_path:
+            continue
+
+        ptype = detect_project_type(project_path)
+        has_tests = slug in PROJECT_TESTS
+        has_struct = slug in STRUCTURE_TESTS
+
+        badges = []
+        if has_tests:
+            badges.append('<span style="background:#1a3a1a;color:#8f8;padding:1px 6px;border-radius:3px;font-size:0.72rem">server tests</span>')
+        if has_struct:
+            badges.append('<span style="background:#1a2a3a;color:#8af;padding:1px 6px;border-radius:3px;font-size:0.72rem">structure tests</span>')
+        if not badges:
+            badges.append('<span style="color:#606080;font-size:0.72rem">auto-detect only</span>')
+
+        run_btn = (
+            f'<button hx-post="/tests/run/{slug}" '
+            f'hx-target="#test-result-{slug}" hx-swap="innerHTML" '
+            f'hx-indicator="#test-spinner-{slug}" '
+            f'style="background:#1a1a3a;border:1px solid #2a2a4a;color:#d0d0e8;'
+            f'padding:2px 8px;border-radius:3px;cursor:pointer;font-family:monospace;font-size:0.78rem">'
+            f'Run Tests</button>'
+            f'<span id="test-spinner-{slug}" class="htmx-indicator" style="color:#606080;font-size:0.72rem"> running...</span>'
+        )
+
+        rows.append([
+            f'<a href="/tests/{html.escape(slug)}" style="color:#d0d0e8"><strong>{html.escape(slug)}</strong></a>',
+            html.escape(ptype),
+            " ".join(badges),
+            run_btn,
+            f'<div id="test-result-{slug}" class="muted" style="font-size:0.78rem">—</div>',
+        ])
+
+    table = _table(
+        ["Project", "Type", "Tests", "Action", "Results"],
+        rows, "No testable projects found", "tests-table")
+
+    body = f"""
+<h2>Tests Dashboard</h2>
+<p class="muted" style="margin-bottom:1rem">
+  Run QA tests against TempleDB-managed projects. Structure tests run instantly.
+  Server tests start the app and check page loads + endpoints.
+</p>
+
+<button hx-post="/tests/run-all" hx-target="#run-all-results" hx-swap="innerHTML"
+  hx-indicator="#run-all-spinner"
+  style="background:#1a1a3a;border:1px solid #3a3a5a;color:#d0d0e8;
+  padding:4px 12px;border-radius:4px;cursor:pointer;font-family:monospace;
+  font-size:0.85rem;margin-bottom:1rem">Run All Tests</button>
+<span id="run-all-spinner" class="htmx-indicator" style="color:#606080"> running all...</span>
+<div id="run-all-results"></div>
+
+{_search_bar("tests-table", "Filter projects...")}
+{table}
+"""
+    return _base("Tests", body, "tests")
+
+
+@app.post("/tests/run/{slug}", response_class=HTMLResponse)
+def tests_run_project(slug: str):
+    """Run tests for a single project and return results as HTML."""
+    from test_runner import run_tests, detect_project_type, TestResult
+
+    project = query_one("SELECT slug, repo_url FROM projects WHERE slug = ?", (slug,))
+    if not project:
+        return HTMLResponse(f'<span style="color:#e94560">Project not found</span>')
+
+    # Resolve path
+    checkout = Path.home() / ".config" / "templedb" / "checkouts" / slug
+    repo_path = Path(project.get("repo_url") or "") if project.get("repo_url") else None
+
+    if repo_path and repo_path.exists() and (
+        (repo_path / "src" / "gui.py").exists() or
+        (repo_path / "frontend" / "package.json").exists() or
+        (repo_path / "package.json").exists() or
+        (repo_path / "backend" / "app.py").exists() or
+        (repo_path / "app.py").exists()
+    ):
+        project_path = repo_path
+    elif checkout.exists():
+        project_path = checkout
+    elif repo_path and repo_path.exists():
+        project_path = repo_path
+    else:
+        return HTMLResponse(f'<span style="color:#e94560">No project path found</span>')
+
+    # Capture test output
+    import io
+    old_stdout = sys.stdout
+    sys.stdout = captured = io.StringIO()
+
+    try:
+        success = run_tests(slug, project_path, verbose=True)
+    except Exception as e:
+        sys.stdout = old_stdout
+        return HTMLResponse(f'<span style="color:#e94560">Error: {html.escape(str(e))}</span>')
+    finally:
+        sys.stdout = old_stdout
+
+    output = captured.getvalue()
+
+    # Parse results from output
+    lines = output.strip().split("\n")
+    result_parts = []
+    for line in lines:
+        line_clean = re.sub(r'\033\[[0-9;]*m', '', line)  # strip ANSI
+        if "PASS" in line_clean:
+            test_name = line_clean.replace("PASS", "").strip()
+            result_parts.append(f'<div style="color:#4a9a6a;font-size:0.75rem">&#x2713; {html.escape(test_name)}</div>')
+        elif "FAIL" in line_clean:
+            test_name = line_clean.replace("FAIL", "").strip()
+            result_parts.append(f'<div style="color:#e94560;font-size:0.75rem">&#x2717; {html.escape(test_name)}</div>')
+
+    # Summary line
+    for line in lines:
+        if "Results:" in line:
+            line_clean = re.sub(r'\033\[[0-9;]*m', '', line)
+            if success:
+                summary = f'<div style="color:#4a9a6a;font-weight:bold;margin-top:4px">{html.escape(line_clean.strip())}</div>'
+            else:
+                summary = f'<div style="color:#e94560;font-weight:bold;margin-top:4px">{html.escape(line_clean.strip())}</div>'
+            result_parts.append(summary)
+            break
+
+    if not result_parts:
+        if success:
+            result_parts.append('<div style="color:#4a9a6a">All tests passed</div>')
+        else:
+            result_parts.append(f'<div style="color:#e94560">Tests failed</div>')
+
+    # Collapsible detail
+    detail_id = f"detail-{slug}"
+    result_html = (
+        f'<details><summary style="cursor:pointer;color:#a0a0c0;font-size:0.78rem">'
+        f'{"&#x2713;" if success else "&#x2717;"} '
+        f'{result_parts[-1] if result_parts else ""}</summary>'
+        f'<div style="margin-top:4px;padding:4px 8px;background:#0a0a15;border-radius:4px">'
+        f'{"".join(result_parts[:-1])}'
+        f'</div></details>'
+    )
+
+    return HTMLResponse(result_html)
+
+
+@app.post("/tests/run-all", response_class=HTMLResponse)
+def tests_run_all():
+    """Run tests for all testable projects."""
+    from test_runner import PROJECT_TESTS, STRUCTURE_TESTS
+
+    testable = set(list(PROJECT_TESTS.keys()) + list(STRUCTURE_TESTS.keys()))
+    results = []
+
+    for slug in sorted(testable):
+        # Trigger individual test and collect summary
+        r = tests_run_project(slug)
+        body = r.body.decode() if hasattr(r, 'body') else str(r)
+        results.append(f'<div style="margin-bottom:4px"><strong>{html.escape(slug)}</strong>: {body}</div>')
+
+        # Also update the individual result span via OOB
+        results.append(
+            f'<div id="test-result-{html.escape(slug)}" hx-swap-oob="innerHTML">{body}</div>'
+        )
+
+    return HTMLResponse("".join(results))
+
+
+@app.get("/tests/{slug}", response_class=HTMLResponse)
+def tests_detail(slug: str):
+    """Per-project test detail page with editable test definitions."""
+    project = query_one("SELECT * FROM projects WHERE slug = ?", (slug,))
+    if not project:
+        return _base("Not found", f'<p class="muted">Project "{html.escape(slug)}" not found.</p>', "tests")
+
+    pid = project["id"]
+
+    # Load test definitions
+    tests = query_all(
+        "SELECT * FROM project_tests WHERE project_id = ? ORDER BY test_type, path, file_path", (pid,))
+
+    # Group by type
+    page_tests = [t for t in tests if t["test_type"] == "page"]
+    post_tests = [t for t in tests if t["test_type"] == "post"]
+    struct_file_tests = [t for t in tests if t["test_type"] == "structure_file"]
+    struct_dir_tests = [t for t in tests if t["test_type"] == "structure_dir"]
+
+    # Build page tests table
+    page_rows = []
+    for t in page_tests:
+        enabled = '&#x2713;' if t["enabled"] else '&#x2717;'
+        toggle_btn = (
+            f'<button hx-post="/tests/{slug}/toggle/{t["id"]}" hx-target="#test-row-{t["id"]}" hx-swap="outerHTML" '
+            f'style="background:none;border:none;color:#d0d0e8;cursor:pointer;font-size:0.8rem" '
+            f'title="Toggle enabled">{"&#x1f7e2;" if t["enabled"] else "&#x26aa;"}</button>')
+        delete_btn = (
+            f'<button hx-delete="/tests/{slug}/delete/{t["id"]}" hx-target="#test-row-{t["id"]}" hx-swap="outerHTML" '
+            f'hx-confirm="Delete this test?" '
+            f'style="background:none;border:none;color:#e94560;cursor:pointer;font-size:0.8rem">&#x2717;</button>')
+        page_rows.append(f'<tr id="test-row-{t["id"]}"><td><code>{html.escape(t["path"] or "")}</code></td>'
+                        f'<td>{html.escape(t["expected_text"] or "")}</td>'
+                        f'<td>{html.escape(t["description"] or "")}</td>'
+                        f'<td>{toggle_btn} {delete_btn}</td></tr>')
+
+    # Build structure tests table
+    struct_rows = []
+    for t in struct_file_tests + struct_dir_tests:
+        ttype = "file" if t["test_type"] == "structure_file" else "dir"
+        toggle_btn = (
+            f'<button hx-post="/tests/{slug}/toggle/{t["id"]}" hx-target="#test-row-{t["id"]}" hx-swap="outerHTML" '
+            f'style="background:none;border:none;color:#d0d0e8;cursor:pointer;font-size:0.8rem">'
+            f'{"&#x1f7e2;" if t["enabled"] else "&#x26aa;"}</button>')
+        delete_btn = (
+            f'<button hx-delete="/tests/{slug}/delete/{t["id"]}" hx-target="#test-row-{t["id"]}" hx-swap="outerHTML" '
+            f'hx-confirm="Delete this test?" '
+            f'style="background:none;border:none;color:#e94560;cursor:pointer;font-size:0.8rem">&#x2717;</button>')
+        struct_rows.append(f'<tr id="test-row-{t["id"]}"><td>{ttype}</td>'
+                          f'<td><code>{html.escape(t["file_path"] or "")}</code></td>'
+                          f'<td>{html.escape(t["description"] or "")}</td>'
+                          f'<td>{toggle_btn} {delete_btn}</td></tr>')
+
+    # Post tests table
+    post_rows = []
+    for t in post_tests:
+        toggle_btn = (
+            f'<button hx-post="/tests/{slug}/toggle/{t["id"]}" hx-target="#test-row-{t["id"]}" hx-swap="outerHTML" '
+            f'style="background:none;border:none;color:#d0d0e8;cursor:pointer;font-size:0.8rem">'
+            f'{"&#x1f7e2;" if t["enabled"] else "&#x26aa;"}</button>')
+        delete_btn = (
+            f'<button hx-delete="/tests/{slug}/delete/{t["id"]}" hx-target="#test-row-{t["id"]}" hx-swap="outerHTML" '
+            f'hx-confirm="Delete this test?" '
+            f'style="background:none;border:none;color:#e94560;cursor:pointer;font-size:0.8rem">&#x2717;</button>')
+        post_rows.append(f'<tr id="test-row-{t["id"]}"><td><code>{html.escape(t["path"] or "")}</code></td>'
+                        f'<td>{html.escape(t["expected_text"] or "")}</td>'
+                        f'<td>{html.escape(t["description"] or "")}</td>'
+                        f'<td>{toggle_btn} {delete_btn}</td></tr>')
+
+    # Test history
+    history = query_all(
+        "SELECT * FROM test_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT 10", (pid,))
+    history_rows = []
+    for h in history:
+        color = "#4a9a6a" if h["failed"] == 0 else "#e94560"
+        history_rows.append([
+            f'<span style="color:{color}">{h["passed"]}/{h["passed"] + h["failed"]}</span>',
+            f'{h.get("duration_ms", 0) or 0}ms',
+            f'<span class="muted">{html.escape((h["created_at"] or "")[:19])}</span>',
+        ])
+
+    # Add test forms
+    input_style = ('style="background:#13131f;border:1px solid #2a2a4a;color:#d0d0e8;'
+                   'padding:4px 8px;border-radius:3px;font-family:monospace;font-size:0.8rem;width:250px"')
+    btn_style = ('style="background:#1a3a1a;border:1px solid #2a4a2a;color:#8f8;'
+                 'padding:4px 10px;border-radius:3px;cursor:pointer;font-family:monospace;font-size:0.8rem"')
+
+    add_page_form = f"""
+<form hx-post="/tests/{slug}/add" hx-target="#add-page-result" hx-swap="innerHTML"
+  style="display:flex;gap:8px;align-items:center;margin-top:8px">
+  <input type="hidden" name="test_type" value="page">
+  <input name="path" placeholder="/path" {input_style} style="width:150px">
+  <input name="expected_text" placeholder="Expected text" {input_style} style="width:180px">
+  <input name="description" placeholder="Description" {input_style} style="width:180px">
+  <button type="submit" {btn_style}>+ Add Page Test</button>
+  <span id="add-page-result"></span>
+</form>"""
+
+    add_post_form = f"""
+<form hx-post="/tests/{slug}/add" hx-target="#add-post-result" hx-swap="innerHTML"
+  style="display:flex;gap:8px;align-items:center;margin-top:8px">
+  <input type="hidden" name="test_type" value="post">
+  <input name="path" placeholder="/path" {input_style} style="width:150px">
+  <input name="expected_text" placeholder="Expected text" {input_style} style="width:180px">
+  <input name="description" placeholder="Description" {input_style} style="width:180px">
+  <button type="submit" {btn_style}>+ Add POST Test</button>
+  <span id="add-post-result"></span>
+</form>"""
+
+    add_struct_form = f"""
+<form hx-post="/tests/{slug}/add" hx-target="#add-struct-result" hx-swap="innerHTML"
+  style="display:flex;gap:8px;align-items:center;margin-top:8px">
+  <select name="test_type" style="background:#13131f;border:1px solid #2a2a4a;color:#d0d0e8;padding:4px;border-radius:3px;font-family:monospace;font-size:0.8rem">
+    <option value="structure_file">File</option>
+    <option value="structure_dir">Dir</option>
+  </select>
+  <input name="file_path" placeholder="relative/path" {input_style} style="width:200px">
+  <input name="description" placeholder="Description" {input_style} style="width:180px">
+  <button type="submit" {btn_style}>+ Add Structure Test</button>
+  <span id="add-struct-result"></span>
+</form>"""
+
+    # Run button
+    run_btn = (
+        f'<button hx-post="/tests/run/{slug}" hx-target="#run-result" hx-swap="innerHTML" '
+        f'hx-indicator="#run-spinner" '
+        f'style="background:#1a1a3a;border:1px solid #3a3a5a;color:#d0d0e8;'
+        f'padding:6px 16px;border-radius:4px;cursor:pointer;font-family:monospace;'
+        f'font-size:0.85rem;margin-bottom:1rem">Run All Tests</button>'
+        f'<span id="run-spinner" class="htmx-indicator" style="color:#606080"> running...</span>'
+    )
+
+    page_table_html = (
+        f'<table><thead><tr><th>Path</th><th>Expected</th><th>Description</th><th></th></tr></thead>'
+        f'<tbody>{"".join(page_rows)}</tbody></table>' if page_rows else '<p class="muted">No page tests</p>')
+
+    post_table_html = (
+        f'<table><thead><tr><th>Path</th><th>Expected</th><th>Description</th><th></th></tr></thead>'
+        f'<tbody>{"".join(post_rows)}</tbody></table>' if post_rows else '<p class="muted">No POST tests</p>')
+
+    struct_table_html = (
+        f'<table><thead><tr><th>Type</th><th>Path</th><th>Description</th><th></th></tr></thead>'
+        f'<tbody>{"".join(struct_rows)}</tbody></table>' if struct_rows else '<p class="muted">No structure tests</p>')
+
+    body = f"""
+<h2>Tests: {html.escape(slug)}</h2>
+<p><a href="/tests" style="color:#606080">&larr; All Projects</a></p>
+
+{run_btn}
+<div id="run-result" style="margin-bottom:1.5rem"></div>
+
+<h3>Page Tests ({len(page_tests)})</h3>
+{page_table_html}
+{add_page_form}
+
+<h3 style="margin-top:1.5rem">POST Tests ({len(post_tests)})</h3>
+{post_table_html}
+{add_post_form}
+
+<h3 style="margin-top:1.5rem">Structure Tests ({len(struct_file_tests) + len(struct_dir_tests)})</h3>
+{struct_table_html}
+{add_struct_form}
+
+<h3 style="margin-top:1.5rem">Run History</h3>
+{_table(["Result", "Duration", "Date"], history_rows, "No test runs yet.")}
+"""
+    return _base(f"Tests: {slug}", body, "tests")
+
+
+@app.post("/tests/{slug}/add", response_class=HTMLResponse)
+def tests_add(slug: str, test_type: str = Form(...), path: str = Form(""),
+              expected_text: str = Form(""), description: str = Form(""),
+              file_path: str = Form(""), post_data: str = Form("")):
+    """Add a new test definition."""
+    project = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
+    if not project:
+        return HTMLResponse(_msg("Project not found", ok=False))
+
+    if test_type in ("page", "post") and not path:
+        return HTMLResponse(_msg("Path is required", ok=False))
+    if test_type.startswith("structure_") and not file_path:
+        return HTMLResponse(_msg("File path is required", ok=False))
+
+    execute("""
+        INSERT INTO project_tests (project_id, test_type, path, expected_text, post_data, file_path, description)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (project["id"], test_type,
+          path or None, expected_text or None,
+          post_data or None, file_path or None,
+          description or None))
+
+    return HTMLResponse(_msg(f"Added {test_type} test", ok=True))
+
+
+@app.post("/tests/{slug}/toggle/{test_id}", response_class=HTMLResponse)
+def tests_toggle(slug: str, test_id: int):
+    """Toggle a test definition enabled/disabled."""
+    test = query_one("SELECT * FROM project_tests WHERE id = ?", (test_id,))
+    if not test:
+        return HTMLResponse("")
+
+    new_enabled = 0 if test["enabled"] else 1
+    execute("UPDATE project_tests SET enabled = ?, updated_at = datetime('now') WHERE id = ?",
+            (new_enabled, test_id))
+
+    # Return updated row
+    test = query_one("SELECT * FROM project_tests WHERE id = ?", (test_id,))
+    toggle_icon = "&#x1f7e2;" if test["enabled"] else "&#x26aa;"
+    toggle_btn = (
+        f'<button hx-post="/tests/{slug}/toggle/{test_id}" hx-target="#test-row-{test_id}" hx-swap="outerHTML" '
+        f'style="background:none;border:none;color:#d0d0e8;cursor:pointer;font-size:0.8rem">{toggle_icon}</button>')
+    delete_btn = (
+        f'<button hx-delete="/tests/{slug}/delete/{test_id}" hx-target="#test-row-{test_id}" hx-swap="outerHTML" '
+        f'hx-confirm="Delete this test?" '
+        f'style="background:none;border:none;color:#e94560;cursor:pointer;font-size:0.8rem">&#x2717;</button>')
+
+    if test["test_type"] in ("page", "post"):
+        return HTMLResponse(
+            f'<tr id="test-row-{test_id}"><td><code>{html.escape(test["path"] or "")}</code></td>'
+            f'<td>{html.escape(test["expected_text"] or "")}</td>'
+            f'<td>{html.escape(test["description"] or "")}</td>'
+            f'<td>{toggle_btn} {delete_btn}</td></tr>')
+    else:
+        ttype = "file" if test["test_type"] == "structure_file" else "dir"
+        return HTMLResponse(
+            f'<tr id="test-row-{test_id}"><td>{ttype}</td>'
+            f'<td><code>{html.escape(test["file_path"] or "")}</code></td>'
+            f'<td>{html.escape(test["description"] or "")}</td>'
+            f'<td>{toggle_btn} {delete_btn}</td></tr>')
+
+
+@app.delete("/tests/{slug}/delete/{test_id}", response_class=HTMLResponse)
+def tests_delete(slug: str, test_id: int):
+    """Delete a test definition."""
+    execute("DELETE FROM project_tests WHERE id = ?", (test_id,))
+    return HTMLResponse("")

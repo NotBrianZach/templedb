@@ -74,7 +74,7 @@ Integrated bug fixes and refactorings into base migrations to simplify the schem
 - 032: System config
 - 034: Code intelligence graph
 - 034: Deployment cache
-- 035: NixOps4 integration
+- 035: Fleet deployment integration (originally nixops4, renamed in 066)
 - 039: Unified views
 - 042: NixOS managed packages
 - 044: Checkout edit sessions

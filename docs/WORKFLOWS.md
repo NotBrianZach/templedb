@@ -104,7 +104,7 @@ Always preview before executing:
 {"dry_run": true}
 ```
 
-### NixOps4 Deployment
+### Fleet Deployment
 ```json
 {
   "variables": {

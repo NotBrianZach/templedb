@@ -129,13 +129,15 @@ class DeploymentOrchestrator:
     def load_environment_variables(self) -> None:
         """Load environment variables for this project/target.
 
-        Loads from the project itself, then from any secret_sources
-        configured in the deployment config (cross-project secrets).
-        Later sources don't overwrite earlier ones — the project's own
-        vars take precedence.
+        Loads plain vars from the project, then encrypted secrets (which
+        override plain vars), then from any secret_sources configured in
+        the deployment config (cross-project secrets).
         """
-        # Load from this project first
+        # Load plain vars from this project first
         self._load_vars_from_project(self.project['id'])
+
+        # Load encrypted secrets (override plain vars — secrets take precedence)
+        self._load_secrets_from_project(self.project['id'])
 
         # Load from cross-project secret sources (e.g. system_config, woofs_projects)
         if self.config.secret_sources:
@@ -146,6 +148,7 @@ class DeploymentOrchestrator:
                 if source:
                     before = len(self.env_vars)
                     self._load_vars_from_project(source['id'], overwrite=False)
+                    self._load_secrets_from_project(source['id'], overwrite=False)
                     added = len(self.env_vars) - before
                     if added > 0:
                         print(f"      Loaded {added} vars from {source_slug}")
@@ -185,6 +188,61 @@ class DeploymentOrchestrator:
                 continue
             resolved_value = self._resolve_template(template)
             self.env_vars[var_name] = resolved_value
+
+    def _load_secrets_from_project(self, project_id: int, overwrite: bool = True) -> None:
+        """Load encrypted secrets from a project into env_vars.
+
+        Tries the target profile first, then falls back to 'default'.
+        Decrypts each secret using age.
+        """
+        import subprocess
+        import os
+
+        # Find the age key file
+        key_file = None
+        for candidate in [
+            os.environ.get("TEMPLEDB_AGE_KEY_FILE"),
+            os.environ.get("SOPS_AGE_KEY_FILE"),
+            os.path.expanduser("~/.config/sops/age/keys.txt"),
+            os.path.expanduser("~/.age/key.txt"),
+        ]:
+            if candidate and os.path.exists(candidate):
+                key_file = candidate
+                break
+
+        if not key_file:
+            return  # No key available — skip silently
+
+        # Query secrets for this project (try target profile, then default)
+        rows = self.db_utils.query_all("""
+            SELECT sb.secret_name, sb.secret_blob
+            FROM secret_blobs sb
+            JOIN project_secret_blobs psb ON psb.secret_blob_id = sb.id
+            WHERE psb.project_id = ?
+              AND psb.profile IN (?, 'default')
+            ORDER BY CASE WHEN psb.profile = ? THEN 0 ELSE 1 END
+        """, (project_id, self.target_name, self.target_name))
+
+        seen = set()
+        for row in rows:
+            name = row['secret_name']
+            if name in seen:
+                continue  # target-specific profile already loaded
+            seen.add(name)
+
+            if not overwrite and name in self.env_vars:
+                continue
+
+            try:
+                result = subprocess.run(
+                    ["age", "-d", "-i", key_file],
+                    input=row['secret_blob'],
+                    capture_output=True,
+                    check=True
+                )
+                self.env_vars[name] = result.stdout.decode('utf-8').strip()
+            except (subprocess.CalledProcessError, Exception):
+                continue  # Skip secrets that fail to decrypt
 
     def _resolve_template(self, template: str) -> str:
         """Resolve a template string with secret and environment variable substitutions"""

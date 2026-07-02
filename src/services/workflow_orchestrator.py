@@ -644,7 +644,7 @@ class WorkflowOrchestrator:
 
         logger.info(f"Deploying to {target} using {backend} backend")
 
-        if backend in ('fleet', 'nixops4'):  # 'nixops4' kept for backwards compat
+        if backend == 'fleet':
             return self._deploy_fleet(task_def, context)
         elif backend == 'generic':
             return self._deploy_generic(task_def, context)

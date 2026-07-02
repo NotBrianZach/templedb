@@ -459,7 +459,11 @@ class CommitCommand:
                 change.content.file_size
             ), commit=False)
 
-        # Create file_contents reference
+        # Create file_contents reference (delete any stale rows first to avoid
+        # UNIQUE(file_id, is_current) constraint violations)
+        self.file_repo.execute("""
+            DELETE FROM file_contents WHERE file_id = ?
+        """, (file_id,), commit=False)
         self.file_repo.execute("""
             INSERT INTO file_contents
             (file_id, content_hash, file_size_bytes, line_count, is_current)
@@ -540,11 +544,9 @@ class CommitCommand:
 
     def _commit_deleted_file(self, project_id: int, commit_id: int, change: FileChange):
         """Commit a deleted file"""
-        # Mark file_contents as not current
+        # Remove file_contents rows (history preserved in vcs_file_states)
         self.file_repo.execute("""
-            UPDATE file_contents
-            SET is_current = 0, updated_at = datetime('now')
-            WHERE file_id = ?
+            DELETE FROM file_contents WHERE file_id = ?
         """, (change.file_id,), commit=False)
 
         # Record in commit_files

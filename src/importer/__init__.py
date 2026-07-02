@@ -537,6 +537,32 @@ class WorkingStateDetector:
         file_type = query_one("SELECT id FROM file_types WHERE type_name = ?", (type_name,))
         return file_type['id'] if file_type else None
 
+    def _ensure_content_blob(self, file_content) -> None:
+        """Insert content into content_blobs if not already present (content-addressable)."""
+        if file_content.content_type == 'text':
+            execute("""
+                INSERT OR IGNORE INTO content_blobs
+                (hash_sha256, content_text, content_blob, content_type, encoding, file_size_bytes)
+                VALUES (?, ?, NULL, ?, ?, ?)
+            """, (
+                file_content.hash_sha256,
+                file_content.content_text,
+                file_content.content_type,
+                file_content.encoding,
+                file_content.file_size,
+            ), commit=False)
+        else:
+            execute("""
+                INSERT OR IGNORE INTO content_blobs
+                (hash_sha256, content_text, content_blob, content_type, encoding, file_size_bytes)
+                VALUES (?, NULL, ?, ?, NULL, ?)
+            """, (
+                file_content.hash_sha256,
+                getattr(file_content, 'content_blob', None),
+                file_content.content_type,
+                file_content.file_size,
+            ), commit=False)
+
     def detect_changes(self) -> Dict[str, int]:
         """Detect file changes and update vcs_working_state table"""
         print(f"\n🔍 Detecting changes in {self.project_slug}...")
@@ -592,7 +618,23 @@ class WorkingStateDetector:
                 file_content = ContentStore.read_file_content(file_path)
 
                 if not file_content:
-                    continue
+                    # Try store_content for larger files (read_file_content
+                    # skips files above BLOB_INLINE_THRESHOLD)
+                    store = ContentStore()
+                    blob_meta = store.store_content(file_path)
+                    if blob_meta:
+                        # Create a FileContent-like object from BlobMetadata
+                        file_content = type('FC', (), {
+                            'hash_sha256': blob_meta.content_hash,
+                            'content_type': blob_meta.content_type,
+                            'content_text': blob_meta.content_text,
+                            'content_blob': blob_meta.content_blob,
+                            'encoding': blob_meta.encoding,
+                            'file_size': blob_meta.file_size,
+                            'line_count': blob_meta.line_count,
+                        })()
+                    else:
+                        continue
 
                 # Use the file_type already detected by the scanner (full mapping)
                 file_type_name = scanned_file.file_type
@@ -624,6 +666,9 @@ class WorkingStateDetector:
                     state = 'added'
                     changes['added'] += 1
 
+                    # Ensure content_blobs entry exists (required by file_contents FK)
+                    self._ensure_content_blob(file_content)
+
                     records.append((
                         self.project_id,
                         branch_id,
@@ -654,7 +699,21 @@ class WorkingStateDetector:
                 file_content = ContentStore.read_file_content(file_path)
 
                 if not file_content:
-                    continue
+                    # Try store_content for larger files
+                    store = ContentStore()
+                    blob_meta = store.store_content(file_path)
+                    if blob_meta:
+                        file_content = type('FC', (), {
+                            'hash_sha256': blob_meta.content_hash,
+                            'content_type': blob_meta.content_type,
+                            'content_text': blob_meta.content_text,
+                            'content_blob': blob_meta.content_blob,
+                            'encoding': blob_meta.encoding,
+                            'file_size': blob_meta.file_size,
+                            'line_count': blob_meta.line_count,
+                        })()
+                    else:
+                        continue
 
                 if last_committed and last_committed['content_hash'] == file_content.hash_sha256:
                     state = 'unmodified'
@@ -663,9 +722,11 @@ class WorkingStateDetector:
                     # File is tracked in project_files but never committed — treat as added
                     state = 'added'
                     changes['added'] += 1
+                    self._ensure_content_blob(file_content)
                 else:
                     state = 'modified'
                     changes['modified'] += 1
+                    self._ensure_content_blob(file_content)
 
                 records.append((
                     self.project_id,

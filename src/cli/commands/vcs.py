@@ -442,6 +442,49 @@ class VCSCommands(Command):
                 ws_blob = self.vcs_repo.query_one(
                     "SELECT content_text, content_blob FROM content_blobs WHERE hash_sha256 = ?",
                     (ws_hash,))
+                if not ws_blob:
+                    # Blob missing — read from disk and store it now
+                    from importer.content import ContentStore
+                    pf = self.vcs_repo.query_one(
+                        "SELECT file_path FROM project_files WHERE id = ?",
+                        (file['file_id'],))
+                    if pf:
+                        import os
+                        checkout = os.path.expanduser(
+                            f"~/.config/templedb/checkouts/{project['slug']}")
+                        fp = os.path.join(checkout, pf['file_path'])
+                        fc = ContentStore.read_file_content(Path(fp))
+                        if not fc:
+                            store = ContentStore()
+                            blob_meta = store.store_content(Path(fp))
+                            if blob_meta:
+                                fc = type('FC', (), {
+                                    'hash_sha256': blob_meta.content_hash,
+                                    'content_type': blob_meta.content_type,
+                                    'content_text': blob_meta.content_text,
+                                    'content_blob': blob_meta.content_blob,
+                                    'encoding': blob_meta.encoding,
+                                    'file_size': blob_meta.file_size,
+                                    'line_count': blob_meta.line_count,
+                                })()
+                        if fc:
+                            if fc.content_type == 'text':
+                                self.vcs_repo.execute("""
+                                    INSERT OR IGNORE INTO content_blobs
+                                    (hash_sha256, content_text, content_blob, content_type, encoding, file_size_bytes)
+                                    VALUES (?, ?, NULL, ?, ?, ?)
+                                """, (fc.hash_sha256, fc.content_text, fc.content_type,
+                                      fc.encoding, fc.file_size), commit=False)
+                            else:
+                                self.vcs_repo.execute("""
+                                    INSERT OR IGNORE INTO content_blobs
+                                    (hash_sha256, content_text, content_blob, content_type, encoding, file_size_bytes)
+                                    VALUES (?, NULL, ?, ?, NULL, ?)
+                                """, (fc.hash_sha256, getattr(fc, 'content_blob', None),
+                                      fc.content_type, fc.file_size), commit=False)
+                            ws_blob = self.vcs_repo.query_one(
+                                "SELECT content_text, content_blob FROM content_blobs WHERE hash_sha256 = ?",
+                                (ws_hash,))
                 if ws_blob:
                     content_text = ws_blob['content_text']
                     file_size = len((content_text or '').encode('utf-8')) if content_text else len(ws_blob.get('content_blob') or b'')
@@ -458,28 +501,17 @@ class VCSCommands(Command):
 
             # Update file_contents so materialization sees the committed content
             if file['state'] in ('modified', 'added') and ws_hash != 'DELETED':
-                # Mark old versions as not current
+                # Remove all old versions for this file, then insert/update the current one.
+                # Using DELETE instead of SET is_current=0 avoids UNIQUE(file_id, is_current) conflicts
+                # when multiple historical rows exist.
                 self.vcs_repo.execute("""
-                    UPDATE file_contents SET is_current = 0
-                    WHERE file_id = ? AND is_current = 1
+                    DELETE FROM file_contents WHERE file_id = ?
                 """, (file['file_id'],), commit=False)
 
-                # Check if this hash already has a file_contents row
-                existing = self.vcs_repo.query_one("""
-                    SELECT id FROM file_contents
-                    WHERE file_id = ? AND content_hash = ?
-                """, (file['file_id'], ws_hash))
-
-                if existing:
-                    self.vcs_repo.execute("""
-                        UPDATE file_contents SET is_current = 1, updated_at = datetime('now')
-                        WHERE id = ?
-                    """, (existing['id'],), commit=False)
-                else:
-                    self.vcs_repo.execute("""
-                        INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
-                        VALUES (?, ?, ?, ?, 1)
-                    """, (file['file_id'], ws_hash, file_size, line_count), commit=False)
+                self.vcs_repo.execute("""
+                    INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
+                    VALUES (?, ?, ?, ?, 1)
+                """, (file['file_id'], ws_hash, file_size, line_count), commit=False)
 
         # Handle deleted files - remove from project_files and working_state
         deleted_files = [f for f in staged if f['state'] == 'deleted']
