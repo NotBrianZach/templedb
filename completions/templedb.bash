@@ -6,7 +6,7 @@ _templedb_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="help status env deploy ai storage admin sync search graph publish project vcs file nixos config workitem tutorial domain merge gui dev"
+    local commands="help status env deploy ai storage admin sync search graph publish project vcs file nixos config tutorial domain merge gui dev"
 
     # Subcommands for each top-level command
     local env_cmds="enter list detect new generate secret var key direnv"
@@ -23,7 +23,6 @@ _templedb_completion() {
     local file_cmds="list show edit"
     local nixos_cmds="build switch rebuild"
     local config_cmds="get set list edit"
-    local workitem_cmds="list create update close"
     local tutorial_cmds="list start"
     local domain_cmds="list add remove"
     local merge_cmds="start finish abort"
@@ -83,9 +82,6 @@ _templedb_completion() {
                     ;;
                 config)
                     COMPREPLY=( $(compgen -W "${config_cmds}" -- "${cur}") )
-                    ;;
-                workitem)
-                    COMPREPLY=( $(compgen -W "${workitem_cmds}" -- "${cur}") )
                     ;;
                 tutorial)
                     COMPREPLY=( $(compgen -W "${tutorial_cmds}" -- "${cur}") )

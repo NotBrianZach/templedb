@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cli.commands import (
     project, vcs, env, search, deploy, storage, admin,
-    gui_launcher, config, workitem, ai, merge,
+    gui_launcher, config, ai, merge,
     domain, nixos,
     file, tutorial, dev, deploy_history,
     mount, graph, sync, publish, system, new_machine,
@@ -36,7 +36,6 @@ def main():
     admin.register(cli)  # Consolidated: status + db + cache + schema + bootstrap + gitserver
     gui_launcher.register(cli)
     config.register(cli)
-    workitem.register(cli)
     ai.register(cli)  # Consolidated: claude + vibe + prompt + mcp
     nixos.register(cli)
     graph.register(cli)
