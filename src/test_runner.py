@@ -34,6 +34,74 @@ def find_free_port():
         return s.getsockname()[1]
 
 
+def resolve_test_deps(project_slug: str) -> dict[str, str]:
+    """Resolve test dependencies from DB. Returns {env_var: binary_path}."""
+    resolved = {}
+    try:
+        from db_utils import query_all, query_one
+        project = query_one("SELECT id FROM projects WHERE slug = ?", (project_slug,))
+        if not project:
+            return resolved
+        deps = query_all(
+            "SELECT nix_package, env_var, binary_name FROM project_test_deps WHERE project_id = ? AND enabled = 1",
+            (project["id"],))
+        for dep in deps:
+            binary = _find_nix_binary(dep["nix_package"], dep.get("binary_name"))
+            if binary and dep.get("env_var"):
+                resolved[dep["env_var"]] = str(binary)
+                logger.debug(f"Test dep: {dep['nix_package']} → {binary}")
+    except Exception as e:
+        logger.debug(f"Failed to resolve test deps: {e}")
+    return resolved
+
+
+def _find_nix_binary(nix_package: str, binary_name: str | None = None) -> Path | None:
+    """Find a binary from a nix package — checks PATH, nix store, nix profile."""
+    import shutil
+    import glob
+
+    name = binary_name or nix_package
+
+    # 1. Explicit env var
+    env_key = f"{nix_package.upper()}_PATH"
+    env_path = os.environ.get(env_key)
+    if env_path and Path(env_path).exists():
+        return Path(env_path)
+
+    # 2. On PATH
+    found = shutil.which(name)
+    if found:
+        return Path(found)
+
+    # 3. Nix store glob
+    matches = sorted(glob.glob(f"/nix/store/*-{nix_package}-*/bin/{name}"), reverse=True)
+    if matches:
+        return Path(matches[0])
+
+    # 4. Nix profile
+    profile_path = Path.home() / ".nix-profile" / "bin" / name
+    if profile_path.exists():
+        return profile_path
+
+    return None
+
+
+def find_chromium() -> Path | None:
+    """Find a Chromium binary. Prefers open-source Chromium over Google Chrome
+    (Google Chrome on NixOS blocks --load-extension for unpacked MV3 extensions)."""
+    # Try DB-resolved deps first
+    deps = resolve_test_deps("bza")
+    if "CHROME_PATH" in deps:
+        return Path(deps["CHROME_PATH"])
+
+    # Manual fallback
+    result = _find_nix_binary("chromium", "chromium")
+    if result:
+        return result
+    result = _find_nix_binary("google-chrome", "google-chrome-stable")
+    return result
+
+
 class TestResult:
     def __init__(self):
         self.passed = 0
@@ -399,6 +467,46 @@ def run_bza_production_qa(verbose=False) -> bool:
                 break
         else:
             result.check("  Extraction tests ran", scraper_passed, r.stderr[-200:], verbose)
+
+        # Extension integration tests (popup, manifest, API endpoints)
+        print("\n  Running extension integration tests...")
+        r3 = subprocess.run(
+            ["node", "test/extension.mjs"],
+            cwd=str(scraper_path),
+            capture_output=True, text=True, timeout=30,
+        )
+        ext_passed = r3.returncode == 0
+        for line in r3.stdout.strip().split("\n"):
+            if "passed" in line and "failed" in line:
+                result.check(f"  Extension: {line.strip()}", ext_passed, r3.stdout[-300:], verbose)
+                break
+        else:
+            result.check("  Extension tests ran", ext_passed, r3.stderr[-200:], verbose)
+
+        # Puppeteer browser tests (needs Chromium + DISPLAY)
+        test_deps = resolve_test_deps("bza")
+        chromium = find_chromium()
+        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        if chromium and has_display:
+            print(f"\n  Running Puppeteer browser tests (chromium: {chromium})...")
+            r4 = subprocess.run(
+                ["node", "test/puppeteer.mjs"],
+                cwd=str(scraper_path),
+                capture_output=True, text=True, timeout=60,
+                env={**os.environ, **test_deps, "CHROME_PATH": str(chromium)},
+            )
+            pup_passed = r4.returncode == 0
+            for line in r4.stdout.strip().split("\n"):
+                if "passed" in line and "failed" in line:
+                    result.check(f"  Puppeteer: {line.strip()}", pup_passed, r4.stdout[-300:], verbose)
+                    break
+            else:
+                result.check("  Puppeteer tests ran", pup_passed, r4.stderr[-200:], verbose)
+        else:
+            if not chromium:
+                print("\n  (skipping Puppeteer — chromium not found, install with: nix build nixpkgs#chromium)")
+            else:
+                print("\n  (skipping Puppeteer — no DISPLAY)")
 
         # Snapshot verification — tests a real MA scrape (informational — old scrapes may have issues)
         if (scraper_path / "test" / "snapshot-real.bza").exists():

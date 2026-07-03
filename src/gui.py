@@ -5658,6 +5658,48 @@ def tests_detail(slug: str):
   <span id="add-struct-result"></span>
 </form>"""
 
+    # Load test deps
+    test_deps = query_all(
+        "SELECT * FROM project_test_deps WHERE project_id = ? ORDER BY nix_package", (pid,))
+    dep_rows = []
+    for d in test_deps:
+        resolved = ""
+        try:
+            from test_runner import _find_nix_binary
+            binary = _find_nix_binary(d["nix_package"], d.get("binary_name"))
+            resolved = f'<span style="color:#8f8;font-size:0.7rem">{html.escape(str(binary))}</span>' if binary else '<span style="color:#f88;font-size:0.7rem">not found</span>'
+        except Exception:
+            resolved = '<span style="color:#888;font-size:0.7rem">?</span>'
+        enabled_color = "#8f8" if d["enabled"] else "#888"
+        dep_rows.append(
+            f'<tr id="dep-row-{d["id"]}">'
+            f'<td><code>{html.escape(d["nix_package"])}</code></td>'
+            f'<td>{html.escape(d.get("env_var") or "")}</td>'
+            f'<td>{html.escape(d.get("binary_name") or "")}</td>'
+            f'<td>{html.escape(d.get("reason") or "")}</td>'
+            f'<td>{resolved}</td>'
+            f'<td>'
+            f'<button hx-post="/tests/{slug}/dep/toggle/{d["id"]}" hx-target="#dep-row-{d["id"]}" hx-swap="outerHTML" '
+            f'style="background:none;border:none;cursor:pointer;color:{enabled_color}">{"●" if d["enabled"] else "○"}</button> '
+            f'<button hx-delete="/tests/{slug}/dep/delete/{d["id"]}" hx-target="#dep-row-{d["id"]}" hx-swap="outerHTML" '
+            f'style="background:none;border:none;cursor:pointer;color:#f66">✕</button>'
+            f'</td></tr>'
+        )
+    deps_table_html = (
+        f'<table><thead><tr><th>Package</th><th>Env Var</th><th>Binary</th><th>Reason</th><th>Resolved</th><th></th></tr></thead>'
+        f'<tbody>{"".join(dep_rows)}</tbody></table>' if dep_rows else '<p class="muted">No test dependencies</p>')
+
+    add_dep_form = f"""
+<form hx-post="/tests/{slug}/dep/add" hx-target="#add-dep-result" hx-swap="innerHTML"
+  style="display:flex;gap:8px;align-items:center;margin-top:8px">
+  <input name="nix_package" placeholder="chromium" {input_style} style="width:120px">
+  <input name="env_var" placeholder="CHROME_PATH" {input_style} style="width:120px">
+  <input name="binary_name" placeholder="chromium" {input_style} style="width:120px">
+  <input name="reason" placeholder="Reason" {input_style} style="width:160px">
+  <button type="submit" {btn_style}>+ Add Dep</button>
+  <span id="add-dep-result"></span>
+</form>"""
+
     # Run button
     run_btn = (
         f'<button hx-post="/tests/run/{slug}" hx-target="#run-result" hx-swap="innerHTML" '
@@ -5698,6 +5740,10 @@ def tests_detail(slug: str):
 <h3 style="margin-top:1.5rem">Structure Tests ({len(struct_file_tests) + len(struct_dir_tests)})</h3>
 {struct_table_html}
 {add_struct_form}
+
+<h3 style="margin-top:1.5rem">Test Dependencies (Nix Packages)</h3>
+{deps_table_html}
+{add_dep_form}
 
 <h3 style="margin-top:1.5rem">Run History</h3>
 {_table(["Result", "Duration", "Date"], history_rows, "No test runs yet.")}
@@ -5771,4 +5817,37 @@ def tests_toggle(slug: str, test_id: int):
 def tests_delete(slug: str, test_id: int):
     """Delete a test definition."""
     execute("DELETE FROM project_tests WHERE id = ?", (test_id,))
+    return HTMLResponse("")
+
+
+@app.post("/tests/{slug}/dep/add", response_class=HTMLResponse)
+def tests_dep_add(slug: str, nix_package: str = Form(...), env_var: str = Form(""),
+                  binary_name: str = Form(""), reason: str = Form("")):
+    """Add a test dependency (nix package)."""
+    project = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
+    if not project:
+        return HTMLResponse(_msg("Project not found", ok=False))
+    if not nix_package.strip():
+        return HTMLResponse(_msg("Package name required", ok=False))
+    execute("""
+        INSERT OR IGNORE INTO project_test_deps (project_id, nix_package, env_var, binary_name, reason)
+        VALUES (?, ?, ?, ?, ?)
+    """, (project["id"], nix_package.strip(), env_var.strip() or None, binary_name.strip() or None, reason.strip() or None))
+    return HTMLResponse(_msg(f"Added dep: {nix_package}", ok=True))
+
+
+@app.post("/tests/{slug}/dep/toggle/{dep_id}", response_class=HTMLResponse)
+def tests_dep_toggle(slug: str, dep_id: int):
+    """Toggle a test dependency enabled/disabled."""
+    dep = query_one("SELECT * FROM project_test_deps WHERE id = ?", (dep_id,))
+    if dep:
+        execute("UPDATE project_test_deps SET enabled = ? WHERE id = ?", (0 if dep["enabled"] else 1, dep_id))
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(f"/tests/{slug}", status_code=303)
+
+
+@app.delete("/tests/{slug}/dep/delete/{dep_id}", response_class=HTMLResponse)
+def tests_dep_delete(slug: str, dep_id: int):
+    """Delete a test dependency."""
+    execute("DELETE FROM project_test_deps WHERE id = ?", (dep_id,))
     return HTMLResponse("")
