@@ -539,12 +539,35 @@ class DeployOpsMixin:
 
             if dry_run:
                 print("DRY RUN - Would make these changes:\n")
-                print(f"1. Add to {system_flake}:")
-                print(f"   inputs.{project_slug}.url = \"path:{project_path}\"")
-                print(f"\n2. Add to {system_home}:")
-                print(f"   {project_slug}.packages.${{pkgs.system}}.default")
-                print("\n3. Commit changes to git")
-                print("4. Run: nixos-rebuild switch with home-manager")
+
+                # Check if already present
+                flake_content = system_flake.read_text() if system_flake.exists() else ""
+                home_content = system_home.read_text() if system_home.exists() else ""
+
+                already_in_flake = f'{project_slug}.url' in flake_content
+                already_in_home = f'{project_slug}.packages' in home_content
+
+                if already_in_flake:
+                    print(f"1. flake.nix: {project_slug} already in inputs (no change)")
+                else:
+                    print(f"1. Add to {system_flake}:")
+                    print(f"   + {project_slug}.url = \"path:{project_path}\";")
+                    print(f"   + {project_slug} added to outputs params")
+                    print(f"   + {project_slug} added to extraSpecialArgs")
+
+                if already_in_home:
+                    print(f"\n2. home.nix: {project_slug} already in packages (no change)")
+                else:
+                    print(f"\n2. Add to {system_home}:")
+                    print(f"   + {project_slug} added to module args")
+                    print(f"   + {project_slug}.packages.${{pkgs.system}}.default to home.packages")
+
+                if already_in_flake and already_in_home:
+                    print(f"\n3. No changes needed — {project_slug} already installed")
+                else:
+                    print("\n3. Commit changes to git")
+                    print("4. Run: sudo nixos-rebuild switch (with home-manager)")
+                    print(f"\n   Requires: sudo access, nix flake evaluation")
                 return 0
 
             # Update flake.nix
@@ -627,18 +650,51 @@ class DeployOpsMixin:
             subprocess.run(['git', '-C', str(system_config_path), 'commit', '-m', commit_msg], check=True)
             print(f"  Changes committed")
 
-            # Rebuild
+            # Rebuild — pass system_config_path so switch_system skips redundant materialize
             print(f"\nDeploying to NixOS with home-manager...")
-            from services.system_service import SystemService
+            from services.system_service import SystemService, SystemServiceError
             service = SystemService()
-            result = service.switch_system(system_config_slug, with_home_manager=True, quiet=quiet)
+
+            try:
+                result = service.switch_system(
+                    system_config_slug,
+                    with_home_manager=True,
+                    quiet=quiet,
+                    checkout_path=system_config_path,
+                )
+            except SystemServiceError as e:
+                print(f"\nDeployment failed: {e}", file=sys.stderr)
+                return 1
 
             if result['success']:
                 print(f"\n{project_slug} installed successfully!")
-                print(f"  Verify: which {project_slug}")
+                if project_slug != system_config_slug:
+                    print(f"  Verify: which {project_slug}")
                 return 0
             else:
-                print(f"\nDeployment failed: {result.get('stderr', 'Unknown error')}")
+                stderr = result.get('stderr', '')
+                # Classify the error for a clearer message
+                if 'error: getting Git object' in stderr or 'object not found' in stderr:
+                    print(f"\nNix evaluation failed: stale flake.lock references a missing git commit.")
+                    print(f"  Fix: nix flake update <input> in {system_config_path}")
+                elif 'does not provide attribute' in stderr:
+                    print(f"\nNix evaluation failed: flake output attribute not found.")
+                    print(f"  Check flake.nix outputs match your hostname.")
+                elif 'Failed to fetch git repository' in stderr:
+                    repo_match = re.search(r'Failed to fetch git repository (\S+)', stderr)
+                    repo = repo_match.group(1) if repo_match else 'unknown'
+                    print(f"\nNix evaluation failed: cannot fetch git repo {repo}")
+                    print(f"  Ensure the repo exists and is a valid git repository.")
+                elif 'sudo' in stderr.lower() and 'password' in stderr.lower():
+                    print(f"\nDeployment failed: sudo requires a password.")
+                    print(f"  Run in an interactive terminal or configure passwordless sudo.")
+                else:
+                    # Show first meaningful error line
+                    error_lines = [l for l in stderr.split('\n') if 'error:' in l.lower()]
+                    if error_lines:
+                        print(f"\nDeployment failed: {error_lines[0].strip()}")
+                    else:
+                        print(f"\nDeployment failed. Check output above for details.")
                 return 1
 
         except Exception as e:
@@ -744,6 +800,14 @@ class DeployOpsMixin:
             hostname = args.hostname if hasattr(args, 'hostname') and args.hostname else socket.gethostname()
             quiet = hasattr(args, 'quiet') and args.quiet
             dry_run = hasattr(args, 'dry_run') and args.dry_run
+
+            # Pre-check sudo access before doing expensive work
+            if not dry_run:
+                from services.system_service import SystemService as _SS
+                if not _SS().check_sudo_access():
+                    print("Error: sudo requires a password.", file=sys.stderr)
+                    print("  Run in an interactive terminal or configure passwordless sudo.", file=sys.stderr)
+                    return 1
 
             checkout_path = Path(os.path.expanduser(
                 f"~/.config/templedb/checkouts/{system_config_slug}"))
@@ -861,17 +925,32 @@ class DeployOpsMixin:
 
             from services.system_service import SystemService
             service = SystemService()
+
+            # Render templates before rebuild
+            service._render_templates(system_config_slug)
+
+            # Run rebuild directly — checkout_path is already materialized from step 1,
+            # no need to re-materialize via switch_system()
             result = service.run_nixos_rebuild(
                 "switch",
                 flake_path=checkout_path,
                 quiet=quiet)
 
             if result['success']:
+                service.record_deployment(
+                    system_config_slug, checkout_path,
+                    checkout_path / "flake.nix", 'switch (bootstrap)', result
+                )
                 print(f"\nBootstrap complete! {hostname} is now running your NixOS config.")
                 print(f"  Next: sudo tailscale up")
                 return 0
             else:
-                print(f"\nBuild failed. Check errors above.")
+                stderr = result.get('stderr', '')
+                error_lines = [l for l in stderr.split('\n') if 'error:' in l.lower()]
+                if error_lines:
+                    print(f"\nBuild failed: {error_lines[0].strip()}")
+                else:
+                    print(f"\nBuild failed. Check output above for details.")
                 return 1
 
         except Exception as e:

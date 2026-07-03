@@ -59,6 +59,9 @@ nav h1 { color: #e94560; font-size: 1.1rem; margin-bottom: 1.2rem; letter-spacin
 nav a { color: #808098; text-decoration: none; padding: 0.35rem 0.5rem; border-radius: 4px; display: block; }
 nav a:hover { background: #1e1e3a; color: #d0d0e8; }
 nav a.active { background: #1a1a30; color: #e94560; }
+nav a kbd { float: right; font-size: 0.65rem; color: #606080; background: #0a0a14; padding: 0 3px; border-radius: 2px; margin-left: 0.4rem; line-height: 1.6; }
+nav a:hover kbd { color: #808098; }
+kbd.keyhint { font-size: 0.65rem; color: #606080; background: #0a0a14; padding: 1px 4px; border-radius: 2px; margin-left: 0.5rem; font-family: monospace; }
 main { flex: 1; padding: 1.5rem 2rem; overflow: auto; }
 h2 { color: #e94560; font-size: 1rem; margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 0.08em; }
 h3 { color: #a0a0c0; font-size: 0.9rem; margin-bottom: 0.6rem; }
@@ -121,25 +124,28 @@ button.danger:hover { background: #4a2222; }
 
 def _base(title: str, body: str, active: str = "") -> HTMLResponse:
     nav = "\n".join(
-        f'<a href="{href}" class="{"active" if active == k else ""}">{label}</a>'
-        for k, href, label in [
-            ("dashboard", "/",         "Dashboard"),
-            ("projects", "/projects", "Projects"),
-            ("vcs",      "/vcs",      "VCS"),
-            ("env",      "/env",      "Env"),
-            ("nix",      "/nix",      "Nix"),
-            ("deploy",   "/deploy",   "Deploy"),
-            ("audit",    "/audit",    "Audit"),
-            ("domains",  "/domains",  "Domains"),
-            ("docs",     "/docs",     "Docs"),
-            ("code",     "/code",     "Code"),
-            ("graph",    "/graph",    "Graph"),
-            ("schema-browser", "/schema-browser", "Schema"),
-            ("settings", "/settings", "Settings"),
-            ("status",   "/status",   "Status"),
-            ("systemd",  "/systemd",  "Systemd"),
-            ("fleet-sync", "/fleet-sync", "Fleet Sync"),
-            ("tests", "/tests", "Tests"),
+        f'<a href="{href}" class="{"active" if active == k else ""}">'
+        f'{label}'
+        f'{f"""<kbd style="float:right;font-size:0.65rem;color:#606080;background:#0a0a14;padding:0 3px;border-radius:2px;margin-left:0.4rem">{key}</kbd>""" if key else ""}'
+        f'</a>'
+        for k, href, label, key in [
+            ("dashboard", "/",         "Dashboard",  ""),
+            ("projects", "/projects",  "Projects",   ", p"),
+            ("vcs",      "/vcs",       "VCS",        ", s"),
+            ("env",      "/env",       "Env",        ", v"),
+            ("nix",      "/nix",       "Nix",        ", N"),
+            ("deploy",   "/deploy",    "Deploy",     ", D"),
+            ("audit",    "/audit",     "Audit",      ", L"),
+            ("domains",  "/domains",   "Domains",    ", O"),
+            ("docs",     "/docs",      "Docs",       ", k"),
+            ("code",     "/code",      "Code",       ", C"),
+            ("graph",    "/graph",     "Graph",      ", g"),
+            ("schema-browser", "/schema-browser", "Schema", ", Q"),
+            ("settings", "/settings",  "Settings",   ", S"),
+            ("status",   "/status",    "Status",     ", i"),
+            ("systemd",  "/systemd",   "Systemd",    ", u"),
+            ("fleet-sync", "/fleet-sync", "Fleet Sync", ", F"),
+            ("tests", "/tests",        "Tests",      ", t"),
         ]
     )
     page = f"""<!DOCTYPE html>
@@ -214,7 +220,7 @@ document.addEventListener('keydown',function(e){{
   <h1>TempleDB</h1>
   {nav}
   <div style="margin-top:auto;padding-top:1rem;border-top:1px solid #1e1e3a">
-    <span class="muted" style="font-size:0.7rem">Press / to search</span>
+    <span class="muted" style="font-size:0.7rem">/ search &middot; Emacs: SPC ,</span>
   </div>
 </nav>
 <div id="global-search">
@@ -482,59 +488,59 @@ of your entire digital life as a developer.
 </div>
 <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));gap:0.5rem">
   <a href="/projects" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Projects</strong>
+    <strong style="color:#e94560">Projects</strong><kbd class="keyhint">SPC , p</kbd>
     <div class="muted" style="margin-top:0.2rem">Every git repo you've imported. Files, LOC, sync status, backups. The central entity everything else hangs off of.</div>
   </a>
   <a href="/vcs" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">VCS</strong>
+    <strong style="color:#e94560">VCS</strong><kbd class="keyhint">SPC , s</kbd>
     <div class="muted" style="margin-top:0.2rem">Database-native version control. Commits, branches, staging, diffs. Replaces git with ACID-guaranteed history stored in SQLite.</div>
   </a>
   <a href="/env" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Env</strong>
+    <strong style="color:#e94560">Env</strong><kbd class="keyhint">SPC , v</kbd>
     <div class="muted" style="margin-top:0.2rem">Environment variables and secrets across projects and profiles. Templated values, secret masking, scoped to project or global.</div>
   </a>
   <a href="/nix" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Nix</strong>
+    <strong style="color:#e94560">Nix</strong><kbd class="keyhint">SPC , N</kbd>
     <div class="muted" style="margin-top:0.2rem">NixOS configuration stored in the DB. Flake configs, host-specific options, packages, and the system config that gets materialized into your flake.</div>
   </a>
   <a href="/deploy" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Deploy</strong>
+    <strong style="color:#e94560">Deploy</strong><kbd class="keyhint">SPC , D</kbd>
     <div class="muted" style="margin-top:0.2rem">Deployment engine. Auto-deploy triggers, fleet NixOS rollouts with magic rollback, deploy history, health checks, and caching.</div>
   </a>
   <a href="/audit" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Audit</strong>
+    <strong style="color:#e94560">Audit</strong><kbd class="keyhint">SPC , L</kbd>
     <div class="muted" style="margin-top:0.2rem">Every action TempleDB takes gets logged. Filter by project or action type. The immutable record of what happened and when.</div>
   </a>
   <a href="/domains" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Domains</strong>
+    <strong style="color:#e94560">Domains</strong><kbd class="keyhint">SPC , O</kbd>
     <div class="muted" style="margin-top:0.2rem">Domain names, DNS records, SSL certs, and registrar info. Track which project owns which domain.</div>
   </a>
   <a href="/docs" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Docs</strong>
+    <strong style="color:#e94560">Docs</strong><kbd class="keyhint">SPC , k</kbd>
     <div class="muted" style="margin-top:0.2rem">READMEs and documentation files across all projects. Scanned, categorized, and searchable by topic.</div>
   </a>
   <a href="/code" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Code</strong>
+    <strong style="color:#e94560">Code</strong><kbd class="keyhint">SPC , C</kbd>
     <div class="muted" style="margin-top:0.2rem">Extracted code symbols &mdash; functions, classes, methods. Complexity analysis, dependency tracking, and cross-project call graphs.</div>
   </a>
   <a href="/graph" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Graph</strong>
+    <strong style="color:#e94560">Graph</strong><kbd class="keyhint">SPC , g</kbd>
     <div class="muted" style="margin-top:0.2rem">The knowledge graph. Cross-project search, dependency visualization, and relationship mapping. How everything connects.</div>
   </a>
   <a href="/schema-browser" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Schema</strong>
+    <strong style="color:#e94560">Schema</strong><kbd class="keyhint">SPC , Q</kbd>
     <div class="muted" style="margin-top:0.2rem">Browse the TempleDB schema itself. Every table, column, index, and trigger in the SQLite database.</div>
   </a>
   <a href="/settings" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Settings</strong>
+    <strong style="color:#e94560">Settings</strong><kbd class="keyhint">SPC , S</kbd>
     <div class="muted" style="margin-top:0.2rem">System configuration. Host-specific NixOS attrs, dotfile links, config checkouts, and TempleDB's own settings.</div>
   </a>
   <a href="/status" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Status</strong>
+    <strong style="color:#e94560">Status</strong><kbd class="keyhint">SPC , i</kbd>
     <div class="muted" style="margin-top:0.2rem">System health. DB stats, migration status, FUSE mount, bootstrap readiness, daemon status, and active services.</div>
   </a>
   <a href="/systemd" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
-    <strong style="color:#e94560">Systemd</strong>
+    <strong style="color:#e94560">Systemd</strong><kbd class="keyhint">SPC , u</kbd>
     <div class="muted" style="margin-top:0.2rem">Live systemd unit monitor. View user and system services, filter by state, read logs. Your machine at a glance.</div>
   </a>
 </div>
