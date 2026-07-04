@@ -38,21 +38,120 @@ class SystemService:
             ORDER BY slug
         """)
 
-    def materialize_from_db(self, project_slug: str) -> Optional[Path]:
+    def _checkout_dir_for(self, project_slug: str) -> Path:
+        """Return the standard checkout directory for a project."""
+        sudo_user = os.environ.get('SUDO_USER')
+        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
+        return real_home / ".config" / "templedb" / "checkouts" / project_slug
+
+    def check_checkout_conflicts(self, project_slug: str) -> List[str]:
+        """Check if checkout has local changes that would be overwritten by materialize.
+
+        Returns list of conflicting file paths (empty = no conflicts).
+        """
+        checkout_dir = self._checkout_dir_for(project_slug)
+        if not checkout_dir.exists():
+            return []
+
+        try:
+            conn = get_connection()
+            proj = conn.execute(
+                "SELECT id FROM projects WHERE slug = ?", (project_slug,)
+            ).fetchone()
+            if not proj:
+                return []
+
+            db_files = conn.execute("""
+                SELECT pf.file_path, cb.content_text, cb.content_blob
+                FROM project_files pf
+                JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
+                JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+                WHERE pf.project_id = ? AND pf.status = 'active'
+            """, (proj["id"],)).fetchall()
+
+            conflicts = []
+            for f in db_files:
+                fpath = checkout_dir / f["file_path"]
+                if not fpath.exists():
+                    continue
+                # Compare local content to DB content
+                if f["content_text"] is not None:
+                    try:
+                        local = fpath.read_text(encoding="utf-8")
+                        if local != f["content_text"]:
+                            conflicts.append(f["file_path"])
+                    except Exception:
+                        conflicts.append(f["file_path"])
+                elif f["content_blob"] is not None:
+                    try:
+                        local = fpath.read_bytes()
+                        if local != bytes(f["content_blob"]):
+                            conflicts.append(f["file_path"])
+                    except Exception:
+                        conflicts.append(f["file_path"])
+
+            return conflicts
+        except Exception as e:
+            logger.warning(f"Conflict check failed: {e}")
+            return []
+
+    def check_sudo_access(self) -> bool:
+        """Check if passwordless sudo is available.
+
+        Returns True if sudo works without a password prompt.
+        """
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "true"],
+                capture_output=True, timeout=5
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def materialize_from_db(self, project_slug: str, force: bool = False) -> Optional[Path]:
         """Write project files from DB to checkout dir for nix evaluation.
 
         This is the FUSE-first bridge: the DB is the source of truth,
         but nix needs real files in a git repo. This method materializes
         the DB content to disk and ensures git tracks it.
 
+        Args:
+            project_slug: Project to materialize
+            force: If False, abort when local files differ from DB.
+                   If True, overwrite without warning.
+
         Returns:
             Path to materialized checkout, or None on failure.
         """
-        sudo_user = os.environ.get('SUDO_USER')
-        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
-        checkout_dir = real_home / ".config" / "templedb" / "checkouts" / project_slug
+        checkout_dir = self._checkout_dir_for(project_slug)
 
         try:
+            # Check for local conflicts before overwriting
+            if not force and checkout_dir.exists():
+                conflicts = self.check_checkout_conflicts(project_slug)
+                if conflicts:
+                    logger.warning(
+                        f"Local changes in {project_slug} checkout would be overwritten by materialize:"
+                    )
+                    for cf in conflicts[:10]:
+                        logger.warning(f"  {cf}")
+                    if len(conflicts) > 10:
+                        logger.warning(f"  ... and {len(conflicts) - 10} more")
+                    logger.warning(
+                        "Commit local changes to DB first (templedb vcs add/commit), "
+                        "or use --force to overwrite."
+                    )
+                    # Print to stderr too so CLI users see it
+                    import sys
+                    print(f"\nConflict: {len(conflicts)} file(s) in checkout differ from DB:", file=sys.stderr)
+                    for cf in conflicts[:5]:
+                        print(f"  {cf}", file=sys.stderr)
+                    if len(conflicts) > 5:
+                        print(f"  ... and {len(conflicts) - 5} more", file=sys.stderr)
+                    print("Commit changes first, or re-run with --force to overwrite.", file=sys.stderr)
+                    return None
+
             conn = get_connection()
             proj = conn.execute(
                 "SELECT id FROM projects WHERE slug = ?", (project_slug,)
@@ -99,16 +198,22 @@ class SystemService:
             subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
                            capture_output=True, check=False)
 
-            # Commit so git daemon can serve the content
-            subprocess.run(
-                ["git", "commit", "--allow-empty", "-m",
-                 f"TempleDB materialize ({written} files)"],
-                cwd=str(checkout_dir), capture_output=True, check=False,
-                env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
-                     "GIT_AUTHOR_EMAIL": "templedb@localhost",
-                     "GIT_COMMITTER_NAME": "TempleDB",
-                     "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+            # Only commit if there are actual changes (avoid noisy empty commits)
+            diff_result = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"],
+                cwd=str(checkout_dir), capture_output=True, check=False
             )
+            if diff_result.returncode != 0:
+                # There are staged changes — commit them
+                subprocess.run(
+                    ["git", "commit", "-m",
+                     f"TempleDB materialize ({written} files)"],
+                    cwd=str(checkout_dir), capture_output=True, check=False,
+                    env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
+                         "GIT_AUTHOR_EMAIL": "templedb@localhost",
+                         "GIT_COMMITTER_NAME": "TempleDB",
+                         "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+                )
 
             logger.info(f"Materialized {written} files to {checkout_dir}")
             return checkout_dir
@@ -123,9 +228,7 @@ class SystemService:
         DB is the source of truth — edits should go through FUSE (~/ temple/)
         or the GUI, not the checkout directory.
         """
-        sudo_user = os.environ.get('SUDO_USER')
-        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
-        checkout_dir = real_home / ".config" / "templedb" / "checkouts" / project_slug
+        checkout_dir = self._checkout_dir_for(project_slug)
 
         if not checkout_dir.exists():
             return 0
@@ -136,25 +239,28 @@ class SystemService:
                 fpath.chmod(0o444)
                 locked += 1
 
-        # Final git commit
+        # Final git commit (only if changes exist)
         subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
                        capture_output=True, check=False)
-        subprocess.run(
-            ["git", "commit", "--allow-empty", "-m",
-             f"TempleDB locked ({locked} files read-only)"],
-            cwd=str(checkout_dir), capture_output=True, check=False,
-            env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
-                 "GIT_AUTHOR_EMAIL": "templedb@localhost",
-                 "GIT_COMMITTER_NAME": "TempleDB",
-                 "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+        diff_result = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=str(checkout_dir), capture_output=True, check=False
         )
+        if diff_result.returncode != 0:
+            subprocess.run(
+                ["git", "commit", "-m",
+                 f"TempleDB locked ({locked} files read-only)"],
+                cwd=str(checkout_dir), capture_output=True, check=False,
+                env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
+                     "GIT_AUTHOR_EMAIL": "templedb@localhost",
+                     "GIT_COMMITTER_NAME": "TempleDB",
+                     "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+            )
         return locked
 
     def unlock_checkout(self, project_slug: str):
         """Make checkout files writable for generate-all to modify."""
-        sudo_user = os.environ.get('SUDO_USER')
-        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
-        checkout_dir = real_home / ".config" / "templedb" / "checkouts" / project_slug
+        checkout_dir = self._checkout_dir_for(project_slug)
 
         if not checkout_dir.exists():
             return
@@ -239,6 +345,13 @@ class SystemService:
                 print(f"  {target} -> {src}")
             return True
 
+        # Pre-check sudo before attempting symlink operations
+        if not self.check_sudo_access():
+            raise SystemServiceError(
+                "Cannot update /etc/nixos symlinks: sudo requires a password.\n"
+                "Run in an interactive terminal, or configure passwordless sudo."
+            )
+
         try:
             for src, target in pairs:
                 cmd = ["sudo", "ln", "-sf", str(src), str(target)]
@@ -257,6 +370,7 @@ class SystemService:
         verbose: bool = False,
         show_trace: bool = False,
         no_update_lock_file: bool = False,
+        quiet: bool = False,
     ) -> Dict[str, Any]:
         """Run nixos-rebuild command
 
@@ -266,6 +380,7 @@ class SystemService:
             dry_run: If True, use 'dry-activate' command instead
             verbose: If True, pass --print-build-logs to nixos-rebuild
             show_trace: If True, pass --show-trace for full Nix eval stack traces
+            quiet: If True, filter out nix store paths and copying lines from display
 
         Returns:
             Dict with exit_code, stdout, stderr, and nixos_generation (if applicable)
@@ -305,11 +420,25 @@ class SystemService:
                 text=True,
             )
 
+            def _should_display(line, quiet_mode):
+                """Filter noisy nix output when in quiet mode."""
+                if not quiet_mode:
+                    return True
+                # Hide nix store paths, copying/fetching lines, and derivation lists
+                if '/nix/store/' in line:
+                    return False
+                if line.strip().startswith('copying path'):
+                    return False
+                if line.strip().startswith('these ') and ('will be built' in line or 'will be fetched' in line):
+                    return False
+                return True
+
             def _tee(src, buf, dest):
                 for line in src:
                     buf.write(line)
-                    dest.write(line)
-                    dest.flush()
+                    if _should_display(line, quiet):
+                        dest.write(line)
+                        dest.flush()
 
             t_out = threading.Thread(target=_tee, args=(proc.stdout, stdout_buf, sys.stdout))
             t_err = threading.Thread(target=_tee, args=(proc.stderr, stderr_buf, sys.stderr))
@@ -614,7 +743,7 @@ class SystemService:
 
         return result
 
-    def switch_system(self, project_slug: str, dry_run: bool = False, with_home_manager: bool = False, verbose: bool = False, show_trace: bool = False, no_update_lock_file: bool = False) -> Dict[str, Any]:
+    def switch_system(self, project_slug: str, dry_run: bool = False, with_home_manager: bool = False, verbose: bool = False, show_trace: bool = False, no_update_lock_file: bool = False, quiet: bool = False, checkout_path: Optional[Path] = None) -> Dict[str, Any]:
         """Switch to system configuration (permanent)
 
         This activates the configuration and adds it to boot menu.
@@ -624,15 +753,25 @@ class SystemService:
             project_slug: Project slug
             dry_run: If True, only show what would be done
             with_home_manager: If True, also rebuild home-manager after NixOS
+            checkout_path: Pre-materialized checkout path. If provided, skips
+                          redundant materialize_from_db() call.
 
         Returns:
             Dict with rebuild results including home-manager if applicable
         """
-        # Materialize DB content to checkout (FUSE-first: DB is source of truth)
-        checkout_path = self.materialize_from_db(project_slug)
-        if not checkout_path:
-            # Fall back to existing checkout
-            checkout_path = self.get_project_checkout_path(project_slug)
+        # Pre-check sudo access before doing expensive work
+        if not dry_run and not self.check_sudo_access():
+            raise SystemServiceError(
+                "sudo requires a password. Run in an interactive terminal, "
+                "or configure passwordless sudo for this user."
+            )
+
+        # Use pre-materialized path if provided, otherwise materialize
+        if checkout_path is None:
+            checkout_path = self.materialize_from_db(project_slug)
+            if not checkout_path:
+                # Fall back to existing checkout
+                checkout_path = self.get_project_checkout_path(project_slug)
 
         if not checkout_path:
             raise SystemServiceError(
@@ -665,7 +804,7 @@ class SystemService:
 
         # Run switch
         flake_path = checkout_path if config_path.name == "flake.nix" else None
-        result = self.run_nixos_rebuild("switch", flake_path=flake_path, dry_run=dry_run, verbose=verbose, show_trace=show_trace, no_update_lock_file=no_update_lock_file)
+        result = self.run_nixos_rebuild("switch", flake_path=flake_path, dry_run=dry_run, verbose=verbose, show_trace=show_trace, no_update_lock_file=no_update_lock_file, quiet=quiet)
 
         # If home-manager rebuild requested and nixos-rebuild succeeded
         if with_home_manager and result['success'] and not dry_run:

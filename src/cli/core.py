@@ -113,7 +113,6 @@ command groups:
   Other
     gui                Launch web GUI dashboard
     domain             DNS and domain management
-    workitem           Work item and coordination management
     tutorial           Interactive tutorials and onboarding
     dev                Local development server
     merge              Merge changes from external sources

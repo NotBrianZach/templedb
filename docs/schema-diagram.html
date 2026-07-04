@@ -729,7 +729,7 @@ const DOMAINS = [
     name: 'Deployment',
     icon: '⛵',
     color: '#f87171',
-    description: 'Targets, history, NixOps4',
+    description: 'Targets, history, fleet',
     pos: { left: 275, top: 310, width: 240 },
     tables: [
       {
@@ -771,9 +771,9 @@ const DOMAINS = [
         refs: []
       },
       {
-        name: 'nixops4_networks',
+        name: 'fleet_networks',
         badge: 'nixops',
-        commentary: `A NixOps4 "network" — a collection of NixOS machines managed together. Each network has a config file (usually a flake.nix), a UUID for NixOps4 state tracking, and a state file path.\n\nThis bridges TempleDB's project model with NixOps4's infrastructure-as-code model. One project can own multiple networks (e.g. "production-cluster", "dev-box").`,
+        commentary: `A Fleet "network" — a collection of NixOS machines managed together. Each network has a config file (usually a flake.nix), a UUID for Fleet state tracking, and a state file path.\n\nThis bridges TempleDB's project model with Fleet's infrastructure-as-code model. One project can own multiple networks (e.g. "production-cluster", "dev-box").`,
         columns: [
           { name: 'id', type: 'INTEGER', tag: 'pk' },
           { name: 'project_id', type: 'INTEGER', tag: 'fk' },
@@ -785,12 +785,12 @@ const DOMAINS = [
           { name: 'is_active', type: 'BOOLEAN' },
           { name: 'description', type: 'TEXT' },
         ],
-        refs: [{ label: '→ nixops4_machines', domain: 'deploy', table: 'nixops4_machines' }]
+        refs: [{ label: '→ fleet_machines', domain: 'deploy', table: 'fleet_machines' }]
       },
       {
-        name: 'nixops4_machines',
+        name: 'fleet_machines',
         badge: 'nixos',
-        commentary: `Individual NixOS machines within a network. Stores the SSH connection details (host, user, port), the NixOS system type, and current deployment state including the active store path.\n\nThe target_env field tells NixOps4 the virtualization or cloud backend (libvirtd, ec2, none for bare metal). Health status and last_deployed_at enable monitoring dashboards.`,
+        commentary: `Individual NixOS machines within a network. Stores the SSH connection details (host, user, port), the NixOS system type, and current deployment state including the active store path.\n\nThe target_env field tells Fleet the virtualization or cloud backend (libvirtd, ec2, none for bare metal). Health status and last_deployed_at enable monitoring dashboards.`,
         columns: [
           { name: 'id', type: 'INTEGER', tag: 'pk' },
           { name: 'network_id', type: 'INTEGER', tag: 'fk' },

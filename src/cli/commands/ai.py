@@ -49,8 +49,8 @@ def register(cli):
     vibe_sub = vibe_parser.add_subparsers(dest='vibe_subcommand', required=True)
 
     start_parser = vibe_sub.add_parser('start', help='Start a vibe coding session')
-    start_parser.add_argument('project', nargs='?', help='Project name or slug')
-    start_parser.add_argument('claude_args', nargs='*', help='Additional arguments for Claude')
+    start_parser.add_argument('projects', nargs='*', help='One or more project names/slugs')
+    start_parser.add_argument('--claude-args', nargs='*', default=[], help='Additional arguments for Claude')
     cli.commands['ai.vibe.start'] = vibe_cmd.start
 
     # --- ai prompt ---

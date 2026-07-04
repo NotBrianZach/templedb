@@ -398,7 +398,7 @@ class MCPServer:
                     },
                     "required": ["action"]
                 }
-            }
+            },
         ]
 
     # ── Legacy tool definitions removed ──────────────────────────────────

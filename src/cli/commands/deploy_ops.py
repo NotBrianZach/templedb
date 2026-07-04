@@ -504,6 +504,7 @@ class DeployOpsMixin:
 
             system_config_slug = args.system_config if hasattr(args, 'system_config') else 'system_config'
             dry_run = hasattr(args, 'dry_run') and args.dry_run
+            quiet = hasattr(args, 'quiet') and args.quiet
 
             print(f"\nInstalling {project_slug} to NixOS config\n")
 
@@ -538,12 +539,35 @@ class DeployOpsMixin:
 
             if dry_run:
                 print("DRY RUN - Would make these changes:\n")
-                print(f"1. Add to {system_flake}:")
-                print(f"   inputs.{project_slug}.url = \"path:{project_path}\"")
-                print(f"\n2. Add to {system_home}:")
-                print(f"   {project_slug}.packages.${{pkgs.system}}.default")
-                print("\n3. Commit changes to git")
-                print("4. Run: nixos-rebuild switch with home-manager")
+
+                # Check if already present
+                flake_content = system_flake.read_text() if system_flake.exists() else ""
+                home_content = system_home.read_text() if system_home.exists() else ""
+
+                already_in_flake = f'{project_slug}.url' in flake_content
+                already_in_home = f'{project_slug}.packages' in home_content
+
+                if already_in_flake:
+                    print(f"1. flake.nix: {project_slug} already in inputs (no change)")
+                else:
+                    print(f"1. Add to {system_flake}:")
+                    print(f"   + {project_slug}.url = \"path:{project_path}\";")
+                    print(f"   + {project_slug} added to outputs params")
+                    print(f"   + {project_slug} added to extraSpecialArgs")
+
+                if already_in_home:
+                    print(f"\n2. home.nix: {project_slug} already in packages (no change)")
+                else:
+                    print(f"\n2. Add to {system_home}:")
+                    print(f"   + {project_slug} added to module args")
+                    print(f"   + {project_slug}.packages.${{pkgs.system}}.default to home.packages")
+
+                if already_in_flake and already_in_home:
+                    print(f"\n3. No changes needed — {project_slug} already installed")
+                else:
+                    print("\n3. Commit changes to git")
+                    print("4. Run: sudo nixos-rebuild switch (with home-manager)")
+                    print(f"\n   Requires: sudo access, nix flake evaluation")
                 return 0
 
             # Update flake.nix
@@ -626,21 +650,310 @@ class DeployOpsMixin:
             subprocess.run(['git', '-C', str(system_config_path), 'commit', '-m', commit_msg], check=True)
             print(f"  Changes committed")
 
-            # Rebuild
+            # Rebuild — pass system_config_path so switch_system skips redundant materialize
             print(f"\nDeploying to NixOS with home-manager...")
-            from services.system_service import SystemService
+            from services.system_service import SystemService, SystemServiceError
             service = SystemService()
-            result = service.switch_system(system_config_slug, with_home_manager=True)
+
+            try:
+                result = service.switch_system(
+                    system_config_slug,
+                    with_home_manager=True,
+                    quiet=quiet,
+                    checkout_path=system_config_path,
+                )
+            except SystemServiceError as e:
+                print(f"\nDeployment failed: {e}", file=sys.stderr)
+                return 1
 
             if result['success']:
                 print(f"\n{project_slug} installed successfully!")
-                print(f"  Verify: which {project_slug}")
+                if project_slug != system_config_slug:
+                    print(f"  Verify: which {project_slug}")
                 return 0
             else:
-                print(f"\nDeployment failed: {result.get('stderr', 'Unknown error')}")
+                stderr = result.get('stderr', '')
+                # Classify the error for a clearer message
+                if 'error: getting Git object' in stderr or 'object not found' in stderr:
+                    print(f"\nNix evaluation failed: stale flake.lock references a missing git commit.")
+                    print(f"  Fix: nix flake update <input> in {system_config_path}")
+                elif 'does not provide attribute' in stderr:
+                    print(f"\nNix evaluation failed: flake output attribute not found.")
+                    print(f"  Check flake.nix outputs match your hostname.")
+                elif 'Failed to fetch git repository' in stderr:
+                    repo_match = re.search(r'Failed to fetch git repository (\S+)', stderr)
+                    repo = repo_match.group(1) if repo_match else 'unknown'
+                    print(f"\nNix evaluation failed: cannot fetch git repo {repo}")
+                    print(f"  Ensure the repo exists and is a valid git repository.")
+                elif 'sudo' in stderr.lower() and 'password' in stderr.lower():
+                    print(f"\nDeployment failed: sudo requires a password.")
+                    print(f"  Run in an interactive terminal or configure passwordless sudo.")
+                else:
+                    # Show first meaningful error line
+                    error_lines = [l for l in stderr.split('\n') if 'error:' in l.lower()]
+                    if error_lines:
+                        print(f"\nDeployment failed: {error_lines[0].strip()}")
+                    else:
+                        print(f"\nDeployment failed. Check output above for details.")
                 return 1
 
         except Exception as e:
             print(f"Failed to install to NixOS: {e}", file=sys.stderr)
+            logger.debug("Full error:", exc_info=True)
+            return 1
+
+    def hardware_config(self, args) -> int:
+        """Generate hardware config for this machine and save to system_config project."""
+        import socket
+        import os
+
+        try:
+            system_config_slug = args.system_config if hasattr(args, 'system_config') else 'system_config'
+            hostname = args.hostname if hasattr(args, 'hostname') and args.hostname else socket.gethostname()
+            dry_run = hasattr(args, 'dry_run') and args.dry_run
+
+            system_config = self.query_one(
+                "SELECT * FROM projects WHERE slug = ?", (system_config_slug,))
+            if not system_config:
+                print(f"System config project '{system_config_slug}' not found")
+                return 1
+
+            checkout_path = Path(os.path.expanduser(
+                f"~/.config/templedb/checkouts/{system_config_slug}"))
+            hardware_dir = checkout_path / "hardwareConfigs"
+            dest_file = hardware_dir / f"{hostname}-hardware.nix"
+
+            print(f"\nGenerating hardware config for {hostname}")
+
+            if dry_run:
+                print(f"  Would run: sudo nixos-generate-config")
+                print(f"  Would copy to: {dest_file}")
+                print(f"  Would strip nixpkgs.hostPlatform line")
+                return 0
+
+            # Run nixos-generate-config
+            print(f"  Running nixos-generate-config...")
+            result = subprocess.run(
+                ["sudo", "nixos-generate-config"],
+                capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"  nixos-generate-config failed: {result.stderr}")
+                return 1
+
+            # Read generated hardware config
+            src = Path("/etc/nixos/hardware-configuration.nix")
+            if not src.exists():
+                print(f"  {src} not found after nixos-generate-config")
+                return 1
+
+            content = src.read_text()
+
+            # Strip nixpkgs.hostPlatform line (conflicts with nixpkgs.nixosModules.readOnlyPkgs in flake.nix)
+            import re as re_mod
+            content = re_mod.sub(
+                r'^\s*nixpkgs\.hostPlatform\s*=.*$',
+                '  # nixpkgs.hostPlatform is set via nixpkgs.pkgs in flake.nix',
+                content,
+                flags=re_mod.MULTILINE)
+
+            # Write to system_config
+            hardware_dir.mkdir(parents=True, exist_ok=True)
+            dest_file.write_text(content)
+            print(f"  Saved to {dest_file}")
+
+            # Commit via templedb VCS
+            print(f"  Committing to TempleDB...")
+            subprocess.run([
+                sys.argv[0] if sys.argv else "templedb",
+                "vcs", "add", "-p", system_config_slug, "--all"
+            ], capture_output=True)
+            commit_result = subprocess.run([
+                sys.argv[0] if sys.argv else "templedb",
+                "vcs", "commit", "-p", system_config_slug,
+                "-m", f"Add hardware config for {hostname}"
+            ], capture_output=True, text=True)
+
+            if commit_result.returncode == 0:
+                print(f"  Committed to {system_config_slug}")
+            else:
+                print(f"  Commit skipped (no changes or error)")
+
+            print(f"\nHardware config ready: {dest_file.name}")
+            return 0
+
+        except Exception as e:
+            print(f"Failed to generate hardware config: {e}", file=sys.stderr)
+            logger.debug("Full error:", exc_info=True)
+            return 1
+
+    def bootstrap(self, args) -> int:
+        """Bootstrap NixOS on this machine from TempleDB database.
+
+        Single command that: checks out system_config, generates hardware config,
+        clones flake dependencies, symlinks flake.nix, and runs nixos-rebuild switch.
+        """
+        import socket
+        import os
+
+        try:
+            system_config_slug = args.system_config if hasattr(args, 'system_config') else 'system_config'
+            hostname = args.hostname if hasattr(args, 'hostname') and args.hostname else socket.gethostname()
+            quiet = hasattr(args, 'quiet') and args.quiet
+            dry_run = hasattr(args, 'dry_run') and args.dry_run
+
+            # Pre-check sudo access before doing expensive work
+            if not dry_run:
+                from services.system_service import SystemService as _SS
+                if not _SS().check_sudo_access():
+                    print("Error: sudo requires a password.", file=sys.stderr)
+                    print("  Run in an interactive terminal or configure passwordless sudo.", file=sys.stderr)
+                    return 1
+
+            checkout_path = Path(os.path.expanduser(
+                f"~/.config/templedb/checkouts/{system_config_slug}"))
+
+            # Step 1: Checkout system_config
+            print(f"\n[1/5] Checking out {system_config_slug}...")
+            if checkout_path.exists() and (checkout_path / "flake.nix").exists():
+                # Ensure checkout is writable (may be read-only from previous checkout)
+                subprocess.run(["chmod", "-R", "u+w", str(checkout_path)],
+                               capture_output=True)
+                print(f"  Already checked out at {checkout_path}")
+            else:
+                # Use service directly instead of subprocess to avoid sys.argv issues
+                from services.system_service import SystemService
+                svc = SystemService()
+                result_path = svc.materialize_from_db(system_config_slug)
+                if not result_path:
+                    print(f"  Checkout failed: could not materialize {system_config_slug}")
+                    return 1
+                checkout_path = Path(result_path)
+                print(f"  Checked out to {checkout_path}")
+
+            # Ensure checkout is a valid git repo (nix flakes require it)
+            git_dir = checkout_path / ".git"
+            if not git_dir.exists() or not (git_dir / "HEAD").exists():
+                print(f"  Initializing git repo (required by nix flakes)...")
+                subprocess.run(["git", "init"], cwd=str(checkout_path), capture_output=True)
+                subprocess.run(["git", "add", "-A"], cwd=str(checkout_path), capture_output=True)
+                subprocess.run(["git", "commit", "-m", "TempleDB bootstrap"], cwd=str(checkout_path), capture_output=True)
+
+            # Step 2: Generate hardware config
+            print(f"\n[2/5] Generating hardware config for {hostname}...")
+            hardware_dir = checkout_path / "hardwareConfigs"
+            dest_file = hardware_dir / f"{hostname}-hardware.nix"
+
+            if dry_run:
+                print(f"  Would generate hardware config to {dest_file}")
+            else:
+                result = subprocess.run(
+                    ["sudo", "nixos-generate-config"],
+                    capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"  nixos-generate-config failed: {result.stderr}")
+                    return 1
+
+                src = Path("/etc/nixos/hardware-configuration.nix")
+                if not src.exists():
+                    print(f"  {src} not found")
+                    return 1
+
+                content = src.read_text()
+                import re as re_mod
+                content = re_mod.sub(
+                    r'^\s*nixpkgs\.hostPlatform\s*=.*$',
+                    '  # nixpkgs.hostPlatform is set via nixpkgs.pkgs in flake.nix',
+                    content, flags=re_mod.MULTILINE)
+
+                hardware_dir.mkdir(parents=True, exist_ok=True)
+                # Ensure writable in case of read-only checkout
+                if dest_file.exists():
+                    subprocess.run(["chmod", "u+w", str(dest_file)], capture_output=True)
+                dest_file.write_text(content)
+                print(f"  Saved to {dest_file.name}")
+
+            # Step 3: Clone flake dependencies that use local paths
+            print(f"\n[3/5] Checking flake dependencies...")
+            flake_nix = checkout_path / "flake.nix"
+            if flake_nix.exists():
+                flake_content = flake_nix.read_text()
+                import re as re_mod
+                # Find git+file:// and path: inputs
+                local_deps = re_mod.findall(
+                    r'(\w+)\.url\s*=\s*"(?:git\+file://|path:)([^"]+)"',
+                    flake_content)
+                for dep_name, dep_path in local_deps:
+                    dep_path = os.path.expanduser(dep_path)
+                    if os.path.exists(dep_path):
+                        print(f"  {dep_name}: {dep_path} (exists)")
+                    else:
+                        # Try to checkout from templedb
+                        dep_project = self.query_one(
+                            "SELECT * FROM projects WHERE slug = ?", (dep_name,))
+                        if dep_project:
+                            print(f"  {dep_name}: checking out from TempleDB to {dep_path}...")
+                            if not dry_run:
+                                from services.system_service import SystemService
+                                dep_svc = SystemService()
+                                materialized = dep_svc.materialize_from_db(dep_name)
+                                if materialized and str(materialized) != dep_path:
+                                    # Symlink from expected path to materialized checkout
+                                    dep_path_obj = Path(dep_path)
+                                    dep_path_obj.parent.mkdir(parents=True, exist_ok=True)
+                                    if not dep_path_obj.exists():
+                                        dep_path_obj.symlink_to(materialized)
+                                        print(f"    Symlinked {dep_path} -> {materialized}")
+                        else:
+                            print(f"  {dep_name}: MISSING at {dep_path} (not in TempleDB either)")
+                            print(f"    Clone it manually or update flake.nix")
+
+            # Step 4: Symlink flake.nix
+            print(f"\n[4/5] Symlinking flake.nix...")
+            if dry_run:
+                print(f"  Would symlink /etc/nixos/flake.nix -> {flake_nix}")
+            else:
+                subprocess.run([
+                    "sudo", "ln", "-sf", str(flake_nix), "/etc/nixos/flake.nix"
+                ], check=True)
+                print(f"  /etc/nixos/flake.nix -> {flake_nix}")
+
+            # Step 5: nixos-rebuild switch
+            print(f"\n[5/5] Building NixOS configuration for {hostname}...")
+            if dry_run:
+                print(f"  Would run: sudo nixos-rebuild switch --flake {checkout_path}#{hostname}")
+                return 0
+
+            from services.system_service import SystemService
+            service = SystemService()
+
+            # Render templates before rebuild
+            service._render_templates(system_config_slug)
+
+            # Run rebuild directly — checkout_path is already materialized from step 1,
+            # no need to re-materialize via switch_system()
+            result = service.run_nixos_rebuild(
+                "switch",
+                flake_path=checkout_path,
+                quiet=quiet)
+
+            if result['success']:
+                service.record_deployment(
+                    system_config_slug, checkout_path,
+                    checkout_path / "flake.nix", 'switch (bootstrap)', result
+                )
+                print(f"\nBootstrap complete! {hostname} is now running your NixOS config.")
+                print(f"  Next: sudo tailscale up")
+                return 0
+            else:
+                stderr = result.get('stderr', '')
+                error_lines = [l for l in stderr.split('\n') if 'error:' in l.lower()]
+                if error_lines:
+                    print(f"\nBuild failed: {error_lines[0].strip()}")
+                else:
+                    print(f"\nBuild failed. Check output above for details.")
+                return 1
+
+        except Exception as e:
+            print(f"Bootstrap failed: {e}", file=sys.stderr)
             logger.debug("Full error:", exc_info=True)
             return 1

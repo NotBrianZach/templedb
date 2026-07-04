@@ -255,9 +255,10 @@ class VCSRepository(BaseRepository):
             (target_branch_id,))
         head_commit_id = branch['head_commit_id'] if branch else None
 
-        # Clear is_current for all project files
+        # Clear all file_contents for this project — we'll re-insert current ones below.
+        # Using DELETE avoids UNIQUE(file_id, is_current) conflicts from stale rows.
         self.execute("""
-            UPDATE file_contents SET is_current = 0
+            DELETE FROM file_contents
             WHERE file_id IN (SELECT id FROM project_files WHERE project_id = ?)
         """, (project_id,), commit=False)
 
@@ -272,7 +273,7 @@ class VCSRepository(BaseRepository):
                     FROM vcs_commits c
                     JOIN branch_commits bc ON c.id = bc.parent_commit_id
                 )
-                SELECT fs.file_id, fs.content_hash, fs.change_type
+                SELECT fs.file_id, fs.content_hash, fs.file_size, fs.line_count, fs.change_type
                 FROM vcs_file_states fs
                 JOIN branch_commits bc ON fs.commit_id = bc.id
                 ORDER BY fs.commit_id DESC
@@ -286,16 +287,11 @@ class VCSRepository(BaseRepository):
                 seen.add(fs['file_id'])
                 if fs['change_type'] == 'deleted':
                     continue
-                # Update file_contents to point to this version
+                # Insert current file_contents row
                 self.execute("""
-                    UPDATE file_contents SET is_current = 1, content_hash = ?
-                    WHERE file_id = ? AND is_current = 0
-                """, (fs['content_hash'], fs['file_id']), commit=False)
-                # If no file_contents row exists, the file may need one
-                affected = self.execute("""
-                    UPDATE file_contents SET is_current = 1, content_hash = ?
-                    WHERE file_id = ?
-                """, (fs['content_hash'], fs['file_id']), commit=False)
+                    INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
+                    VALUES (?, ?, ?, ?, 1)
+                """, (fs['file_id'], fs['content_hash'], fs.get('file_size', 0), fs.get('line_count')), commit=False)
 
         # Update active_branch_id
         self.execute(

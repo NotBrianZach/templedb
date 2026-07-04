@@ -31,7 +31,7 @@
 
 ### Deployment
 - [Deployment Guide](DEPLOYMENT.md) - Deployment modes
-- [NixOps4 Integration](NIXOPS4_INTEGRATION.md) - NixOS deployments
+- [Fleet Deployment](NIXOPS4_INTEGRATION.md) - NixOS fleet deployments
 - [FHS Deployments](FHS_DEPLOYMENTS.md) - Filesystem Hierarchy Standard
 
 ### Secrets Management
