@@ -40,7 +40,7 @@ class VibeCommands(Command):
                 display = f"{slug}" + (f" ({name})" if name != slug else "")
                 print(f"  • {display}  [{file_count} files]")
             print()
-            print(f"Usage: templedb ai vibe start <project>")
+            print(f"Usage: templedb ai vibe start <project> [project2 ...]")
             print()
 
         finally:
@@ -171,27 +171,106 @@ What would you like to work on?
         finally:
             conn.close()
 
+    def _get_project_prompt(self, project: str) -> str:
+        """Get prompt text for a project from DB"""
+        conn = get_simple_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT id FROM projects WHERE slug = ? OR name = ?",
+                          (project, project))
+            proj = cursor.fetchone()
+            if not proj:
+                return None
+            cursor.execute("""
+                SELECT prompt_text FROM active_project_prompts_view
+                WHERE project_id = ?
+                ORDER BY priority DESC, created_at DESC
+                LIMIT 1
+            """, (proj[0],))
+            row = cursor.fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
     def start(self, args) -> int:
-        """Launch Claude Code with project context"""
-        from types import SimpleNamespace
+        """Launch Claude Code with project context (one or more projects)"""
+        import os
+        import shutil
+        import subprocess
+        import tempfile
         from .claude import ClaudeCommands
+        from cli.tty_utils import is_tty, is_emacs_vterm
 
-        project = args.project if hasattr(args, 'project') and args.project else None
-
-        if not project:
+        projects = getattr(args, 'projects', None) or []
+        if not projects:
             return self._show_available_projects()
 
-        self._ensure_project_prompt(project)
+        # Ensure all projects have prompts
+        for project in projects:
+            self._ensure_project_prompt(project)
 
-        claude_args = list(args.claude_args) if getattr(args, 'claude_args', None) else []
-        ns = SimpleNamespace(
-            from_db=True,
-            project=project,
-            template=None,
-            claude_args=claude_args,
-            dry_run=False,
-        )
-        return ClaudeCommands().launch_claude(ns)
+        # Single project: use existing launch_claude path
+        if len(projects) == 1:
+            from types import SimpleNamespace
+            claude_args = list(args.claude_args) if getattr(args, 'claude_args', None) else []
+            ns = SimpleNamespace(
+                from_db=True,
+                project=projects[0],
+                template=None,
+                claude_args=claude_args,
+                dry_run=False,
+            )
+            return ClaudeCommands().launch_claude(ns)
+
+        # Multi-project: combine prompts and launch
+        prompt_parts = []
+        for project in projects:
+            prompt = self._get_project_prompt(project)
+            if prompt:
+                prompt_parts.append(prompt)
+            else:
+                print(f"Warning: no prompt found for '{project}'", file=sys.stderr)
+
+        if not prompt_parts:
+            print("Error: no prompts found for any of the specified projects", file=sys.stderr)
+            return 1
+
+        combined = "\n\n---\n\n".join(prompt_parts)
+
+        if not shutil.which('claude'):
+            print("Error: 'claude' command not found in PATH", file=sys.stderr)
+            return 1
+
+        temp_file = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+                f.write(combined)
+                temp_file = f.name
+
+            cmd = ['claude', '--append-system-prompt-file', temp_file]
+            claude_args = list(args.claude_args) if getattr(args, 'claude_args', None) else []
+            cmd.extend(claude_args)
+
+            use_pty_wrapper = not is_tty()
+            if use_pty_wrapper:
+                wrapped_cmd = ['script', '-q', '-c',
+                               ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in cmd),
+                               '/dev/null']
+                result = subprocess.run(wrapped_cmd, check=False)
+            else:
+                result = subprocess.run(cmd, check=False)
+            return result.returncode
+        except KeyboardInterrupt:
+            return 0
+        except Exception as e:
+            print(f"Error launching Claude Code: {e}", file=sys.stderr)
+            return 1
+        finally:
+            if temp_file:
+                try:
+                    os.unlink(temp_file)
+                except Exception:
+                    pass
 
 
 def register(cli):
@@ -206,6 +285,6 @@ def register(cli):
     subparsers = vibe_parser.add_subparsers(dest='vibe_subcommand', required=True)
 
     start_parser = subparsers.add_parser('start', help='Start a vibe coding session')
-    start_parser.add_argument('project', nargs='?', help='Project name or slug')
-    start_parser.add_argument('claude_args', nargs='*', help='Additional arguments for Claude')
+    start_parser.add_argument('projects', nargs='*', help='One or more project names/slugs')
+    start_parser.add_argument('--claude-args', nargs='*', default=[], help='Additional arguments for Claude')
     cli.commands['vibe.start'] = cmd.start
