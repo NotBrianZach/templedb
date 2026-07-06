@@ -1209,12 +1209,16 @@ def register_subcommands(parent_subparsers, cli, prefix='env'):
 
 
 def register(cli):
-    """Register var commands with the CLI instance."""
+    """Register var as a top-level command (if not already registered by env)."""
     cmd = VarCommands()
 
-    var_parser = cli.register_command(
-        'var', None, help_text='Unified variable management (env vars + secrets with scope hierarchy)'
-    )
+    try:
+        var_parser = cli.register_command(
+            'var', None, help_text='Unified variable management (env vars + secrets with scope hierarchy)'
+        )
+    except Exception:
+        # Already registered (e.g. by env.register calling register_subcommands)
+        return
     subparsers = var_parser.add_subparsers(dest='var_subcommand', required=True)
 
     # --- var set ---

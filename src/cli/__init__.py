@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cli.commands import (
-    project, vcs, env, search, deploy, storage, admin,
+    project, vcs, env, var, search, deploy, storage, admin,
     gui_launcher, config, ai, merge,
     domain, nixos,
     file, tutorial, dev, deploy_history,
@@ -28,7 +28,8 @@ def main():
     project.register(cli)
     vcs.register(cli)
     file.register(cli)
-    env.register(cli)  # Consolidated: env + var + secret + key + direnv
+    env.register(cli)  # Consolidated: env + secret + key + direnv
+    var.register(cli)  # Unified variable management
     search.register(cli)  # Consolidated: search + query/query-open
     deploy.register(cli)  # Consolidated: deploy + targets + migration
     deploy_history.register(cli)

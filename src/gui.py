@@ -561,6 +561,71 @@ of your entire digital life as a developer.
 
 {fleet_html}
 
+<h3 style="margin-top:1.5rem">Emacs Keybindings <span class="muted" style="font-size:0.75rem">SPC , opens dispatch</span></h3>
+<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(320px, 1fr));gap:0.6rem;font-size:0.8rem;margin-bottom:1.2rem">
+  <div style="background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.6rem 0.8rem">
+    <strong style="color:#e94560">Claude Code & AI</strong>
+    <div class="muted" style="margin-top:0.3rem;line-height:1.8">
+      <kbd class="keyhint">SPC , ,</kbd> Launch Claude Code &nbsp;
+      <kbd class="keyhint">SPC , a</kbd> Vibe start &nbsp;
+      <kbd class="keyhint">SPC , A</kbd> Vibe stop &amp; commit
+    </div>
+  </div>
+  <div style="background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.6rem 0.8rem">
+    <strong style="color:#e94560">VCS</strong>
+    <div class="muted" style="margin-top:0.3rem;line-height:1.8">
+      <kbd class="keyhint">SPC , s</kbd> Status &nbsp;
+      <kbd class="keyhint">SPC , c</kbd> Commit &nbsp;
+      <kbd class="keyhint">SPC , l</kbd> Log &nbsp;
+      <kbd class="keyhint">SPC , b</kbd> Branch &nbsp;
+      <kbd class="keyhint">SPC , d</kbd> Diff &nbsp;
+      <kbd class="keyhint">SPC , m</kbd> Merge
+    </div>
+  </div>
+  <div style="background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.6rem 0.8rem">
+    <strong style="color:#e94560">Projects</strong>
+    <div class="muted" style="margin-top:0.3rem;line-height:1.8">
+      <kbd class="keyhint">SPC , p</kbd> List &nbsp;
+      <kbd class="keyhint">SPC , P</kbd> Switch &nbsp;
+      <kbd class="keyhint">SPC , I</kbd> Import &nbsp;
+      <kbd class="keyhint">SPC , y</kbd> Sync &nbsp;
+      <kbd class="keyhint">SPC , Y</kbd> Sync all &nbsp;
+      <kbd class="keyhint">SPC , o</kbd> Layout
+    </div>
+  </div>
+  <div style="background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.6rem 0.8rem">
+    <strong style="color:#e94560">Operations</strong>
+    <div class="muted" style="margin-top:0.3rem;line-height:1.8">
+      <kbd class="keyhint">SPC , D</kbd> Deploy &nbsp;
+      <kbd class="keyhint">SPC , f</kbd> Fleet &nbsp;
+      <kbd class="keyhint">SPC , t</kbd> Tests &nbsp;
+      <kbd class="keyhint">SPC , /</kbd> Search &nbsp;
+      <kbd class="keyhint">SPC , B</kbd> Backup &nbsp;
+      <kbd class="keyhint">SPC , x</kbd> Migrate
+    </div>
+  </div>
+  <div style="background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.6rem 0.8rem">
+    <strong style="color:#e94560">NixOS &amp; Config</strong>
+    <div class="muted" style="margin-top:0.3rem;line-height:1.8">
+      <kbd class="keyhint">SPC , N</kbd> Nix menu &nbsp;
+      <kbd class="keyhint">SPC , S</kbd> Settings &nbsp;
+      <kbd class="keyhint">SPC , M</kbd> FUSE mount &nbsp;
+      <kbd class="keyhint">SPC , v</kbd> Variables
+    </div>
+  </div>
+  <div style="background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.6rem 0.8rem">
+    <strong style="color:#e94560">Browse</strong>
+    <div class="muted" style="margin-top:0.3rem;line-height:1.8">
+      <kbd class="keyhint">SPC , Q</kbd> Schema &nbsp;
+      <kbd class="keyhint">SPC , C</kbd> Code &nbsp;
+      <kbd class="keyhint">SPC , g</kbd> Graph &nbsp;
+      <kbd class="keyhint">SPC , L</kbd> Audit &nbsp;
+      <kbd class="keyhint">SPC , k</kbd> Docs &nbsp;
+      <kbd class="keyhint">SPC , q</kbd> SQL
+    </div>
+  </div>
+</div>
+
 {nav_guide}
 """
     return _base("Dashboard", body, "dashboard")

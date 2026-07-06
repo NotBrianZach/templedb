@@ -76,7 +76,7 @@ class PublishCommands(Command):
         # Step 2: Materialize to checkout (git repo for daemon + push)
         print(f"  Materializing to git repo...")
         svc = SystemService()
-        checkout = svc.materialize_from_db(project_slug)
+        checkout = svc.materialize_from_db(project_slug, force=getattr(args, 'force', False))
         if not checkout:
             print(f"  Failed to materialize", file=sys.stderr)
             return 1
@@ -257,6 +257,8 @@ def register(cli):
     run_p = subparsers.add_parser('run', help='Commit + push to all mirrors')
     run_p.add_argument('project', help='Project slug')
     run_p.add_argument('-m', '--message', help='Commit message', default='TempleDB publish')
+    run_p.add_argument('--force', '-f', action='store_true',
+                       help='Force materialize (overwrite local checkout changes)')
     cli.commands['publish.run'] = cmd.publish
 
     # publish mirror-add
