@@ -869,8 +869,8 @@ class SystemService:
                 timeout=300  # 5 minute timeout
             )
 
-            # Extract generation number from activation output
-            generation = self._extract_hm_generation(activate_result.stdout)
+            # Extract generation number from activation output (may be in stdout or stderr)
+            generation = self._extract_hm_generation(activate_result.stdout) or self._extract_hm_generation(activate_result.stderr)
 
             success = activate_result.returncode == 0
             if success:
@@ -913,6 +913,17 @@ class SystemService:
             match = re.search(pattern, output, re.IGNORECASE)
             if match:
                 return int(match.group(1))
+
+        # Fallback: read current generation from profile symlink
+        try:
+            import os
+            profile = os.path.expanduser("~/.local/state/nix/profiles/home-manager")
+            target = os.readlink(profile)
+            match = re.search(r'home-manager-(\d+)-link', target)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            pass
 
         return None
 

@@ -748,6 +748,10 @@ def register(cli):
     # deploy nix - Nix closures backend (from deploy-nix)
     deploy_nix.register_under_deploy(subparsers, cli)
 
+    # deploy project - App deployment (Cloudflare Workers, Vercel, etc.)
+    from cli.commands import deploy_project
+    deploy_project.register_under_deploy(subparsers, cli)
+
     # deploy fleet - Multi-machine NixOS deployment with magic rollback
     fleet_module.register_under_deploy(subparsers, cli)
 

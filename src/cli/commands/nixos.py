@@ -492,6 +492,48 @@ class NixOSCommand(Command):
             logger.error(f"Failed to update input: {e}", exc_info=True)
             return 1
 
+    def home_rebuild(self, args) -> int:
+        """Rebuild home-manager only (no full NixOS rebuild)"""
+        if not _check_dirty_and_prompt():
+            return 1
+
+        try:
+            from services.system_service import SystemService
+
+            slug = args.slug
+            service = SystemService()
+
+            # Resolve checkout path
+            proj = _get_conn().execute(
+                "SELECT repo_url FROM projects WHERE slug = ?", (slug,)
+            ).fetchone()
+            if not proj or not proj[0]:
+                print(f"❌ Project '{slug}' has no repo_url set.", file=sys.stderr)
+                return 1
+
+            checkout_path = Path(proj[0])
+            print(f"🏠 Rebuilding home-manager from {slug}...")
+
+            result = service._rebuild_home_manager(checkout_path)
+
+            if result['success']:
+                print(f"\n✅ home-manager switch successful!")
+                if result.get('generation'):
+                    print(f"   Generation: {result['generation']}")
+            else:
+                print(f"\n❌ home-manager rebuild failed")
+                if result.get('error'):
+                    print(f"   Error: {result['error']}")
+                if result.get('stderr'):
+                    print(f"\n⚠️  Errors:")
+                    print(result['stderr'])
+
+            return 0 if result['success'] else 1
+
+        except Exception as e:
+            logger.error(f"Failed to rebuild home-manager: {e}", exc_info=True)
+            return 1
+
     def rebuild(self, args) -> int:
         """Rebuild NixOS system"""
         # Check for pending migrations before rebuilding
@@ -1868,6 +1910,11 @@ def register(cli):
     rebuild_parser.add_argument('--yes', '-y', action='store_true')
     rebuild_parser.add_argument('--no-update-lock-file', dest='no_update_lock_file', action='store_true')
     cli.commands['nixos.rebuild'] = cmd.rebuild
+
+    # home-rebuild
+    home_rebuild_parser = subparsers.add_parser('home-rebuild', help='Rebuild home-manager only (no full NixOS rebuild)')
+    home_rebuild_parser.add_argument('slug', help='Project slug')
+    cli.commands['nixos.home-rebuild'] = cmd.home_rebuild
 
     # system-switch
     switch_parser = subparsers.add_parser('system-switch', help='Switch to system configuration')
