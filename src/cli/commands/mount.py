@@ -13,7 +13,27 @@ from logger import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_MOUNT = Path.home() / "temple"
+
+def _default_mount_path() -> str:
+    """Get default FUSE mount path from system_config DB, falling back to ~/temple."""
+    try:
+        from db_utils import get_simple_connection
+        conn = get_simple_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT value FROM system_config WHERE key LIKE '%fuse.mount_path' "
+            "ORDER BY key DESC"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        pass
+    return str(Path.home() / "temple")
+
+
+DEFAULT_MOUNT = _default_mount_path()
 
 
 class MountCommands(Command):

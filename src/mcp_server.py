@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from repositories import ProjectRepository
 from llm_context import TempleDBContext
-from config import DB_PATH, PROJECT_ROOT
+from config import DB_PATH, PROJECT_ROOT, FUSE_MOUNT_PATH
 from logger import get_logger
 
 # Configure logging to stderr so stdout is clean for MCP protocol
@@ -3128,7 +3128,7 @@ class MCPServer:
             return self._success_response({
                 "mounted": len(mounts) > 0,
                 "mounts": mounts,
-                "hint": "Mount with: templedb mount ~/temple" if not mounts else None,
+                "hint": f"Mount with: templedb mount {FUSE_MOUNT_PATH}" if not mounts else None,
             })
         except Exception as e:
             return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)

@@ -1652,6 +1652,224 @@ class NixOSCommand(Command):
         print(f"  Generate:  templedb nixos generate-all {slug}")
         return 0
 
+    def init_config(self, args) -> int:
+        """Scaffold a minimal system_config project with TempleDB integration."""
+        import socket
+        import platform
+
+        username = args.username or os.environ.get("USER", "nixos")
+        hostname = args.hostname or socket.gethostname()
+        machine = platform.machine()
+        system = f"{machine}-linux"
+        home_dir = f"/home/{username}"
+        mount_path = args.mount_path or f"{home_dir}/temple"
+        timezone = args.timezone or "America/Chicago"
+        state_version = args.state_version or "24.11"
+
+        # Determine templedb flake input
+        templedb_input = "github:NotBrianZach/templedb"
+        try:
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT value FROM system_config WHERE key LIKE '%git_server.port'"
+            ).fetchone()
+            if row:
+                templedb_input = f"git://localhost:{row[0]}/templedb"
+        except Exception:
+            pass
+
+        output_dir = Path(args.output) if args.output else Path("/tmp/system_config_scaffold")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── flake.nix ──
+        flake_nix = f'''\
+{{
+  description = "NixOS system configuration managed by TempleDB";
+
+  inputs = {{
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    home-manager = {{
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    }};
+    templedb = {{
+      url = "{templedb_input}";
+      inputs.nixpkgs.follows = "nixpkgs";
+    }};
+  }};
+
+  outputs = {{ self, nixpkgs, home-manager, templedb, ... }}@inputs:
+  {{
+    nixosConfigurations.{hostname} = nixpkgs.lib.nixosSystem {{
+      system = "{system}";
+      specialArgs = {{ inherit templedb; }};
+      modules = [
+        ./configuration.nix
+        ./hardware-configuration.nix
+
+        home-manager.nixosModules.home-manager
+        {{
+          home-manager.useGlobalPkgs = true;
+          home-manager.useUserPackages = false;
+          home-manager.backupFileExtension = "backup";
+          home-manager.extraSpecialArgs = {{ inherit templedb inputs; }};
+
+          home-manager.users.{username} = {{ config, pkgs, ... }}: {{
+            imports = [
+              ./home.nix
+              templedb.homeManagerModules.default
+            ];
+
+            programs.templedb = {{
+              enable = true;
+              package = templedb.packages.${{pkgs.system}}.templedb;
+              mount.enable = true;
+              mount.path = "{mount_path}";
+              claude.enable = true;
+              claude.mcp = true;
+            }};
+          }};
+        }}
+      ];
+    }};
+  }};
+}}
+'''
+
+        # ── configuration.nix ──
+        configuration_nix = f'''\
+# NixOS system configuration — managed by TempleDB
+{{ config, pkgs, lib, ... }}:
+
+let homeDir = "{home_dir}"; in
+{{
+  networking.hostName = "{hostname}";
+  time.timeZone = "{timezone}";
+
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
+
+  users.users.{username} = {{
+    isNormalUser = true;
+    extraGroups = [ "wheel" "networkmanager" ];
+    home = homeDir;
+  }};
+
+  security.sudo.extraRules = [
+    {{ users = [ "{username}" ]; commands = [ {{ command = "ALL"; options = [ "NOPASSWD" ]; }} ]; }}
+  ];
+
+  services.openssh.enable = true;
+  networking.networkmanager.enable = true;
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+  environment.systemPackages = with pkgs; [ git vim curl htop ];
+
+  system.stateVersion = "{state_version}";
+}}
+'''
+
+        # ── home.nix ──
+        home_nix = f'''\
+# Home Manager configuration — managed by TempleDB
+{{ config, pkgs, lib, ... }}:
+
+let homeDir = "{home_dir}"; in
+{{
+  home.username = "{username}";
+  home.homeDirectory = homeDir;
+  home.stateVersion = "{state_version}";
+
+  home.packages = with pkgs; [ ripgrep fd jq fzf ];
+
+  programs.bash.enable = true;
+  programs.git.enable = true;
+  programs.direnv.enable = true;
+}}
+'''
+
+        # ── hardware-configuration.nix ──
+        hw_config = None
+        if Path("/etc/nixos/hardware-configuration.nix").exists():
+            hw_config = Path("/etc/nixos/hardware-configuration.nix").read_text()
+        elif not getattr(args, 'skip_hardware', False):
+            try:
+                result = subprocess.run(
+                    ["nixos-generate-config", "--show-hardware-config"],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0:
+                    hw_config = result.stdout
+            except Exception:
+                pass
+
+        if not hw_config:
+            hw_config = '''\
+# TODO: Generate with: nixos-generate-config --show-hardware-config
+{ config, lib, pkgs, modulesPath, ... }:
+{
+  imports = [ (modulesPath + "/installer/scan/not-detected.nix") ];
+  boot.initrd.availableKernelModules = [ "xhci_pci" "ahci" "nvme" "usbhid" "sd_mod" ];
+  fileSystems."/" = { device = "/dev/disk/by-label/nixos"; fsType = "ext4"; };
+}
+'''
+
+        files = {
+            "flake.nix": flake_nix,
+            "configuration.nix": configuration_nix,
+            "home.nix": home_nix,
+            "hardware-configuration.nix": hw_config,
+        }
+
+        for name, content in files.items():
+            (output_dir / name).write_text(content)
+            print(f"  Created {name}")
+
+        print(f"\nScaffolded system_config at {output_dir}")
+        print(f"  Host:     {hostname}")
+        print(f"  User:     {username}")
+        print(f"  Mount:    {mount_path}")
+        print(f"  TempleDB: {templedb_input}")
+
+        # Import into templedb
+        if getattr(args, 'import_project', True) and not getattr(args, 'no_import', False):
+            print(f"\nImporting as templedb project...")
+            import_result = subprocess.run(
+                [sys.executable, "-m", "cli", "project", "import",
+                 str(output_dir), "--slug", "system_config", "--type", "nixos-config"],
+                cwd=str(Path(__file__).parent.parent.parent.parent),
+                capture_output=True, text=True
+            )
+            if import_result.returncode == 0:
+                print(f"  Imported as 'system_config'")
+                conn = _get_conn()
+                db_configs = {
+                    "nixos.flake_output": hostname,
+                    "nixos.username": username,
+                    "nixos.home.stateVersion": state_version,
+                    "nixos.timeZone": timezone,
+                    "nixos.let.home.homeDir": home_dir,
+                    "nixos.let.configuration.homeDir": home_dir,
+                    "fuse.mount_path": mount_path,
+                }
+                for key, value in db_configs.items():
+                    conn.execute(
+                        "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+                        "VALUES (?, ?, datetime('now'))",
+                        (key, value)
+                    )
+                conn.commit()
+                print(f"  Set {len(db_configs)} system_config keys")
+            else:
+                print(f"  Import failed: {import_result.stderr[:200]}")
+
+        print(f"\nNext steps:")
+        print(f"  1. Review files in {output_dir}")
+        print(f"  2. Generate: templedb nixos generate-all system_config")
+        print(f"  3. Build:    templedb nixos rebuild system_config")
+
+        return 0
+
     def generate_all(self, args) -> int:
         """Generate all NixOS config from DB: render templates + generate managed modules."""
         slug = _resolve_slug(getattr(args, 'slug', None))
@@ -1848,7 +2066,8 @@ class NixOSCommand(Command):
                 svc = SystemService()
                 locked = svc.lock_checkout(slug)
                 print(f"\n  Committed and locked {locked} files read-only")
-                print(f"  (Edit via ~/temple/ FUSE mount or GUI, not the checkout)")
+                from config import FUSE_MOUNT_PATH
+                print(f"  (Edit via {FUSE_MOUNT_PATH}/ FUSE mount or GUI, not the checkout)")
             except Exception:
                 print(f"\n  Staged all generated files for nix evaluation")
 
@@ -2022,6 +2241,18 @@ def register(cli):
     # dotfiles-list
     dl = subparsers.add_parser('dotfiles-list', help='List dotfile mappings and status')
     cli.commands['nixos.dotfiles-list'] = cmd.dotfiles_list
+
+    # init-config
+    init_parser = subparsers.add_parser('init-config', help='Scaffold a minimal system_config project with TempleDB integration')
+    init_parser.add_argument('-o', '--output', help='Output directory (default: /tmp/system_config_scaffold)')
+    init_parser.add_argument('--username', help='Username (default: $USER)')
+    init_parser.add_argument('--hostname', help='NixOS hostname (default: auto-detect)')
+    init_parser.add_argument('--mount-path', help='FUSE mount path (default: ~/temple)')
+    init_parser.add_argument('--timezone', help='Timezone (default: America/Chicago)')
+    init_parser.add_argument('--state-version', help='NixOS stateVersion (default: 24.11)')
+    init_parser.add_argument('--no-import', action='store_true', help='Do not import into templedb')
+    init_parser.add_argument('--skip-hardware', action='store_true', help='Skip hardware config detection')
+    cli.commands['nixos.init-config'] = cmd.init_config
 
     # import-config
     ic = subparsers.add_parser('import-config', help='Import existing NixOS config into DB')

@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
 from logger import get_logger
+from config import FUSE_MOUNT_PATH
 
 logger = get_logger(__name__)
 
@@ -349,7 +350,8 @@ class BootstrapCommand(Command):
         # ── Step 8: FUSE Mount ────────────────────────────────────────
         _step(8, "FUSE mount")
 
-        temple_dir = Path.home() / "temple"
+        from config import FUSE_MOUNT_PATH
+        temple_dir = Path(FUSE_MOUNT_PATH)
         try:
             # Check if already mounted
             mounted = False
@@ -375,10 +377,10 @@ class BootstrapCommand(Command):
                 t.start()
                 import time; time.sleep(2)
                 _ok(f"Mounted at {temple_dir}")
-                print("       Edit files at ~/temple/<project>/")
+                print(f"       Edit files at {temple_dir}/<project>/")
         except Exception as e:
             _skip(f"FUSE mount failed: {e}")
-            print("       Mount manually: templedb mount ~/temple")
+            print(f"       Mount manually: templedb mount {temple_dir}")
 
         # ── Step 9: Claude Code hooks ────────────────────────────────
         _step(9, "Claude Code integration")
@@ -428,7 +430,7 @@ class BootstrapCommand(Command):
         print("\nNext steps:")
         if not age_found:
             print("  1. Copy your age key:   cp /path/to/key.txt ~/.age/key.txt")
-        print("  - Edit files via FUSE:  ls ~/temple/<project>/")
+        print(f"  - Edit files via FUSE:  ls {temple_dir}/<project>/")
         print("  - Rebuild NixOS:        templedb nixos rebuild system_config")
         print("  - Check backup status:  templedb storage backup cloud status")
         print("  - Launch GUI:           templedb gui")

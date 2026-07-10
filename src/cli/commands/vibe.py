@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
+from config import FUSE_MOUNT_PATH
 from db_utils import get_simple_connection
 
 
@@ -112,8 +113,8 @@ class VibeCommands(Command):
 
 ## Rules
 
-1. **Read files** from FUSE mount at `~/temple/{slug}/` or use Claude's Read/Grep/Glob tools on that path
-2. **Write files** via FUSE mount (`~/temple/{slug}/`) — writes go to DB and auto-stage in VCS
+1. **Read files** from FUSE mount at `{FUSE_MOUNT_PATH}/{slug}/` or use Claude's Read/Grep/Glob tools on that path
+2. **Write files** via FUSE mount (`{FUSE_MOUNT_PATH}/{slug}/`) — writes go to DB and auto-stage in VCS
 3. **TempleDB operations**: use `templedb_cli` MCP tool (e.g. `templedb_cli({{command: "vcs status {slug}"}})`)
 4. **SQL queries**: use `templedb_query` MCP tool
 5. **DO NOT** use `git` commands — use `templedb publish` and `templedb vcs` instead
@@ -125,13 +126,13 @@ class VibeCommands(Command):
 - Slug: `{slug}`
 - Files: {file_count}
 - Types: {', '.join(sorted(extensions)[:10]) if extensions else 'Unknown'}
-{f'- FUSE: `{fuse_path}/`' if fuse_mounted else '- FUSE: not mounted (run: templedb mount ~/temple)'}
+{f'- FUSE: `{fuse_path}/`' if fuse_mounted else '- FUSE: not mounted (run: templedb mount {FUSE_MOUNT_PATH})'}
 
 ## Workflow
 
 ```bash
 # Edit via FUSE (auto-stages)
-vim ~/temple/{slug}/src/file.py
+vim {FUSE_MOUNT_PATH}/{slug}/src/file.py
 
 # Or commit + push in one step
 templedb publish run {slug} -m "description"

@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from db_utils import execute, query_all, query_one
+from config import FUSE_MOUNT_PATH
 
 from fastapi import FastAPI, Form, Query
 from fastapi.responses import HTMLResponse
@@ -437,7 +438,7 @@ def root():
     except Exception:
         pass
     if not fuse_mounted:
-        alerts.append("FUSE mount is down (~/temple)")
+        alerts.append("FUSE mount is down ({FUSE_MOUNT_PATH})")
 
     alerts_html = ""
     if alerts:
@@ -472,7 +473,7 @@ Not scattered across <code>.git/</code>, <code>.env</code>, CI YAML, and a dozen
 One artifact. One truth.
 </p>
 <p style="margin-bottom:0.6rem">
-The FUSE mount at <code>~/temple/</code> projects the database back into the
+The FUSE mount at <code>{FUSE_MOUNT_PATH}/</code> projects the database back into the
 filesystem so legacy tools still work, but the filesystem is the shadow on the
 cave wall &mdash; the database is the reality. Writes through the mount go
 straight to SQLite with ACID guarantees. Version control is native:
@@ -730,7 +731,7 @@ def projects_list():
 <div class="row" style="margin-bottom:0.5rem">
   <form hx-post="/projects/sync-all" hx-target="#sync-all-result" hx-swap="innerHTML">
     <button type="submit">Sync All Projects</button>
-    <span class="help-tip" style="position:relative">?<span class="tip">Re-imports project files from checkout dirs into the database. Only needed if you edited files in ~/.config/templedb/checkouts/ directly. Not needed if you use the FUSE mount (~/temple/) — FUSE writes go straight to the DB.</span></span>
+    <span class="help-tip" style="position:relative">?<span class="tip">Re-imports project files from checkout dirs into the database. Only needed if you edited files in ~/.config/templedb/checkouts/ directly. Not needed if you use the FUSE mount ({FUSE_MOUNT_PATH}/) — FUSE writes go straight to the DB.</span></span>
   </form>
   <span id="sync-all-result" class="muted"></span>
 </div>
@@ -927,7 +928,7 @@ def mount_toggle():
         t = threading.Thread(target=_bg_mount, daemon=True)
         t.start()
         import time; time.sleep(1)
-        return HTMLResponse(_msg("Mounting at ~/temple...", ok=True))
+        return HTMLResponse(_msg("Mounting at {FUSE_MOUNT_PATH}...", ok=True))
 
 
 @app.get("/projects/{slug}", response_class=HTMLResponse)
@@ -3884,11 +3885,11 @@ def graph_page(q: str = Query(""), view: str = Query("overview"), project: str =
   </h3>
   <p style="margin:0.5rem 0">Status: {mount_status}</p>
   <div style="display:flex;gap:0.5rem;margin-top:0.5rem">
-    <button hx-post="/mount/toggle" hx-swap="outerHTML" class="sm">{'Unmount' if fuse_mounts else 'Mount ~/temple'}</button>
+    <button hx-post="/mount/toggle" hx-swap="outerHTML" class="sm">{'Unmount' if fuse_mounts else 'Mount {FUSE_MOUNT_PATH}'}</button>
   </div>
   <p class="muted" style="font-size:0.78rem;margin-top:0.5rem">
     {'Access files at: <code>' + fuse_mounts[0] + '/&lt;project&gt;/</code>' if fuse_mounts else
-     'After mounting, access files at <code>~/temple/&lt;project&gt;/</code>. Writes auto-stage in VCS.'}
+     'After mounting, access files at <code>{FUSE_MOUNT_PATH}/&lt;project&gt;/</code>. Writes auto-stage in VCS.'}
   </p>
 </div>
 """
@@ -4415,7 +4416,7 @@ def system_page(q: str = Query(""), host: str = Query("")):
 <p><strong>Actions</strong></p>
 <table style="margin:0.5rem 0">
 <tr><td style="width:180px"><strong>Sync</strong></td><td>Re-import project files from disk into the database</td></tr>
-<tr><td><strong>Mount ~/temple</strong></td><td>Mount the database as a FUSE filesystem (read/write, auto-stages changes)</td></tr>
+<tr><td><strong>Mount {FUSE_MOUNT_PATH}</strong></td><td>Mount the database as a FUSE filesystem (read/write, auto-stages changes)</td></tr>
 <tr><td><strong>Generate NixOS</strong></td><td>Regenerate all NixOS config from DB: let-bindings, templates, modules, flake inputs</td></tr>
 <tr><td><strong>Apply Dotfiles</strong></td><td>Create/update symlinks from checkout files to home directory</td></tr>
 <tr><td><strong>Backup to GCS</strong></td><td>Upload database to Google Cloud Storage bucket</td></tr>
@@ -4633,7 +4634,7 @@ def system_page(q: str = Query(""), host: str = Query("")):
 <tr><td>Database</td><td>{db_info}</td></tr>
 </table>
 <div style="display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap">
-  <button hx-post="/mount/toggle" hx-swap="outerHTML" style="font-size:0.78rem">{'Unmount' if fuse_mounts else 'Mount'} ~/temple</button>
+  <button hx-post="/mount/toggle" hx-swap="outerHTML" style="font-size:0.78rem">{'Unmount' if fuse_mounts else 'Mount'} {FUSE_MOUNT_PATH}</button>
   <button hx-post="/db/migrate" hx-swap="outerHTML" style="font-size:0.78rem">Run Migrations</button>
   <button hx-post="/nixos/dotfiles-apply" hx-swap="outerHTML" style="font-size:0.78rem">Apply Dotfiles</button>
   <button hx-post="/nixos/generate-all" hx-swap="outerHTML" style="font-size:0.78rem">Generate NixOS</button>
@@ -4851,7 +4852,7 @@ def system_page(q: str = Query(""), host: str = Query("")):
 <tr><td><strong>cr-sqlite</strong></td><td>CRDT sync between machines</td><td><span class="badge">optional</span></td><td><code>templedb sync init</code></td></tr>
 <tr><td><strong>Git</strong></td><td>Checkout management, git daemon, git-export</td><td><span class="badge green">core</span></td><td>Built-in</td></tr>
 <tr><td><strong>Nix / NixOS</strong></td><td>System config generation, flake inputs</td><td><span class="badge green">core</span></td><td><code>templedb nixos status</code></td></tr>
-<tr><td><strong>FUSE</strong></td><td>Mount DB as filesystem at <code>~/temple/</code></td><td><span class="badge blue">recommended</span></td><td><code>templedb mount ~/temple</code></td></tr>
+<tr><td><strong>FUSE</strong></td><td>Mount DB as filesystem at <code>{FUSE_MOUNT_PATH}/</code></td><td><span class="badge blue">recommended</span></td><td><code>templedb mount {FUSE_MOUNT_PATH}</code></td></tr>
 <tr><td><strong>SOPS / Age</strong></td><td>Secret encryption</td><td><span class="badge blue">recommended</span></td><td><code>~/.age/key.txt</code></td></tr>
 <tr><td><strong>GCS</strong></td><td>Cloud backup</td><td><span class="badge">optional</span></td><td><code>gcs.backup_bucket</code></td></tr>
 <tr><td><strong>Tailscale</strong></td><td>Machine-to-machine sync</td><td><span class="badge">optional</span></td><td><code>templedb sync peers</code></td></tr>

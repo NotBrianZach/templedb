@@ -99,6 +99,29 @@ BLOB_CACHE_EVICTION_POLICY = os.environ.get(
 
 # Ensure blob directories exist
 os.makedirs(BLOB_STORAGE_DIR, exist_ok=True)
+
+
+# FUSE mount path — read from system_config DB, fallback to ~/temple
+def get_fuse_mount_path() -> str:
+    """Get the configured FUSE mount path from system_config DB."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT value FROM system_config WHERE key LIKE '%fuse.mount_path' "
+            "ORDER BY key DESC"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        pass
+    return str(Path.home() / "temple")
+
+
+FUSE_MOUNT_PATH = get_fuse_mount_path()
 os.makedirs(BLOB_CACHE_DIR, exist_ok=True)
 
 # Logging Configuration

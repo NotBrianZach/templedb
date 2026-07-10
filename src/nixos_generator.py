@@ -72,7 +72,8 @@ from nix_env_generator import NixEnvGenerator
 def get_git_server_url(db_path: Optional[str] = None) -> str:
     """Get git server URL from system config"""
     if db_path is None:
-        db_path = os.path.expanduser('~/.local/share/templedb/templedb.sqlite')
+        from config import DB_PATH
+        db_path = DB_PATH
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -141,7 +142,11 @@ class NixOSGenerator:
     }
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite"
+        if db_path is None:
+            from config import DB_PATH
+            self.db_path = Path(DB_PATH)
+        else:
+            self.db_path = db_path
         self.conn = None
         self.nix_env_gen = None
 

@@ -111,7 +111,13 @@
             mount.enable = lib.mkOption {
               type = lib.types.bool;
               default = false;
-              description = "Auto-mount TempleDB FUSE filesystem at ~/temple on login.";
+              description = "Auto-mount TempleDB FUSE filesystem on login.";
+            };
+
+            mount.path = lib.mkOption {
+              type = lib.types.str;
+              default = "${config.home.homeDirectory}/temple";
+              description = "FUSE mount point for TempleDB filesystem.";
             };
 
             sync.enable = lib.mkOption {
@@ -172,7 +178,7 @@
 
             (lib.mkIf cfg.mount.enable {
               home.activation.createTempleMount = lib.hm.dag.entryAfter ["writeBoundary"] ''
-                mkdir -p $HOME/temple
+                mkdir -p ${cfg.mount.path}
               '';
 
               systemd.user.services.templedb-mount = {
@@ -182,8 +188,8 @@
                 };
                 Service = {
                   Type = "simple";
-                  ExecStart = "${templedb-bin} mount %h/temple --foreground";
-                  ExecStop = "/run/wrappers/bin/fusermount -u %h/temple";
+                  ExecStart = "${templedb-bin} mount ${cfg.mount.path} --foreground";
+                  ExecStop = "/run/wrappers/bin/fusermount -u ${cfg.mount.path}";
                   Restart = "on-failure";
                   RestartSec = 5;
                   Environment = [ "PYTHONUNBUFFERED=1" ]

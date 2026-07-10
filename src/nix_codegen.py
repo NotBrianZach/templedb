@@ -148,6 +148,28 @@ def generate_aliases() -> str:
     return "\n".join(lines)
 
 
+def generate_home_files() -> str:
+    """Generate home.file entries from nixos.home.file.* keys.
+
+    nixos.home.file..authinfo.gpg = .authinfo.gpg
+      → ".authinfo.gpg" = { source = ./.authinfo.gpg; target = ".authinfo.gpg"; };
+
+    nixos.home.file..claude/settings.json = claude/settings.json
+      → ".claude/settings.json".source = ./claude/settings.json;
+    """
+    rows = _get_keys("nixos.home.file.")
+    if not rows:
+        return ""
+
+    lines = []
+    for r in rows:
+        target = r["key"].replace("nixos.home.file.", "")
+        source = r["value"]
+        lines.append(f'    "{target}".source = ./{source};')
+
+    return "\n".join(lines)
+
+
 def generate_firewall_ports() -> str:
     """Generate firewall.allowedTCPPorts from nixos.firewall.tcp."""
     row = query_one("SELECT value FROM system_config WHERE key = 'nixos.firewall.tcp'")
@@ -231,6 +253,23 @@ def update_home_nix(home_path: Path, dry_run: bool = False) -> int:
                 begin = BEGIN.format("aliases")
                 end = END.format("aliases")
                 replacement = f"{m.group(1)}\n      {begin}\n{alias_code}\n      {end}\n{m.group(3)}"
+                content = content[:m.start()] + replacement + content[m.end():]
+                updated += 1
+
+    # --- Home files ---
+    hf_code = generate_home_files()
+    if hf_code:
+        result = _replace_section(content, "home-files", hf_code)
+        if result:
+            content = result
+            updated += 1
+        else:
+            # Try to inject into existing home.file block
+            m = re.search(r'(  home\.file = \{)\n(.*?)(  \};)', content, re.DOTALL)
+            if m:
+                begin = BEGIN.format("home-files")
+                end = END.format("home-files")
+                replacement = f"{m.group(1)}\n    {begin}\n{hf_code}\n    {end}\n{m.group(3)}"
                 content = content[:m.start()] + replacement + content[m.end():]
                 updated += 1
 

@@ -16,6 +16,7 @@ from cli.commands.commit import CommitCommand
 from repositories import ProjectRepository, FileRepository
 from project_context import ProjectContext, get_project_context
 from logger import get_logger
+from config import FUSE_MOUNT_PATH
 
 logger = get_logger(__name__)
 
@@ -58,14 +59,14 @@ class ProjectCommands(Command):
             )
 
             # Check FUSE mount
-            fuse_path = Path.home() / "temple" / slug
-            fuse_note = f"   FUSE: ~/temple/{slug}/" if fuse_path.exists() else "   FUSE: ~/temple/{slug}/ (mount with: templedb mount ~/temple)".format(slug=slug)
+            fuse_path = Path(FUSE_MOUNT_PATH) / slug
+            fuse_note = f"   FUSE: {FUSE_MOUNT_PATH}/{slug}/" if fuse_path.exists() else f"   FUSE: {FUSE_MOUNT_PATH}/{slug}/ (mount with: templedb mount {FUSE_MOUNT_PATH})"
 
             print(f"Created project: {slug} (ID {project_id})")
             print(fuse_note)
             print()
             print("Start working:")
-            print(f"   echo 'hello' > ~/temple/{slug}/README.md")
+            print(f"   echo 'hello' > {FUSE_MOUNT_PATH}/{slug}/README.md")
             print(f"   templedb vcs commit -p {slug} -m 'initial commit'")
 
             return 0

@@ -37,6 +37,50 @@ GIT_REDIRECTS = {
 }
 
 
+def _get_fuse_mount() -> str:
+    """Get the configured FUSE mount path from the DB and verify it's mounted.
+
+    Reads fuse.mount_path from system_config. If the mount is not active,
+    logs a warning suggesting how to fix it.
+    """
+    mount_path = None
+    try:
+        conn = get_simple_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT value FROM system_config WHERE key LIKE '%fuse.mount_path' "
+            "ORDER BY key DESC"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            mount_path = row[0]
+    except Exception:
+        pass
+
+    if not mount_path:
+        mount_path = os.path.join(str(Path.home()), "temple")
+
+    # Verify mount is actually active
+    mounted = False
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                if mount_path in line and "fuse" in line.lower():
+                    mounted = True
+                    break
+    except Exception:
+        pass
+
+    if not mounted:
+        logger.warning(
+            f"FUSE mount not active at {mount_path}. "
+            f"Run: templedb mount {mount_path}"
+        )
+
+    return mount_path
+
+
 def _is_templedb_project(cwd: str) -> bool:
     """Check if the current directory is a TempleDB-managed project."""
     try:
@@ -203,6 +247,7 @@ class ClaudeCommands(Command):
 
         Called by Claude Code hooks with arguments like:
           templedb ai claude hook pre-tool bash
+          templedb ai claude hook pre-tool edit
           templedb ai claude hook post-tool bash
           templedb ai claude hook notify
         """
@@ -211,6 +256,9 @@ class ClaudeCommands(Command):
 
         if hook_type == "pre-tool" and tool_type == "bash":
             return self._pre_tool_bash()
+
+        if hook_type == "pre-tool" and tool_type in ("edit", "write"):
+            return self._pre_tool_file_edit()
 
         return 0
 
@@ -240,6 +288,89 @@ class ClaudeCommands(Command):
                     "reason": f"Use templedb instead of git in TempleDB-managed projects.\n"
                               f"  Instead of: {command.strip()}\n"
                               f"  Use:        {suggestion}"
+                }
+                print(json.dumps(response))
+                return 0
+
+        return 0
+
+    def _pre_tool_file_edit(self) -> int:
+        """Pre-tool hook for Edit/Write commands.
+
+        Blocks edits to files in TempleDB project checkouts or repo dirs
+        that should go through the FUSE mount instead.
+        """
+        try:
+            input_data = json.loads(sys.stdin.read())
+            file_path = input_data.get("tool_input", {}).get("file_path", "")
+        except (json.JSONDecodeError, KeyError):
+            return 0
+
+        if not file_path:
+            return 0
+
+        file_path = os.path.expanduser(file_path)
+        home = str(Path.home())
+        fuse_mount = _get_fuse_mount()
+
+        # Paths that should be redirected to FUSE mount
+        blocked_prefixes = [
+            os.path.join(home, ".config", "templedb", "checkouts"),
+        ]
+
+        # Also check direct project repo paths (e.g. /home/zach/templeDB/)
+        try:
+            conn = get_simple_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT slug, repo_url FROM projects WHERE repo_url IS NOT NULL")
+            for row in cursor.fetchall():
+                repo_url = row[1]
+                if repo_url and os.path.isabs(repo_url):
+                    blocked_prefixes.append(repo_url)
+            conn.close()
+        except Exception:
+            pass
+
+        for prefix in blocked_prefixes:
+            if file_path.startswith(prefix):
+                # Figure out the project slug and relative path
+                slug = None
+                rel_path = None
+                for bp in blocked_prefixes:
+                    if file_path.startswith(bp):
+                        rest = file_path[len(bp):].lstrip("/")
+                        parts = rest.split("/", 1)
+                        if len(parts) >= 1:
+                            slug = parts[0] if bp.endswith("checkouts") else None
+                            rel_path = parts[1] if len(parts) > 1 else rest
+
+                        # For repo_url matches, detect slug from DB
+                        if not slug:
+                            try:
+                                conn = get_simple_connection()
+                                cursor = conn.cursor()
+                                cursor.execute(
+                                    "SELECT slug FROM projects WHERE repo_url = ?",
+                                    (bp,)
+                                )
+                                r = cursor.fetchone()
+                                conn.close()
+                                if r:
+                                    slug = r[0]
+                                    rel_path = file_path[len(bp):].lstrip("/")
+                            except Exception:
+                                pass
+                        break
+
+                fuse_path = os.path.join(fuse_mount, slug, rel_path) if slug and rel_path else fuse_mount
+                response = {
+                    "decision": "block",
+                    "reason": (
+                        f"Edit files through the FUSE mount, not the checkout/repo directly.\n"
+                        f"  Blocked: {file_path}\n"
+                        f"  Use:     {fuse_path}\n"
+                        f"FUSE writes go to the DB (source of truth) and auto-stage for VCS."
+                    )
                 }
                 print(json.dumps(response))
                 return 0
