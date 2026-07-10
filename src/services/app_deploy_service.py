@@ -201,6 +201,58 @@ class AppDeployService(BaseService):
 
         return env
 
+    def _sync_from_checkout(self, project_slug: str, work_dir: str) -> None:
+        """Sync source files from the materialized checkout to the deploy working dir.
+
+        First materializes from DB to ensure the checkout is current, then
+        rsyncs source files (excluding node_modules, build artifacts, etc.)
+        into the FHS deploy working directory.
+        """
+        real_home = Path(os.path.expanduser("~"))
+        checkout_base = real_home / ".config" / "templedb" / "checkouts" / project_slug
+        if not checkout_base.exists():
+            self.logger.info(f"No checkout found at {checkout_base}, skipping sync")
+            return
+
+        # Materialize from DB to ensure checkout has latest committed files
+        try:
+            from services.system_service import SystemService
+            sys_svc = SystemService()
+            sys_svc.materialize_from_db(project_slug, force=True)
+        except Exception as e:
+            self.logger.warning(f"Materialize failed, syncing from existing checkout: {e}")
+
+        # Determine source dir: if work_dir ends with a subdir (e.g. /frontend),
+        # sync from the corresponding subdir of the checkout
+        work_path = Path(work_dir)
+        # The FHS deploy path pattern is:
+        #   ~/.local/share/templedb/fhs-deployments/{slug}/working[/subdir]
+        fhs_base = real_home / ".local" / "share" / "templedb" / "fhs-deployments" / project_slug / "working"
+        if work_path != fhs_base and str(work_path).startswith(str(fhs_base)):
+            subdir = work_path.relative_to(fhs_base)
+            src_dir = checkout_base / subdir
+        else:
+            src_dir = checkout_base
+
+        if not src_dir.exists():
+            self.logger.warning(f"Source dir {src_dir} not found, skipping sync")
+            return
+
+        # rsync source files, excluding build artifacts and deps
+        cmd = [
+            "rsync", "-a", "--delete",
+            "--exclude", "node_modules",
+            "--exclude", ".next",
+            "--exclude", ".open-next",
+            "--exclude", ".wrangler",
+            f"{src_dir}/", f"{work_dir}/",
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            self.logger.info(f"Synced {src_dir} → {work_dir}")
+        except subprocess.CalledProcessError as e:
+            self.logger.warning(f"rsync failed: {e.stderr}")
+
     def deploy(self, project_slug: str, target: str = 'production',
                dry_run: bool = False, skip_tests: bool = False) -> AppDeployResult:
         """
@@ -225,6 +277,11 @@ class AppDeployService(BaseService):
                 duration_seconds=time.time() - start,
                 error=f"Working directory not found: {work_dir}"
             )
+
+        # Sync source files from materialized checkout to deploy working dir.
+        # The checkout is the source of truth (materialized from DB); the FHS
+        # working dir may be stale from a previous deploy.
+        self._sync_from_checkout(project_slug, work_dir)
 
         # Get project ID for tracking
         proj = db_utils.query_one(
