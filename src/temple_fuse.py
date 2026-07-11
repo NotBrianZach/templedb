@@ -667,7 +667,7 @@ def mount(mountpoint: str, db_path: str = None, foreground: bool = False,
         print(f"  Running in background (unmount with: fusermount -u {mountpoint})")
 
     FUSE(fs, mountpoint, foreground=foreground, nothreads=False,
-         allow_other=False, debug=debug)
+         allow_other=False, nonempty=True, debug=debug)
 
 
 if __name__ == "__main__":
