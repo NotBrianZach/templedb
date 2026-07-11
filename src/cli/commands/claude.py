@@ -36,6 +36,20 @@ GIT_REDIRECTS = {
     "git merge": "templedb vcs merge <project> <branch>",
 }
 
+# NixOS/home-manager commands that should use templedb equivalents
+SYSTEM_REDIRECTS = {
+    "sudo nixos-rebuild switch": "templedb nixos system-switch system_config --yes",
+    "sudo nixos-rebuild build": "templedb nixos rebuild system_config --dry-run",
+    "sudo nixos-rebuild test": "templedb nixos rebuild system_config --yes",
+    "sudo nixos-rebuild": "templedb nixos rebuild system_config --yes",
+    "nixos-rebuild switch": "templedb nixos system-switch system_config --yes",
+    "nixos-rebuild build": "templedb nixos rebuild system_config --dry-run",
+    "nixos-rebuild test": "templedb nixos rebuild system_config --yes",
+    "nixos-rebuild": "templedb nixos rebuild system_config --yes",
+    "home-manager switch": "templedb nixos home-rebuild system_config",
+    "home-manager build": "templedb nixos home-rebuild system_config",
+}
+
 
 def _get_fuse_mount() -> str:
     """Get the configured FUSE mount path from the DB and verify it's mounted.
@@ -276,17 +290,31 @@ class ClaudeCommands(Command):
             return 0
 
         cwd = os.getcwd()
+        cmd = command.strip()
+
+        # System commands (nixos-rebuild, home-manager) — always redirect
+        for sys_cmd, templedb_cmd in SYSTEM_REDIRECTS.items():
+            if cmd.startswith(sys_cmd):
+                response = {
+                    "decision": "block",
+                    "reason": f"Use templedb instead of raw system commands.\n"
+                              f"  Instead of: {cmd}\n"
+                              f"  Use:        {templedb_cmd}"
+                }
+                print(json.dumps(response))
+                return 0
+
         if not _is_templedb_project(cwd):
             return 0
 
         for git_cmd, templedb_cmd in GIT_REDIRECTS.items():
-            if command.strip().startswith(git_cmd):
+            if cmd.startswith(git_cmd):
                 slug = _detect_project_slug(cwd) or "<project>"
                 suggestion = templedb_cmd.replace("<project>", slug)
                 response = {
                     "decision": "block",
                     "reason": f"Use templedb instead of git in TempleDB-managed projects.\n"
-                              f"  Instead of: {command.strip()}\n"
+                              f"  Instead of: {cmd}\n"
                               f"  Use:        {suggestion}"
                 }
                 print(json.dumps(response))
