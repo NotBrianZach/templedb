@@ -761,21 +761,17 @@ class DeployOpsMixin:
             dest_file.write_text(content)
             print(f"  Saved to {dest_file}")
 
-            # Commit via templedb VCS
+            # Commit via VCS service directly (no subprocess/sys.argv dependency)
             print(f"  Committing to TempleDB...")
-            subprocess.run([
-                sys.argv[0] if sys.argv else "templedb",
-                "vcs", "add", "-p", system_config_slug, "--all"
-            ], capture_output=True)
-            commit_result = subprocess.run([
-                sys.argv[0] if sys.argv else "templedb",
-                "vcs", "commit", "-p", system_config_slug,
-                "-m", f"Add hardware config for {hostname}"
-            ], capture_output=True, text=True)
-
-            if commit_result.returncode == 0:
-                print(f"  Committed to {system_config_slug}")
-            else:
+            try:
+                from services.context import ServiceContext
+                ctx = ServiceContext()
+                vcs_svc = ctx.get_vcs_service()
+                vcs_svc.stage_files(system_config_slug, stage_all=True)
+                result = vcs_svc.commit(system_config_slug, f"Add hardware config for {hostname}")
+                print(f"  Committed to {system_config_slug} ({result.commit_hash[:8]})")
+            except Exception as e:
+                logger.debug(f"VCS commit error: {e}")
                 print(f"  Commit skipped (no changes or error)")
 
             print(f"\nHardware config ready: {dest_file.name}")

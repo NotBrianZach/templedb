@@ -198,11 +198,10 @@ class ComponentService(BaseService):
                 INSERT INTO file_contents (
                     file_id,
                     content_hash,
-                    content_type,
                     file_size_bytes,
                     is_current
-                ) VALUES (?, ?, 'text', ?, 1)
-                ON CONFLICT(file_id, is_current) DO UPDATE SET
+                ) VALUES (?, ?, ?, 1)
+                ON CONFLICT(file_id) DO UPDATE SET
                     content_hash = excluded.content_hash,
                     file_size_bytes = excluded.file_size_bytes,
                     updated_at = datetime('now')

@@ -2545,6 +2545,147 @@ def _status_badge(status: str) -> str:
     return f'<span class="badge{cls}">{html.escape(status or "—")}</span>'
 
 
+def _deploy_logic_section() -> str:
+    """Build the Prolog-powered deployment logic section."""
+    try:
+        from services.prolog_engine import DeploymentLogic
+        pl_path = Path(__file__).parent / "services" / "deploy_logic.pl"
+        if not pl_path.exists():
+            return '<div class="muted" style="margin-bottom:1.5rem">deploy_logic.pl not found</div>'
+        logic = DeploymentLogic(str(pl_path))
+
+        # Single swipl call: all projects, order, groups, validation
+        batch = logic.batch_all()
+
+        projects_info = []
+        for p in batch.get("projects", []):
+            slug = str(p.get("slug", "")).replace("_", "-")
+            ptype = str(p.get("type", "?"))
+            # Adapt validation dict to match expected format
+            v = {
+                "valid": p.get("valid", False),
+                "can_deploy": p.get("can_deploy", False),
+                "has_cycle": p.get("has_cycle", False),
+                "deps": [str(d).replace("_", "-") for d in p.get("deps", [])],
+                "targets": [str(t) for t in p.get("targets", [])],
+                "required_env": [str(e) for e in p.get("required_env", [])],
+                "health_checks": p.get("health_checks", []),
+            }
+            projects_info.append((slug, ptype, v))
+
+        ordered = [str(s).replace("_", "-") for s in batch.get("deploy_order", [])]
+        parallel = [
+            [str(s).replace("_", "-") for s in g]
+            for g in batch.get("parallel_groups", [])
+        ]
+
+        # Build project cards
+        cards_html = ""
+        for slug, ptype, v in sorted(projects_info, key=lambda x: ordered.index(x[0]) if x[0] in ordered else 99):
+            ok = v["valid"] and v["can_deploy"] and not v["has_cycle"]
+            status_icon = '<span style="color:#4a9a6a">&#x2713;</span>' if ok else '<span style="color:#e94560">&#x2717;</span>'
+            deps_html = ", ".join(f'<code>{html.escape(d)}</code>' for d in v["deps"]) or '<span class="muted">none</span>'
+            targets_html = ", ".join(f'<code>{html.escape(t)}</code>' for t in v["targets"]) or '<span class="muted">\u2014</span>'
+            env_html = ", ".join(f'<code style="font-size:0.7rem">{html.escape(e)}</code>' for e in v["required_env"]) if v["required_env"] else ""
+            health_html = ""
+            for hc in v["health_checks"]:
+                health_html += f' <a href="{html.escape(hc.get("URL", ""))}" target="_blank" style="font-size:0.72rem" class="muted">{html.escape(hc.get("URL", ""))}</a>'
+            cycle_warn = ' <span class="badge" style="color:#e94560">CYCLE</span>' if v["has_cycle"] else ""
+            safe_id = slug.replace('-', '_')
+
+            cards_html += f"""
+            <div style="background:#13131f;border:1px solid #1e1e3a;border-radius:6px;padding:0.6rem 0.8rem;min-width:220px">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.3rem">
+                <strong>{status_icon} <a href="/projects/{html.escape(slug)}">{html.escape(slug)}</a></strong>
+                <span class="badge">{html.escape(ptype)}</span>
+              </div>
+              <div style="font-size:0.78rem;color:#808098">
+                deps: {deps_html}{cycle_warn}<br>
+                targets: {targets_html}
+                {('<br>env: ' + env_html) if env_html else ''}
+                {('<br>health:' + health_html) if health_html else ''}
+              </div>
+              <div style="margin-top:0.4rem">
+                <button hx-get="/deploy/validate/{html.escape(slug)}" hx-target="#validate-{safe_id}"
+                        hx-swap="innerHTML" style="padding:0.15rem 0.5rem;font-size:0.72rem">validate</button>
+                <span id="validate-{safe_id}" style="font-size:0.72rem;margin-left:0.3rem"></span>
+              </div>
+            </div>"""
+
+        # Parallel groups visualization (swim lanes)
+        lanes_html = ""
+        for i, group in enumerate(parallel):
+            group_items = " ".join(
+                f'<span style="background:#1a1a30;border:1px solid #2a2a4a;border-radius:4px;padding:0.2rem 0.5rem;font-size:0.78rem">{html.escape(p)}</span>'
+                for p in group
+            )
+            lanes_html += f"""
+            <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+              <span class="muted" style="font-size:0.72rem;width:50px;text-align:right">phase {i+1}</span>
+              <span style="color:#2a2a4a">&#x25B6;</span>
+              <div style="display:flex;gap:0.4rem;flex-wrap:wrap">{group_items}</div>
+            </div>"""
+
+        # Dependency graph edges
+        graph_edges = ""
+        for slug, _, v in projects_info:
+            for dep in v["deps"]:
+                graph_edges += f'<div style="font-size:0.78rem;color:#808098;margin-left:2rem"><code>{html.escape(dep)}</code> <span style="color:#4a9eff">&#x2192;</span> <code>{html.escape(slug)}</code></div>'
+
+        return f"""
+<h3>Deployment Logic <span class="muted" style="font-weight:normal;font-size:0.78rem">Prolog engine &middot; <code>deploy_logic.pl</code></span></h3>
+<p class="muted" style="font-size:0.8rem;margin-bottom:0.8rem">Declarative dependency resolution. Edit rules in <code>src/services/deploy_logic.pl</code></p>
+
+<div style="display:flex;gap:1.5rem;margin-bottom:1.2rem;flex-wrap:wrap">
+  <div style="flex:1;min-width:300px">
+    <h3 style="font-size:0.85rem;color:#808098;margin-bottom:0.5rem">Deploy Order (parallel phases)</h3>
+    {lanes_html}
+  </div>
+  <div style="flex:0 0 auto;min-width:200px">
+    <h3 style="font-size:0.85rem;color:#808098;margin-bottom:0.5rem">Dependency Edges</h3>
+    {graph_edges if graph_edges else '<span class="muted" style="font-size:0.78rem">no edges</span>'}
+  </div>
+</div>
+
+<div style="display:flex;gap:0.8rem;flex-wrap:wrap;margin-bottom:1.5rem">
+{cards_html}
+</div>
+"""
+    except Exception as e:
+        return f'<div class="muted" style="margin-bottom:1.5rem">Prolog engine error: {html.escape(str(e))}</div>'
+
+
+@app.get("/deploy/validate/{slug}", response_class=HTMLResponse)
+def deploy_validate(slug: str):
+    """HTMX endpoint: validate a single project deployment readiness."""
+    try:
+        from services.prolog_engine import DeploymentLogic
+        pl_path = Path(__file__).parent / "services" / "deploy_logic.pl"
+        logic = DeploymentLogic(str(pl_path))
+        v = logic.validate(slug)
+
+        # Check env vars actually exist in DB
+        missing_env = []
+        for var_name in v["required_env"]:
+            row = query_one("SELECT 1 FROM env_vars WHERE var_name = ? LIMIT 1", (var_name,))
+            if not row:
+                missing_env.append(var_name)
+
+        if v["valid"] and not v["has_cycle"] and not missing_env:
+            return HTMLResponse(f'<span style="color:#4a9a6a">&#x2713; ready</span>')
+        else:
+            issues = []
+            if v["has_cycle"]:
+                issues.append("cycle detected")
+            if not v["valid"]:
+                issues.append("invalid config")
+            if missing_env:
+                issues.append(f'missing: {", ".join(missing_env)}')
+            return HTMLResponse(f'<span style="color:#e94560">&#x2717; {html.escape("; ".join(issues))}</span>')
+    except Exception as e:
+        return HTMLResponse(f'<span style="color:#e94560">error: {html.escape(str(e)[:80])}</span>')
+
+
 @app.get("/deploy", response_class=HTMLResponse)
 def deploy_list():
     # ── Deployment Scripts ─────────────────────────────────────────────────────
@@ -2914,8 +3055,11 @@ def deploy_list():
     auto_count = query_one("SELECT COUNT(*) as n FROM deployment_history WHERE triggered_by = 'auto-commit'")
     auto_html = f' <span class="badge">auto: {auto_count["n"]}</span>' if auto_count and auto_count["n"] else ""
 
+    deploy_logic_html = _deploy_logic_section()
     body = f"""
 <h2>Deploy</h2>
+
+{deploy_logic_html}
 
 <h3>Auto-Deploy Triggers</h3>
 <p class="muted" style="font-size:0.8rem;margin-bottom:0.5rem">Commits to matching branches auto-deploy to the target. Manage with <code>templedb deploy trigger add/list/remove</code></p>

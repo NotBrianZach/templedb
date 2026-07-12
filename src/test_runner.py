@@ -677,35 +677,48 @@ def generate_structure_tests(project_path: Path, result: TestResult, verbose=Fal
 
 # ── Server starters ─────────────────────────────────────────────────────────
 
-def start_fastapi_server(project_path: Path, port: int) -> ServerProcess:
-    """Start a FastAPI server (e.g., TempleDB GUI)."""
-    # Find the right python
+def _resolve_nix_python() -> tuple[str, str]:
+    """Resolve the nix-installed Python and its site-packages.
+
+    Uses the nix store structure directly instead of parsing wrapper scripts.
+    Returns (python_path, site_packages_path).
+    """
+    import shutil
+
+    # Best: find templedb on PATH → resolve its Python from the same nix closure
+    templedb_bin = shutil.which("templedb")
+    if templedb_bin:
+        store_path = Path(templedb_bin).resolve().parent.parent
+        site_pkgs = list(store_path.glob("lib/python3.*/site-packages"))
+        if site_pkgs:
+            python_bins = list(store_path.glob("bin/python3"))
+            python = str(python_bins[0]) if python_bins else sys.executable
+            return python, str(site_pkgs[0])
+
+    # Fallback: last-result symlink
     nix_result = Path.home() / ".local" / "state" / "templedb" / "last-result"
     if nix_result.exists():
-        store_path = nix_result.read_text().strip()
-        bin_file = Path(store_path) / "bin" / "templedb"
-        if bin_file.exists():
-            content = bin_file.read_text()
-            import re
-            m = re.search(r'exec "([^"]+/bin/python3)"', content)
-            if m:
-                python = m.group(1)
-            else:
-                python = sys.executable
-            # Extract PYTHONPATH
-            m2 = re.search(r"PYTHONPATH='([^']+)'", content)
-            pythonpath = m2.group(1) if m2 else ""
-        else:
-            python = sys.executable
-            pythonpath = ""
-    else:
-        python = sys.executable
-        pythonpath = ""
+        store_path = Path(nix_result.read_text().strip())
+        site_pkgs = list(store_path.glob("lib/python3.*/site-packages"))
+        if site_pkgs:
+            python_bins = list(store_path.glob("bin/python3"))
+            python = str(python_bins[0]) if python_bins else sys.executable
+            return python, str(site_pkgs[0])
+
+    return sys.executable, ""
+
+
+def start_fastapi_server(project_path: Path, port: int) -> ServerProcess:
+    """Start a FastAPI server (e.g., TempleDB GUI)."""
+    python, site_packages = _resolve_nix_python()
+    local_src = str(project_path / "src")
 
     env = os.environ.copy()
-    # Local src FIRST so patched files override nix store versions
-    local_src = str(project_path / "src")
-    env["PYTHONPATH"] = f"{local_src}:{pythonpath}"
+    # Local src FIRST so dev files override nix store
+    parts = [local_src]
+    if site_packages:
+        parts.append(site_packages)
+    env["PYTHONPATH"] = ":".join(parts)
     env["PYTHONNOUSERSITE"] = "1"
 
     import tempfile

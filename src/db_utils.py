@@ -78,6 +78,49 @@ def get_simple_connection(db_path: str = None, row_factory: bool = False) -> sql
     return conn
 
 
+def checkpoint_and_copy(dest_path: str, *, user: str = "zach", host: str = None, timeout: int = 120) -> tuple[bool, str]:
+    """Checkpoint WAL and safely transfer DB to a destination.
+
+    Always checkpoints before transfer — eliminates stale WAL data risk.
+    If host is None, does a local file copy. Otherwise SCPs to remote.
+
+    Returns:
+        (success, message) tuple
+    """
+    import shutil
+    import subprocess as _sp
+    from pathlib import Path
+
+    db_path = Path(DB_PATH)
+    if not db_path.exists():
+        return False, f"DB not found: {db_path}"
+
+    # Checkpoint WAL — forces all WAL data into the main DB file
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.close()
+
+    if host is None:
+        try:
+            shutil.copy2(str(db_path), dest_path)
+            return True, f"Copied to {dest_path}"
+        except Exception as e:
+            return False, str(e)
+    else:
+        remote = f"{user}@{host}:{dest_path}"
+        try:
+            r = _sp.run(
+                ["scp", "-o", "ConnectTimeout=10", str(db_path), remote],
+                capture_output=True, text=True, timeout=timeout)
+            if r.returncode != 0:
+                return False, f"SCP failed: {r.stderr.strip()}"
+            return True, f"Synced to {host}:{dest_path}"
+        except _sp.TimeoutExpired:
+            return False, "SCP timed out"
+        except Exception as e:
+            return False, str(e)
+
+
 def close_connection():
     """Close thread-local connection"""
     if hasattr(_thread_local, 'connection'):

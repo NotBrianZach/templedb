@@ -501,15 +501,8 @@ class VCSCommands(Command):
 
             # Update file_contents so materialization sees the committed content
             if file['state'] in ('modified', 'added') and ws_hash != 'DELETED':
-                # Remove all old versions for this file, then insert/update the current one.
-                # Using DELETE instead of SET is_current=0 avoids UNIQUE(file_id, is_current) conflicts
-                # when multiple historical rows exist.
                 self.vcs_repo.execute("""
-                    DELETE FROM file_contents WHERE file_id = ?
-                """, (file['file_id'],), commit=False)
-
-                self.vcs_repo.execute("""
-                    INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
+                    INSERT OR REPLACE INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
                     VALUES (?, ?, ?, ?, 1)
                 """, (file['file_id'], ws_hash, file_size, line_count), commit=False)
 

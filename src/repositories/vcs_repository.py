@@ -255,8 +255,7 @@ class VCSRepository(BaseRepository):
             (target_branch_id,))
         head_commit_id = branch['head_commit_id'] if branch else None
 
-        # Clear all file_contents for this project — we'll re-insert current ones below.
-        # Using DELETE avoids UNIQUE(file_id, is_current) conflicts from stale rows.
+        # Clear all file_contents for this project — bulk replace with new branch's files.
         self.execute("""
             DELETE FROM file_contents
             WHERE file_id IN (SELECT id FROM project_files WHERE project_id = ?)

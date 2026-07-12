@@ -504,23 +504,17 @@ class TempleFS(Operations):
 
         file_id = file_row["id"]
 
-        # Update file_contents: replace current version in-place
+        # Update file_contents: upsert current version
         line_count = text.count('\n') + 1 if (content_type == "text" and text) else 0
-        existing = conn.execute(
-            "SELECT id FROM file_contents WHERE file_id = ? AND is_current = 1",
-            (file_id,)
-        ).fetchone()
-        if existing:
-            conn.execute("""
-                UPDATE file_contents
-                SET content_hash = ?, file_size_bytes = ?, line_count = ?, updated_at = datetime('now')
-                WHERE id = ?
-            """, (content_hash, len(content), line_count, existing["id"]))
-        else:
-            conn.execute("""
-                INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
-                VALUES (?, ?, ?, ?, 1)
-            """, (file_id, content_hash, len(content), line_count))
+        conn.execute("""
+            INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(file_id) DO UPDATE SET
+                content_hash = excluded.content_hash,
+                file_size_bytes = excluded.file_size_bytes,
+                line_count = excluded.line_count,
+                updated_at = datetime('now')
+        """, (file_id, content_hash, len(content), line_count))
 
         # Auto-stage for VCS
         self._auto_stage(project["id"], file_id, "modified")
