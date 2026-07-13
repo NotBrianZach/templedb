@@ -13,10 +13,16 @@ class MCPCommands(Command):
     """MCP server command handlers"""
 
     def start_server(self, args) -> int:
-        """Start the MCP server"""
-        # Import and run MCP server
+        """Start the MCP server (stdio transport, 1:1 with Claude instance)"""
         from mcp_server import main as mcp_main
         mcp_main()
+        return 0
+
+    def start_daemon(self, args) -> int:
+        """Start the shared MCP daemon (HTTP + hook socket)"""
+        from mcp_daemon import main as daemon_main
+        port = getattr(args, 'port', 8421) or 8421
+        daemon_main(port=port)
         return 0
 
 

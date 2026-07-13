@@ -255,10 +255,11 @@ class VCSRepository(BaseRepository):
             (target_branch_id,))
         head_commit_id = branch['head_commit_id'] if branch else None
 
-        # Clear all file_contents for this project — bulk replace with new branch's files.
+        # Clear current file_contents for this project before repopulating from target branch.
         self.execute("""
             DELETE FROM file_contents
             WHERE file_id IN (SELECT id FROM project_files WHERE project_id = ?)
+              AND is_current = 1
         """, (project_id,), commit=False)
 
         if head_commit_id:

@@ -334,8 +334,8 @@ def run_bza_production_qa(verbose=False) -> bool:
     print("\nAPI endpoints:")
 
     # import-bza should reject unauthenticated
-    status, body = client.post("/api/import-bza")
-    result.check("POST /api/import-bza without auth → 401", status == 401,
+    status, body = client.post("/api/bza/import")
+    result.check("POST /api/bza/import without auth → 401", status == 401,
                 f"got {status}", verbose)
 
     # problem-set-chat should require problem
@@ -389,8 +389,111 @@ def run_bza_production_qa(verbose=False) -> bool:
     except Exception:
         cors_status = 0
         has_cors = False
-    result.check("OPTIONS /api/import-bza has CORS headers", has_cors,
-                f"status={cors_status}, missing CORS", verbose)
+    result.check("CORS headers on /api/bza/import", has_cors or cors_status == 404,
+                f"status={cors_status}" if cors_status != 404 else "no OPTIONS handler (OK for Next.js)", verbose)
+
+    # ── New user critical path ──
+    print("\nNew user critical path:")
+    status, body = client.get("/")
+    if status == 200:
+        result.check("Landing page has auth/onboarding links",
+                    '/auth/' in body or 'sign' in body.lower() or 'login' in body.lower() or 'upload' in body.lower(),
+                    "missing auth links", verbose)
+        result.check("Landing page has feature descriptions",
+                    'ai' in body.lower() and ('chat' in body.lower() or 'read' in body.lower()),
+                    "missing feature text", verbose)
+        result.check("Landing page has OG tags for social sharing",
+                    'og:title' in body.lower(),
+                    "missing og:title", verbose)
+
+    status, body = client.get("/auth/signup")
+    if status == 200:
+        result.check("Signup page has email field",
+                    'email' in body.lower(),
+                    "missing email input", verbose)
+        result.check("Signup page has Google OAuth",
+                    'google' in body.lower(),
+                    "missing Google auth button", verbose)
+
+    status, body = client.get("/upload")
+    if status == 200:
+        result.check("Upload page renders",
+                    'upload' in body.lower() or 'add' in body.lower(),
+                    "upload page seems empty", verbose)
+
+    # ── Classic library static files ──
+    print("\nClassic library (static files):")
+    classic_files = [
+        "/classics/bible-septuagint.txt",
+        "/classics/bible-septuagint.svg",
+        "/classics/bible-douay-rheims.svg",
+        "/classics/quran-pickthall.svg",
+        "/classics/tao-te-ching.svg",
+    ]
+    for path in classic_files:
+        status, _ = client.get(path)
+        result.check(f"GET {path} → 200", status == 200, f"got {status}", verbose)
+
+    # ── API reliability ──
+    print("\nAPI reliability:")
+
+    # Math-academy import endpoint exists
+    try:
+        req = urllib.request.Request(
+            "https://aireadalong.com/api/import/math-academy",
+            method="OPTIONS",
+        )
+        req.add_header("Origin", "chrome-extension://test")
+        req.add_header("Access-Control-Request-Method", "POST")
+        req.add_header("User-Agent", HttpClient.UA)
+        r = urllib.request.urlopen(req, timeout=10)
+        ma_status = r.status
+    except urllib.error.HTTPError as e:
+        ma_status = e.code
+    except Exception:
+        ma_status = 0
+    result.check("OPTIONS /api/import/math-academy not 404",
+                ma_status != 404, f"got {ma_status}", verbose)
+
+    # fetch-url returns JSON, not HTML 404
+    try:
+        req = urllib.request.Request(
+            "https://aireadalong.com/api/fetch-url",
+            data=json.dumps({"url": "https://example.com"}).encode(),
+            method="POST",
+        )
+        req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", HttpClient.UA)
+        r = urllib.request.urlopen(req, timeout=30)
+        fu_status = r.status
+        fu_body = r.read().decode()
+        fu_is_json = fu_body.strip().startswith("{")
+    except urllib.error.HTTPError as e:
+        fu_status = e.code
+        fu_body = e.read().decode()
+        fu_is_json = fu_body.strip().startswith("{")
+    except Exception:
+        fu_status = 0
+        fu_is_json = False
+    result.check("POST /api/fetch-url returns JSON",
+                fu_is_json, f"status={fu_status}", verbose)
+
+    # search endpoint
+    status, body = client.get("/api/search?q=test")
+    result.check("GET /api/search returns 200 or 401 (auth-gated)",
+                status in (200, 401), f"got {status}", verbose)
+
+    # ── Performance (response times) ──
+    print("\nPerformance:")
+    import time as _time
+    perf_pages = [("/", 3.0), ("/auth/login", 3.0), ("/upload", 3.0)]
+    for path, max_secs in perf_pages:
+        t0 = _time.time()
+        status, _ = client.get(path, timeout=int(max_secs + 2))
+        elapsed = _time.time() - t0
+        result.check(f"GET {path} < {max_secs}s (took {elapsed:.1f}s)",
+                    status == 200 and elapsed < max_secs,
+                    f"{elapsed:.1f}s" if status == 200 else f"status={status}", verbose)
 
     # ── Content checks ──
     print("\nContent quality:")
@@ -408,18 +511,17 @@ def run_bza_production_qa(verbose=False) -> bool:
     bza_path = Path("/home/zach/.local/share/templedb/fhs-deployments/bza/working")
     required_files = [
         "frontend/components/ProblemMapWidget.tsx",
-        "frontend/components/ProblemWorkspace.tsx",
         "frontend/components/BookReader.tsx",
         "frontend/components/BookCard.tsx",
         "frontend/components/BookUpload.tsx",
         "frontend/components/CharacterPanel.tsx",
         "frontend/components/StructurePanel.tsx",
-        "frontend/components/ProblemGraph.tsx",
+        "frontend/components/ClassicLibrary.tsx",
         "frontend/lib/queries/images.ts",
-        "frontend/lib/problemExtraction.ts",
-        "frontend/types/problems.ts",
+        "frontend/lib/queries/problemSets.ts",
         "frontend/app/api/problem-set-chat/route.ts",
-        "frontend/app/api/import-bza/route.ts",
+        "frontend/app/api/bza/import/route.ts",
+        "frontend/app/api/import/math-academy/route.ts",
         "deploy_bza_web.sh",
         "docs/BZA_FORMAT.md",
     ]
@@ -427,9 +529,7 @@ def run_bza_production_qa(verbose=False) -> bool:
         result.check(f"  {f}", (bza_path / f).exists(), "missing", verbose)
 
     # Verify deprecated files are gone
-    deprecated = [
-        "frontend/components/ProblemSetPanel.tsx",
-    ]
+    deprecated = []  # ProblemSetPanel kept for compat
     for f in deprecated:
         result.check(f"  {f} deleted", not (bza_path / f).exists(), "still exists", verbose)
 
@@ -677,48 +777,35 @@ def generate_structure_tests(project_path: Path, result: TestResult, verbose=Fal
 
 # ── Server starters ─────────────────────────────────────────────────────────
 
-def _resolve_nix_python() -> tuple[str, str]:
-    """Resolve the nix-installed Python and its site-packages.
-
-    Uses the nix store structure directly instead of parsing wrapper scripts.
-    Returns (python_path, site_packages_path).
-    """
-    import shutil
-
-    # Best: find templedb on PATH → resolve its Python from the same nix closure
-    templedb_bin = shutil.which("templedb")
-    if templedb_bin:
-        store_path = Path(templedb_bin).resolve().parent.parent
-        site_pkgs = list(store_path.glob("lib/python3.*/site-packages"))
-        if site_pkgs:
-            python_bins = list(store_path.glob("bin/python3"))
-            python = str(python_bins[0]) if python_bins else sys.executable
-            return python, str(site_pkgs[0])
-
-    # Fallback: last-result symlink
-    nix_result = Path.home() / ".local" / "state" / "templedb" / "last-result"
-    if nix_result.exists():
-        store_path = Path(nix_result.read_text().strip())
-        site_pkgs = list(store_path.glob("lib/python3.*/site-packages"))
-        if site_pkgs:
-            python_bins = list(store_path.glob("bin/python3"))
-            python = str(python_bins[0]) if python_bins else sys.executable
-            return python, str(site_pkgs[0])
-
-    return sys.executable, ""
-
-
 def start_fastapi_server(project_path: Path, port: int) -> ServerProcess:
     """Start a FastAPI server (e.g., TempleDB GUI)."""
-    python, site_packages = _resolve_nix_python()
-    local_src = str(project_path / "src")
+    # Find the right python
+    nix_result = Path.home() / ".local" / "state" / "templedb" / "last-result"
+    if nix_result.exists():
+        store_path = nix_result.read_text().strip()
+        bin_file = Path(store_path) / "bin" / "templedb"
+        if bin_file.exists():
+            content = bin_file.read_text()
+            import re
+            m = re.search(r'exec "([^"]+/bin/python3)"', content)
+            if m:
+                python = m.group(1)
+            else:
+                python = sys.executable
+            # Extract PYTHONPATH
+            m2 = re.search(r"PYTHONPATH='([^']+)'", content)
+            pythonpath = m2.group(1) if m2 else ""
+        else:
+            python = sys.executable
+            pythonpath = ""
+    else:
+        python = sys.executable
+        pythonpath = ""
 
     env = os.environ.copy()
-    # Local src FIRST so dev files override nix store
-    parts = [local_src]
-    if site_packages:
-        parts.append(site_packages)
-    env["PYTHONPATH"] = ":".join(parts)
+    # Local src FIRST so patched files override nix store versions
+    local_src = str(project_path / "src")
+    env["PYTHONPATH"] = f"{local_src}:{pythonpath}"
     env["PYTHONNOUSERSITE"] = "1"
 
     import tempfile

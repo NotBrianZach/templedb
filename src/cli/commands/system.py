@@ -84,7 +84,8 @@ class SystemCommands(Command):
         # Backup current database first
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safety_backup = f"{DB_PATH}.before_restore_{timestamp}"
-        shutil.copy2(DB_PATH, safety_backup)
+        from db_utils import safe_copy_db
+        safe_copy_db(safety_backup)
         print(f"📦 Created safety backup: {safety_backup}")
 
         # Restore

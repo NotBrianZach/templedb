@@ -105,3 +105,7 @@ def register(cli):
 
     serve_parser = mcp_sub.add_parser('serve', help='Start MCP server (stdio transport)')
     cli.commands['ai.mcp.serve'] = mcp_cmd.start_server
+
+    daemon_parser = mcp_sub.add_parser('daemon', help='Start shared MCP daemon (HTTP + hook socket)')
+    daemon_parser.add_argument('--port', type=int, default=8421, help='HTTP port (default: 8421)')
+    cli.commands['ai.mcp.daemon'] = mcp_cmd.start_daemon

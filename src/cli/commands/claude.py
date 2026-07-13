@@ -8,10 +8,12 @@ git commands and redirecting to templedb equivalents.
 """
 import json
 import os
+import socket
 import sys
 import subprocess
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -21,6 +23,62 @@ from db_utils import DB_PATH, get_simple_connection
 from logger import get_logger
 
 logger = get_logger(__name__)
+
+HOOK_SOCKET_PATH = "/tmp/templedb-hook.sock"
+
+
+def _query_daemon(request: dict) -> dict | None:
+    """Send a hook query to the MCP daemon via Unix socket.
+
+    Returns the response dict, or None if the daemon is not running.
+    Auto-launches the daemon if the socket doesn't exist.
+    """
+    if not os.path.exists(HOOK_SOCKET_PATH):
+        _try_launch_daemon()
+        for _ in range(10):
+            if os.path.exists(HOOK_SOCKET_PATH):
+                break
+            time.sleep(0.05)
+        if not os.path.exists(HOOK_SOCKET_PATH):
+            return None
+
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(2.0)
+        sock.connect(HOOK_SOCKET_PATH)
+        sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        data = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+        sock.close()
+        response = json.loads(data.decode("utf-8").strip())
+        return response if response else None
+    except Exception:
+        return None
+
+
+def _try_launch_daemon():
+    """Try to launch the MCP daemon in the background."""
+    try:
+        templedb_root = Path(__file__).parent.parent.parent.parent
+        templedb_bin = templedb_root / "templedb"
+        if not templedb_bin.exists():
+            return
+        log_path = os.path.expanduser("~/.local/share/templedb/mcp-daemon.log")
+        subprocess.Popen(
+            [str(templedb_bin), "ai", "mcp", "daemon"],
+            stdout=subprocess.DEVNULL,
+            stderr=open(log_path, "a"),
+            start_new_session=True,
+        )
+        logger.info("Auto-launched MCP daemon")
+    except Exception as e:
+        logger.debug(f"Failed to auto-launch daemon: {e}")
 
 # Git commands that should be redirected to templedb
 GIT_REDIRECTS = {
@@ -259,11 +317,8 @@ class ClaudeCommands(Command):
     def hook(self, args) -> int:
         """Handle Claude Code hook invocations.
 
-        Called by Claude Code hooks with arguments like:
-          templedb ai claude hook pre-tool bash
-          templedb ai claude hook pre-tool edit
-          templedb ai claude hook post-tool bash
-          templedb ai claude hook notify
+        Tries the MCP daemon socket first (~1ms). If the daemon isn't running,
+        auto-launches it, then falls back to direct DB queries.
         """
         hook_type = args.hook_type if hasattr(args, 'hook_type') else None
         tool_type = args.tool_type if hasattr(args, 'tool_type') else None
@@ -277,12 +332,7 @@ class ClaudeCommands(Command):
         return 0
 
     def _pre_tool_bash(self) -> int:
-        """Pre-tool hook for bash commands.
-
-        Reads the tool input from stdin (JSON with 'command' field).
-        If it's a git command in a templedb-managed project, blocks it
-        and suggests the templedb equivalent.
-        """
+        """Pre-tool hook for bash commands. Uses daemon socket when available."""
         try:
             input_data = json.loads(sys.stdin.read())
             command = input_data.get("tool_input", {}).get("command", "")
@@ -290,18 +340,25 @@ class ClaudeCommands(Command):
             return 0
 
         cwd = os.getcwd()
+
+        # Try daemon first
+        result = _query_daemon({"type": "bash", "command": command, "cwd": cwd})
+        if result is not None:
+            if result.get("decision") == "block":
+                print(json.dumps(result))
+            return 0
+
+        # Fallback: direct DB queries
         cmd = command.strip()
 
-        # System commands (nixos-rebuild, home-manager) — always redirect
         for sys_cmd, templedb_cmd in SYSTEM_REDIRECTS.items():
             if cmd.startswith(sys_cmd):
-                response = {
+                print(json.dumps({
                     "decision": "block",
                     "reason": f"Use templedb instead of raw system commands.\n"
                               f"  Instead of: {cmd}\n"
                               f"  Use:        {templedb_cmd}"
-                }
-                print(json.dumps(response))
+                }))
                 return 0
 
         if not _is_templedb_project(cwd):
@@ -311,23 +368,18 @@ class ClaudeCommands(Command):
             if cmd.startswith(git_cmd):
                 slug = _detect_project_slug(cwd) or "<project>"
                 suggestion = templedb_cmd.replace("<project>", slug)
-                response = {
+                print(json.dumps({
                     "decision": "block",
                     "reason": f"Use templedb instead of git in TempleDB-managed projects.\n"
                               f"  Instead of: {cmd}\n"
                               f"  Use:        {suggestion}"
-                }
-                print(json.dumps(response))
+                }))
                 return 0
 
         return 0
 
     def _pre_tool_file_edit(self) -> int:
-        """Pre-tool hook for Edit/Write commands.
-
-        Blocks edits to files in TempleDB project checkouts or repo dirs
-        that should go through the FUSE mount instead.
-        """
+        """Pre-tool hook for Edit/Write commands. Uses daemon socket when available."""
         try:
             input_data = json.loads(sys.stdin.read())
             file_path = input_data.get("tool_input", {}).get("file_path", "")
@@ -337,16 +389,22 @@ class ClaudeCommands(Command):
         if not file_path:
             return 0
 
+        # Try daemon first
+        result = _query_daemon({"type": "edit", "file_path": file_path})
+        if result is not None:
+            if result.get("decision") == "block":
+                print(json.dumps(result))
+            return 0
+
+        # Fallback: direct DB queries
         file_path = os.path.expanduser(file_path)
         home = str(Path.home())
         fuse_mount = _get_fuse_mount()
 
-        # Paths that should be redirected to FUSE mount
         blocked_prefixes = [
             os.path.join(home, ".config", "templedb", "checkouts"),
         ]
 
-        # Also check direct project repo paths (e.g. /home/zach/templeDB/)
         try:
             conn = get_simple_connection()
             cursor = conn.cursor()
@@ -361,7 +419,6 @@ class ClaudeCommands(Command):
 
         for prefix in blocked_prefixes:
             if file_path.startswith(prefix):
-                # Figure out the project slug and relative path
                 slug = None
                 rel_path = None
                 for bp in blocked_prefixes:
@@ -372,7 +429,6 @@ class ClaudeCommands(Command):
                             slug = parts[0] if bp.endswith("checkouts") else None
                             rel_path = parts[1] if len(parts) > 1 else rest
 
-                        # For repo_url matches, detect slug from DB
                         if not slug:
                             try:
                                 conn = get_simple_connection()
@@ -391,7 +447,7 @@ class ClaudeCommands(Command):
                         break
 
                 fuse_path = os.path.join(fuse_mount, slug, rel_path) if slug and rel_path else fuse_mount
-                response = {
+                print(json.dumps({
                     "decision": "block",
                     "reason": (
                         f"Edit files through the FUSE mount, not the checkout/repo directly.\n"
@@ -399,8 +455,7 @@ class ClaudeCommands(Command):
                         f"  Use:     {fuse_path}\n"
                         f"FUSE writes go to the DB (source of truth) and auto-stage for VCS."
                     )
-                }
-                print(json.dumps(response))
+                }))
                 return 0
 
         return 0

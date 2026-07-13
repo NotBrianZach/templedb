@@ -110,7 +110,8 @@ class BackupCommands(Command):
             # Backup current database first
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safety_backup = f"{DB_PATH}.before_restore_{timestamp}"
-            shutil.copy2(DB_PATH, safety_backup)
+            from db_utils import safe_copy_db
+            safe_copy_db(safety_backup)
             print(f"📦 Created safety backup: {safety_backup}")
 
             # Restore
@@ -495,9 +496,10 @@ class BackupCommands(Command):
             capture_output=True, text=True,
         )
         if result2.returncode != 0 or not backup_path.exists():
-            # try direct copy as fallback
+            # try direct copy as fallback (safe_copy_db checkpoints WAL first)
             try:
-                shutil.copy2(str(DB_PATH), str(backup_path))
+                from db_utils import safe_copy_db
+                safe_copy_db(str(backup_path))
             except Exception as e:
                 print(f"Backup creation failed: {e}", file=sys.stderr)
                 return 1

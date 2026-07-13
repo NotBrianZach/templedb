@@ -459,13 +459,10 @@ class CommitCommand:
                 change.content.file_size
             ), commit=False)
 
-        # Create file_contents reference (delete any stale rows first to avoid
-        # UNIQUE(file_id, is_current) constraint violations)
+        # Upsert file_contents — partial unique index on (file_id) WHERE is_current=1
+        # allows INSERT OR REPLACE without needing to DELETE first
         self.file_repo.execute("""
-            DELETE FROM file_contents WHERE file_id = ?
-        """, (file_id,), commit=False)
-        self.file_repo.execute("""
-            INSERT INTO file_contents
+            INSERT OR REPLACE INTO file_contents
             (file_id, content_hash, file_size_bytes, line_count, is_current)
             VALUES (?, ?, ?, ?, 1)
         """, (

@@ -417,6 +417,29 @@ def get_db_stats() -> Dict[str, Any]:
     return stats
 
 
+def checkpoint_wal(db_path: str = None) -> None:
+    """Flush WAL to main database file. MUST be called before copying the DB."""
+    import sqlite3 as _sqlite3
+    path = db_path or DB_PATH
+    conn = _sqlite3.connect(path)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.close()
+
+
+def safe_copy_db(dest: str, db_path: str = None) -> str:
+    """Checkpoint WAL then copy the database file. Returns dest path.
+
+    This is the ONLY correct way to copy the templedb sqlite file.
+    Copying without checkpointing first risks deploying stale data
+    (WAL contains uncommitted pages that won't be in the copy).
+    """
+    import shutil
+    path = db_path or DB_PATH
+    checkpoint_wal(path)
+    shutil.copy2(path, dest)
+    return dest
+
+
 def vacuum_db():
     """Vacuum database to reclaim space and optimize"""
     conn = get_connection()

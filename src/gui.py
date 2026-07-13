@@ -5525,7 +5525,7 @@ def fleet_sync_probe_all():
 @app.post("/fleet-sync/push/{machine_name}", response_class=HTMLResponse)
 def fleet_sync_push(machine_name: str):
     """Checkpoint WAL and SCP the DB to a remote machine."""
-    import sqlite3 as _sqlite3
+    from db_utils import checkpoint_wal
     hosts = _fleet_sync_get_hosts()
     host_info = next((h for h in hosts if h["name"] == machine_name), None)
     if not host_info or not host_info["host"]:
@@ -5538,9 +5538,7 @@ def fleet_sync_push(machine_name: str):
     db_path = Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite"
 
     try:
-        conn = _sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.close()
+        checkpoint_wal(str(db_path))
 
         r = subprocess.run(
             ["scp", "-o", "ConnectTimeout=10", str(db_path), f"{user}@{host}:~/.local/share/templedb/templedb.sqlite"],
