@@ -777,35 +777,44 @@ def generate_structure_tests(project_path: Path, result: TestResult, verbose=Fal
 
 # ── Server starters ─────────────────────────────────────────────────────────
 
-def start_fastapi_server(project_path: Path, port: int) -> ServerProcess:
-    """Start a FastAPI server (e.g., TempleDB GUI)."""
-    # Find the right python
+
+def _find_project_python(project_path: Path) -> str:
+    """Find the Python interpreter for a project — nix wrapper or system."""
+    import re
     nix_result = Path.home() / ".local" / "state" / "templedb" / "last-result"
     if nix_result.exists():
         store_path = nix_result.read_text().strip()
         bin_file = Path(store_path) / "bin" / "templedb"
         if bin_file.exists():
-            content = bin_file.read_text()
-            import re
-            m = re.search(r'exec "([^"]+/bin/python3)"', content)
+            m = re.search(r'exec "([^"]+/bin/python3)"', bin_file.read_text())
             if m:
-                python = m.group(1)
-            else:
-                python = sys.executable
-            # Extract PYTHONPATH
-            m2 = re.search(r"PYTHONPATH='([^']+)'", content)
-            pythonpath = m2.group(1) if m2 else ""
-        else:
-            python = sys.executable
-            pythonpath = ""
-    else:
-        python = sys.executable
-        pythonpath = ""
+                return m.group(1)
+    return sys.executable
+
+
+def _find_project_pythonpath(project_path: Path) -> str:
+    """Extract PYTHONPATH from nix wrapper if available."""
+    import re
+    nix_result = Path.home() / ".local" / "state" / "templedb" / "last-result"
+    if nix_result.exists():
+        store_path = nix_result.read_text().strip()
+        bin_file = Path(store_path) / "bin" / "templedb"
+        if bin_file.exists():
+            m = re.search(r"PYTHONPATH='([^']+)'", bin_file.read_text())
+            if m:
+                return m.group(1)
+    return ""
+
+
+def start_fastapi_server(project_path: Path, port: int) -> ServerProcess:
+    """Start a FastAPI server (e.g., TempleDB GUI)."""
+    local_src = str(project_path / "src")
+    python = _find_project_python(project_path)
+    pythonpath = _find_project_pythonpath(project_path)
 
     env = os.environ.copy()
-    # Local src FIRST so patched files override nix store versions
-    local_src = str(project_path / "src")
-    env["PYTHONPATH"] = f"{local_src}:{pythonpath}"
+    # Local src FIRST so dev changes override nix store versions
+    env["PYTHONPATH"] = f"{local_src}:{pythonpath}" if pythonpath else local_src
     env["PYTHONNOUSERSITE"] = "1"
 
     import tempfile

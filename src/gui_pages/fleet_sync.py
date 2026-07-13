@@ -70,13 +70,21 @@ def fleet_sync_page():
             f'padding:2px 8px;border-radius:3px;cursor:pointer;font-family:monospace;font-size:0.78rem">'
             f'Probe</button>')
         is_local = h["host"] == "localhost"
-        sync_btn = ('<span class="muted">local</span>' if is_local else
+        push_btn = ('' if is_local else
             f'<button hx-post="/fleet-sync/push/{h["name"]}" '
             f'hx-target="#sync-{h["name"]}" hx-swap="innerHTML" '
             f'hx-confirm="Push DB to {h["name"]}?" '
             f'style="background:#1a3a1a;border:1px solid #2a4a2a;color:#8f8;'
             f'padding:2px 8px;border-radius:3px;cursor:pointer;font-family:monospace;font-size:0.78rem">'
-            f'Sync DB</button>')
+            f'Push</button>')
+        pull_btn = ('' if is_local else
+            f'<button hx-post="/fleet-sync/pull/{h["name"]}" '
+            f'hx-target="#sync-{h["name"]}" hx-swap="innerHTML" '
+            f'hx-confirm="Pull DB from {h["name"]}? This will replace your local DB." '
+            f'style="background:#1a1a3a;border:1px solid #2a2a4a;color:#88f;'
+            f'padding:2px 8px;border-radius:3px;cursor:pointer;font-family:monospace;font-size:0.78rem">'
+            f'Pull</button>')
+        sync_btn = '<span class="muted">local</span>' if is_local else f'{push_btn} {pull_btn}\'
         machine_rows.append([
             f'<strong>{name}</strong>', ip,
             f'{probe_btn} {sync_btn}',
@@ -99,7 +107,7 @@ def fleet_sync_page():
 <h2>Fleet Sync Dashboard</h2>
 <p class="muted" style="margin-bottom:1rem">
   Compare TempleDB database state across machines. Probe checks latest commits via SSH.
-  Sync pushes the local DB (with WAL checkpoint) to remote machines.
+  Push sends local DB to remote. Pull downloads remote DB (with conflict detection).
 </p>
 <h3>This Machine (Local Reference)</h3>
 {ref_table}
@@ -192,6 +200,109 @@ def fleet_sync_push(machine_name: str):
 
 
 # ── Tests Dashboard ──────────────────────────────────────────────────────────
+
+
+
+@router.post("/fleet-sync/pull/{machine_name}", response_class=HTMLResponse)
+def fleet_sync_pull(machine_name: str):
+    """Pull the DB from a remote machine — checkpoint, download, conflict check."""
+    import sqlite3 as _sqlite3
+    import tempfile
+    import shutil
+    from db_utils import wal_checkpoint, safe_copy_db, DB_PATH
+
+    hosts = _fleet_sync_get_hosts()
+    host_info = next((h for h in hosts if h["name"] == machine_name), None)
+    if not host_info or not host_info["host"]:
+        return HTMLResponse(_msg("Unknown machine or no IP", ok=False))
+    if host_info["host"] == "localhost":
+        return HTMLResponse(_msg("Cannot pull from localhost", ok=False))
+
+    user = host_info.get("user", "zach")
+    host = host_info["host"]
+    remote_db = f"{user}@{host}:~/.local/share/templedb/templedb.sqlite"
+
+    try:
+        # 1. Checkpoint local WAL first
+        wal_checkpoint()
+
+        # 2. Download remote DB to temp file
+        tmp = tempfile.NamedTemporaryFile(suffix='.sqlite', delete=False, prefix='templedb_pull_')
+        tmp.close()
+        r = subprocess.run(
+            ["scp", "-o", "ConnectTimeout=10", remote_db, tmp.name],
+            capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            os.unlink(tmp.name)
+            return HTMLResponse(_msg(f"SCP failed: {r.stderr.strip()}", ok=False))
+
+        # 3. Checkpoint the downloaded DB too
+        conn_remote = _sqlite3.connect(tmp.name)
+        conn_remote.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn_remote.close()
+
+        # 4. Conflict detection — compare VCS commit heads
+        conn_local = _sqlite3.connect(str(DB_PATH))
+        conn_remote = _sqlite3.connect(tmp.name)
+        conn_local.row_factory = _sqlite3.Row
+        conn_remote.row_factory = _sqlite3.Row
+
+        local_heads = {
+            r["slug"]: r["hash"]
+            for r in conn_local.execute(
+                "SELECT p.slug, substr(c.commit_hash, 1, 8) as hash "
+                "FROM projects p LEFT JOIN vcs_branches b ON p.active_branch_id = b.id "
+                "LEFT JOIN vcs_commits c ON b.head_commit_id = c.id "
+                "WHERE p.slug IS NOT NULL"
+            ).fetchall()
+        }
+
+        try:
+            remote_heads = {
+                r["slug"]: r["hash"]
+                for r in conn_remote.execute(
+                    "SELECT p.slug, substr(c.commit_hash, 1, 8) as hash "
+                    "FROM projects p LEFT JOIN vcs_branches b ON p.active_branch_id = b.id "
+                    "LEFT JOIN vcs_commits c ON b.head_commit_id = c.id "
+                    "WHERE p.slug IS NOT NULL"
+                ).fetchall()
+            }
+        except Exception:
+            remote_heads = {}
+
+        conn_local.close()
+        conn_remote.close()
+
+        # 5. Check for divergence
+        diverged = []
+        for slug in set(local_heads) | set(remote_heads):
+            lh = local_heads.get(slug, "—")
+            rh = remote_heads.get(slug, "—")
+            if lh != rh and lh != "—" and rh != "—":
+                diverged.append(f"{slug}: local={lh} remote={rh}")
+
+        if diverged:
+            os.unlink(tmp.name)
+            detail = "<br>".join(diverged)
+            return HTMLResponse(_msg(
+                f"Conflict: {len(diverged)} project(s) diverged between local and {machine_name}.<br>"
+                f"{detail}<br><br>"
+                f"Resolve by pushing your changes first, or force pull with care.",
+                ok=False))
+
+        # 6. No conflicts — safe to replace
+        backup_path = str(DB_PATH) + f".pre-pull-{machine_name}"
+        safe_copy_db(str(DB_PATH), backup_path)
+        shutil.copy2(tmp.name, str(DB_PATH))
+        os.unlink(tmp.name)
+
+        return HTMLResponse(_msg(
+            f"DB pulled from {machine_name}. Backup at {backup_path}", ok=True))
+
+    except subprocess.TimeoutExpired:
+        return HTMLResponse(_msg("SCP timed out", ok=False))
+    except Exception as e:
+        return HTMLResponse(_msg(f"Error: {e}", ok=False))
 
 
 # ── Split page modules ──
