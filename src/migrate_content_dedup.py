@@ -1,3 +1,4 @@
+from db_utils import safe_copy_db
 #!/usr/bin/env python3
 """
 Content Deduplication Migration
@@ -36,7 +37,7 @@ def backup_database():
     backup_path = f"{DB_PATH}.backup_{timestamp}"
 
     print(f"📦 Creating backup: {backup_path}")
-    shutil.copy2(DB_PATH, backup_path)
+    safe_copy_db(DB_PATH, backup_path)
 
     # Verify backup
     backup_size = os.path.getsize(backup_path)

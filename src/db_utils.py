@@ -28,6 +28,31 @@ def _get_db_path():
 
 DB_PATH = _get_db_path()
 
+
+def wal_checkpoint(db_path=None):
+    """Flush WAL to main DB file. MUST be called before copying the DB file.
+    
+    Without this, shutil.copy2 may copy a stale DB missing recent writes
+    that are still in the WAL file. This is a silent data loss bug.
+    """
+    path = db_path or DB_PATH
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.close()
+    logger.debug(f"WAL checkpoint: {path}")
+
+
+def safe_copy_db(src=None, dst=None):
+    """Copy the DB file safely — checkpoints WAL first.
+    
+    Use this instead of shutil.copy2() for any DB file copy.
+    """
+    import shutil
+    src = src or DB_PATH
+    wal_checkpoint(src)
+    shutil.copy2(str(src), str(dst))
+
+
 # Thread-local storage for connections
 _thread_local = threading.local()
 
@@ -76,49 +101,6 @@ def get_simple_connection(db_path: str = None, row_factory: bool = False) -> sql
     conn.execute("PRAGMA foreign_keys=ON")
 
     return conn
-
-
-def checkpoint_and_copy(dest_path: str, *, user: str = "zach", host: str = None, timeout: int = 120) -> tuple[bool, str]:
-    """Checkpoint WAL and safely transfer DB to a destination.
-
-    Always checkpoints before transfer — eliminates stale WAL data risk.
-    If host is None, does a local file copy. Otherwise SCPs to remote.
-
-    Returns:
-        (success, message) tuple
-    """
-    import shutil
-    import subprocess as _sp
-    from pathlib import Path
-
-    db_path = Path(DB_PATH)
-    if not db_path.exists():
-        return False, f"DB not found: {db_path}"
-
-    # Checkpoint WAL — forces all WAL data into the main DB file
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    conn.close()
-
-    if host is None:
-        try:
-            shutil.copy2(str(db_path), dest_path)
-            return True, f"Copied to {dest_path}"
-        except Exception as e:
-            return False, str(e)
-    else:
-        remote = f"{user}@{host}:{dest_path}"
-        try:
-            r = _sp.run(
-                ["scp", "-o", "ConnectTimeout=10", str(db_path), remote],
-                capture_output=True, text=True, timeout=timeout)
-            if r.returncode != 0:
-                return False, f"SCP failed: {r.stderr.strip()}"
-            return True, f"Synced to {host}:{dest_path}"
-        except _sp.TimeoutExpired:
-            return False, "SCP timed out"
-        except Exception as e:
-            return False, str(e)
 
 
 def close_connection():
@@ -415,29 +397,6 @@ def get_db_stats() -> Dict[str, Any]:
         stats['tables'][table] = result['count'] if result else 0
 
     return stats
-
-
-def checkpoint_wal(db_path: str = None) -> None:
-    """Flush WAL to main database file. MUST be called before copying the DB."""
-    import sqlite3 as _sqlite3
-    path = db_path or DB_PATH
-    conn = _sqlite3.connect(path)
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    conn.close()
-
-
-def safe_copy_db(dest: str, db_path: str = None) -> str:
-    """Checkpoint WAL then copy the database file. Returns dest path.
-
-    This is the ONLY correct way to copy the templedb sqlite file.
-    Copying without checkpointing first risks deploying stale data
-    (WAL contains uncommitted pages that won't be in the copy).
-    """
-    import shutil
-    path = db_path or DB_PATH
-    checkpoint_wal(path)
-    shutil.copy2(path, dest)
-    return dest
 
 
 def vacuum_db():

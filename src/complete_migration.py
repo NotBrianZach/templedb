@@ -1,3 +1,4 @@
+from db_utils import safe_copy_db
 #!/usr/bin/env python3
 """
 Complete the partially-finished content deduplication migration
@@ -25,7 +26,7 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = f"{DB_PATH}.backup_{timestamp}"
     print(f"\n📦 Creating backup: {backup_path}")
-    shutil.copy2(DB_PATH, backup_path)
+    safe_copy_db(DB_PATH, backup_path)
     print(f"✓ Backup created")
 
     # Connect

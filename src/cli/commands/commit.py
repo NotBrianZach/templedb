@@ -459,12 +459,16 @@ class CommitCommand:
                 change.content.file_size
             ), commit=False)
 
-        # Upsert file_contents — partial unique index on (file_id) WHERE is_current=1
-        # allows INSERT OR REPLACE without needing to DELETE first
+        # Create/update file_contents reference
         self.file_repo.execute("""
-            INSERT OR REPLACE INTO file_contents
+            INSERT INTO file_contents
             (file_id, content_hash, file_size_bytes, line_count, is_current)
             VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(file_id, is_current) DO UPDATE SET
+                content_hash = excluded.content_hash,
+                file_size_bytes = excluded.file_size_bytes,
+                line_count = excluded.line_count,
+                updated_at = datetime('now')
         """, (
             file_id,
             change.content.hash_sha256,

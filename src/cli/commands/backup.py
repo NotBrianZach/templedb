@@ -12,7 +12,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from db_utils import DB_PATH
+from db_utils import safe_copy_db, DB_PATH
 from repositories import BaseRepository
 from cli.core import Command
 from logger import get_logger
@@ -110,8 +110,7 @@ class BackupCommands(Command):
             # Backup current database first
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safety_backup = f"{DB_PATH}.before_restore_{timestamp}"
-            from db_utils import safe_copy_db
-            safe_copy_db(safety_backup)
+            safe_copy_db(DB_PATH, safety_backup)
             print(f"📦 Created safety backup: {safety_backup}")
 
             # Restore
@@ -496,10 +495,9 @@ class BackupCommands(Command):
             capture_output=True, text=True,
         )
         if result2.returncode != 0 or not backup_path.exists():
-            # try direct copy as fallback (safe_copy_db checkpoints WAL first)
+            # try direct copy as fallback
             try:
-                from db_utils import safe_copy_db
-                safe_copy_db(str(backup_path))
+                safe_copy_db(str(DB_PATH), str(backup_path))
             except Exception as e:
                 print(f"Backup creation failed: {e}", file=sys.stderr)
                 return 1
