@@ -282,6 +282,8 @@ class NixDeployCommands(Command):
             print(f"\n{result.message}")
             if result.error:
                 print(f"\nError details:\n{result.error}")
+            return 1
+
     def health_check(self, args) -> int:
         """Run health check on deployed service"""
         target_host = args.host

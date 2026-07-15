@@ -686,15 +686,16 @@ class DeploymentService(BaseService):
             # Get project-specific env vars for this target
             # Variables are stored with format "target:VAR_NAME"
             var_name_prefix = f"{target}:%"
+            prefix_len = len(target) + 1  # length of "target:"
             project_envs = db_utils.query_all("""
                 SELECT
-                    SUBSTR(var_name, LENGTH(?) + 1) as key,
+                    SUBSTR(var_name, ? + 1) as key,
                     var_value as value
                 FROM environment_variables
                 WHERE scope_type = 'project'
                   AND scope_id = ?
                   AND var_name LIKE ?
-            """, (target + ':', project['id'], var_name_prefix))
+            """, (prefix_len, project['id'], var_name_prefix))
 
             for env in project_envs:
                 env_vars[env['key']] = env['value']
