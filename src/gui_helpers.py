@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from db_utils import execute, query_all, query_one
 from config import FUSE_MOUNT_PATH
+from fastapi.responses import HTMLResponse
 
 CSS = """
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -142,6 +143,94 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
     )
     page = f"""<!DOCTYPE html>
 <html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{html.escape(title)} — TempleDB</title>
+<script src="https://unpkg.com/htmx.org@1.9.10"></script>
+<style>{CSS}</style>
+<script>
+function tFilter(id,q){{
+  q=q.toLowerCase().trim();
+  var c=document.getElementById(id);
+  if(!c)return;
+  c.querySelectorAll('tbody tr').forEach(function(r){{
+    r.style.display=(!q||r.textContent.toLowerCase().includes(q))?'':'none';
+  }});
+  c.querySelectorAll('.fsec').forEach(function(s){{
+    var rows=s.querySelectorAll('tbody tr');
+    if(!rows.length)return;
+    s.style.display=Array.from(rows).some(function(r){{return r.style.display!=='none';}})?'':'none';
+  }});
+}}
+function fuzzyMatch(t,q){{
+  t=t.toLowerCase();q=q.toLowerCase();var qi=0;
+  for(var i=0;i<t.length&&qi<q.length;i++){{if(t[i]===q[qi])qi++;}}
+  return qi===q.length;
+}}
+function gSearch(q){{
+  q=q.trim();
+  document.querySelectorAll('table tbody tr').forEach(function(r){{
+    if(!q){{r.style.display='';return;}}
+    r.style.display=fuzzyMatch(r.textContent,q)?'':'none';
+  }});
+}}
+function sortTable(th){{
+  var table=th.closest('table');
+  if(!table)return;
+  var tbody=table.querySelector('tbody');
+  if(!tbody)return;
+  var idx=Array.from(th.parentElement.children).indexOf(th);
+  var rows=Array.from(tbody.querySelectorAll('tr'));
+  var asc=th.dataset.sort!=='asc';
+  th.parentElement.querySelectorAll('th').forEach(function(h){{h.dataset.sort='';h.style.color='';}});
+  th.dataset.sort=asc?'asc':'desc';
+  th.style.color='#e94560';
+  rows.sort(function(a,b){{
+    var av=a.children[idx]?a.children[idx].textContent.trim():'';
+    var bv=b.children[idx]?b.children[idx].textContent.trim():'';
+    var an=parseFloat(av.replace(/,/g,''));
+    var bn=parseFloat(bv.replace(/,/g,''));
+    if(!isNaN(an)&&!isNaN(bn))return asc?an-bn:bn-an;
+    return asc?av.localeCompare(bv):bv.localeCompare(av);
+  }});
+  rows.forEach(function(r){{tbody.appendChild(r);}});
+}}
+document.addEventListener('keydown',function(e){{
+  if(e.key==='/'&&!e.target.matches('input,textarea')){{
+    e.preventDefault();
+    var s=document.getElementById('gsearch');
+    if(s){{s.parentElement.classList.add('active');s.focus();}}
+  }}
+  if(e.key==='Escape'){{
+    var s=document.getElementById('gsearch');
+    if(s){{s.parentElement.classList.remove('active');s.value='';gSearch('');}}
+  }}
+}});
+</script>
+</head>
+<body>
+<nav>
+  <h1>TempleDB</h1>
+  {nav}
+  <div style="margin-top:auto;padding-top:1rem;border-top:1px solid #1e1e3a">
+    <span class="muted" style="font-size:0.7rem">/ search &middot; Emacs: SPC ,</span>
+  </div>
+</nav>
+<div id="global-search">
+  <span style="color:#808098;font-size:0.85rem">Search:</span>
+  <input id="gsearch" type="search" placeholder="Fuzzy search across all tables..." oninput="gSearch(this.value)"
+    style="flex:1;max-width:500px;background:#13131f;border:1px solid #2a2a4a;color:#d0d0e8;padding:0.35rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.85rem"
+    autocomplete="off">
+  <span class="muted" style="font-size:0.75rem">Esc to close</span>
+</div>
+<main>
+{body}
+</main>
+</body>
+</html>"""
+    return HTMLResponse(page)
+
+
 
 def _table(headers: list[str], rows: list[list[str]], empty: str = "No results.", table_id: str = "") -> str:
     if not rows:
@@ -307,6 +396,10 @@ def _deploy_logic_section() -> str:
             for dep in v["deps"]:
                 graph_edges += f'<div style="font-size:0.78rem;color:#808098;margin-left:2rem"><code>{html.escape(dep)}</code> <span style="color:#4a9eff">&#x2192;</span> <code>{html.escape(slug)}</code></div>'
 
-        return f"""
-<h3>Deployment Logic <span class="muted" style="font-weight:normal;font-size:0.78rem">Prolog engine &middot; <code>deploy_logic.pl</code></span></h3>
-
+        return f"""<h3>Deployment Logic</h3>
+<div style="display:flex;flex-wrap:wrap;gap:0.6rem;margin:0.8rem 0">{cards_html}</div>
+<h3>Parallel Groups</h3>{lanes_html}
+<h3>Dependencies</h3>{graph_edges}
+"""
+    except Exception as e:
+        return f'<div class="muted">Deployment logic unavailable: {e}</div>'
