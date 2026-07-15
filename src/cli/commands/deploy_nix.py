@@ -22,37 +22,91 @@ class NixDeployCommands(Command):
         super().__init__()
         self.nix_service = NixDeploymentService(self.get_connection())
 
+    def _export_project_from_db(self, project_slug: str) -> Path:
+        """Export project files from TempleDB to a temp directory for building.
+
+        Returns path to the exported directory containing all project files.
+        """
+        import tempfile
+        import db_utils
+
+        export_dir = Path(tempfile.mkdtemp(prefix=f"templedb-build-{project_slug}-"))
+
+        project = db_utils.query_one(
+            "SELECT id FROM projects WHERE slug = ?", (project_slug,)
+        )
+        if not project:
+            raise RuntimeError(f"Project '{project_slug}' not found in database")
+
+        rows = db_utils.query_all("""
+            SELECT pf.file_path, cb.content_text, cb.content_blob
+            FROM project_files pf
+            JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
+            JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+            WHERE pf.project_id = ? AND pf.status = 'active'
+        """, (project['id'],))
+
+        file_count = 0
+        for row in rows:
+            fp = export_dir / row['file_path']
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            if row['content_text'] is not None:
+                fp.write_text(row['content_text'])
+            elif row['content_blob'] is not None:
+                fp.write_bytes(bytes(row['content_blob']))
+            else:
+                fp.write_bytes(b"")
+            file_count += 1
+
+        print(f"   Exported {file_count} files from database")
+        return export_dir
+
     def build_closure(self, args) -> int:
-        """Build Nix closure for project"""
+        """Build Nix closure for project from TempleDB database"""
+        import shutil
+
         project_slug = args.slug
-
-        # Get project from database
         project = self.get_project_or_exit(project_slug)
-
-        # Get project path
-        project_path = Path(project['git_path']) if project.get('git_path') else None
-        if not project_path or not project_path.exists():
-            logger.error(f"Project path not found: {project_path}")
-            return 1
+        git_path = Path(project['git_path']) if project.get('git_path') else None
 
         print(f"🔨 Building Nix closure for {project_slug}...")
-        print(f"📁 Project path: {project_path}\n")
+        print(f"📦 Exporting from TempleDB database...")
 
-        # Build closure
-        result = self.nix_service.build_nix_closure(project_path, project_slug)
+        try:
+            build_dir = self._export_project_from_db(project_slug)
+        except Exception as e:
+            print(f"❌ Failed to export project: {e}")
+            return 1
+
+        print(f"📁 Build directory: {build_dir}\n")
+
+        result = self.nix_service.build_nix_closure(build_dir, project_slug)
 
         if result.success:
             print(f"✅ {result.message}")
             print(f"\n📦 Closure location: {result.closure_path}")
+
+            # Update result symlink in git_path so wrapper scripts pick it up
+            if git_path and git_path.exists():
+                nix_result = self.nix_service.temp_dir / f"result-{project_slug}"
+                if nix_result.exists():
+                    store_path = nix_result.resolve()
+                    result_link = git_path / "result"
+                    if result_link.is_symlink() or result_link.exists():
+                        result_link.unlink()
+                    result_link.symlink_to(store_path)
+                    print(f"\n🔗 Updated {result_link} -> {store_path}")
+
             print(f"\nNext steps:")
-            print(f"  1. Transfer: templedb deploy-nix transfer {project_slug} --host <target-host>")
-            print(f"  2. Import:   templedb deploy-nix import {project_slug} --host <target-host>")
-            print(f"  3. Activate: templedb deploy-nix activate {project_slug} --host <target-host>")
+            print(f"  Transfer: templedb deploy nix transfer {project_slug} --host <target-host>")
+
+            shutil.rmtree(build_dir, ignore_errors=True)
             return 0
         else:
             print(f"❌ {result.message}")
             if result.error:
                 print(f"\nError details:\n{result.error}")
+            print(f"\n📁 Build dir preserved for debugging: {build_dir}")
             return 1
 
     def transfer(self, args) -> int:
@@ -380,7 +434,7 @@ def register_under_deploy(deploy_subparsers, cli):
 
     # deploy nix command group
     nix_parser = deploy_subparsers.add_parser('nix', help='Nix closure deployment backend')
-    subparsers = nix_parser.add_subparsers(dest='deploy_nix_subcommand', required=True)
+    subparsers = nix_parser.add_subparsers(dest='nix_subcommand', required=True)
 
     _register_nix_commands(cmd, subparsers, cli, prefix='deploy.nix')
 
@@ -447,3 +501,4 @@ def _register_nix_commands(cmd, subparsers, cli, prefix='deploy.nix'):
     add_config_parser = subparsers.add_parser('add-to-config', help='Generate NixOS/home-manager config snippet')
     add_config_parser.add_argument('slug', help='Project slug')
     cli.commands[f'{prefix}.add-to-config'] = cmd.add_to_config
+
