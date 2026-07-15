@@ -696,7 +696,9 @@ class MCPServer:
     def tool_query(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute SQL query"""
         try:
-            query = args["query"]
+            query = args.get("sql", args.get("query"))
+            if not query:
+                return self._error_response("Missing 'sql' parameter")
             format_type = args.get("format", "json")
 
             conn = self._get_db_connection()
