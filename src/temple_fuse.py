@@ -19,10 +19,12 @@ Usage:
 Requires: fusepy (python3Packages.fusepy in nixpkgs)
 """
 
+import calendar
 import errno
 import hashlib
 import logging
 import os
+import queue
 import sqlite3
 import stat
 import sys
@@ -49,6 +51,8 @@ _WRITE_BUFFERS = {}  # fd -> {"path": str, "data": bytearray, "dirty": bool}
 _NEXT_FD = 100
 _FD_LOCK = threading.Lock()
 
+_CACHE_TTL = 5.0  # seconds before tree cache expires
+
 
 def _get_db_path():
     """Get database path, same logic as db_utils."""
@@ -60,28 +64,139 @@ def _get_db_path():
     return os.path.expanduser("~/.local/share/templedb/templedb.sqlite")
 
 
+def _parse_db_datetime(s):
+    """Parse SQLite datetime string to Unix timestamp."""
+    if not s:
+        return 0.0
+    try:
+        return calendar.timegm(time.strptime(s, "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, TypeError):
+        return 0.0
+
+
 class TempleFS(Operations):
     """FUSE filesystem backed by TempleDB's SQLite database."""
 
-    def __init__(self, db_path=None, readonly=False):
+    def __init__(self, db_path=None, readonly=False, pool_size=8):
         self.db_path = db_path or _get_db_path()
         self.readonly = readonly
         self.uid = os.getuid()
         self.gid = os.getgid()
-        self.now = time.time()
-        # One connection per thread
-        self._local = threading.local()
+        # Connection pool with bounded size
+        self._pool = queue.Queue(maxsize=pool_size)
+        self._pool_size = pool_size
+        self._pool_created = 0
+        self._pool_lock = threading.Lock()
+        # Per-project directory tree cache
+        self._tree_cache = {}
+        self._tree_lock = threading.Lock()
+
+    def _make_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None,
+                               check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
 
     def _conn(self) -> sqlite3.Connection:
-        if not hasattr(self._local, 'conn'):
-            conn = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=10000")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            self._local.conn = conn
-        return self._local.conn
+        """Borrow a connection from the pool. Must be returned via _return_conn."""
+        try:
+            return self._pool.get_nowait()
+        except queue.Empty:
+            with self._pool_lock:
+                if self._pool_created < self._pool_size:
+                    self._pool_created += 1
+                    return self._make_conn()
+            # Pool exhausted, block until one is returned
+            return self._pool.get(timeout=30.0)
+
+    def _return_conn(self, conn: sqlite3.Connection):
+        """Return a connection to the pool."""
+        try:
+            self._pool.put_nowait(conn)
+        except queue.Full:
+            conn.close()
+
+    class _BorrowedConn:
+        """Context manager for borrowing a pooled connection."""
+        def __init__(self, fs):
+            self._fs = fs
+            self._conn = None
+        def __enter__(self):
+            self._conn = self._fs._conn()
+            return self._conn
+        def __exit__(self, *exc):
+            if self._conn is not None:
+                self._fs._return_conn(self._conn)
+                self._conn = None
+
+    def _borrow(self):
+        return self._BorrowedConn(self)
+
+    def destroy(self, path):
+        """Called on unmount — close all pooled connections."""
+        while not self._pool.empty():
+            try:
+                self._pool.get_nowait().close()
+            except queue.Empty:
+                break
+
+    # ── Directory tree cache ─────────────────────────────────────────────
+
+    def _get_tree(self, conn, project_id):
+        """Get or build the cached file/directory tree for a project.
+
+        Returns {"files": {path: {"size": int, "mtime": float}},
+                 "dirs": set(path), "children": {dir_path: set(name)},
+                 "expires": float}
+        """
+        with self._tree_lock:
+            cached = self._tree_cache.get(project_id)
+            if cached and time.time() < cached["expires"]:
+                return cached
+
+        rows = conn.execute(
+            "SELECT pf.file_path, cb.file_size_bytes, "
+            "COALESCE(fc.updated_at, pf.last_modified) as mtime "
+            "FROM project_files pf "
+            "JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1 "
+            "JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash "
+            "WHERE pf.project_id = ? AND pf.status = 'active'",
+            (project_id,)
+        ).fetchall()
+
+        files = {}
+        dirs = set()
+        children = {}  # dir_path -> set of immediate child names
+
+        for row in rows:
+            fp = row["file_path"]
+            mtime = _parse_db_datetime(row["mtime"])
+            files[fp] = {"size": row["file_size_bytes"], "mtime": mtime}
+
+            parts = fp.split("/")
+            for i in range(len(parts)):
+                parent = "/".join(parts[:i]) if i > 0 else ""
+                child = parts[i]
+                if parent not in children:
+                    children[parent] = set()
+                children[parent].add(child)
+                if i > 0:
+                    dirs.add(parent)
+
+        tree = {"files": files, "dirs": dirs, "children": children,
+                "expires": time.time() + _CACHE_TTL}
+        with self._tree_lock:
+            self._tree_cache[project_id] = tree
+        return tree
+
+    def _invalidate_tree(self, project_id):
+        """Invalidate cached tree for a project after a mutation."""
+        with self._tree_lock:
+            self._tree_cache.pop(project_id, None)
 
     # ── Path parsing ──────────────────────────────────────────────────────
 
@@ -95,13 +210,13 @@ class TempleFS(Operations):
         file_path = parts[1] if len(parts) > 1 else None
         return (slug, file_path)
 
-    def _get_project(self, slug):
-        return self._conn().execute(
+    def _get_project(self, conn, slug):
+        return conn.execute(
             "SELECT id, slug FROM projects WHERE slug = ?", (slug,)
         ).fetchone()
 
-    def _get_file(self, project_id, file_path):
-        return self._conn().execute(
+    def _get_file(self, conn, project_id, file_path):
+        return conn.execute(
             "SELECT pf.id, pf.file_path, fc.content_hash, cb.content_text, "
             "cb.content_blob, cb.file_size_bytes, cb.content_type "
             "FROM project_files pf "
@@ -111,8 +226,8 @@ class TempleFS(Operations):
             (project_id, file_path)
         ).fetchone()
 
-    def _get_file_content(self, project_id, file_path) -> bytes:
-        row = self._get_file(project_id, file_path)
+    def _get_file_content(self, conn, project_id, file_path) -> bytes:
+        row = self._get_file(conn, project_id, file_path)
         if not row:
             return None
         if row["content_text"] is not None:
@@ -121,57 +236,10 @@ class TempleFS(Operations):
             return bytes(row["content_blob"])
         return b""
 
-    def _list_projects(self):
-        return self._conn().execute(
+    def _list_projects(self, conn):
+        return conn.execute(
             "SELECT slug FROM projects ORDER BY slug"
         ).fetchall()
-
-    def _list_files(self, project_id):
-        """List all files for a project with current content."""
-        return self._conn().execute(
-            "SELECT pf.file_path, cb.file_size_bytes, cb.content_type, pf.last_modified "
-            "FROM project_files pf "
-            "JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1 "
-            "JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash "
-            "WHERE pf.project_id = ? AND pf.status = 'active' "
-            "ORDER BY pf.file_path",
-            (project_id,)
-        ).fetchall()
-
-    def _list_dir_entries(self, project_id, dir_path):
-        """List immediate children of a directory path."""
-        prefix = (dir_path + "/") if dir_path else ""
-        prefix_len = len(prefix)
-
-        rows = self._conn().execute(
-            "SELECT pf.file_path FROM project_files pf "
-            "JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1 "
-            "WHERE pf.project_id = ? AND pf.status = 'active' "
-            "AND pf.file_path LIKE ? || '%'",
-            (project_id, prefix)
-        ).fetchall()
-
-        entries = set()
-        for row in rows:
-            remainder = row["file_path"][prefix_len:]
-            if not remainder:
-                continue
-            # First component after prefix
-            first = remainder.split("/")[0]
-            entries.add(first)
-        return sorted(entries)
-
-    def _is_dir(self, project_id, dir_path):
-        """Check if dir_path is a directory (has files beneath it)."""
-        prefix = dir_path + "/"
-        row = self._conn().execute(
-            "SELECT 1 FROM project_files pf "
-            "JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1 "
-            "WHERE pf.project_id = ? AND pf.status = 'active' "
-            "AND pf.file_path LIKE ? || '%' LIMIT 1",
-            (project_id, prefix)
-        ).fetchone()
-        return row is not None
 
     # ── FUSE Operations ───────────────────────────────────────────────────
 
@@ -182,28 +250,33 @@ class TempleFS(Operations):
         if slug is None:
             return self._dir_stat()
 
-        project = self._get_project(slug)
-        if not project:
-            raise FuseOSError(errno.ENOENT)
+        with self._borrow() as conn:
+            project = self._get_project(conn, slug)
+            if not project:
+                raise FuseOSError(errno.ENOENT)
 
-        # Project root directory
-        if file_path is None:
-            return self._dir_stat()
+            # Project root directory
+            if file_path is None:
+                return self._dir_stat()
 
-        # Check if it's a file
-        row = self._get_file(project["id"], file_path)
-        if row:
-            size = row["file_size_bytes"]
-            # Check write buffer for modified size
-            for buf in _WRITE_BUFFERS.values():
-                if buf["path"] == path:
-                    size = len(buf["data"])
-                    break
-            return self._file_stat(size)
+            tree = self._get_tree(conn, project["id"])
 
-        # Check if it's a directory (has children)
-        if self._is_dir(project["id"], file_path):
-            return self._dir_stat()
+            # Check if it's a file
+            finfo = tree["files"].get(file_path)
+            if finfo:
+                size = finfo["size"]
+                mtime = finfo["mtime"]
+                # Check write buffer for modified size
+                with _FD_LOCK:
+                    for buf in _WRITE_BUFFERS.values():
+                        if buf["path"] == path:
+                            size = len(buf["data"])
+                            break
+                return self._file_stat(size, mtime)
+
+            # Check if it's a directory
+            if file_path in tree["dirs"]:
+                return self._dir_stat()
 
         raise FuseOSError(errno.ENOENT)
 
@@ -215,38 +288,43 @@ class TempleFS(Operations):
 
         if slug is None:
             # Root: list projects
-            for row in self._list_projects():
-                yield row["slug"]
+            with self._borrow() as conn:
+                for row in self._list_projects(conn):
+                    yield row["slug"]
             return
 
-        project = self._get_project(slug)
-        if not project:
-            return
+        with self._borrow() as conn:
+            project = self._get_project(conn, slug)
+            if not project:
+                return
 
-        # List directory entries
-        entries = self._list_dir_entries(project["id"], file_path)
-        for entry in entries:
-            yield entry
+            tree = self._get_tree(conn, project["id"])
+            dir_key = file_path or ""
+            for entry in sorted(tree["children"].get(dir_key, ())):
+                yield entry
 
     def read(self, path, size, offset, fh):
         # Check write buffer first
-        if fh in _WRITE_BUFFERS:
-            data = bytes(_WRITE_BUFFERS[fh]["data"])
+        with _FD_LOCK:
+            buf = _WRITE_BUFFERS.get(fh)
+        if buf is not None:
+            data = bytes(buf["data"])
             return data[offset:offset + size]
 
         slug, file_path = self._parse_path(path)
         if not slug or not file_path:
             raise FuseOSError(errno.EISDIR)
 
-        project = self._get_project(slug)
-        if not project:
-            raise FuseOSError(errno.ENOENT)
+        with self._borrow() as conn:
+            project = self._get_project(conn, slug)
+            if not project:
+                raise FuseOSError(errno.ENOENT)
 
-        content = self._get_file_content(project["id"], file_path)
-        if content is None:
-            raise FuseOSError(errno.ENOENT)
+            content = self._get_file_content(conn, project["id"], file_path)
+            if content is None:
+                raise FuseOSError(errno.ENOENT)
 
-        return content[offset:offset + size]
+            return content[offset:offset + size]
 
     def open(self, path, flags):
         global _NEXT_FD
@@ -254,13 +332,14 @@ class TempleFS(Operations):
         if not slug or not file_path:
             raise FuseOSError(errno.EISDIR)
 
-        project = self._get_project(slug)
-        if not project:
-            raise FuseOSError(errno.ENOENT)
+        with self._borrow() as conn:
+            project = self._get_project(conn, slug)
+            if not project:
+                raise FuseOSError(errno.ENOENT)
 
-        content = self._get_file_content(project["id"], file_path)
-        if content is None:
-            raise FuseOSError(errno.ENOENT)
+            content = self._get_file_content(conn, project["id"], file_path)
+            if content is None:
+                raise FuseOSError(errno.ENOENT)
 
         with _FD_LOCK:
             fd = _NEXT_FD
@@ -297,15 +376,17 @@ class TempleFS(Operations):
         else:
             # Load content into a temporary buffer
             slug, file_path = self._parse_path(path)
-            project = self._get_project(slug)
-            content = self._get_file_content(project["id"], file_path) or b""
+            with self._borrow() as conn:
+                project = self._get_project(conn, slug)
+                content = self._get_file_content(conn, project["id"], file_path) or b""
             # Find existing buffer for this path
-            for existing_fh, existing_buf in _WRITE_BUFFERS.items():
-                if existing_buf["path"] == path:
-                    buf = existing_buf
-                    break
-            else:
-                raise FuseOSError(errno.EBADF)
+            with _FD_LOCK:
+                for existing_fh, existing_buf in _WRITE_BUFFERS.items():
+                    if existing_buf["path"] == path:
+                        buf = existing_buf
+                        break
+                else:
+                    raise FuseOSError(errno.EBADF)
 
         if length < len(buf["data"]):
             buf["data"] = buf["data"][:length]
@@ -330,7 +411,8 @@ class TempleFS(Operations):
         try:
             self._write_file(slug, file_path, bytes(buf["data"]))
         except Exception as e:
-            logger.error(f"Failed to write {path} to DB: {e}")
+            logger.error(f"FUSE DATA LOSS: failed to write {path} to DB: {e}")
+            print(f"FUSE DATA LOSS: failed to write {path} to DB: {e}", file=sys.stderr)
 
         return 0
 
@@ -344,12 +426,14 @@ class TempleFS(Operations):
         if not slug or not file_path:
             raise FuseOSError(errno.EACCES)
 
-        project = self._get_project(slug)
-        if not project:
-            raise FuseOSError(errno.ENOENT)
+        with self._borrow() as conn:
+            project = self._get_project(conn, slug)
+            if not project:
+                raise FuseOSError(errno.ENOENT)
 
-        # Create empty file in DB
-        self._create_file(project["id"], slug, file_path, b"")
+            # Create empty file in DB
+            self._create_file(conn, project["id"], slug, file_path, b"")
+            self._invalidate_tree(project["id"])
 
         with _FD_LOCK:
             fd = _NEXT_FD
@@ -370,23 +454,24 @@ class TempleFS(Operations):
         if not slug or not file_path:
             raise FuseOSError(errno.EACCES)
 
-        project = self._get_project(slug)
-        if not project:
-            raise FuseOSError(errno.ENOENT)
+        with self._borrow() as conn:
+            project = self._get_project(conn, slug)
+            if not project:
+                raise FuseOSError(errno.ENOENT)
 
-        conn = self._conn()
-        row = conn.execute(
-            "SELECT id FROM project_files WHERE project_id = ? AND file_path = ?",
-            (project["id"], file_path)
-        ).fetchone()
-        if not row:
-            raise FuseOSError(errno.ENOENT)
+            row = conn.execute(
+                "SELECT id FROM project_files WHERE project_id = ? AND file_path = ?",
+                (project["id"], file_path)
+            ).fetchone()
+            if not row:
+                raise FuseOSError(errno.ENOENT)
 
-        conn.execute(
-            "UPDATE project_files SET status = 'deleted' WHERE id = ?",
-            (row["id"],)
-        )
-        self._auto_stage(project["id"], row["id"], "deleted")
+            conn.execute(
+                "UPDATE project_files SET status = 'deleted' WHERE id = ?",
+                (row["id"],)
+            )
+            self._auto_stage(conn, project["id"], row["id"], "deleted")
+            self._invalidate_tree(project["id"])
 
     def mkdir(self, path, mode):
         """Directories are implicit in TempleDB (derived from file paths). No-op."""
@@ -413,123 +498,122 @@ class TempleFS(Operations):
         if not old_path or not new_path:
             raise FuseOSError(errno.EACCES)
 
-        project = self._get_project(old_slug)
-        if not project:
-            raise FuseOSError(errno.ENOENT)
+        with self._borrow() as conn:
+            project = self._get_project(conn, old_slug)
+            if not project:
+                raise FuseOSError(errno.ENOENT)
 
-        conn = self._conn()
-        row = conn.execute(
-            "SELECT id FROM project_files WHERE project_id = ? AND file_path = ?",
-            (project["id"], old_path)
-        ).fetchone()
-        if not row:
-            raise FuseOSError(errno.ENOENT)
+            row = conn.execute(
+                "SELECT id FROM project_files WHERE project_id = ? AND file_path = ?",
+                (project["id"], old_path)
+            ).fetchone()
+            if not row:
+                raise FuseOSError(errno.ENOENT)
 
-        new_name = new_path.rsplit("/", 1)[-1]
-        conn.execute(
-            "UPDATE project_files SET file_path = ?, file_name = ? WHERE id = ?",
-            (new_path, new_name, row["id"])
-        )
+            new_name = new_path.rsplit("/", 1)[-1]
+            conn.execute(
+                "UPDATE project_files SET file_path = ?, file_name = ? WHERE id = ?",
+                (new_path, new_name, row["id"])
+            )
+            self._invalidate_tree(project["id"])
 
     # ── Stat helpers ──────────────────────────────────────────────────────
 
     def _dir_stat(self):
+        now = time.time()
         return {
             'st_mode': stat.S_IFDIR | 0o755,
             'st_nlink': 2,
             'st_uid': self.uid,
             'st_gid': self.gid,
             'st_size': 4096,
-            'st_atime': self.now,
-            'st_mtime': self.now,
-            'st_ctime': self.now,
+            'st_atime': now,
+            'st_mtime': now,
+            'st_ctime': now,
         }
 
-    def _file_stat(self, size):
+    def _file_stat(self, size, mtime=0.0):
+        now = time.time()
+        if not mtime:
+            mtime = now
         return {
             'st_mode': stat.S_IFREG | (0o444 if self.readonly else 0o644),
             'st_nlink': 1,
             'st_uid': self.uid,
             'st_gid': self.gid,
             'st_size': size,
-            'st_atime': self.now,
-            'st_mtime': self.now,
-            'st_ctime': self.now,
+            'st_atime': now,
+            'st_mtime': mtime,
+            'st_ctime': mtime,
         }
 
     # ── Write-back to DB ──────────────────────────────────────────────────
 
     def _write_file(self, slug, file_path, content: bytes):
         """Write file content back to the database."""
-        conn = self._conn()
-        project = self._get_project(slug)
-        if not project:
-            return
+        with self._borrow() as conn:
+            project = self._get_project(conn, slug)
+            if not project:
+                return
 
-        # Compute hash
-        content_hash = hashlib.sha256(content).hexdigest()
+            # Compute hash
+            content_hash = hashlib.sha256(content).hexdigest()
 
-        # Try to decode as text
-        try:
-            text = content.decode("utf-8")
-            content_type = "text"
-        except UnicodeDecodeError:
-            text = None
-            content_type = "binary"
+            # Try to decode as text
+            try:
+                text = content.decode("utf-8")
+                content_type = "text"
+            except UnicodeDecodeError:
+                text = None
+                content_type = "binary"
 
-        # Upsert content blob
-        conn.execute("""
-            INSERT OR IGNORE INTO content_blobs
-            (hash_sha256, content_text, content_blob, content_type, encoding,
-             file_size_bytes, reference_count)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-        """, (
-            content_hash,
-            text if content_type == "text" else None,
-            content if content_type == "binary" else None,
-            content_type, "utf-8",
-            len(content),
-        ))
-
-        # Get file_id
-        file_row = conn.execute(
-            "SELECT id FROM project_files WHERE project_id = ? AND file_path = ?",
-            (project["id"], file_path)
-        ).fetchone()
-
-        if not file_row:
-            # File doesn't exist yet, create it
-            self._create_file(project["id"], slug, file_path, content)
-            return
-
-        file_id = file_row["id"]
-
-        # Update file_contents: replace current version in-place
-        line_count = text.count('\n') + 1 if (content_type == "text" and text) else 0
-        existing = conn.execute(
-            "SELECT id FROM file_contents WHERE file_id = ? AND is_current = 1",
-            (file_id,)
-        ).fetchone()
-        if existing:
+            # Upsert content blob
             conn.execute("""
-                UPDATE file_contents
-                SET content_hash = ?, file_size_bytes = ?, line_count = ?, updated_at = datetime('now')
-                WHERE id = ?
-            """, (content_hash, len(content), line_count, existing["id"]))
-        else:
+                INSERT OR IGNORE INTO content_blobs
+                (hash_sha256, content_text, content_blob, content_type, encoding,
+                 file_size_bytes, reference_count)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+            """, (
+                content_hash,
+                text if content_type == "text" else None,
+                content if content_type == "binary" else None,
+                content_type, "utf-8",
+                len(content),
+            ))
+
+            # Get file_id
+            file_row = conn.execute(
+                "SELECT id FROM project_files WHERE project_id = ? AND file_path = ?",
+                (project["id"], file_path)
+            ).fetchone()
+
+            if not file_row:
+                # File doesn't exist yet, create it
+                self._create_file(conn, project["id"], slug, file_path, content)
+                self._invalidate_tree(project["id"])
+                return
+
+            file_id = file_row["id"]
+
+            # Update file_contents: upsert current version
+            line_count = text.count('\n') + 1 if (content_type == "text" and text) else 0
             conn.execute("""
                 INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
                 VALUES (?, ?, ?, ?, 1)
+                ON CONFLICT(file_id) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    file_size_bytes = excluded.file_size_bytes,
+                    line_count = excluded.line_count,
+                    updated_at = datetime('now')
             """, (file_id, content_hash, len(content), line_count))
 
-        # Auto-stage for VCS
-        self._auto_stage(project["id"], file_id, "modified")
-        logger.debug(f"FUSE write: {slug}/{file_path} ({len(content)} bytes, hash={content_hash[:12]})")
+            # Auto-stage for VCS
+            self._auto_stage(conn, project["id"], file_id, "modified")
+            self._invalidate_tree(project["id"])
+            logger.debug(f"FUSE write: {slug}/{file_path} ({len(content)} bytes, hash={content_hash[:12]})")
 
-    def _create_file(self, project_id, slug, file_path, content: bytes):
+    def _create_file(self, conn, project_id, slug, file_path, content: bytes):
         """Create a new file in the database."""
-        conn = self._conn()
-
         # Compute hash
         content_hash = hashlib.sha256(content).hexdigest()
         try:
@@ -555,7 +639,6 @@ class TempleFS(Operations):
         ))
 
         # Map file extension to file_type_id
-        # file_types uses type_name (e.g. 'python_script'), not extension
         ext = Path(file_path).suffix.lstrip(".").lower()
         ext_to_type = {
             "py": "python_script", "js": "javascript", "ts": "typescript",
@@ -570,7 +653,6 @@ class TempleFS(Operations):
                 "SELECT id FROM file_types WHERE type_name = ? LIMIT 1", (type_name,)
             ).fetchone()
         if not ft_row:
-            # Fallback: get any file type
             ft_row = conn.execute("SELECT id FROM file_types LIMIT 1").fetchone()
         file_type_id = ft_row["id"] if ft_row else 1
 
@@ -592,13 +674,12 @@ class TempleFS(Operations):
             VALUES (?, ?, ?, ?, 1)
         """, (file_id, content_hash, len(content), line_count))
 
+        self._auto_stage(conn, project_id, file_id, "added")
         conn.execute("COMMIT")
-        self._auto_stage(project_id, file_id, "added")
 
-    def _auto_stage(self, project_id, file_id, change_state):
+    def _auto_stage(self, conn, project_id, file_id, change_state):
         """Auto-stage a file change in vcs_working_state."""
         try:
-            conn = self._conn()
             # Get active branch (falls back to default)
             branch = conn.execute(
                 "SELECT active_branch_id as id FROM projects WHERE id = ? AND active_branch_id IS NOT NULL",
@@ -667,7 +748,7 @@ def mount(mountpoint: str, db_path: str = None, foreground: bool = False,
         print(f"  Running in background (unmount with: fusermount -u {mountpoint})")
 
     FUSE(fs, mountpoint, foreground=foreground, nothreads=False,
-         allow_other=False, debug=debug)
+         allow_other=False, nonempty=True, debug=debug)
 
 
 if __name__ == "__main__":
