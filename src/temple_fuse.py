@@ -600,7 +600,7 @@ class TempleFS(Operations):
             conn.execute("""
                 INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
                 VALUES (?, ?, ?, ?, 1)
-                ON CONFLICT(file_id) DO UPDATE SET
+                ON CONFLICT(file_id, is_current) DO UPDATE SET
                     content_hash = excluded.content_hash,
                     file_size_bytes = excluded.file_size_bytes,
                     line_count = excluded.line_count,
