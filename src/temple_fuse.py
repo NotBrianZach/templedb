@@ -231,7 +231,8 @@ class TempleFS(Operations):
         if not row:
             return None
         if row["content_text"] is not None:
-            return row["content_text"].encode("utf-8")
+            ct = row["content_text"]
+            return ct if isinstance(ct, bytes) else ct.encode("utf-8")
         elif row["content_blob"] is not None:
             return bytes(row["content_blob"])
         return b""

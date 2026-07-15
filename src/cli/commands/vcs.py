@@ -521,12 +521,12 @@ class VCSCommands(Command):
                     WHERE file_id = ? AND project_id = ? AND branch_id = ?
                 """, (file['file_id'], project['id'], branch['id']), commit=False)
 
-        # Clear staging for remaining files
+        # Clear staging for remaining files (this is the final operation — commit=True commits the transaction)
         self.vcs_repo.execute("""
             UPDATE vcs_working_state
             SET staged = 0, state = 'unmodified'
             WHERE project_id = ? AND branch_id = ? AND staged = 1
-        """, (project['id'], branch['id']))
+        """, (project['id'], branch['id']), commit=True)
 
         # If in edit mode, make read-only and end session
         from sync import SyncManager, make_readonly

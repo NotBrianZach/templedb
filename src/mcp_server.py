@@ -988,8 +988,8 @@ class MCPServer:
         try:
             project_name = args["project"]
             message = args["message"]
-            author = args["author"]
-            commit_all = args.get("all", False)
+            author = args.get("author", "templedb")
+            commit_all = args.get("stage_all", args.get("all", False))
 
             import subprocess
             # Stage all files first if requested (commit has no --all flag; add does)

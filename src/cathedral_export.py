@@ -145,7 +145,7 @@ class CathedralExporter:
         """Get VCS branches"""
         cursor = self.conn.cursor()
         rows = cursor.execute("""
-            SELECT id, branch_name, parent_branch_id, is_default, created_at
+            SELECT id, branch_name, parent_branch_id, is_default, head_commit_id, created_at
             FROM vcs_branches
             WHERE project_id = ?
             ORDER BY id
@@ -481,11 +481,11 @@ class CathedralExporter:
 
                 # Get latest commit for each branch
                 for branch in branches:
-                    if branch.get('latest_commit_id'):
+                    if branch.get('head_commit_id'):
                         cursor = self.conn.cursor()
                         commit = cursor.execute("""
                             SELECT * FROM vcs_commits WHERE id = ?
-                        """, (branch['latest_commit_id'],)).fetchone()
+                        """, (branch['head_commit_id'],)).fetchone()
                         if commit:
                             commits.append(dict_from_row(commit))
             else:
