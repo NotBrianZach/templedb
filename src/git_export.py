@@ -125,17 +125,17 @@ def export_to_git(
 
     for commit in commits:
         # Get file states for this commit
-        file_states = conn.execute("""
+        # Try vcs_file_states first, fall back to commit_files
+        file_states_all = conn.execute("""
             SELECT fs.file_id, pf.file_path, fs.content_text, fs.content_blob,
                    fs.content_hash, fs.file_size, fs.change_type
             FROM vcs_file_states fs
             JOIN project_files pf ON fs.file_id = pf.id
             WHERE fs.commit_id = ?
             ORDER BY pf.file_path
-        """, (commit["id"],)).fetchone()
+        """, (commit["id"],)).fetchall()
 
-        # If no file states in vcs_file_states, try commit_files table
-        if not file_states:
+        if not file_states_all:
             file_states_all = conn.execute("""
                 SELECT cf.file_id, pf.file_path, cb.content_text, cb.content_blob,
                        cf.content_hash, cb.file_size_bytes as file_size, cf.change_type
@@ -143,16 +143,6 @@ def export_to_git(
                 JOIN project_files pf ON cf.file_id = pf.id
                 LEFT JOIN content_blobs cb ON cf.content_hash = cb.hash_sha256
                 WHERE cf.commit_id = ?
-                ORDER BY pf.file_path
-            """, (commit["id"],)).fetchall()
-        else:
-            # Re-query to get all rows
-            file_states_all = conn.execute("""
-                SELECT fs.file_id, pf.file_path, fs.content_text, fs.content_blob,
-                       fs.content_hash, fs.file_size, fs.change_type
-                FROM vcs_file_states fs
-                JOIN project_files pf ON fs.file_id = pf.id
-                WHERE fs.commit_id = ?
                 ORDER BY pf.file_path
             """, (commit["id"],)).fetchall()
 

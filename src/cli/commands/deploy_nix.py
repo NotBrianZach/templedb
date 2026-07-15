@@ -303,7 +303,7 @@ class NixDeployCommands(Command):
         """Get environment variables for project from TempleDB"""
         # Query environment variables
         rows = self.query_all("""
-            SELECT ev.name, ev.value
+            SELECT ev.key, ev.value
             FROM env_vars ev
             JOIN project_env_vars pev ON ev.id = pev.env_var_id
             JOIN projects p ON pev.project_id = p.id
@@ -311,7 +311,7 @@ class NixDeployCommands(Command):
               AND pev.profile = ?
         """, (project_slug, target))
 
-        return {row['name']: row['value'] for row in rows}
+        return {row['key']: row['value'] for row in rows}
 
     # ========================================================================
     # CLI Tool Packaging Commands

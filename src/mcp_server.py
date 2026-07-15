@@ -8,6 +8,7 @@ Uses stdio transport for local integration.
 
 import sys
 import json
+import re
 import logging
 import os
 import sqlite3
@@ -700,10 +701,11 @@ class MCPServer:
 
             conn = self._get_db_connection()
             cursor = conn.cursor()
+            # Block write queries - this is a read-only tool
+            if re.search(r'\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE)\b', query, re.IGNORECASE):
+                return self._error_response("Write queries are not allowed. Use dedicated tools for modifications.")
             cursor.execute(query)
             rows = cursor.fetchall()
-            # Commit so write queries don't hold an open transaction
-            conn.commit()
 
             results = [dict(row) for row in rows]
 
@@ -782,7 +784,7 @@ class MCPServer:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT * FROM commits
+                    SELECT * FROM vcs_commits
                     WHERE project_id = ?
                     ORDER BY commit_timestamp DESC
                     LIMIT ?
@@ -849,7 +851,7 @@ class MCPServer:
 
                     cursor.execute("""
                         SELECT f.*, p.name as project_name
-                        FROM files f
+                        FROM project_files f
                         JOIN projects p ON f.project_id = p.id
                         WHERE f.project_id = ? AND f.file_path LIKE ?
                         ORDER BY f.file_path
@@ -858,7 +860,7 @@ class MCPServer:
                 else:
                     cursor.execute("""
                         SELECT f.*, p.name as project_name
-                        FROM files f
+                        FROM project_files f
                         JOIN projects p ON f.project_id = p.id
                         WHERE f.file_path LIKE ?
                         ORDER BY f.file_path
@@ -1576,7 +1578,7 @@ class MCPServer:
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
             logger.error(f"Error creating fleet network: {e}")
-            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
     def tool_fleet_network_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List fleet deployment networks"""
@@ -1596,7 +1598,7 @@ class MCPServer:
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
             logger.error(f"Error listing fleet networks: {e}")
-            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
     def tool_fleet_network_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Show fleet network info"""
@@ -1615,7 +1617,7 @@ class MCPServer:
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
             logger.error(f"Error getting fleet network info: {e}")
-            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
     def tool_fleet_machine_add(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Add machine to fleet network"""
@@ -1641,7 +1643,7 @@ class MCPServer:
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
             logger.error(f"Error adding fleet machine: {e}")
-            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
     def tool_fleet_machine_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List machines in fleet network"""
@@ -1660,7 +1662,7 @@ class MCPServer:
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
             logger.error(f"Error listing fleet machines: {e}")
-            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
     def tool_fleet_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy fleet network with magic rollback"""
@@ -1699,7 +1701,7 @@ class MCPServer:
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
             logger.error(f"Error deploying fleet network: {e}")
-            return self._error_response(ErrorCode.DEPLOYMENT_FAILED, str(e))
+            return self._error_response(str(e), ErrorCode.DEPLOYMENT_FAILED)
 
     def tool_fleet_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Show fleet deployment status"""
@@ -1723,7 +1725,7 @@ class MCPServer:
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
             logger.error(f"Error getting fleet status: {e}")
-            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
     def tool_fleet_check(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Health check fleet machines"""
@@ -1742,7 +1744,7 @@ class MCPServer:
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
             logger.error(f"Error checking fleet: {e}")
-            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
     def tool_fleet_diff(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Show what would change if deployed"""
@@ -1766,7 +1768,7 @@ class MCPServer:
             return self._success_response(result["stdout"], format_json=False)
         except Exception as e:
             logger.error(f"Error computing fleet diff: {e}")
-            return self._error_response(ErrorCode.INTERNAL_ERROR, str(e))
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
     # ========================================================================
     # CODE INTELLIGENCE TOOLS (Phase 1.7)

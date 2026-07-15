@@ -141,6 +141,7 @@ class DeploymentService(BaseService):
             # First, we need to reconstruct to compute hash (lightweight operation)
             export_start = time.time()
 
+            cathedral_dir = None  # Only set for standard (non-commit) deploys
             if commit_hash or branch_name:
                 # Commit-specific deploy: reconstruct files at a specific VCS state
                 resolved_hash = commit_hash
