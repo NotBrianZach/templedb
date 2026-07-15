@@ -102,7 +102,7 @@ def export_to_git(
     # Get commits in order (oldest first)
     commits = conn.execute("""
         SELECT id, commit_hash, parent_commit_id, author, author_email,
-               message, created_at
+               commit_message, commit_timestamp
         FROM vcs_commits
         WHERE project_id = ? AND branch_id = ?
         ORDER BY id ASC
@@ -190,8 +190,8 @@ def export_to_git(
         # Create git commit with matching metadata
         author = commit["author"] or "Unknown"
         email = commit["author_email"] or "unknown@templedb"
-        date = commit["created_at"] or "2026-01-01T00:00:00"
-        message = commit["message"] or f"TempleDB commit {commit['commit_hash']}"
+        date = commit["commit_timestamp"] or "2026-01-01T00:00:00"
+        message = commit["commit_message"] or f"TempleDB commit {commit['commit_hash']}"
 
         env = {
             "GIT_AUTHOR_NAME": author,
