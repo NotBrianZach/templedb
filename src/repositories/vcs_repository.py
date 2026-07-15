@@ -152,7 +152,7 @@ class VCSRepository(BaseRepository):
                     c.commit_message,
                     c.commit_timestamp,
                     b.branch_name,
-                    (SELECT COUNT(*) FROM commit_files WHERE commit_id = c.id) as files_changed
+                    COALESCE((SELECT COUNT(*) FROM vcs_file_states WHERE commit_id = c.id), (SELECT COUNT(*) FROM commit_files WHERE commit_id = c.id)) as files_changed
                 FROM vcs_commits c
                 JOIN vcs_branches b ON c.branch_id = b.id
                 WHERE c.project_id = ? AND b.branch_name = ?
@@ -169,7 +169,7 @@ class VCSRepository(BaseRepository):
                     c.commit_message,
                     c.commit_timestamp,
                     b.branch_name,
-                    (SELECT COUNT(*) FROM commit_files WHERE commit_id = c.id) as files_changed
+                    COALESCE((SELECT COUNT(*) FROM vcs_file_states WHERE commit_id = c.id), (SELECT COUNT(*) FROM commit_files WHERE commit_id = c.id)) as files_changed
                 FROM vcs_commits c
                 JOIN vcs_branches b ON c.branch_id = b.id
                 WHERE c.project_id = ?

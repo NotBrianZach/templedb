@@ -476,7 +476,7 @@ class CommitCommand:
             change.content.line_count
         ), commit=False)
 
-        # Record in commit_files
+        # Record in commit_files (legacy metadata)
         self.vcs_repo.record_file_change(
             commit_id=commit_id,
             file_id=file_id,
@@ -485,6 +485,15 @@ class CommitCommand:
             new_hash=change.content.hash_sha256,
             new_path=change.file_path
         )
+
+        # Record content snapshot in vcs_file_states (canonical)
+        self.vcs_repo.execute("""
+            INSERT INTO vcs_file_states (commit_id, file_id, content_text, content_hash,
+                                         file_size, line_count, change_type)
+            VALUES (?, ?, ?, ?, ?, ?, 'added')
+        """, (commit_id, file_id, change.content.content_text,
+              change.content.hash_sha256, change.content.file_size,
+              change.content.line_count), commit=False)
 
         # Store file_id in change for later snapshot update
         change.file_id = file_id
@@ -533,7 +542,7 @@ class CommitCommand:
             change.file_id
         ), commit=False)
 
-        # Record in commit_files
+        # Record in commit_files (legacy metadata)
         self.vcs_repo.record_file_change(
             commit_id=commit_id,
             file_id=change.file_id,
@@ -543,6 +552,15 @@ class CommitCommand:
             new_path=change.file_path
         )
 
+        # Record content snapshot in vcs_file_states (canonical)
+        self.vcs_repo.execute("""
+            INSERT INTO vcs_file_states (commit_id, file_id, content_text, content_hash,
+                                         file_size, line_count, change_type)
+            VALUES (?, ?, ?, ?, ?, ?, 'modified')
+        """, (commit_id, change.file_id, change.content.content_text,
+              change.content.hash_sha256, change.content.file_size,
+              change.content.line_count), commit=False)
+
     def _commit_deleted_file(self, project_id: int, commit_id: int, change: FileChange):
         """Commit a deleted file"""
         # Remove file_contents rows (history preserved in vcs_file_states)
@@ -550,7 +568,7 @@ class CommitCommand:
             DELETE FROM file_contents WHERE file_id = ?
         """, (change.file_id,), commit=False)
 
-        # Record in commit_files
+        # Record in commit_files (legacy metadata)
         self.vcs_repo.record_file_change(
             commit_id=commit_id,
             file_id=change.file_id,
@@ -559,6 +577,13 @@ class CommitCommand:
             new_hash=None,
             old_path=change.file_path
         )
+
+        # Record deletion in vcs_file_states (canonical)
+        self.vcs_repo.execute("""
+            INSERT INTO vcs_file_states (commit_id, file_id, content_hash,
+                                         file_size, line_count, change_type)
+            VALUES (?, ?, ?, 0, 0, 'deleted')
+        """, (commit_id, change.file_id, change.old_hash or 'DELETED'), commit=False)
 
     def _get_file_type_id(self, file_path: str) -> Optional[int]:
         """Get file type ID for a file path"""

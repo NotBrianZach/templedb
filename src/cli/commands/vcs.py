@@ -398,6 +398,9 @@ class VCSCommands(Command):
         hash_input = f"{project['slug']}:{branch['branch_name']}:{args.message}:{time.time()}"
         commit_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16].upper()
 
+        # Begin transaction — all commit operations are atomic
+        self.vcs_repo.execute("BEGIN", commit=False)
+
         # Create commit
         parent_hash = None
         if branch.get('head_commit_id'):
@@ -521,12 +524,15 @@ class VCSCommands(Command):
                     WHERE file_id = ? AND project_id = ? AND branch_id = ?
                 """, (file['file_id'], project['id'], branch['id']), commit=False)
 
-        # Clear staging for remaining files (this is the final operation — commit=True commits the transaction)
+        # Clear staging for remaining files
         self.vcs_repo.execute("""
             UPDATE vcs_working_state
             SET staged = 0, state = 'unmodified'
             WHERE project_id = ? AND branch_id = ? AND staged = 1
-        """, (project['id'], branch['id']), commit=True)
+        """, (project['id'], branch['id']), commit=False)
+
+        # Commit the transaction
+        self.vcs_repo.execute("COMMIT", commit=False)
 
         # If in edit mode, make read-only and end session
         from sync import SyncManager, make_readonly
