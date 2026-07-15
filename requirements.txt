@@ -1,0 +1,34 @@
+# TempleDB Python Dependencies
+
+# Core dependencies (minimal)
+# None - TempleDB core only needs Python standard library + SQLite
+
+# TUI dependencies (optional - for `templedb tui`)
+textual>=0.47.0
+rich>=13.0.0
+
+# Secret management dependencies
+PyYAML>=6.0.0  # For YAML export format in secret management
+
+# DNS provider API dependencies
+requests>=2.28.0  # For Cloudflare, Namecheap DNS automation
+
+# Vibe coding AI question generation
+anthropic>=0.18.0  # Claude API for intelligent quiz questions
+
+# Cloud backup dependencies (optional - for cloud-backup command)
+google-api-python-client>=2.0.0  # Google Drive API
+google-auth-httplib2>=0.1.0
+google-auth-oauthlib>=0.5.0
+google-cloud-storage>=2.0.0  # Google Cloud Storage (GCS buckets)
+
+# Code intelligence dependencies (for symbol extraction and dependency analysis)
+tree-sitter>=0.20.0  # AST parsing engine
+tree-sitter-python>=0.20.0  # Python grammar
+tree-sitter-javascript>=0.20.0  # JavaScript grammar
+tree-sitter-typescript>=0.20.0  # TypeScript grammar
+
+# Graph analysis dependencies (for community detection and clustering)
+networkx>=3.0  # Graph data structure and algorithms
+python-igraph>=0.11.0  # Fast graph library (for Leiden algorithm)
+leidenalg>=0.10.0  # Leiden community detection algorithm

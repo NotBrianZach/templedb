@@ -581,11 +581,15 @@ class CommitCommand:
             'nix': 'nix',
         }
 
-        type_name = extension_map.get(extension, 'unknown')
+        type_name = extension_map.get(extension)
 
-        # Get type ID
-        file_type = self.file_repo.query_one("SELECT id FROM file_types WHERE type_name = ?", (type_name,))
-        return file_type['id'] if file_type else None
+        # Get type ID, fall back to any file type for unknown extensions
+        file_type = None
+        if type_name:
+            file_type = self.file_repo.query_one("SELECT id FROM file_types WHERE type_name = ?", (type_name,))
+        if not file_type:
+            file_type = self.file_repo.query_one("SELECT id FROM file_types LIMIT 1")
+        return file_type['id'] if file_type else 1
 
     def _detect_conflicts(self, project_id: int, workspace_dir: Path, modified_files: List[FileChange]) -> List[Dict]:
         """Detect version conflicts for modified files"""

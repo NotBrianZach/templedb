@@ -1,0 +1,121 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "templedb"
+# Keep in sync with src/cli/_version.py (the runtime --version source).
+version = "0.7.0"
+description = "Database-native development environment and project manager"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "TempleDB Contributors"},
+]
+keywords = ["database", "project-management", "nix", "secrets", "vcs"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Version Control",
+]
+
+dependencies = [
+    "pyyaml",
+    "textual",
+    "rich",
+]
+
+[project.optional-dependencies]
+# Cloud backup dependencies
+backup = [
+    "google-api-python-client",
+    "google-auth",
+    "google-auth-oauthlib",
+    "google-auth-httplib2",
+]
+
+# Vibe coding real-time dependencies
+vibe = [
+    "aiohttp",
+    "watchdog",
+    "websockets",
+]
+
+# DNS management
+dns = [
+    "requests",
+]
+
+# Encryption
+crypto = [
+    "cryptography",
+]
+
+# All optional features
+all = [
+    "templedb[backup,vibe,dns,crypto]",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/templedb"
+Documentation = "https://github.com/yourusername/templedb/blob/main/README.md"
+Repository = "https://github.com/yourusername/templedb"
+Issues = "https://github.com/yourusername/templedb/issues"
+
+[project.scripts]
+templedb = "cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+# Standalone top-level modules under src/ that are imported flat (e.g. nixos_generator).
+# These are NOT auto-discovered by packages.find, so they must be listed explicitly.
+py-modules = [
+    "cathedral_compression",
+    "cathedral_export",
+    "cathedral_format",
+    "cathedral_import",
+    "complete_migration",
+    "compression",
+    "config",
+    "db_utils",
+    "deployment_config",
+    "deployment_instructions",
+    "deployment_orchestrator",
+    "deployment_tracker",
+    "error_handler",
+    "fhs_deployment",
+    "fhs_integration",
+    "fhs_package_detector",
+    "llm_context",
+    "gui_helpers",
+    "logger",
+    "main",
+    "mcp_server",
+    "merge_resolver",
+    "migrate_content_dedup",
+    "migration_tracker",
+    "nix_env_generator",
+    "nixos_generator",
+    "project_context",
+    "safe_file_queries",
+    "safe_queries",
+    "template_renderer",
+    "tui",
+    "vibe_claude_capture",
+    "vibe_server",
+    "vibe_watcher",
+]
+
+# Auto-discover all packages (and subpackages) under src/, so subpackages like
+# cli.commands, services.deployment, dns_providers, git_server, importer, sync,
+# and exporter are included instead of being silently dropped.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["*.sql", "*.md", "*.html"]

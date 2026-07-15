@@ -18,6 +18,22 @@ vim ~/temple/templedb/src/cli/commands/vcs.py
 
 If the mount is down: `templedb mount ~/temple`
 
+### File Access Without FUSE (CLI Bypass)
+
+If the FUSE mount is down or stale, use `templedb file` commands to read/write directly from the database:
+
+```bash
+templedb file cat templedb src/temple_fuse.py         # read file from DB
+templedb file ls templedb                             # list all files
+templedb file ls templedb src/cli/ -l                  # list with line counts
+templedb file set templedb src/foo.py -c "content"    # write content to DB
+cat new_code.py | templedb file set templedb src/foo.py  # pipe content in
+templedb file edit templedb src/foo.py                # edit in $EDITOR (DB round-trip)
+templedb file checkout templedb src/foo.py -o /tmp/   # extract to filesystem
+```
+
+These commands bypass FUSE entirely — they read/write content_blobs in SQLite directly.
+
 ### VCS: Use templedb, Not git
 
 ```bash
@@ -53,6 +69,7 @@ templedb graph callers templedb functionName  # who calls this?
 - Do NOT edit files at `/home/zach/templeDB/` directly when FUSE is mounted — use `~/temple/templedb/`
 - Do NOT use `grep -r` or `find` for code search — use `templedb graph search`
 - Do NOT edit files in `~/.config/templedb/checkouts/` (read-only, auto-generated)
+- If the FUSE mount is down/stale and `~/temple/` paths fail, use `templedb file` CLI commands (see above) instead of falling back to raw filesystem paths
 
 ### Project Info
 

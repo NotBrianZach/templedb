@@ -628,13 +628,8 @@ CREATE TABLE IF NOT EXISTS file_contents (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER DEFAULT 1,
 
-    -- Partial unique index enforces one current version per file (see below)
-    CHECK(is_current IN (0, 1))
+    UNIQUE(file_id, is_current)       -- Only one current version per file
 );
-
--- Only one current version per file — allows multiple historical (is_current=0) rows
-CREATE UNIQUE INDEX IF NOT EXISTS idx_file_contents_one_current
-    ON file_contents(file_id) WHERE is_current = 1;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS file_contents_fts USING fts5(
     file_path UNINDEXED,          -- Don't index file path
