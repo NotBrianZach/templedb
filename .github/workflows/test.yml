@@ -181,7 +181,6 @@ jobs:
         run: |
           test -x result/bin/templedb
           test -x result/bin/tdb
-          test -f result/lib/crsqlite.so
           result/bin/templedb --version
           echo "Nix build: OK"
 

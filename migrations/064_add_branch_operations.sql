@@ -1,7 +1,6 @@
 -- Migration 064: Add branch operations support
 --
 -- Adds active_branch_id to projects, vcs_commit_parents join table,
--- and sync_vcs_branches shadow table for cr-sqlite.
 
 -- Step 1: Add active_branch_id to projects
 ALTER TABLE projects ADD COLUMN active_branch_id INTEGER REFERENCES vcs_branches(id);

@@ -576,7 +576,6 @@ This runs 9 steps:
 4. **Auto-Generated Inputs**: New projects automatically wire into your flake
 5. **Version Control**: NixOS configs tracked in TempleDB VCS
 6. **Secret Management**: Encrypted secrets with age, decrypted at build/deploy time
-7. **Multi-Machine Sync**: cr-sqlite replicates your config across machines
 8. **One-Command Bootstrap**: Restore an entire machine from a GCS backup
 
 ## See Also

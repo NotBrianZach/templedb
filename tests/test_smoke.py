@@ -134,18 +134,3 @@ class TestGitExport:
             export_to_git("nonexistent", "/tmp/test-export", db_path=temp_db)
 
 
-class TestSyncEngine:
-    def test_shadow_table_creation(self, temp_db):
-        """Test that sync init creates shadow tables."""
-        # This will fail if crsqlite.so isn't available, which is fine in CI
-        try:
-            from sync_engine import SyncEngine
-            engine = SyncEngine(db_path=temp_db)
-            result = engine.initialize()
-            assert "site_id" in result
-            assert "db_version" in result
-            engine.close()
-        except Exception as e:
-            if "crsqlite" in str(e).lower():
-                pytest.skip("cr-sqlite not available")
-            raise

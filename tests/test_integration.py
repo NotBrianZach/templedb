@@ -445,29 +445,3 @@ class TestDirenvGenerator:
 
 # ── Sync Engine Tests ─────────────────────────────────────────────────────────
 
-class TestSyncEngine:
-    def test_init_creates_shadow_tables(self, temp_env):
-        try:
-            from sync_engine import SyncEngine
-            engine = SyncEngine(db_path=temp_env["db_path"])
-            result = engine.initialize()
-            assert "site_id" in result
-            assert len(result["site_id"]) > 0
-            engine.close()
-        except Exception as e:
-            if "crsqlite" in str(e).lower() or "extension" in str(e).lower():
-                pytest.skip("cr-sqlite not available")
-            raise
-
-    def test_get_changes_empty(self, temp_env):
-        try:
-            from sync_engine import SyncEngine
-            engine = SyncEngine(db_path=temp_env["db_path"])
-            engine.initialize()
-            changes, version = engine.get_changes(0)
-            assert isinstance(changes, list)
-            engine.close()
-        except Exception as e:
-            if "crsqlite" in str(e).lower():
-                pytest.skip("cr-sqlite not available")
-            raise

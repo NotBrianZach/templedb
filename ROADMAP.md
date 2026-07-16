@@ -345,14 +345,12 @@ TempleDB currently assumes single-user operation throughout the codebase. This i
 - No single point of failure
 
 **Cons:**
-- Complex conflict resolution (CRDTs required)
 - Eventual consistency issues
 - Requires distributed systems expertise
 - Merge conflicts at database level (complex)
 - Harder to enforce authorization
 
 **Implementation:**
-- [ ] CRDTs (Conflict-free Replicated Data Types)
 - [ ] Vector clocks or Lamport timestamps
 - [ ] Sync protocol design
 - [ ] Peer discovery mechanism
