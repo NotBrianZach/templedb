@@ -91,8 +91,6 @@ class NetworkCommands(Command):
         # Step 5: Check cr-sqlite
         print()
         try:
-            from sync_engine import SyncEngine
-            engine = SyncEngine()
             info = engine.initialize()
             print(f"  cr-sqlite: initialized (site {info['site_id'][:12]}...)")
             engine.close()
@@ -103,10 +101,7 @@ class NetworkCommands(Command):
         # Step 6: Probe peers for TempleDB
         if online > 0:
             print(f"\n  Probing {online} online peer(s) for TempleDB sync...")
-            from sync_engine import discover_tailscale_peers, probe_peer
-            ts_peers = discover_tailscale_peers()
             for peer in ts_peers:
-                ts_info = probe_peer(peer["ip"])
                 if ts_info:
                     print(f"    {peer['hostname']:20s} {peer['ip']:18s} TempleDB sync READY")
                 else:
@@ -144,12 +139,10 @@ class NetworkCommands(Command):
         if not online_peers:
             print("    No online peers")
         else:
-            from sync_engine import probe_peer
             for node_id, peer in online_peers.items():
                 hostname = peer.get("HostName", "?")
                 peer_ips = peer.get("TailscaleIPs", [])
                 ip = peer_ips[0] if peer_ips else "?"
-                ts_info = probe_peer(ip) if peer_ips else None
 
                 sync_status = ""
                 if ts_info:
@@ -177,9 +170,7 @@ class NetworkCommands(Command):
 
     def sync_all(self, args) -> int:
         """Sync with all online Tailscale peers that have TempleDB."""
-        from sync_engine import SyncEngine, SyncClient, discover_tailscale_peers, probe_peer
 
-        engine = SyncEngine()
         try:
             engine.initialize()
         except Exception as e:
@@ -187,7 +178,6 @@ class NetworkCommands(Command):
             print("  Run: templedb sync init")
             return 1
 
-        peers = discover_tailscale_peers()
         if not peers:
             print("No Tailscale peers found.")
             return 0
@@ -196,7 +186,6 @@ class NetworkCommands(Command):
         synced = 0
 
         for peer in peers:
-            ts_info = probe_peer(peer["ip"])
             if not ts_info:
                 continue
 

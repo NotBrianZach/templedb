@@ -16,13 +16,13 @@ from db_utils import execute, query_all, query_one
 
 router = APIRouter()
 
-import gui as _gui
-_base = _gui._base
-_table = _gui._table
-_search_bar = _gui._search_bar
-_msg = _gui._msg
-_status_badge = _gui._status_badge
-_run = _gui._run
+from gui_helpers import _base, _msg, _run, _search_bar, _status_badge, _table
+_base = _base
+_table = _table
+_search_bar = _search_bar
+_msg = _msg
+_status_badge = _status_badge
+_run = _run
 
 
 @router.get("/audit", response_class=HTMLResponse)

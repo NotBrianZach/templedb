@@ -16,12 +16,12 @@ from db_utils import execute, query_all, query_one
 router = APIRouter()
 
 # Import helpers from parent gui module
-import gui as _gui
-_base = _gui._base
-_table = _gui._table
-_search_bar = _gui._search_bar
-_msg = _gui._msg
-_status_badge = _gui._status_badge
+from gui_helpers import _base, _msg, _search_bar, _status_badge, _table
+_base = _base
+_table = _table
+_search_bar = _search_bar
+_msg = _msg
+_status_badge = _status_badge
 
 @router.get("/tests", response_class=HTMLResponse)
 def tests_page():

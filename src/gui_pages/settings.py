@@ -19,17 +19,17 @@ from config import FUSE_MOUNT_PATH
 
 router = APIRouter()
 
-import gui as _gui
-_base = _gui._base
-_table = _gui._table
-_search_bar = _gui._search_bar
-_file_link = _gui._file_link
-_msg = _gui._msg
-_status_badge = _gui._status_badge
-_run = _gui._run
-_colorize_diff = _gui._colorize_diff
-_highlight_template = _gui._highlight_template
-TEMPLEDB = _gui.TEMPLEDB
+from gui_helpers import TEMPLEDB, _base, _colorize_diff, _file_link, _highlight_template, _msg, _run, _search_bar, _status_badge, _table
+_base = _base
+_table = _table
+_search_bar = _search_bar
+_file_link = _file_link
+_msg = _msg
+_status_badge = _status_badge
+_run = _run
+_colorize_diff = _colorize_diff
+_highlight_template = _highlight_template
+TEMPLEDB = TEMPLEDB
 
 
 @router.get("/settings", response_class=HTMLResponse)

@@ -16,13 +16,13 @@ from db_utils import execute, query_all, query_one
 
 router = APIRouter()
 
-import gui as _gui
-_base = _gui._base
-_table = _gui._table
-_search_bar = _gui._search_bar
-_msg = _gui._msg
-_status_badge = _gui._status_badge
-_run = _gui._run
+from gui_helpers import _base, _msg, _run, _search_bar, _status_badge, _table
+_base = _base
+_table = _table
+_search_bar = _search_bar
+_msg = _msg
+_status_badge = _status_badge
+_run = _run
 
 
 @router.get("/fleet-sync", response_class=HTMLResponse)
@@ -84,7 +84,7 @@ def fleet_sync_page():
             f'style="background:#1a1a3a;border:1px solid #2a2a4a;color:#88f;'
             f'padding:2px 8px;border-radius:3px;cursor:pointer;font-family:monospace;font-size:0.78rem">'
             f'Pull</button>')
-        sync_btn = '<span class="muted">local</span>' if is_local else f'{push_btn} {pull_btn}\'
+        sync_btn = '<span class="muted">local</span>' if is_local else f'{push_btn} {pull_btn}'
         machine_rows.append([
             f'<strong>{name}</strong>', ip,
             f'{probe_btn} {sync_btn}',

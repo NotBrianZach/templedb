@@ -138,7 +138,7 @@ class DeploymentLogic:
             self.engine.assert_fact('project', slug, deploy_type)
 
         machines = db_utils.query_all(
-            "SELECT name, target_host, flake_attr, machine_config "
+            "SELECT machine_name as name, target_host, machine_name as flake_attr, machine_config "
             "FROM fleet_machines WHERE target_host IS NOT NULL"
         )
         for m in machines:
@@ -220,7 +220,7 @@ class NixosLogic:
     def load_from_db(self, db_utils):
         """Load host/service facts from fleet tables."""
         machines = db_utils.query_all(
-            "SELECT name, target_host, flake_attr FROM fleet_machines "
+            "SELECT machine_name as name, target_host, machine_name as flake_attr FROM fleet_machines "
             "WHERE target_host IS NOT NULL"
         )
         for m in machines:
