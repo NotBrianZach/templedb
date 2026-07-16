@@ -80,7 +80,7 @@ class BaseRepository:
             logger.error(f"Query failed: {e}", exc_info=True)
             raise
 
-    def execute(self, sql: str, params: tuple = None, commit: bool = True) -> int:
+    def execute(self, sql: str, params: tuple = (), commit: bool = True) -> int:
         """
         Execute a non-query SQL statement (INSERT, UPDATE, DELETE).
 

@@ -636,9 +636,85 @@ of your entire digital life as a developer.
 # ── Projects ──────────────────────────────────────────────────────────────────
 
 
-from gui_pages.settings import router as settings_router
-app.include_router(settings_router)
-from gui_pages.projects import router as projects_router
-app.include_router(projects_router)
-from gui_pages.actions import router as actions_router
-app.include_router(actions_router)
+# ── Page routers ──
+try:
+    from gui_pages.actions import router as actions_router
+    app.include_router(actions_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page actions: {e}')
+try:
+    from gui_pages.audit import router as audit_router
+    app.include_router(audit_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page audit: {e}')
+try:
+    from gui_pages.code import router as code_router
+    app.include_router(code_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page code: {e}')
+try:
+    from gui_pages.deploy import router as deploy_router
+    app.include_router(deploy_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page deploy: {e}')
+try:
+    from gui_pages.docs import router as docs_router
+    app.include_router(docs_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page docs: {e}')
+try:
+    from gui_pages.domains import router as domains_router
+    app.include_router(domains_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page domains: {e}')
+try:
+    from gui_pages.env import router as env_router
+    app.include_router(env_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page env: {e}')
+try:
+    from gui_pages.fleet_sync import router as fleet_sync_router
+    app.include_router(fleet_sync_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page fleet_sync: {e}')
+try:
+    from gui_pages.graph import router as graph_router
+    app.include_router(graph_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page graph: {e}')
+try:
+    from gui_pages.nix import router as nix_router
+    app.include_router(nix_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page nix: {e}')
+try:
+    from gui_pages.projects import router as projects_router
+    app.include_router(projects_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page projects: {e}')
+try:
+    from gui_pages.schema import router as schema_router
+    app.include_router(schema_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page schema: {e}')
+try:
+    from gui_pages.settings import router as settings_router
+    app.include_router(settings_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page settings: {e}')
+try:
+    from gui_pages.systemd import router as systemd_router
+    app.include_router(systemd_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page systemd: {e}')
+try:
+    from gui_pages.tests import router as tests_router
+    app.include_router(tests_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page tests: {e}')
+try:
+    from gui_pages.vcs import router as vcs_router
+    app.include_router(vcs_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page vcs: {e}')
+

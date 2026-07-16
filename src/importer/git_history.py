@@ -432,11 +432,12 @@ class GitHistoryImporter:
                     file_content.file_size
                 ), commit=False)
 
-            # Record in commit_files
+            # Record in commit_files with proper change type
+            change_type = 'added' if not file_record else 'modified'
             self.vcs_repo.record_file_change(
                 commit_id=commit_id,
                 file_id=file_id,
-                change_type='modified',  # Simplified - could detect add/delete
+                change_type=change_type,
                 old_hash=None,
                 new_hash=file_content.hash_sha256,
                 new_path=file_path
@@ -444,7 +445,17 @@ class GitHistoryImporter:
 
         except subprocess.CalledProcessError:
             # File was deleted at this commit
-            pass
+            file_record = self.file_repo.get_by_path(self.project_id, file_path)
+            if file_record:
+                file_id = file_record['file_id']
+                self.vcs_repo.record_file_change(
+                    commit_id=commit_id,
+                    file_id=file_id,
+                    change_type='deleted',
+                    old_hash=None,
+                    new_hash=None,
+                    old_path=file_path
+                )
 
     def _import_branch(self, ref: GitRef):
         """Import a branch reference"""
