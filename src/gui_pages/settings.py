@@ -656,7 +656,6 @@ def system_page(q: str = Query(""), host: str = Query("")):
 <thead><tr><th>Service</th><th>Used For</th><th>Required?</th><th>Config</th></tr></thead>
 <tbody>
 <tr><td><strong>SQLite</strong></td><td>Core database</td><td><span class="badge green">core</span></td><td><code>~/.local/share/templedb/templedb.sqlite</code></td></tr>
-<tr><td><strong>cr-sqlite</strong></td><td>CRDT sync between machines</td><td><span class="badge">optional</span></td><td><code>templedb sync init</code></td></tr>
 <tr><td><strong>Git</strong></td><td>Checkout management, git daemon, git-export</td><td><span class="badge green">core</span></td><td>Built-in</td></tr>
 <tr><td><strong>Nix / NixOS</strong></td><td>System config generation, flake inputs</td><td><span class="badge green">core</span></td><td><code>templedb nixos status</code></td></tr>
 <tr><td><strong>FUSE</strong></td><td>Mount DB as filesystem at <code>{FUSE_MOUNT_PATH}/</code></td><td><span class="badge blue">recommended</span></td><td><code>templedb mount {FUSE_MOUNT_PATH}</code></td></tr>

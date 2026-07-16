@@ -88,16 +88,6 @@ class NetworkCommands(Command):
             print("    Start with: templedb sync serve")
             print("    Or enable:  programs.templedb.sync.enable = true  (in NixOS)")
 
-        # Step 5: Check cr-sqlite
-        print()
-        try:
-            info = engine.initialize()
-            print(f"  cr-sqlite: initialized (site {info['site_id'][:12]}...)")
-            engine.close()
-        except Exception as e:
-            print(f"  cr-sqlite: not initialized ({e})")
-            print("    Run: templedb sync init")
-
         # Step 6: Probe peers for TempleDB
         if online > 0:
             print(f"\n  Probing {online} online peer(s) for TempleDB sync...")
@@ -182,7 +172,6 @@ class NetworkCommands(Command):
             print("No Tailscale peers found.")
             return 0
 
-        client = SyncClient(engine)
         synced = 0
 
         for peer in peers:

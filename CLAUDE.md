@@ -10,7 +10,6 @@ Read and write files through the FUSE mount at `~/temple/templedb/`, not `/home/
 
 ```bash
 # Read files
-cat ~/temple/templedb/src/sync_engine.py
 
 # Edit files — writes go to DB and auto-stage for VCS
 vim ~/temple/templedb/src/cli/commands/vcs.py

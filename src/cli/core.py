@@ -96,7 +96,6 @@ command groups:
                          storage cathedral export|import|inspect|verify
                          storage mount|unmount|mount-status
                          storage blob status|verify|list|migrate
-    sync               CRDT sync + network (init, serve, push, pull, peers)
                          sync network setup|status|connect|sync-all
 
   AI Integration

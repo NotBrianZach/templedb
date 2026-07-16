@@ -79,7 +79,6 @@ command groups:
     ai mcp             MCP server
 
   Sync & Network
-    sync               cr-sqlite CRDT sync between machines
     sync network       Tailscale VPN setup
 
   Storage
@@ -103,7 +102,6 @@ The database is the single source of truth. Everything else — the FUSE mount, 
 └──────┬──────────┬──────────┬──────────┬──────────┬───────────┘
        │          │          │          │          │
   ┌────▼───┐ ┌───▼────┐ ┌───▼──┐ ┌────▼───┐ ┌───▼────────┐
-  │ FUSE   │ │  Git   │ │ MCP  │ │  GUI   │ │ cr-sqlite  │
   │~/temple│ │ Daemon │ │10tool│ │ :8420  │ │   sync     │
   │  r/w   │ │ :9419  │ │      │ │        │ │            │
   └────────┘ └────────┘ └──────┘ └────────┘ └────────────┘
@@ -357,12 +355,9 @@ templedb bootstrap --from-gcs my-bucket --username zach --hostname zMothership3
 
 ---
 
-## Machine-to-Machine Sync
 
-cr-sqlite provides conflict-free replication between your machines over Tailscale:
 
 ```bash
-templedb sync init                       # initialize CRDTs
 templedb sync network setup               # configure Tailscale
 templedb sync serve                      # start sync server (port 9420)
 
@@ -372,7 +367,6 @@ templedb sync sync zMothership2          # bidirectional sync
 
 Changes merge automatically — last-writer-wins for config, append-only for commits.
 
-See [Machine-to-Machine Sync](docs/MACHINE_TO_MACHINE_SYNC.md) for details on which tables are synced via cr-sqlite and how the protocol works.
 
 ---
 
@@ -459,7 +453,6 @@ programs.templedb = {
   # FUSE mount: auto-mount database as ~/temple on login (systemd user service)
   mount.enable = true;
 
-  # Sync: cr-sqlite replication server between machines over Tailscale
   sync.enable = true;        # starts systemd user service
   sync.port = 9420;          # default port
 
@@ -480,7 +473,6 @@ programs.templedb = {
 |--------|-------------|
 | `enable` | Installs `templedb` and `tdb` (alias) to PATH |
 | `mount.enable` | Systemd user service: FUSE mount at `~/temple` with auto-restart |
-| `sync.enable` | Systemd user service: cr-sqlite sync server on port 9420 |
 | `claude.enable` | Generates `~/.claude/settings.json` with PreToolUse/PostToolUse hooks |
 | `claude.mcp` | Creates `~/.mcp.json` so TempleDB MCP tools work in every Claude Code session, not just the templeDB project |
 

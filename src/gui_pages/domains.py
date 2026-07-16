@@ -177,7 +177,6 @@ templedb publish mirror-add &lt;p&gt; github &lt;url&gt;
 templedb publish mirror-list               # show all mirrors</pre>
 
 <h3 style="margin-top:1rem">Sync &amp; Network</h3>
-<pre style="font-size:0.75rem">templedb sync init                         # init cr-sqlite CRDTs
 templedb sync sync &lt;peer&gt;                 # bidirectional sync
 templedb sync network setup                # configure Tailscale
 templedb sync network sync-all             # sync all peers</pre>
