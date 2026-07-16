@@ -58,14 +58,18 @@ def _register_top_level_aliases():
     def push_cmd(args):
         from cli.commands.publish import PublishCommands
         cmd = PublishCommands()
+        args.project = args.slug
         args.force = True
-        return cmd.publish_run(args)
+        if not hasattr(args, 'message') or not args.message:
+            args.message = "TempleDB publish"
+        return cmd.publish(args)
 
     push_parser = cli.register_command(
         'push', push_cmd,
         help_text='Publish project to git mirrors (alias for publish run --force)'
     )
     push_parser.add_argument('slug', help='Project slug')
+    push_parser.add_argument('-m', '--message', help='Commit message', default='TempleDB publish')
     cli.commands['push'] = push_cmd
 
     # templedb validate <slug>  →  run all Prolog validators
