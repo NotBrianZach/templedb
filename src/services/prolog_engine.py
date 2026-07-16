@@ -207,3 +207,159 @@ class DeploymentLogic:
     def get_deploy_targets(self, project: str) -> List[str]:
         slug = project.replace('-', '_')
         return self.engine.query_all(f"deploy_to(M, {slug})", "M")
+
+
+class NixosLogic:
+    """NixOS host validation: port conflicts, systemd deps, cycles."""
+
+    def __init__(self, pl_path: str | Path | None = None):
+        if pl_path is None:
+            pl_path = Path(__file__).parent / "nixos_logic.pl"
+        self.engine = PrologEngine(pl_path)
+
+    def load_from_db(self, db_utils):
+        """Load host/service facts from fleet tables."""
+        machines = db_utils.query_all(
+            "SELECT name, target_host, flake_attr FROM fleet_machines "
+            "WHERE target_host IS NOT NULL"
+        )
+        for m in machines:
+            self.engine.assert_fact('host', m['name'], m['target_host'],
+                                    m.get('flake_attr') or m['name'])
+
+        # Load services from nix_services if table exists
+        try:
+            services = db_utils.query_all(
+                "SELECT project_slug, service_name, systemd_unit, requires_db, "
+                "opens_port, dynamic_user FROM nix_services"
+            )
+            for s in services:
+                self.engine.assert_fact('service', s['project_slug'],
+                    s['service_name'], s['systemd_unit'],
+                    s.get('requires_db') or 'false',
+                    s.get('opens_port') or 'false',
+                    s.get('dynamic_user') or 'false')
+        except Exception:
+            pass  # Table may not exist
+
+    def validate_host(self, host: str) -> Dict[str, Any]:
+        return self.engine.run_json(f"validate_host_json('{host}')") or {
+            'host': host, 'valid': False, 'port_conflicts': [],
+            'missing_systemd_deps': [], 'systemd_cycles': [],
+            'requires_databases': []
+        }
+
+    def validate_all(self) -> Dict[str, Any]:
+        return self.engine.run_json("all_hosts_json") or {'hosts': []}
+
+
+class TestLogic:
+    """Test impact analysis: which tests to run for a set of changed files."""
+
+    def __init__(self, pl_path: str | Path | None = None):
+        if pl_path is None:
+            pl_path = Path(__file__).parent / "test_logic.pl"
+        self.engine = PrologEngine(pl_path)
+
+    def load_from_db(self, db_utils, project_slug: str):
+        """Load test definitions and file deps for a project."""
+        proj = db_utils.query_one(
+            "SELECT id FROM projects WHERE slug = ?", (project_slug,)
+        )
+        if not proj:
+            return
+
+        slug = project_slug.replace('-', '_')
+
+        # Load test definitions
+        tests = db_utils.query_all(
+            "SELECT test_type, test_path, enabled FROM project_tests "
+            "WHERE project_id = ?", (proj['id'],)
+        )
+        for t in tests:
+            self.engine.assert_fact('test_def', slug, t['test_type'],
+                                    t['test_path'],
+                                    'true' if t['enabled'] else 'false')
+
+        # Load file list
+        files = db_utils.query_all(
+            "SELECT file_path FROM project_files "
+            "WHERE project_id = ? AND status = 'active'", (proj['id'],)
+        )
+        for f in files:
+            self.engine.assert_fact('file_in_project', slug, f['file_path'])
+
+    def set_changed_files(self, project_slug: str, changed: List[str]):
+        """Set which files changed (call before querying)."""
+        slug = project_slug.replace('-', '_')
+        for fp in changed:
+            self.engine.assert_fact('changed_file', slug, fp)
+
+    def tests_to_run(self, project_slug: str) -> Dict[str, Any]:
+        slug = project_slug.replace('-', '_')
+        return self.engine.run_json(f"tests_to_run_json('{slug}')") or {
+            'project': project_slug, 'tests_to_run': [], 'affected_files': []
+        }
+
+    def test_status(self, project_slug: str) -> Dict[str, Any]:
+        slug = project_slug.replace('-', '_')
+        return self.engine.run_json(f"test_status_json('{slug}')") or {
+            'project': project_slug, 'runnable': False,
+            'enabled_tests': [], 'disabled_tests': [], 'missing_deps': []
+        }
+
+
+class EnvLogic:
+    """Environment variable validation: missing vars, secret audit, scope resolution."""
+
+    def __init__(self, pl_path: str | Path | None = None):
+        if pl_path is None:
+            pl_path = Path(__file__).parent / "env_logic.pl"
+        self.engine = PrologEngine(pl_path)
+
+    def load_from_db(self, db_utils, project_slug: str | None = None):
+        """Load env vars and secrets from DB."""
+        # Global vars
+        globals_ = db_utils.query_all(
+            "SELECT var_name, var_value, "
+            "CASE WHEN var_value LIKE '$${%%}' THEN 'compound' "
+            "     WHEN var_value LIKE 'secret:%%' THEN 'secret_ref' "
+            "     ELSE 'static' END as vtype "
+            "FROM environment_variables WHERE scope_type = 'global'"
+        )
+        for v in globals_:
+            self.engine.assert_fact('env_var', 'global', v['var_name'],
+                                    v['var_value'] or '', v['vtype'], 'global')
+
+        # Project vars
+        query = """
+            SELECT p.slug, ev.var_name, ev.var_value,
+            CASE WHEN ev.var_value LIKE '$${%%}' THEN 'compound'
+                 WHEN ev.var_value LIKE 'secret:%%' THEN 'secret_ref'
+                 ELSE 'static' END as vtype
+            FROM environment_variables ev
+            JOIN projects p ON ev.scope_id = p.id
+            WHERE ev.scope_type = 'project'
+        """
+        params = ()
+        if project_slug:
+            query += " AND p.slug = ?"
+            params = (project_slug,)
+
+        proj_vars = db_utils.query_all(query, params)
+        for v in proj_vars:
+            slug = v['slug'].replace('-', '_')
+            self.engine.assert_fact('env_var', slug, v['var_name'],
+                                    v['var_value'] or '', v['vtype'], 'project')
+
+    def audit_project(self, project_slug: str) -> Dict[str, Any]:
+        slug = project_slug.replace('-', '_')
+        return self.engine.run_json(f"env_audit_json('{slug}')") or {
+            'project': project_slug, 'valid': True, 'missing': [],
+            'secret_refs': [], 'compounds': [], 'visible_vars': []
+        }
+
+    def audit_secrets(self) -> Dict[str, Any]:
+        return self.engine.run_json("secret_audit_json") or {
+            'secrets': [], 'orphaned': []
+        }

@@ -76,7 +76,8 @@
             makeWrapper ${pythonEnv}/bin/python3 "$out/bin/templedb" \
               --add-flags "-m cli" \
               --set PYTHONPATH "$SITE" \
-              --set TEMPLEDB_CRSQLITE_PATH "$out/lib/crsqlite"
+              --set TEMPLEDB_CRSQLITE_PATH "$out/lib/crsqlite" \
+              --prefix PATH : "${pkgs.swi-prolog}/bin"
 
             ln -s "$out/bin/templedb" "$out/bin/tdb"
 
