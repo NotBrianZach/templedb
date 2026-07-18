@@ -77,7 +77,7 @@ def _parse_db_datetime(s):
 class TempleFS(Operations):
     """FUSE filesystem backed by TempleDB's SQLite database."""
 
-    def __init__(self, db_path=None, readonly=False, pool_size=8):
+    def __init__(self, db_path=None, readonly=False, pool_size=16):
         self.db_path = db_path or _get_db_path()
         self.readonly = readonly
         self.uid = os.getuid()
@@ -110,8 +110,13 @@ class TempleFS(Operations):
                 if self._pool_created < self._pool_size:
                     self._pool_created += 1
                     return self._make_conn()
-            # Pool exhausted, block until one is returned
-            return self._pool.get(timeout=30.0)
+            # Pool exhausted — wait briefly then fail with EIO rather than
+            # hanging indefinitely (which causes permanent FUSE deadlocks)
+            try:
+                return self._pool.get(timeout=5.0)
+            except queue.Empty:
+                logger.error("FUSE connection pool exhausted for 5s, returning EIO")
+                raise FuseOSError(errno.EIO)
 
     def _return_conn(self, conn: sqlite3.Connection):
         """Return a connection to the pool."""
@@ -749,7 +754,8 @@ def mount(mountpoint: str, db_path: str = None, foreground: bool = False,
         print(f"  Running in background (unmount with: fusermount -u {mountpoint})")
 
     FUSE(fs, mountpoint, foreground=foreground, nothreads=False,
-         allow_other=False, nonempty=True, debug=debug)
+         allow_other=False, nonempty=True, debug=debug,
+         entry_timeout=1.0, attr_timeout=1.0, negative_timeout=0.5)
 
 
 if __name__ == "__main__":

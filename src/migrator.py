@@ -54,6 +54,7 @@ MIGRATION_SEQUENCE = [
     "068_add_blue_green_state.sql",
     "069_add_project_tests.sql",
     "070_drop_work_items.sql",
+    "072_fix_dangling_work_items_fks.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",
