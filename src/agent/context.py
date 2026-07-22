@@ -1,24 +1,31 @@
 """Context basket - gathers project context from TempleDB for the agent.
 
-Each project can have multiple context items toggled on/off.
-The gathered context is serialized and sent to the provider with each message.
+Reuses the vibe prompt system for base context, with optional extras
+(schema breakdown, env info, selected file contents) that can be toggled.
 """
 import json
-from db_utils import query_one, query_all
+import sys
+from pathlib import Path
+
+from db_utils import query_one, query_all, get_simple_connection
 
 
-# Available context item types and their gatherers
+# Context item types that can be toggled beyond the base prompt
 CONTEXT_TYPES = {
-    "file_tree": {
-        "label": "File tree",
+    "project_prompt": {
+        "label": "Project prompt (rules, workflow, MCP tools)",
         "default": True,
+    },
+    "file_tree": {
+        "label": "Full file tree",
+        "default": False,
     },
     "recent_commits": {
         "label": "Recent commits",
         "default": True,
     },
     "schema": {
-        "label": "Database schema",
+        "label": "Language breakdown",
         "default": False,
     },
     "env": {
@@ -26,12 +33,8 @@ CONTEXT_TYPES = {
         "default": False,
     },
     "selected_files": {
-        "label": "Selected files",
+        "label": "Selected files (contents)",
         "default": False,
-    },
-    "project_info": {
-        "label": "Project info",
-        "default": True,
     },
 }
 
@@ -42,12 +45,22 @@ def get_project_id(slug):
     return row["id"] if row else None
 
 
+def _ensure_and_get_prompt(slug):
+    """Ensure a project prompt exists (auto-generate if needed) and return it.
+    Reuses the same logic as `templedb ai vibe start`.
+    """
+    from cli.commands.vibe import VibeCommands
+    vibe = VibeCommands()
+    vibe._ensure_project_prompt(slug)
+    return vibe._get_project_prompt(slug)
+
+
 def gather_context(projects_config):
     """Gather context for multiple projects.
 
     Args:
         projects_config: list of dicts like:
-            [{"slug": "bza", "items": {"file_tree": true, "recent_commits": true, ...},
+            [{"slug": "bza", "items": {"project_prompt": true, ...},
               "selected_files": ["src/foo.py"]}]
 
     Returns:
@@ -64,8 +77,11 @@ def gather_context(projects_config):
 
         ctx = {"slug": slug, "sections": []}
 
-        if items.get("project_info", True):
-            ctx["sections"].append(_gather_project_info(project_id, slug))
+        # Base project prompt (rules, workflow, MCP tools) - same as vibe
+        if items.get("project_prompt", True):
+            prompt_text = _ensure_and_get_prompt(slug)
+            if prompt_text:
+                ctx["sections"].append({"title": "Project Context", "content": prompt_text})
 
         if items.get("file_tree", False):
             ctx["sections"].append(_gather_file_tree(project_id))
@@ -107,45 +123,23 @@ def serialize_context(context_list):
             parts.append(f"## Project: {slug}\n\nError: {ctx['error']}\n")
             continue
 
-        parts.append(f"## Project: {slug}\n")
         for section in ctx.get("sections", []):
             title = section.get("title", "")
             content = section.get("content", "")
             if content:
-                parts.append(f"### {title}\n\n{content}\n")
+                # Project Context prompt is already a full markdown doc
+                if title == "Project Context":
+                    parts.append(content)
+                else:
+                    parts.append(f"### {title}\n\n{content}\n")
 
-    return "\n".join(parts)
+    return "\n\n---\n\n".join(parts)
 
 
-# --- Gatherers ---
-
-def _gather_project_info(project_id, slug):
-    """Basic project info."""
-    project = query_one("SELECT * FROM projects WHERE id = ?", (project_id,))
-    if not project:
-        return {"title": "Project Info", "content": "Not found"}
-
-    lines = [f"- Slug: {project.get('slug', '')}"]
-    if project.get('name'):
-        lines.append(f"- Name: {project['name']}")
-    if project.get('repo_url'):
-        lines.append(f"- Repo: {project['repo_url']}")
-
-    # File count
-    fc = query_one("SELECT COUNT(*) as n FROM project_files WHERE project_id = ?", (project_id,))
-    if fc:
-        lines.append(f"- Files: {fc['n']}")
-
-    # Line count
-    lc = query_one("SELECT SUM(lines_of_code) as n FROM project_files WHERE project_id = ?", (project_id,))
-    if lc and lc['n']:
-        lines.append(f"- Total lines: {lc['n']}")
-
-    return {"title": "Project Info", "content": "\n".join(lines)}
-
+# --- Extra gatherers (beyond the base prompt) ---
 
 def _gather_file_tree(project_id, max_files=200):
-    """File tree listing."""
+    """Full file tree listing."""
     files = query_all(
         """SELECT file_path FROM project_files
            WHERE project_id = ? AND status = 'active'
@@ -185,20 +179,20 @@ def _gather_recent_commits(project_id, count=5):
 
 
 def _gather_schema(project_id):
-    """File types / component breakdown."""
+    """Language/file type breakdown."""
     types = query_all(
         """SELECT
              CASE
-               WHEN file_path LIKE '%.py' THEN 'Python'
-               WHEN file_path LIKE '%.js' THEN 'JavaScript'
-               WHEN file_path LIKE '%.ts' OR file_path LIKE '%.tsx' THEN 'TypeScript'
-               WHEN file_path LIKE '%.nix' THEN 'Nix'
-               WHEN file_path LIKE '%.el' THEN 'Emacs Lisp'
-               WHEN file_path LIKE '%.json' THEN 'JSON'
-               WHEN file_path LIKE '%.md' OR file_path LIKE '%.org' THEN 'Docs'
-               WHEN file_path LIKE '%.sql' THEN 'SQL'
-               WHEN file_path LIKE '%.css' THEN 'CSS'
-               WHEN file_path LIKE '%.html' THEN 'HTML'
+               WHEN file_path LIKE '%%.py' THEN 'Python'
+               WHEN file_path LIKE '%%.js' THEN 'JavaScript'
+               WHEN file_path LIKE '%%.ts' OR file_path LIKE '%%.tsx' THEN 'TypeScript'
+               WHEN file_path LIKE '%%.nix' THEN 'Nix'
+               WHEN file_path LIKE '%%.el' THEN 'Emacs Lisp'
+               WHEN file_path LIKE '%%.json' THEN 'JSON'
+               WHEN file_path LIKE '%%.md' OR file_path LIKE '%%.org' THEN 'Docs'
+               WHEN file_path LIKE '%%.sql' THEN 'SQL'
+               WHEN file_path LIKE '%%.css' THEN 'CSS'
+               WHEN file_path LIKE '%%.html' THEN 'HTML'
                ELSE 'Other'
              END as lang,
              COUNT(*) as count,
@@ -210,12 +204,12 @@ def _gather_schema(project_id):
         (project_id,),
     )
     if not types:
-        return {"title": "Schema", "content": "(no data)"}
+        return {"title": "Language Breakdown", "content": "(no data)"}
 
-    lines = [f"| Language | Files | Lines |", f"|----------|-------|-------|"]
+    lines = ["| Language | Files | Lines |", "|----------|-------|-------|"]
     for t in types:
         lines.append(f"| {t['lang']} | {t['count']} | {t['lines'] or 0} |")
-    return {"title": "Schema", "content": "\n".join(lines)}
+    return {"title": "Language Breakdown", "content": "\n".join(lines)}
 
 
 def _gather_env(project_id, slug):
@@ -261,7 +255,6 @@ def _gather_selected_files(project_id, file_paths):
         )
         if row and row.get("content"):
             content = row["content"]
-            # Truncate very large files
             if len(content) > 10000:
                 content = content[:10000] + "\n... (truncated)"
             sections.append(f"#### {fp}\n\n```\n{content}\n```")
