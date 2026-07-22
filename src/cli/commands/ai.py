@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI commands - consolidated group for Claude Code, vibe, prompt, and MCP.
+AI commands - consolidated group for Claude Code, vibe, prompt, MCP, and agent.
 """
 
 
@@ -10,9 +10,10 @@ def register(cli):
     from cli.commands.vibe import VibeCommands
     from cli.commands.prompt import PromptCommands
     from cli.commands.mcp import MCPCommands
+    from cli.commands.agent import register_agent_commands
 
     ai_parser = cli.register_command('ai', None,
-        help_text='AI integration (Claude Code, vibe, prompts, MCP)')
+        help_text='AI integration (Claude Code, vibe, prompts, MCP, agent)')
     subparsers = ai_parser.add_subparsers(dest='ai_subcommand')
 
     # --- ai claude ---
@@ -109,3 +110,6 @@ def register(cli):
     daemon_parser = mcp_sub.add_parser('daemon', help='Start shared MCP daemon (HTTP + hook socket)')
     daemon_parser.add_argument('--port', type=int, default=8421, help='HTTP port (default: 8421)')
     cli.commands['ai.mcp.daemon'] = mcp_cmd.start_daemon
+
+    # --- ai agent ---
+    register_agent_commands(subparsers, cli)

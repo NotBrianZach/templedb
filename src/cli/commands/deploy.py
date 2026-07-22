@@ -2,8 +2,10 @@
 """
 Deployment management commands for TempleDB
 """
+import os
 import sys
 import subprocess
+import shutil
 import re
 from pathlib import Path
 from typing import Optional
@@ -157,10 +159,16 @@ class DeployCommands(DeployOpsMixin, Command):
                         cmd.append('--dry-run')
                     # Pass target to deployment script
                     cmd.extend(['--target', target])
-                    # Pass --only-* if specified
+                    # Pass --only if specified
                     only = getattr(args, 'only', None)
                     if only:
-                        cmd.append(f'--only-{only}')
+                        cmd.extend(['--only', only])
+
+                    # Wrap in nix develop if project has flake.nix
+                    script_dir = os.path.dirname(script_path)
+                    flake_path = os.path.join(script_dir, 'flake.nix')
+                    if os.path.exists(flake_path) and shutil.which('nix'):
+                        cmd = ['nix', 'develop', script_dir, '--command'] + cmd
 
                     # Run the deployment script and track it
                     import time

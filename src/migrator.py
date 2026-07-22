@@ -55,6 +55,8 @@ MIGRATION_SEQUENCE = [
     "069_add_project_tests.sql",
     "070_drop_work_items.sql",
     "072_fix_dangling_work_items_fks.sql",
+    "073_add_temple_agent.sql",
+    "074_drop_unused_tables_and_views.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",
