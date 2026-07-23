@@ -279,21 +279,35 @@
       (let ((inhibit-read-only t))
         (replace-match (format "#+TDB_STATUS: %s" status))))))
 
-(defun templedb-agent--insert-conversation-entry (role text)
-  "Insert a conversation entry under * Conversation."
+(defun templedb-agent--exchange-title (text)
+  "Generate a short exchange title from user TEXT."
+  (let ((first-line (car (split-string text "\n" t))))
+    (if (> (length first-line) 70)
+        (concat (substring first-line 0 70) "...")
+      first-line)))
+
+(defun templedb-agent--insert-before-next-prompt (text)
+  "Insert TEXT just before the * Next Prompt heading."
   (save-excursion
     (goto-char (point-min))
     (if (re-search-forward "^\\* Next Prompt" nil t)
-        (progn
-          (forward-line -1)
-          (let ((inhibit-read-only t))
-            (insert (format "\n** %s\n\n%s\n" (capitalize role) text))))
-      (goto-char (point-min))
-      (when (re-search-forward "^\\* Conversation\n" nil t)
-        (goto-char (if (re-search-forward "^\\* " nil t)
-                       (match-beginning 0) (point-max)))
-        (let ((inhibit-read-only t))
-          (insert (format "\n** %s\n\n%s\n" (capitalize role) text)))))))
+        (progn (forward-line -1)
+               (let ((inhibit-read-only t)) (insert text)))
+      (goto-char (point-max))
+      (let ((inhibit-read-only t)) (insert text)))))
+
+(defun templedb-agent--insert-conversation-entry (role text)
+  "Insert a conversation entry under * Conversation.
+User messages create a new exchange group heading (level 2).
+Assistant/tool entries go under the current exchange (level 3)."
+  (if (equal role "user")
+      ;; User message: create new exchange group
+      (templedb-agent--insert-before-next-prompt
+       (format "\n** %s\n\n*** User\n\n%s\n"
+               (templedb-agent--exchange-title text) text))
+    ;; Non-user: insert as level 3 under current exchange
+    (templedb-agent--insert-before-next-prompt
+     (format "\n*** %s\n\n%s\n" (capitalize role) text))))
 
 (defun templedb-agent--start-streaming ()
   "Prepare for streaming assistant response."
@@ -304,11 +318,11 @@
         (progn
           (forward-line -1)
           (let ((inhibit-read-only t))
-            (insert "\n** Assistant\n\n")
+            (insert "\n*** Assistant\n\n")
             (setq templedb-agent--streaming-marker (point-marker))))
       (goto-char (point-max))
       (let ((inhibit-read-only t))
-        (insert "\n** Assistant\n\n")
+        (insert "\n*** Assistant\n\n")
         (setq templedb-agent--streaming-marker (point-marker))))))
 
 (defun templedb-agent--append-streaming (text)
@@ -350,7 +364,7 @@ Shows tool name, input as code block, status indicator."
             (forward-line -1)
           (goto-char (point-max)))
         (let ((inhibit-read-only t))
-          (insert (format "\n** %s %s\n" status (or summary tool-name "tool")))
+          (insert (format "\n*** %s %s\n" status (or summary tool-name "tool")))
           (when (and tool-input (not (string-empty-p tool-input)))
             (let ((lang (cond
                          ((member tool-name '("Bash" "bash")) "shell")
@@ -368,7 +382,7 @@ Shows tool name, input as code block, status indicator."
       (goto-char (point-max))
       ;; Find the matching RUNNING heading
       (when (re-search-backward
-             (format "^\\*\\* RUNNING %s$"
+             (format "^\\*\\*\\* RUNNING %s$"
                      (regexp-quote (or summary "")))
              nil t)
         (let ((inhibit-read-only t))
@@ -376,7 +390,7 @@ Shows tool name, input as code block, status indicator."
           (let ((status-str (if duration
                                 (format "%s %s (%.1fs)" new-status (or summary "") duration)
                               (format "%s %s" new-status (or summary "")))))
-            (replace-match (format "** %s" status-str) t t))
+            (replace-match (format "*** %s" status-str) t t))
           ;; Add output after the src block (or after heading if no src block)
           (forward-line 1)
           ;; Skip past any existing src block
