@@ -119,6 +119,25 @@ class VibeCommands(Command):
 4. **SQL queries**: use `templedb_query` MCP tool
 5. **DO NOT** use `git` commands — use `templedb publish` and `templedb vcs` instead
 6. **DO NOT** edit files in `~/.config/templedb/checkouts/` — that's read-only, auto-generated
+7. **DO NOT** use `find`, `grep -r`, or shell commands to explore the project — use TempleDB tools instead
+
+## How to Search This Project
+
+This project is fully indexed by TempleDB. Use these instead of raw shell commands:
+
+| Instead of...                  | Use this                                                          |
+|--------------------------------+-------------------------------------------------------------------|
+| `find ... -name '*.tsx'`       | `templedb_query` with file_path LIKE query                        |
+| `grep -r 'pattern' ...`       | `templedb_cli({{{{command: "search content {slug} pattern"}}}})` |
+| `ls dir/`                      | `templedb_cli({{{{command: "file ls {slug} dir/ -l"}}}})` |
+| Find a symbol/function         | `templedb_cli({{{{command: "graph search {slug} name"}}}})` |
+| Who imports X?                 | `templedb_cli({{{{command: "graph who-uses X"}}}})` |
+
+SQL examples via `templedb_query`:
+- Files by extension: `SELECT file_path FROM project_files WHERE project_id=(SELECT id FROM projects WHERE slug='{slug}') AND file_path LIKE '%.tsx' AND status='active'`
+- Files by name: `SELECT file_path FROM project_files WHERE ... AND file_path LIKE '%book%' ...`
+
+These are faster and more accurate than shell commands.
 
 ---
 

@@ -5,32 +5,17 @@
 ;;
 ;;; Commentary:
 ;;
-;; Temple Agent — Claude Code inside Emacs, but native.
+;; Temple Agent -- Claude Code inside Emacs, but native.
 ;; Uses TempleDB for memory, Org for display, JSON-lines for protocol.
 ;;
-;; Entry point: M-x templedb-agent-new or SPC , a n
-;;
-;; Architecture:
-;;   Emacs buffer (Org) <-> JSON protocol <-> templedb ai agent serve <-> Provider
-;;
-;; Buffer keybindings:
-;;   , RET   send prompt
-;;   , i     guide Claude
-;;   , c     cancel
-;;   , r     resume
-;;   , g     refresh
-;;   C-c C-c send
-;;   C-c C-k cancel
-;;   C-c C-r resume
+;; Entry point: M-x templedb-agent-new or SPC a T A n
 
 ;;; Code:
 
 (require 'json)
 (require 'org)
 
-;;;; ═══════════════════════════════════════════════════════════════
 ;;;; Configuration
-;;;; ═══════════════════════════════════════════════════════════════
 
 (defgroup templedb-agent nil
   "Temple Agent: native AI in Emacs."
@@ -45,62 +30,40 @@
   :type 'string
   :group 'templedb-agent)
 
-(defcustom templedb-agent-default-provider "fake"
+(defcustom templedb-agent-default-provider "claude-code"
   "Default AI provider for new sessions."
   :type '(choice (const "fake") (const "claude-code"))
   :group 'templedb-agent)
 
-;;;; ═══════════════════════════════════════════════════════════════
 ;;;; State
-;;;; ═══════════════════════════════════════════════════════════════
 
-(defvar-local templedb-agent--session-id nil
-  "Current session ID for this buffer.")
+(defvar-local templedb-agent--session-id nil "Current session ID.")
+(defvar-local templedb-agent--run-id nil "Current run ID.")
+(defvar-local templedb-agent--status "created" "Current session status.")
+(defvar-local templedb-agent--project nil "Primary project slug.")
+(defvar-local templedb-agent--projects nil "List of project slugs in context.")
+(defvar-local templedb-agent--context-config nil
+  "Context config per project. Alist of (slug . items-alist).")
+(defvar-local templedb-agent--project-stats nil
+  "Cached project stats. Alist of (slug . plist) with :files :commits :envs.")
+(defvar-local templedb-agent--provider nil "Provider name.")
+(defvar-local templedb-agent--process nil "Agent serve process.")
+(defvar-local templedb-agent--request-id 0 "Request ID counter.")
+(defvar-local templedb-agent--pending-requests nil "Pending (id . callback) alist.")
+(defvar-local templedb-agent--partial-line "" "Incomplete JSON line.")
+(defvar-local templedb-agent--streaming-text "" "Accumulated streaming text.")
+(defvar-local templedb-agent--streaming-marker nil "Streaming insert marker.")
+(defvar-local templedb-agent--now-text "" "Now section text.")
 
-(defvar-local templedb-agent--run-id nil
-  "Current run ID.")
-
-(defvar-local templedb-agent--status "created"
-  "Current session status.")
-
-(defvar-local templedb-agent--project nil
-  "Project slug for this session.")
-
-(defvar-local templedb-agent--provider nil
-  "Provider name for this session.")
-
-(defvar-local templedb-agent--process nil
-  "The agent serve process for this buffer.")
-
-(defvar-local templedb-agent--request-id 0
-  "Monotonic request ID counter.")
-
-(defvar-local templedb-agent--pending-requests nil
-  "Alist of (id . callback) for pending requests.")
-
-(defvar-local templedb-agent--partial-line ""
-  "Incomplete JSON line from process output.")
-
-(defvar-local templedb-agent--streaming-text ""
-  "Accumulated streaming text from assistant.")
-
-(defvar-local templedb-agent--streaming-marker nil
-  "Marker for where streaming text is being inserted.")
-
-(defvar-local templedb-agent--now-text ""
-  "Current 'Now' section text.")
-
-;;;; ═══════════════════════════════════════════════════════════════
 ;;;; Process management
-;;;; ═══════════════════════════════════════════════════════════════
 
 (defun templedb-agent--start-process ()
   "Start the agent serve process."
-  (when (and templedb-agent--process
-             (process-live-p templedb-agent--process))
+  (when (and templedb-agent--process (process-live-p templedb-agent--process))
     (delete-process templedb-agent--process))
   (let ((process-environment (append '("PYTHONDONTWRITEBYTECODE=1") process-environment))
-        (buf (current-buffer)))
+        (buf (current-buffer))
+        (stderr-buf (get-buffer-create "*temple-agent-stderr*")))
     (setq templedb-agent--process
           (make-process
            :name (format "temple-agent-%s" (or templedb-agent--session-id "new"))
@@ -108,6 +71,7 @@
            :command (list templedb-agent-executable "ai" "agent" "serve" "--stdio")
            :connection-type 'pipe
            :noquery t
+           :stderr stderr-buf
            :filter (lambda (proc output)
                      (templedb-agent--process-filter buf proc output))
            :sentinel (lambda (proc event)
@@ -118,18 +82,13 @@
   "Handle output from the agent process, parsing JSON lines."
   (when (buffer-live-p agent-buf)
     (with-current-buffer agent-buf
-      ;; Accumulate partial lines
       (setq templedb-agent--partial-line
             (concat templedb-agent--partial-line output))
-      ;; Process complete lines
       (let ((lines (split-string templedb-agent--partial-line "\n")))
-        ;; Last element is incomplete (or empty if output ends with \n)
         (setq templedb-agent--partial-line (car (last lines)))
-        ;; Process all complete lines
         (dolist (line (butlast lines))
           (let ((trimmed (string-trim line)))
             (when (and (not (string-empty-p trimmed))
-                       ;; Skip log lines (INFO, WARNING, etc.)
                        (eq (aref trimmed 0) ?\{))
               (condition-case err
                   (let ((msg (json-read-from-string trimmed)))
@@ -143,14 +102,17 @@
     (with-current-buffer agent-buf
       (when (string-match-p "\\(finished\\|exited\\|killed\\)" event)
         (setq templedb-agent--process nil)
-        (templedb-agent--set-now "Process ended")
-        (templedb-agent--set-status "interrupted")))))
+        (let ((stderr (when-let ((sb (get-buffer "*temple-agent-stderr*")))
+                        (with-current-buffer sb (string-trim (buffer-string))))))
+          (templedb-agent--set-now
+           (if (and stderr (not (string-empty-p stderr)))
+               (format "Process ended: %s" (car (split-string stderr "\n")))
+             (format "Process ended (%s)" (string-trim event))))
+          (templedb-agent--set-status "interrupted"))))))
 
 (defun templedb-agent--send (method params &optional callback)
-  "Send a JSON-lines request to the agent process.
-If CALLBACK is non-nil, call it with the result when response arrives."
-  (unless (and templedb-agent--process
-               (process-live-p templedb-agent--process))
+  "Send a JSON-lines request to the agent process."
+  (unless (and templedb-agent--process (process-live-p templedb-agent--process))
     (templedb-agent--start-process))
   (cl-incf templedb-agent--request-id)
   (let ((id templedb-agent--request-id)
@@ -159,13 +121,10 @@ If CALLBACK is non-nil, call it with the result when response arrives."
                    (params . ,params))))
     (when callback
       (push (cons id callback) templedb-agent--pending-requests))
-    (let ((json-str (concat (json-encode request) "\n")))
-      (process-send-string templedb-agent--process json-str))
+    (process-send-string templedb-agent--process (concat (json-encode request) "\n"))
     id))
 
-;;;; ═══════════════════════════════════════════════════════════════
 ;;;; Message handling
-;;;; ═══════════════════════════════════════════════════════════════
 
 (defun templedb-agent--handle-message (msg)
   "Handle a parsed JSON message from the agent process."
@@ -174,16 +133,16 @@ If CALLBACK is non-nil, call it with the result when response arrives."
         (result (alist-get 'result msg))
         (error-msg (alist-get 'error msg)))
     (cond
-     ;; Response to a request
      (id
       (let ((callback (alist-get id templedb-agent--pending-requests)))
         (setq templedb-agent--pending-requests
               (assq-delete-all id templedb-agent--pending-requests))
         (when callback
           (if error-msg
-              (message "Temple Agent error: %s" error-msg)
+              (progn
+                (message "Temple Agent error: %s" error-msg)
+                (templedb-agent--set-now (format "Error: %s" error-msg)))
             (funcall callback result)))))
-     ;; Event push
      ((equal method "event")
       (templedb-agent--handle-event (alist-get 'params msg))))))
 
@@ -197,56 +156,41 @@ If CALLBACK is non-nil, call it with the result when response arrives."
        (setq templedb-agent--run-id (alist-get 'run_id event))
        (templedb-agent--set-now (or summary "Working..."))
        (templedb-agent--set-status "running"))
-
       ("run.completed"
        (templedb-agent--set-now "Ready")
        (templedb-agent--set-status "waiting")
        (templedb-agent--finalize-streaming))
-
       ("run.failed"
        (templedb-agent--set-now (format "Failed: %s" (or summary "unknown error")))
        (templedb-agent--set-status "failed")
        (templedb-agent--finalize-streaming))
-
       ("run.interrupted"
        (templedb-agent--set-now "Interrupted")
        (templedb-agent--set-status "interrupted")
        (templedb-agent--finalize-streaming))
-
       ("assistant.started"
        (templedb-agent--set-now "Generating response...")
        (templedb-agent--start-streaming))
-
       ("assistant.delta"
-       (let ((text (alist-get 'text data)))
-         (when text
-           (templedb-agent--append-streaming text))))
-
+       (when-let ((text (alist-get 'text data)))
+         (templedb-agent--append-streaming text)))
       ("assistant.completed"
        (templedb-agent--set-now "Response complete"))
-
       ("tool.started"
        (templedb-agent--set-now (or summary "Running tool..."))
-       (templedb-agent--insert-tool-heading summary "RUNNING"))
-
+       (templedb-agent--insert-rich-tool summary data "RUNNING"))
       ("tool.completed"
-       (templedb-agent--update-tool-heading summary "DONE"))
-
+       (templedb-agent--complete-rich-tool summary data "DONE"))
       ("tool.failed"
-       (templedb-agent--update-tool-heading summary "FAILED"))
-
+       (templedb-agent--complete-rich-tool summary data "FAILED"))
       ("provider.rate_limited"
        (templedb-agent--set-now "Rate limited. Waiting..."))
-
       ("provider.login_required"
        (templedb-agent--set-now "Login required. Run: claude auth login"))
-
       ("service.recovered"
        (message "Temple Agent: %s" (or summary "Sessions recovered"))))))
 
-;;;; ═══════════════════════════════════════════════════════════════
 ;;;; Org buffer rendering
-;;;; ═══════════════════════════════════════════════════════════════
 
 (defun templedb-agent--render-buffer ()
   "Render the full agent Org buffer."
@@ -257,31 +201,60 @@ If CALLBACK is non-nil, call it with the result when response arrives."
     (insert (format "#+TDB_PROJECT: %s\n" (or templedb-agent--project "")))
     (insert (format "#+TDB_STATUS: %s\n\n" templedb-agent--status))
 
-    ;; Now section
+    ;; Guide (starts collapsed)
+    (insert "* Guide\n")
+    (insert "Temple Agent -- Claude Code inside Emacs.\n")
+    (insert "Type your message under *Next Prompt*, then press =C-c C-c= to send.\n\n")
+    (insert "| Section        | Purpose                                    | Editable |\n")
+    (insert "|----------------+--------------------------------------------+----------|\n")
+    (insert "| Now            | What Claude is currently doing              | no       |\n")
+    (insert "| Goal           | Session goal -- sent to Claude as guidance  | yes      |\n")
+    (insert "| Context        | Projects and data sent with each message    | toggle   |\n")
+    (insert "| Conversation   | Message history and tool activity           | no       |\n")
+    (insert "| Next Prompt    | Your next message to Claude                 | yes      |\n")
+    (insert "| Notes          | Persistent notes (saved to DB)              | yes      |\n")
+    (insert "| Scratch        | Scratch space (not sent)                    | yes      |\n\n")
+    (insert "| Key            | Action                                     |\n")
+    (insert "|----------------+--------------------------------------------|\n")
+    (insert "| =C-c C-c=      | Send message                               |\n")
+    (insert "| =C-c C-k=      | Cancel current run                         |\n")
+    (insert "| =C-c C-r=      | Resume interrupted run                     |\n")
+    (insert "| =, x a=        | Add project to context                     |\n")
+    (insert "| =, x r=        | Remove project from context                |\n")
+    (insert "| =, x t=        | Toggle context item                        |\n")
+    (insert "| =, x b=        | Add current buffer to context              |\n")
+    (insert "| =, x v=        | Add selected region to context             |\n")
+    (insert "| =, i=          | Send guidance while Claude works           |\n")
+    (insert "| =, g=          | Refresh buffer from database               |\n")
+    (insert "| =, s n=        | New session                                |\n")
+    (insert "| =, s s=        | Switch session                             |\n")
+    (insert "| =, s f=        | Fork session                               |\n")
+    (insert "| =, s q=        | Close session                              |\n")
+    (insert "| =, ?=          | Debug info (process, stderr, pending)      |\n")
+    (insert "| =, K=          | Kill stuck process                         |\n")
+    (insert "| =TAB=          | Fold/unfold section                        |\n\n")
+
+    ;; Now
     (insert "* Now\n\n")
     (insert (or templedb-agent--now-text "Ready") "\n\n")
 
-    ;; Goal section (editable)
-    (insert "* Goal\n\n\n")
+    ;; Goal (editable, sent to Claude)
+    (insert "* Goal\n\n")
+    (insert "Set your goal here. It is sent to Claude with every message to keep the conversation focused.\n\n")
 
-    ;; Context section
+    ;; Context basket
     (insert "* Context\n\n")
-    (when templedb-agent--project
-      (insert (format "- Current project: %s\n" templedb-agent--project)))
+    (templedb-agent--insert-context-basket)
     (insert "\n")
-
-    ;; Conversation section
     (insert "* Conversation\n\n")
-
-    ;; Next Prompt section (editable)
-    (insert "* Next Prompt\n\n")
-    (insert "Type next message here.\n\n")
-
-    ;; Notes section (editable)
+    (insert "* Next Prompt\n\n\n")
     (insert "* Notes\n\n\n")
+    (insert "* Scratch\n\n\n")
 
-    ;; Scratch section (editable)
-    (insert "* Scratch\n\n\n")))
+    ;; Collapse the Guide section by default
+    (goto-char (point-min))
+    (when (re-search-forward "^\\* Guide" nil t)
+      (org-cycle))))
 
 (defun templedb-agent--set-now (text)
   "Update the Now section."
@@ -291,15 +264,14 @@ If CALLBACK is non-nil, call it with the result when response arrives."
     (when (re-search-forward "^\\* Now\n\n" nil t)
       (let ((start (point))
             (end (if (re-search-forward "^\\* " nil t)
-                     (match-beginning 0)
-                   (point-max))))
+                     (match-beginning 0) (point-max))))
         (let ((inhibit-read-only t))
           (delete-region start end)
           (goto-char start)
           (insert text "\n\n"))))))
 
 (defun templedb-agent--set-status (status)
-  "Update the session status in header and variable."
+  "Update the session status."
   (setq templedb-agent--status status)
   (save-excursion
     (goto-char (point-min))
@@ -315,17 +287,13 @@ If CALLBACK is non-nil, call it with the result when response arrives."
         (progn
           (forward-line -1)
           (let ((inhibit-read-only t))
-            (insert (format "\n** %s\n\n%s\n"
-                            (capitalize role) text))))
-      ;; Fallback: insert at end of Conversation section
+            (insert (format "\n** %s\n\n%s\n" (capitalize role) text))))
       (goto-char (point-min))
       (when (re-search-forward "^\\* Conversation\n" nil t)
         (goto-char (if (re-search-forward "^\\* " nil t)
-                       (match-beginning 0)
-                     (point-max)))
+                       (match-beginning 0) (point-max)))
         (let ((inhibit-read-only t))
-          (insert (format "\n** %s\n\n%s\n"
-                          (capitalize role) text)))))))
+          (insert (format "\n** %s\n\n%s\n" (capitalize role) text)))))))
 
 (defun templedb-agent--start-streaming ()
   "Prepare for streaming assistant response."
@@ -338,58 +306,96 @@ If CALLBACK is non-nil, call it with the result when response arrives."
           (let ((inhibit-read-only t))
             (insert "\n** Assistant\n\n")
             (setq templedb-agent--streaming-marker (point-marker))))
-      ;; Fallback
       (goto-char (point-max))
       (let ((inhibit-read-only t))
         (insert "\n** Assistant\n\n")
         (setq templedb-agent--streaming-marker (point-marker))))))
 
 (defun templedb-agent--append-streaming (text)
-  "Append TEXT to the streaming assistant response."
+  "Append TEXT to the streaming assistant response.
+Uses `with-undo-amalgamate' so all streaming chunks become one undo entry."
   (setq templedb-agent--streaming-text
         (concat templedb-agent--streaming-text text))
   (when (and templedb-agent--streaming-marker
              (marker-buffer templedb-agent--streaming-marker))
-    (save-excursion
-      (goto-char templedb-agent--streaming-marker)
-      (let ((inhibit-read-only t))
-        (insert text)
-        (set-marker templedb-agent--streaming-marker (point))))))
+    (with-undo-amalgamate
+      (save-excursion
+        (goto-char templedb-agent--streaming-marker)
+        (let ((inhibit-read-only t))
+          (insert text)
+          (set-marker templedb-agent--streaming-marker (point)))))))
 
 (defun templedb-agent--finalize-streaming ()
   "Finalize the streaming response."
   (when templedb-agent--streaming-marker
     (save-excursion
       (goto-char templedb-agent--streaming-marker)
-      (let ((inhibit-read-only t))
-        (insert "\n")))
+      (let ((inhibit-read-only t)) (insert "\n")))
     (set-marker templedb-agent--streaming-marker nil)
     (setq templedb-agent--streaming-marker nil))
   (setq templedb-agent--streaming-text ""))
 
-(defun templedb-agent--insert-tool-heading (summary status)
-  "Insert a tool activity heading."
-  (save-excursion
-    (goto-char (point-min))
-    (if (re-search-forward "^\\* Next Prompt" nil t)
-        (progn
-          (forward-line -1)
-          (let ((inhibit-read-only t))
-            (insert (format "\n** %s %s\n" status (or summary "tool")))))
-      (goto-char (point-max))
-      (let ((inhibit-read-only t))
-        (insert (format "\n** %s %s\n" status (or summary "tool")))))))
+;;; Rich tool display
 
-(defun templedb-agent--update-tool-heading (summary new-status)
-  "Update the latest tool heading matching SUMMARY to NEW-STATUS."
-  (save-excursion
-    (goto-char (point-max))
-    (when (re-search-backward
-           (format "^\\*\\* \\(RUNNING\\|DONE\\|FAILED\\) %s$"
-                   (regexp-quote (or summary "")))
-           nil t)
-      (let ((inhibit-read-only t))
-        (replace-match (format "** %s %s" new-status (or summary "")) t t)))))
+(defun templedb-agent--insert-rich-tool (summary data status)
+  "Insert a rich tool heading with input details.
+Shows tool name, input as code block, status indicator."
+  (let ((tool-name (alist-get 'tool_name data))
+        (tool-input (alist-get 'tool_input data))
+        (tool-id (alist-get 'tool_id data)))
+    (with-undo-amalgamate
+      (save-excursion
+        (goto-char (point-min))
+        (if (re-search-forward "^\\* Next Prompt" nil t)
+            (forward-line -1)
+          (goto-char (point-max)))
+        (let ((inhibit-read-only t))
+          (insert (format "\n** %s %s\n" status (or summary tool-name "tool")))
+          (when (and tool-input (not (string-empty-p tool-input)))
+            (let ((lang (cond
+                         ((member tool-name '("Bash" "bash")) "shell")
+                         ((member tool-name '("Edit" "edit")) "diff")
+                         (t ""))))
+              (insert (format "#+begin_src %s\n%s\n#+end_src\n"
+                              lang
+                              (templedb-agent--truncate-output tool-input 500))))))))))
+
+(defun templedb-agent--complete-rich-tool (summary data new-status)
+  "Update a tool heading to completed/failed and add output."
+  (let ((tool-output (alist-get 'tool_output data))
+        (duration (alist-get 'duration data)))
+    (save-excursion
+      (goto-char (point-max))
+      ;; Find the matching RUNNING heading
+      (when (re-search-backward
+             (format "^\\*\\* RUNNING %s$"
+                     (regexp-quote (or summary "")))
+             nil t)
+        (let ((inhibit-read-only t))
+          ;; Update status with duration
+          (let ((status-str (if duration
+                                (format "%s %s (%.1fs)" new-status (or summary "") duration)
+                              (format "%s %s" new-status (or summary "")))))
+            (replace-match (format "** %s" status-str) t t))
+          ;; Add output after the src block (or after heading if no src block)
+          (forward-line 1)
+          ;; Skip past any existing src block
+          (when (looking-at "^#\\+begin_src")
+            (re-search-forward "^#\\+end_src" nil t)
+            (forward-line 1))
+          ;; Insert output
+          (when (and tool-output (not (string-empty-p tool-output)))
+            (insert (format "#+begin_example\n%s\n#+end_example\n"
+                            (templedb-agent--truncate-output tool-output 1000)))))))))
+
+(defun templedb-agent--truncate-output (text max-len)
+  "Truncate TEXT for display, showing line count if truncated."
+  (if (<= (length text) max-len)
+      text
+    (let* ((truncated (substring text 0 max-len))
+           (total-lines (length (split-string text "\n")))
+           (shown-lines (length (split-string truncated "\n"))))
+      (format "%s\n... +%d lines" truncated (- total-lines shown-lines)))))
 
 (defun templedb-agent--restore-messages (messages)
   "Restore conversation from saved MESSAGES."
@@ -399,9 +405,7 @@ If CALLBACK is non-nil, call it with the result when response arrives."
       (when (and role text (not (string-empty-p text)))
         (templedb-agent--insert-conversation-entry role text)))))
 
-;;;; ═══════════════════════════════════════════════════════════════
 ;;;; User commands
-;;;; ═══════════════════════════════════════════════════════════════
 
 (defun templedb-agent--get-prompt-text ()
   "Get the text from the Next Prompt section."
@@ -410,8 +414,7 @@ If CALLBACK is non-nil, call it with the result when response arrives."
     (when (re-search-forward "^\\* Next Prompt\n\n" nil t)
       (let ((start (point))
             (end (if (re-search-forward "^\\* " nil t)
-                     (match-beginning 0)
-                   (point-max))))
+                     (match-beginning 0) (point-max))))
         (string-trim (buffer-substring-no-properties start end))))))
 
 (defun templedb-agent--clear-prompt ()
@@ -421,35 +424,33 @@ If CALLBACK is non-nil, call it with the result when response arrives."
     (when (re-search-forward "^\\* Next Prompt\n\n" nil t)
       (let ((start (point))
             (end (if (re-search-forward "^\\* " nil t)
-                     (match-beginning 0)
-                   (point-max))))
+                     (match-beginning 0) (point-max))))
         (let ((inhibit-read-only t))
           (delete-region start end)
           (goto-char start)
           (insert "\n"))))))
 
 (defun templedb-agent-send ()
-  "Send the message in Next Prompt to the agent.
-If a run is active, queue the message instead."
+  "Send the message in Next Prompt to the agent."
   (interactive)
   (let ((text (templedb-agent--get-prompt-text)))
     (when (or (null text) (string-empty-p text))
       (user-error "No message to send. Type in the Next Prompt section"))
-    ;; Show user message in conversation
+    ;; Auto-set goal from first message
+    (templedb-agent--auto-goal-from-message text)
     (templedb-agent--insert-conversation-entry "user" text)
     (templedb-agent--clear-prompt)
-    ;; Queue if running, send otherwise
     (if (equal templedb-agent--status "running")
-        (progn
-          (templedb-agent--send
-           "message.queue"
-           `((session_id . ,templedb-agent--session-id)
-             (content . ,text))
-           (lambda (_result) (message "Message queued (Claude is working)"))))
+        (templedb-agent--send
+         "message.queue"
+         `((session_id . ,templedb-agent--session-id)
+           (content . ,text))
+         (lambda (_result) (message "Message queued (Claude is working)")))
       (templedb-agent--send
        "message.send"
        `((session_id . ,templedb-agent--session-id)
-         (content . ,text))
+         (content . ,text)
+         (context . ,(templedb-agent--build-context-payload)))
        (lambda (_result) nil)))))
 
 (defun templedb-agent-cancel ()
@@ -479,8 +480,7 @@ If a run is active, queue the message instead."
    (lambda (_result) nil)))
 
 (defun templedb-agent-refresh ()
-  "Refresh the buffer from database state.
-Uses server-rendered Org for full fidelity recovery."
+  "Refresh the buffer from database state."
   (interactive)
   (templedb-agent--send
    "session.open"
@@ -490,22 +490,16 @@ Uses server-rendered Org for full fidelity recovery."
            (org-text (alist-get 'org result)))
        (setq templedb-agent--status (alist-get 'status session))
        (setq templedb-agent--project
-             (or (alist-get 'project_slug session)
-                 templedb-agent--project))
+             (or (alist-get 'project_slug session) templedb-agent--project))
        (setq templedb-agent--provider
-             (or (alist-get 'provider_name session)
-                 templedb-agent--provider))
-       ;; Replace buffer with server-rendered Org
+             (or (alist-get 'provider_name session) templedb-agent--provider))
        (when org-text
-         (let ((inhibit-read-only t)
-               (pos (point)))
+         (let ((inhibit-read-only t) (pos (point)))
            (erase-buffer)
            (insert org-text)
            (goto-char (min pos (point-max)))))))))
 
-;;;; ═══════════════════════════════════════════════════════════════
 ;;;; Session management
-;;;; ═══════════════════════════════════════════════════════════════
 
 (defun templedb-agent--project-slugs ()
   "Get list of project slugs."
@@ -521,6 +515,34 @@ Uses server-rendered Org for full fidelity recovery."
           (nreverse slugs)))
     (error nil)))
 
+(defun templedb-agent--wait-and-create-session (buf &optional attempts)
+  "Wait for the agent process to be ready, then create a session."
+  (let ((n (or attempts 0)))
+    (if (and (buffer-live-p buf)
+             (with-current-buffer buf
+               (and templedb-agent--process
+                    (process-live-p templedb-agent--process))))
+        (with-current-buffer buf
+          (templedb-agent--send
+           "session.create"
+           `((provider . ,templedb-agent--provider)
+             (project . ,templedb-agent--project))
+           (lambda (result)
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (setq templedb-agent--session-id (alist-get 'id result))
+                 (templedb-agent--render-buffer)
+                 (templedb-agent--set-now "Ready")
+                 (message "Temple Agent session %d created"
+                          templedb-agent--session-id))))))
+      (if (< n 10)
+          (run-at-time 0.2 nil
+                       (lambda ()
+                         (templedb-agent--wait-and-create-session buf (1+ n))))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (templedb-agent--set-now "Failed to start agent process")))))))
+
 ;;;###autoload
 (defun templedb-agent-new (project)
   "Start a new Temple Agent session for PROJECT."
@@ -531,24 +553,51 @@ Uses server-rendered Org for full fidelity recovery."
     (switch-to-buffer buf)
     (templedb-agent-mode)
     (setq templedb-agent--project project)
+    (setq templedb-agent--projects (list project))
+    (setq templedb-agent--context-config nil)
+    (templedb-agent--ensure-context-config project)
     (setq templedb-agent--provider templedb-agent-default-provider)
-    ;; Start process and create session
+    (templedb-agent--render-buffer)
+    (templedb-agent--set-now "Starting agent...")
     (templedb-agent--start-process)
-    ;; Give process a moment to start
-    (run-at-time 0.3 nil
-                 (lambda ()
-                   (when (buffer-live-p buf)
-                     (with-current-buffer buf
-                       (templedb-agent--send
-                        "session.create"
-                        `((provider . ,templedb-agent--provider)
-                          (project . ,templedb-agent--project))
-                        (lambda (result)
-                          (setq templedb-agent--session-id (alist-get 'id result))
-                          (templedb-agent--render-buffer)
-                          (templedb-agent--set-now "Ready")
-                          (message "Temple Agent session %d created"
-                                   templedb-agent--session-id)))))))))
+    (templedb-agent--wait-and-create-session buf)))
+
+(defun templedb-agent--wait-and-open-session (buf session-id &optional attempts)
+  "Wait for the agent process, then open a session."
+  (let ((n (or attempts 0)))
+    (if (and (buffer-live-p buf)
+             (with-current-buffer buf
+               (and templedb-agent--process
+                    (process-live-p templedb-agent--process))))
+        (with-current-buffer buf
+          (templedb-agent--send
+           "session.open"
+           `((session_id . ,session-id))
+           (lambda (result)
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (let ((session (alist-get 'session result))
+                       (org-text (alist-get 'org result)))
+                   (setq templedb-agent--project
+                         (or (alist-get 'project_slug session) ""))
+                   (setq templedb-agent--provider
+                         (alist-get 'provider_name session))
+                   (setq templedb-agent--status
+                         (alist-get 'status session))
+                   (if org-text
+                       (let ((inhibit-read-only t))
+                         (erase-buffer)
+                         (insert org-text))
+                     (templedb-agent--render-buffer))
+                   (message "Temple Agent session %d opened (%s)"
+                            session-id (alist-get 'status session))))))))
+      (if (< n 10)
+          (run-at-time 0.2 nil
+                       (lambda ()
+                         (templedb-agent--wait-and-open-session buf session-id (1+ n))))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (templedb-agent--set-now "Failed to start agent process")))))))
 
 ;;;###autoload
 (defun templedb-agent-open (session-id)
@@ -559,33 +608,10 @@ Uses server-rendered Org for full fidelity recovery."
     (switch-to-buffer buf)
     (templedb-agent-mode)
     (setq templedb-agent--session-id session-id)
+    (templedb-agent--render-buffer)
+    (templedb-agent--set-now "Loading session...")
     (templedb-agent--start-process)
-    (run-at-time 0.3 nil
-                 (lambda ()
-                   (when (buffer-live-p buf)
-                     (with-current-buffer buf
-                       (templedb-agent--send
-                        "session.open"
-                        `((session_id . ,session-id))
-                        (lambda (result)
-                          (let ((session (alist-get 'session result))
-                                (org-text (alist-get 'org result)))
-                            (setq templedb-agent--project
-                                  (or (alist-get 'project_slug session) ""))
-                            (setq templedb-agent--provider
-                                  (alist-get 'provider_name session))
-                            (setq templedb-agent--status
-                                  (alist-get 'status session))
-                            ;; Use server-rendered Org for full recovery
-                            (if org-text
-                                (let ((inhibit-read-only t))
-                                  (erase-buffer)
-                                  (insert org-text))
-                              ;; Fallback: render locally
-                              (templedb-agent--render-buffer))
-                            (message "Temple Agent session %d opened (%s)"
-                                     session-id
-                                     (alist-get 'status session)))))))))))
+    (templedb-agent--wait-and-open-session buf session-id)))
 
 ;;;###autoload
 (defun templedb-agent-list ()
@@ -608,12 +634,12 @@ Uses server-rendered Org for full fidelity recovery."
 (defun templedb-agent-doctor ()
   "Check Temple Agent provider health."
   (interactive)
-  (let ((output (with-temp-buffer
-                  (call-process templedb-agent-executable nil t nil
-                                "ai" "agent" "doctor"
-                                "--provider" templedb-agent-default-provider)
-                  (buffer-string))))
-    (message "%s" (string-trim output))))
+  (message "%s" (string-trim
+                 (with-temp-buffer
+                   (call-process templedb-agent-executable nil t nil
+                                 "ai" "agent" "doctor"
+                                 "--provider" templedb-agent-default-provider)
+                   (buffer-string)))))
 
 ;;;###autoload
 (defun templedb-agent-fork ()
@@ -625,42 +651,392 @@ Uses server-rendered Org for full fidelity recovery."
    "session.fork"
    `((session_id . ,templedb-agent--session-id))
    (lambda (result)
-     (let ((new-id (alist-get 'id result)))
-       (templedb-agent-open new-id)
-       (message "Forked session %d -> %d"
-                templedb-agent--session-id new-id)))))
+     (templedb-agent-open (alist-get 'id result)))))
 
 ;;;###autoload
 (defun templedb-agent-switch ()
   "Switch to a different agent session."
   (interactive)
-  ;; Get list of sessions via CLI
   (let* ((output (with-temp-buffer
                    (call-process templedb-agent-executable nil t nil
                                  "ai" "agent" "sessions" "--json")
                    (buffer-string)))
-         (sessions (condition-case nil
-                       (json-read-from-string output)
-                     (error nil))))
+         (sessions (condition-case nil (json-read-from-string output) (error nil))))
     (if (or (null sessions) (= (length sessions) 0))
         (message "No sessions to switch to")
-      (let* ((choices (mapcar
-                       (lambda (s)
-                         (format "%d: %s [%s]"
-                                 (alist-get 'id s)
-                                 (or (alist-get 'title s) "(untitled)")
-                                 (alist-get 'status s)))
-                       (append sessions nil)))
+      (let* ((choices (mapcar (lambda (s)
+                                (format "%d: %s [%s]"
+                                        (alist-get 'id s)
+                                        (or (alist-get 'title s) "(untitled)")
+                                        (alist-get 'status s)))
+                              (append sessions nil)))
              (choice (completing-read "Session: " choices nil t))
              (id (string-to-number choice)))
         (templedb-agent-open id)))))
 
-;;;; ═══════════════════════════════════════════════════════════════
 ;;;; Context basket
-;;;; ═══════════════════════════════════════════════════════════════
+
+(defvar templedb-agent--context-items
+  '((project_prompt . "Project prompt (rules, workflow, MCP tools)")
+    (recent_commits . "Recent commits")
+    (file_tree      . "Full file tree")
+    (schema         . "Language breakdown")
+    (env            . "Environment")
+    (selected_files . "Selected files (contents)"))
+  "Available context item types and labels.")
+
+(defvar templedb-agent--context-defaults
+  '((project_prompt . t)
+    (recent_commits . t)
+    (file_tree      . nil)
+    (schema         . nil)
+    (env            . nil)
+    (selected_files . nil))
+  "Default toggle state for context items.")
+
+(defun templedb-agent--ensure-context-config (slug)
+  "Ensure SLUG has an entry in the context config."
+  (unless (assoc slug templedb-agent--context-config)
+    (push (cons slug (copy-alist templedb-agent--context-defaults))
+          templedb-agent--context-config)))
+
+(defun templedb-agent--query-project-stats (slug)
+  "Query TempleDB for project stats. Returns plist with :files :lines :commits :envs :name.
+Uses sqlite3 directly for speed (no process startup)."
+  (or (cdr (assoc slug templedb-agent--project-stats))
+      (condition-case nil
+          (let* ((db-path (or (and (boundp 'templedb-db-path) templedb-db-path)
+                              (expand-file-name "~/.local/share/templedb/templedb.sqlite")))
+                 (sqlite3 (or (executable-find "sqlite3")
+                              (car (file-expand-wildcards "/nix/store/*-sqlite-*-bin/bin/sqlite3"))
+                              "sqlite3"))
+                 (sql (format "SELECT
+                    p.name,
+                    (SELECT COUNT(*) FROM project_files WHERE project_id=p.id AND status='active') as files,
+                    (SELECT COALESCE(SUM(lines_of_code),0) FROM project_files WHERE project_id=p.id) as lines,
+                    (SELECT COUNT(*) FROM vcs_commits WHERE project_id=p.id) as commits,
+                    (SELECT COUNT(*) FROM nix_environments WHERE project_id=p.id AND is_active=1) as envs,
+                    (SELECT COUNT(*) FROM project_env_vars WHERE project_id=p.id) as vars
+                  FROM projects p WHERE p.slug='%s'" slug))
+                 (output (with-temp-buffer
+                           (call-process sqlite3 nil t nil "-separator" "|" db-path sql)
+                           (buffer-string)))
+                 (parts (split-string (string-trim output) "|")))
+            (when (>= (length parts) 6)
+              (let ((stats (list :name (nth 0 parts)
+                                 :files (string-to-number (nth 1 parts))
+                                 :lines (string-to-number (nth 2 parts))
+                                 :commits (string-to-number (nth 3 parts))
+                                 :envs (string-to-number (nth 4 parts))
+                                 :vars (string-to-number (nth 5 parts)))))
+                (push (cons slug stats) templedb-agent--project-stats)
+                stats)))
+        (error nil))))
+
+(defun templedb-agent--context-item-label (key stats)
+  "Return an enriched label for context item KEY using STATS."
+  (let ((files (or (plist-get stats :files) 0))
+        (lines (or (plist-get stats :lines) 0))
+        (commits (or (plist-get stats :commits) 0))
+        (envs (or (plist-get stats :envs) 0))
+        (vars (or (plist-get stats :vars) 0)))
+    (pcase key
+      ('project_prompt
+       "Project prompt -- FUSE paths, MCP tools, workflow rules")
+      ('recent_commits
+       (format "Recent commits -- last 5 of %d total" commits))
+      ('file_tree
+       (format "Full file tree -- %d files, %s lines"
+               files (templedb-agent--format-number lines)))
+      ('schema
+       "Language breakdown -- files and lines per language")
+      ('env
+       (if (> (+ envs vars) 0)
+           (format "Environment -- %d envs, %d vars" envs vars)
+         "Environment -- none configured"))
+      ('selected_files
+       "Selected files -- include full source of chosen files")
+      (_ (or (cdr (assq key templedb-agent--context-items)) (symbol-name key))))))
+
+(defun templedb-agent--format-number (n)
+  "Format number N with K/M suffix."
+  (cond
+   ((>= n 1000000) (format "%.1fM" (/ n 1000000.0)))
+   ((>= n 1000) (format "%.1fK" (/ n 1000.0)))
+   (t (number-to-string n))))
+
+(defun templedb-agent--query-detail (sql)
+  "Run a quick SQL query against TempleDB, return lines."
+  (condition-case nil
+      (let* ((db-path (or (and (boundp 'templedb-db-path) templedb-db-path)
+                          (expand-file-name "~/.local/share/templedb/templedb.sqlite")))
+             (sqlite3 (or (executable-find "sqlite3")
+                          (car (file-expand-wildcards "/nix/store/*-sqlite-*-bin/bin/sqlite3"))
+                          "sqlite3")))
+        (with-temp-buffer
+          (call-process sqlite3 nil t nil "-separator" "|" db-path sql)
+          (string-trim (buffer-string))))
+    (error "")))
+
+(defun templedb-agent--insert-context-basket ()
+  "Insert the context basket with per-project Org sub-trees and inline previews."
+  (let ((projects (or templedb-agent--projects
+                      (when templedb-agent--project
+                        (list templedb-agent--project)))))
+    (if (not projects)
+        (insert "(no projects -- use , x a to add one)\n")
+      (dolist (slug projects)
+        (templedb-agent--ensure-context-config slug)
+        (let* ((items (cdr (assoc slug templedb-agent--context-config)))
+               (stats (templedb-agent--query-project-stats slug))
+               (name (or (plist-get stats :name) slug))
+               (files (or (plist-get stats :files) 0))
+               (lines (or (plist-get stats :lines) 0))
+               (commits (or (plist-get stats :commits) 0))
+               (envs (or (plist-get stats :envs) 0))
+               (vars (or (plist-get stats :vars) 0)))
+
+          ;; Project heading with properties
+          (insert (format "** %s\n" name))
+          (insert ":PROPERTIES:\n")
+          (insert (format ":SLUG: %s\n" slug))
+          (insert (format ":FILES: %d\n" files))
+          (insert (format ":LINES: %s\n" (templedb-agent--format-number lines)))
+          (insert (format ":COMMITS: %d\n" commits))
+          (insert ":END:\n\n")
+
+          ;; Each context item as a sub-heading with preview
+          ;; --- Project Prompt ---
+          (let ((val (alist-get 'project_prompt items)))
+            (insert (format "*** %s Project Prompt\n"
+                            (if val "ACTIVE" "OFF")))
+            (insert "FUSE paths, MCP tools, workflow rules, vibe-style context.\n")
+            (insert "Same prompt used by =templedb ai vibe start=.\n\n"))
+
+          ;; --- Recent Commits ---
+          (let ((val (alist-get 'recent_commits items)))
+            (insert (format "*** %s Recent Commits (%d total)\n"
+                            (if val "ACTIVE" "OFF") commits))
+            (when (and val (> commits 0))
+              (let ((output (templedb-agent--query-detail
+                             (format "SELECT substr(commit_hash,1,8) || ' ' || substr(commit_message,1,60) || ' (' || commit_timestamp || ')'
+                                      FROM vcs_commits WHERE project_id=(SELECT id FROM projects WHERE slug='%s')
+                                      ORDER BY commit_timestamp DESC LIMIT 5" slug))))
+                (when (not (string-empty-p output))
+                  (dolist (line (split-string output "\n"))
+                    (insert (format "- ~%s~\n" line)))))
+              (insert "\n")))
+
+          ;; --- File Tree ---
+          (let ((val (alist-get 'file_tree items)))
+            (insert (format "*** %s File Tree (%d files, %s lines)\n"
+                            (if val "ACTIVE" "OFF")
+                            files (templedb-agent--format-number lines)))
+            (when val
+              (let ((output (templedb-agent--query-detail
+                             (format "SELECT DISTINCT
+                                        CASE WHEN instr(file_path,'/')>0
+                                             THEN substr(file_path,1,instr(file_path,'/')-1)
+                                             ELSE file_path END as dir
+                                      FROM project_files
+                                      WHERE project_id=(SELECT id FROM projects WHERE slug='%s')
+                                        AND status='active'
+                                      ORDER BY dir LIMIT 20" slug))))
+                (when (not (string-empty-p output))
+                  (insert "Top-level:\n")
+                  (dolist (dir (split-string output "\n"))
+                    (insert (format "- =%s/=\n" dir)))
+                  (insert "\n")))))
+
+          ;; --- Language Breakdown ---
+          (let ((val (alist-get 'schema items)))
+            (insert (format "*** %s Language Breakdown\n"
+                            (if val "ACTIVE" "OFF")))
+            (when val
+              (let ((output (templedb-agent--query-detail
+                             (format "SELECT
+                                CASE
+                                  WHEN file_path LIKE '%%.py' THEN 'Python'
+                                  WHEN file_path LIKE '%%.js' THEN 'JavaScript'
+                                  WHEN file_path LIKE '%%.ts' OR file_path LIKE '%%.tsx' THEN 'TypeScript'
+                                  WHEN file_path LIKE '%%.nix' THEN 'Nix'
+                                  WHEN file_path LIKE '%%.el' THEN 'Emacs Lisp'
+                                  WHEN file_path LIKE '%%.json' THEN 'JSON'
+                                  WHEN file_path LIKE '%%.sql' THEN 'SQL'
+                                  WHEN file_path LIKE '%%.css' THEN 'CSS'
+                                  WHEN file_path LIKE '%%.html' THEN 'HTML'
+                                  ELSE 'Other'
+                                END || '|' || COUNT(*) || '|' || COALESCE(SUM(lines_of_code),0)
+                              FROM project_files
+                              WHERE project_id=(SELECT id FROM projects WHERE slug='%s') AND status='active'
+                              GROUP BY 1 ORDER BY COUNT(*) DESC" slug))))
+                (when (not (string-empty-p output))
+                  (insert "| Language | Files | Lines |\n")
+                  (insert "|----------+-------+-------|\n")
+                  (dolist (line (split-string output "\n"))
+                    (let ((cols (split-string line "|")))
+                      (when (>= (length cols) 3)
+                        (insert (format "| %s | %s | %s |\n"
+                                        (nth 0 cols) (nth 1 cols) (nth 2 cols))))))
+                  (insert "\n")))))
+
+          ;; --- Environment ---
+          (let ((val (alist-get 'env items)))
+            (insert (format "*** %s Environment (%d envs, %d vars)\n"
+                            (if val "ACTIVE" "OFF") envs vars))
+            (when (and val (> (+ envs vars) 0))
+              (when (> envs 0)
+                (let ((output (templedb-agent--query-detail
+                               (format "SELECT env_name || ': ' || COALESCE(description,'')
+                                        FROM nix_environments
+                                        WHERE project_id=(SELECT id FROM projects WHERE slug='%s') AND is_active=1" slug))))
+                  (when (not (string-empty-p output))
+                    (insert "Nix environments:\n")
+                    (dolist (line (split-string output "\n"))
+                      (insert (format "- %s\n" line))))))
+              (when (> vars 0)
+                (let ((output (templedb-agent--query-detail
+                               (format "SELECT var_name || ': ' || COALESCE(description,'')
+                                        FROM project_env_vars
+                                        WHERE project_id=(SELECT id FROM projects WHERE slug='%s')
+                                        ORDER BY var_name LIMIT 10" slug))))
+                  (when (not (string-empty-p output))
+                    (insert "Variables:\n")
+                    (dolist (line (split-string output "\n"))
+                      (insert (format "- =%s=\n" line))))))
+              (insert "\n")))
+
+          ;; --- Selected Files ---
+          (let ((val (alist-get 'selected_files items)))
+            (insert (format "*** %s Selected Files\n"
+                            (if val "ACTIVE" "OFF")))
+            (insert "Use =, x b= to add current buffer or =, x v= for selection.\n\n"))
+
+          )))))
+
+(defun templedb-agent--render-context-section ()
+  "Re-render just the Context section in place."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^\\* Context\n\n" nil t)
+      (let ((start (point))
+            (end (if (re-search-forward "^\\* " nil t)
+                     (match-beginning 0) (point-max))))
+        (let ((inhibit-read-only t))
+          (delete-region start end)
+          (goto-char start)
+          (templedb-agent--insert-context-basket)
+          (insert "\n"))))))
+
+(defun templedb-agent--get-goal-text ()
+  "Get the text from the Goal section."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^\\* Goal\n\n" nil t)
+      (let ((start (point))
+            (end (if (re-search-forward "^\\* " nil t)
+                     (match-beginning 0) (point-max))))
+        (let ((text (string-trim (buffer-substring-no-properties start end))))
+          ;; Filter out the placeholder text
+          (if (string-match-p "^Set your goal here" text)
+              nil
+            (unless (string-empty-p text) text)))))))
+
+(defun templedb-agent--set-goal (text)
+  "Set the Goal section text."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^\\* Goal\n\n" nil t)
+      (let ((start (point))
+            (end (if (re-search-forward "^\\* " nil t)
+                     (match-beginning 0) (point-max))))
+        (let ((inhibit-read-only t))
+          (delete-region start end)
+          (goto-char start)
+          (insert text "\n\n"))))))
+
+(defun templedb-agent--auto-goal-from-message (text)
+  "Auto-set goal from first user message if goal is not already set."
+  (unless (templedb-agent--get-goal-text)
+    ;; Use first sentence or first 120 chars as goal
+    (let ((goal (if (string-match "[.!?]\s" text)
+                    (substring text 0 (1+ (match-beginning 0)))
+                  (if (> (length text) 120)
+                      (concat (substring text 0 120) "...")
+                    text))))
+      (templedb-agent--set-goal goal))))
+
+(defun templedb-agent--build-context-payload ()
+  "Build context payload from current config for sending to the service.
+Includes goal text and per-project context items."
+  (let ((projects-payload '())
+        (goal (templedb-agent--get-goal-text)))
+    (dolist (slug (or templedb-agent--projects
+                      (when templedb-agent--project
+                        (list templedb-agent--project))))
+      (let* ((items (cdr (assoc slug templedb-agent--context-config)))
+             (item-obj '()))
+        (dolist (pair items)
+          (push (cons (symbol-name (car pair)) (if (cdr pair) t :json-false))
+                item-obj))
+        (push `((slug . ,slug) (items . ,item-obj)) projects-payload)))
+    (let ((payload `((projects . ,(vconcat (nreverse projects-payload))))))
+      (when goal
+        (push (cons 'goal goal) payload))
+      payload)))
+
+(defun templedb-agent-add-project (project)
+  "Add PROJECT to the session context."
+  (interactive
+   (list (completing-read "Add project: " (templedb-agent--project-slugs) nil nil)))
+  (unless (member project templedb-agent--projects)
+    (push project templedb-agent--projects)
+    (templedb-agent--ensure-context-config project)
+    (templedb-agent--render-context-section)
+    (message "Added %s to context" project)))
+
+(defun templedb-agent-remove-project (project)
+  "Remove PROJECT from the session context."
+  (interactive
+   (list (completing-read "Remove project: " templedb-agent--projects nil t)))
+  (setq templedb-agent--projects (delete project templedb-agent--projects))
+  (setq templedb-agent--context-config
+        (assoc-delete-all project templedb-agent--context-config))
+  (when (equal project templedb-agent--project)
+    (setq templedb-agent--project (car templedb-agent--projects)))
+  (templedb-agent--render-context-section)
+  (message "Removed %s from context" project))
+
+(defun templedb-agent-toggle-context-item ()
+  "Toggle a context item on/off for a project."
+  (interactive)
+  (let* ((project (if (= (length templedb-agent--projects) 1)
+                      (car templedb-agent--projects)
+                    (completing-read "Project: " templedb-agent--projects nil t)))
+         (items (cdr (assoc project templedb-agent--context-config)))
+         (choices (mapcar (lambda (pair)
+                           (let* ((key (car pair))
+                                  (label (cdr pair))
+                                  (val (alist-get key items)))
+                             (format "[%s] %s" (if val "X" " ") label)))
+                         templedb-agent--context-items))
+         (choice (completing-read "Toggle: " choices nil t))
+         (idx (cl-position choice choices :test #'equal))
+         (key (car (nth idx templedb-agent--context-items))))
+    (let ((entry (assoc project templedb-agent--context-config)))
+      (when entry
+        (setf (alist-get key (cdr entry)) (not (alist-get key (cdr entry))))))
+    (templedb-agent--render-context-section)
+    (message "Toggled %s for %s" (cdr (nth idx templedb-agent--context-items)) project)))
+
+(defun templedb-agent-list-context ()
+  "Show current context projects."
+  (interactive)
+  (message "Context: %s"
+           (mapconcat #'identity (or templedb-agent--projects '("(none)")) ", ")))
 
 (defun templedb-agent-add-buffer ()
-  "Add current buffer's file to agent context."
+  "Add current buffer file to agent context."
   (interactive)
   (let ((file (buffer-file-name)))
     (if file
@@ -688,10 +1064,8 @@ Uses server-rendered Org for full fidelity recovery."
                                    (and (eq major-mode 'templedb-agent-mode)
                                         templedb-agent--session-id)))
                      (buffer-list))))
-    (unless agent-buf
-      (user-error "No active Temple Agent session"))
-    (unless sym
-      (user-error "No symbol at point"))
+    (unless agent-buf (user-error "No active Temple Agent session"))
+    (unless sym (user-error "No symbol at point"))
     (with-current-buffer agent-buf
       (templedb-agent--insert-conversation-entry
        "user" (format "What is `%s` at %s:%d?" sym file line))
@@ -702,13 +1076,10 @@ Uses server-rendered Org for full fidelity recovery."
        (lambda (_result) nil)))
     (switch-to-buffer-other-window agent-buf)))
 
-;;;; ═══════════════════════════════════════════════════════════════
 ;;;; Major mode
-;;;; ═══════════════════════════════════════════════════════════════
 
 (defvar templedb-agent-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Standard Emacs keys
     (define-key map (kbd "C-c C-c") #'templedb-agent-send)
     (define-key map (kbd "C-c C-k") #'templedb-agent-cancel)
     (define-key map (kbd "C-c C-r") #'templedb-agent-resume)
@@ -716,48 +1087,18 @@ Uses server-rendered Org for full fidelity recovery."
   "Keymap for `templedb-agent-mode'.")
 
 (define-derived-mode templedb-agent-mode org-mode "TAgent"
-  "Major mode for Temple Agent sessions.
-\\{templedb-agent-mode-map}"
+  "Major mode for Temple Agent sessions."
   (setq-local buffer-read-only nil)
-  ;; Keep org functionality but add our keys
+  ;; Raise undo limit -- streaming creates large entries
+  (setq-local undo-outer-limit 50000000)  ; 50MB
+  ;; Enable word wrap so long lines are visible
+  (visual-line-mode 1)
+  (setq-local word-wrap t)
+  (setq-local truncate-lines nil)
   (use-local-map (make-composed-keymap
-                  templedb-agent-mode-map
-                  org-mode-map)))
+                  templedb-agent-mode-map org-mode-map)))
 
-;;;; ═══════════════════════════════════════════════════════════════
-;;;; Spacemacs integration
-;;;; ═══════════════════════════════════════════════════════════════
-
-(defun templedb-agent--setup-spacemacs-keys ()
-  "Set up Spacemacs leader keys for Temple Agent."
-  (when (fboundp 'spacemacs/declare-prefix)
-    ;; Global keys under SPC a T A (agent sub-prefix)
-    (spacemacs/declare-prefix "aTA" "agent")
-    (spacemacs/set-leader-keys
-      "aTAn" 'templedb-agent-new
-      "aTAo" 'templedb-agent-open
-      "aTAl" 'templedb-agent-list
-      "aTAr" 'templedb-agent-resume
-      "aTAd" 'templedb-agent-doctor
-      "aTA?" 'templedb-agent-ask-about-point)
-
-    ;; Buffer-local keys for agent mode
-    (spacemacs/set-leader-keys-for-major-mode 'templedb-agent-mode
-      ;; Core
-      "RET" 'templedb-agent-send
-      "i"   'templedb-agent-guide
-      "c"   'templedb-agent-cancel
-      "r"   'templedb-agent-resume
-      "g"   'templedb-agent-refresh
-      ;; Context
-      "xb"  'templedb-agent-add-buffer
-      "xv"  'templedb-agent-add-region
-      ;; Sessions
-      "sn"  'templedb-agent-new
-      "ss"  'templedb-agent-switch
-      "sl"  'templedb-agent-list
-      "sf"  'templedb-agent-fork
-      "sq"  'templedb-agent-close)))
+;;;; Cleanup and debugging
 
 (defun templedb-agent-close ()
   "Close the current agent session and kill the buffer."
@@ -767,18 +1108,57 @@ Uses server-rendered Org for full fidelity recovery."
      "session.close"
      `((session_id . ,templedb-agent--session-id))
      (lambda (_result) nil)))
-  (when (and templedb-agent--process
-             (process-live-p templedb-agent--process))
+  (when (and templedb-agent--process (process-live-p templedb-agent--process))
     (delete-process templedb-agent--process))
   (kill-buffer))
 
-;; Auto-setup Spacemacs keys when loaded
-(with-eval-after-load 'spacemacs-bootstrap
-  (templedb-agent--setup-spacemacs-keys))
+(defun templedb-agent-debug ()
+  "Show debug info about the current agent session."
+  (interactive)
+  (let ((info (list
+               (format "Session ID: %s" templedb-agent--session-id)
+               (format "Status: %s" templedb-agent--status)
+               (format "Provider: %s" templedb-agent--provider)
+               (format "Projects: %s" templedb-agent--projects)
+               (format "Process: %s"
+                       (if (and templedb-agent--process
+                                (process-live-p templedb-agent--process))
+                           (format "alive (pid %s)"
+                                   (process-id templedb-agent--process))
+                         "dead"))
+               (format "Pending requests: %d"
+                       (length templedb-agent--pending-requests))
+               (format "Streaming: %s"
+                       (if templedb-agent--streaming-marker "yes" "no"))
+               (format "Stderr: %s"
+                       (if-let ((sb (get-buffer "*temple-agent-stderr*")))
+                           (with-current-buffer sb
+                             (let ((s (string-trim (buffer-string))))
+                               (if (string-empty-p s) "(empty)"
+                                 (car (last (split-string s "\n"))))))
+                         "(no buffer)")))))
+    (message "%s" (mapconcat #'identity info "\n"))
+    (with-current-buffer (get-buffer-create "*Temple Agent Debug*")
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (dolist (line info) (insert line "\n"))
+        (insert "\n--- Stderr ---\n")
+        (when-let ((sb (get-buffer "*temple-agent-stderr*")))
+          (insert (with-current-buffer sb (buffer-string)))))
+      (special-mode)
+      (display-buffer (current-buffer)))))
 
-;; Also try at load time (for non-lazy loading)
-(when (fboundp 'spacemacs/set-leader-keys)
-  (templedb-agent--setup-spacemacs-keys))
+(defun templedb-agent-kill-process ()
+  "Force-kill the agent process (unstick a frozen session)."
+  (interactive)
+  (when (and templedb-agent--process (process-live-p templedb-agent--process))
+    (kill-process templedb-agent--process)
+    (message "Agent process killed"))
+  (setq templedb-agent--process nil)
+  (templedb-agent--set-now "Process killed (use , r to resume or C-c C-c to send new message)")
+  (templedb-agent--set-status "interrupted"))
+
+;; Spacemacs keys are registered in packages.el (the proper Spacemacs way).
 
 (provide 'templedb-agent)
 
