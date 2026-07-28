@@ -19,6 +19,19 @@ from agent.events import (
 _logger = logging.getLogger(__name__)
 
 
+def _retry_on_lock(fn, max_retries=3, delay=0.5):
+    """Retry a DB operation on sqlite3.OperationalError (database locked)."""
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                _logger.warning(f"DB locked, retry {attempt+1}/{max_retries} in {delay}s")
+                time.sleep(delay * (attempt + 1))
+            else:
+                raise
+
+
 def _now():
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 

@@ -157,7 +157,7 @@
        (templedb-agent--set-now (or summary "Working..."))
        (templedb-agent--set-status "running"))
       ("run.completed"
-       (templedb-agent--set-now "Ready")
+       (templedb-agent--set-now (or summary "Ready"))
        (templedb-agent--set-status "waiting")
        (templedb-agent--finalize-streaming))
       ("run.failed"
@@ -351,7 +351,8 @@ Uses `with-undo-amalgamate' so all streaming chunks become one undo entry."
         (goto-char templedb-agent--streaming-marker)
         (let ((inhibit-read-only t))
           (insert text)
-          (set-marker templedb-agent--streaming-marker (point)))))))
+          (set-marker templedb-agent--streaming-marker (point)))))
+    (templedb-agent--auto-scroll))))
 
 (defun templedb-agent--finalize-streaming ()
   "Finalize the streaming response."
@@ -367,15 +368,16 @@ Uses `with-undo-amalgamate' so all streaming chunks become one undo entry."
 
 (defun templedb-agent--insert-rich-tool (summary data status)
   "Insert a rich tool heading with input details.
-Shows tool name, input as code block, status indicator."
+Uses TOOL_ID property for reliable matching when completing."
   (let ((tool-name (alist-get 'tool_name data))
         (tool-input (alist-get 'tool_input data))
-        (tool-id (alist-get 'tool_id data)))
+        (tool-id (or (alist-get 'tool_id data) (format "t%d" (random 100000)))))
     (with-undo-amalgamate
       (save-excursion
         (goto-char (templedb-agent--end-of-current-exchange))
         (let ((inhibit-read-only t))
           (insert (format "\n*** %s %s\n" status (or summary tool-name "tool")))
+          (insert (format ":PROPERTIES:\n:TOOL_ID: %s\n:END:\n" tool-id))
           (when (and tool-input (not (string-empty-p tool-input)))
             (let ((lang (cond
                          ((member tool-name '("Bash" "bash")) "shell")
@@ -383,35 +385,60 @@ Shows tool name, input as code block, status indicator."
                          (t ""))))
               (insert (format "#+begin_src %s\n%s\n#+end_src\n"
                               lang
-                              (templedb-agent--truncate-output tool-input 500))))))))))
+                              (templedb-agent--truncate-output tool-input 500)))))))))
+  ;; Auto-scroll to show latest activity
+  (templedb-agent--auto-scroll))
 
 (defun templedb-agent--complete-rich-tool (summary data new-status)
-  "Update a tool heading to completed/failed and add output."
+  "Update a tool heading to completed/failed and add output.
+Matches by TOOL_ID property for reliability, falls back to summary text."
   (let ((tool-output (alist-get 'tool_output data))
-        (duration (alist-get 'duration data)))
+        (tool-id (alist-get 'tool_id data))
+        (duration (alist-get 'duration data))
+        (found nil))
     (save-excursion
       (goto-char (point-max))
-      ;; Find the matching RUNNING heading
-      (when (re-search-backward
-             (format "^\\*\\*\\* RUNNING %s$"
-                     (regexp-quote (or summary "")))
-             nil t)
+      ;; Try matching by TOOL_ID property first
+      (when tool-id
+        (goto-char (point-max))
+        (while (and (not found)
+                    (re-search-backward (format ":TOOL_ID: %s" (regexp-quote tool-id)) nil t))
+          ;; Found the property — go back to the heading
+          (when (re-search-backward "^\\*\\*\\* RUNNING " nil t)
+            (setq found t))))
+      ;; Fallback: match by summary text
+      (unless found
+        (goto-char (point-max))
+        (when (re-search-backward
+               (format "^\\*\\*\\* RUNNING %s$"
+                       (regexp-quote (or summary "")))
+               nil t)
+          (setq found t)))
+      (when found
         (let ((inhibit-read-only t))
-          ;; Update status with duration
           (let ((status-str (if duration
                                 (format "%s %s (%.1fs)" new-status (or summary "") duration)
                               (format "%s %s" new-status (or summary "")))))
+            (looking-at "^\\*\\*\\* RUNNING .*$")
             (replace-match (format "*** %s" status-str) t t))
-          ;; Add output after the src block (or after heading if no src block)
+          ;; Skip past properties and src block
           (forward-line 1)
-          ;; Skip past any existing src block
+          (when (looking-at "^:PROPERTIES:")
+            (re-search-forward "^:END:" nil t)
+            (forward-line 1))
           (when (looking-at "^#\\+begin_src")
             (re-search-forward "^#\\+end_src" nil t)
             (forward-line 1))
-          ;; Insert output
           (when (and tool-output (not (string-empty-p tool-output)))
             (insert (format "#+begin_example\n%s\n#+end_example\n"
                             (templedb-agent--truncate-output tool-output 1000)))))))))
+
+(defun templedb-agent--auto-scroll ()
+  "Scroll the agent buffer window to show the latest content."
+  (when-let ((win (get-buffer-window (current-buffer))))
+    (with-selected-window win
+      (goto-char (point-max))
+      (recenter -3))))
 
 (defun templedb-agent--truncate-output (text max-len)
   "Truncate TEXT for display, showing line count if truncated."
