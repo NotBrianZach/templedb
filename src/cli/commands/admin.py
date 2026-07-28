@@ -43,6 +43,15 @@ def register(cli):
     integrity_p.add_argument('--db-path', help='Database path (default: auto)')
     cli.commands['admin.db.integrity'] = db_cmd.integrity
 
+    check_p = db_sub.add_parser('check', help='Comprehensive DB health check (integrity, locks, WAL, processes)')
+    check_p.add_argument('--db-path', help='Database path (default: auto)')
+    cli.commands['admin.db.check'] = db_cmd.check
+
+    repair_p = db_sub.add_parser('repair', help='Repair database via dump/restore (fixes corruption)')
+    repair_p.add_argument('--db-path', help='Database path (default: auto)')
+    repair_p.add_argument('-y', '--yes', action='store_true', help='Skip confirmation prompt')
+    cli.commands['admin.db.repair'] = db_cmd.repair
+
     # --- admin cache ---
     cache_cmd = CacheCommands()
     cache_parser = subparsers.add_parser('cache', help='Manage deployment cache')

@@ -4,6 +4,9 @@ Single writer pattern: all agent table mutations go through this module.
 Uses db_utils for connection pooling and transactions.
 """
 import json
+import logging
+import sqlite3
+import time
 import uuid
 from datetime import datetime
 
@@ -13,9 +16,28 @@ from agent.events import (
     RUN_STATUS_INTERRUPTED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED,
 )
 
+_logger = logging.getLogger(__name__)
+
 
 def _now():
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _retry_on_lock(fn, max_retries=3, base_delay=0.5):
+    """Retry a DB operation on OperationalError (database locked).
+
+    Uses exponential backoff. Prevents agent sessions from dying
+    when the FUSE mount or GUI holds a brief write lock.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower() or attempt == max_retries:
+                raise
+            delay = base_delay * (2 ** attempt)
+            _logger.warning(f"DB locked (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay:.1f}s")
+            time.sleep(delay)
 
 
 # --- Providers ---
@@ -98,11 +120,11 @@ def list_sessions(project_id=None, status=None, limit=50):
 
 
 def update_session_status(session_id, status):
-    """Update session status."""
-    execute(
+    """Update session status. Retries on lock to avoid losing state transitions."""
+    _retry_on_lock(lambda: execute(
         "UPDATE agent_sessions SET status = ?, updated_at = ? WHERE id = ?",
         (status, _now(), session_id),
-    )
+    ))
 
 
 def update_session_external_id(session_id, external_session_id):
@@ -135,11 +157,11 @@ def create_run(session_id):
 
 
 def complete_run(run_id, status=RUN_STATUS_COMPLETED, error_text=None):
-    """Mark a run as completed/failed/interrupted."""
-    execute(
+    """Mark a run as completed/failed/interrupted. Retries on lock."""
+    _retry_on_lock(lambda: execute(
         "UPDATE agent_runs SET status = ?, completed_at = ?, error_text = ? WHERE id = ?",
         (status, _now(), error_text, run_id),
-    )
+    ))
 
 
 def get_run(run_id):
@@ -185,11 +207,15 @@ def add_message(session_id, role, content_text, run_id=None, content_format="org
 
 
 def update_message_content(message_id, content_text):
-    """Update message content (for streaming accumulation)."""
-    execute(
+    """Update message content (for streaming accumulation).
+
+    Retries on DB lock since this is called frequently during streaming
+    and is most likely to collide with FUSE/GUI writes.
+    """
+    _retry_on_lock(lambda: execute(
         "UPDATE agent_messages SET content_text = ?, updated_at = ? WHERE id = ?",
         (content_text, _now(), message_id),
-    )
+    ))
 
 
 def get_messages(session_id, limit=200):
@@ -211,32 +237,37 @@ def get_message(message_id):
 # --- Events ---
 
 def add_event(run_id, event_type, summary=None, payload=None, raw_payload=None):
-    """Add an event to a run. Auto-assigns sequence number. Returns event row."""
-    # Get next sequence from run's counter
-    row = query_one("SELECT last_event_sequence FROM agent_runs WHERE id = ?", (run_id,))
-    if not row:
-        raise ValueError(f"Run {run_id} not found")
+    """Add an event to a run. Auto-assigns sequence number. Returns event row.
 
-    seq = row["last_event_sequence"] + 1
+    Retries on DB lock since events stream in rapidly during agent runs.
+    """
+    def _do():
+        row = query_one("SELECT last_event_sequence FROM agent_runs WHERE id = ?", (run_id,))
+        if not row:
+            raise ValueError(f"Run {run_id} not found")
 
-    payload_json = json.dumps(payload) if payload else None
-    raw_json = json.dumps(raw_payload) if raw_payload else None
+        seq = row["last_event_sequence"] + 1
 
-    event_id = execute(
-        """INSERT INTO agent_events
-           (run_id, sequence_number, event_type, summary, payload_json, raw_payload_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (run_id, seq, event_type, summary, payload_json, raw_json, _now()),
-    )
+        payload_json = json.dumps(payload) if payload else None
+        raw_json = json.dumps(raw_payload) if raw_payload else None
 
-    # Update run's sequence counter
-    execute(
-        "UPDATE agent_runs SET last_event_sequence = ? WHERE id = ?",
-        (seq, run_id),
-        commit=False,
-    )
+        event_id = execute(
+            """INSERT INTO agent_events
+               (run_id, sequence_number, event_type, summary, payload_json, raw_payload_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, seq, event_type, summary, payload_json, raw_json, _now()),
+        )
 
-    return query_one("SELECT * FROM agent_events WHERE id = ?", (event_id,))
+        # Update run's sequence counter
+        execute(
+            "UPDATE agent_runs SET last_event_sequence = ? WHERE id = ?",
+            (seq, run_id),
+            commit=False,
+        )
+
+        return query_one("SELECT * FROM agent_events WHERE id = ?", (event_id,))
+
+    return _retry_on_lock(_do)
 
 
 def get_events_since(run_id, since_sequence=0, limit=500):

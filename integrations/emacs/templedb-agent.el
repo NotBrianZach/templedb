@@ -286,44 +286,58 @@
         (concat (substring first-line 0 70) "...")
       first-line)))
 
-(defun templedb-agent--insert-before-next-prompt (text)
-  "Insert TEXT just before the * Next Prompt heading."
+(defun templedb-agent--end-of-conversation ()
+  "Return point just before * Next Prompt (for new exchange headings)."
   (save-excursion
     (goto-char (point-min))
     (if (re-search-forward "^\\* Next Prompt" nil t)
-        (progn (forward-line -1)
-               (let ((inhibit-read-only t)) (insert text)))
-      (goto-char (point-max))
-      (let ((inhibit-read-only t)) (insert text)))))
+        (progn (beginning-of-line) (point))
+      (point-max))))
+
+(defun templedb-agent--end-of-current-exchange ()
+  "Return point at end of current exchange (last ** heading).
+This is where assistant/tool content should be inserted --
+before the next ** heading or before * Next Prompt."
+  (save-excursion
+    (let ((conversation-end (templedb-agent--end-of-conversation)))
+      ;; Go to end of conversation, search backward for the last ** heading
+      (goto-char conversation-end)
+      (if (re-search-backward "^\\*\\* " nil t)
+          (progn
+            ;; Found the last ** heading. Now find where this exchange ends:
+            ;; either at the next ** heading or at * Next Prompt
+            (forward-line 1)
+            (if (re-search-forward "^\\*\\* \\|^\\* " nil t)
+                (progn (beginning-of-line) (point))
+              conversation-end))
+        ;; No ** heading found, use end of conversation
+        conversation-end))))
 
 (defun templedb-agent--insert-conversation-entry (role text)
   "Insert a conversation entry under * Conversation.
-User messages create a new exchange group heading (level 2).
-Assistant/tool entries go under the current exchange (level 3)."
+User messages create a new exchange group heading (level 2) at the end.
+Assistant/tool entries go at the end of the current exchange (level 3)."
   (if (equal role "user")
-      ;; User message: create new exchange group
-      (templedb-agent--insert-before-next-prompt
-       (format "\n** %s\n\n*** User\n\n%s\n"
-               (templedb-agent--exchange-title text) text))
-    ;; Non-user: insert as level 3 under current exchange
-    (templedb-agent--insert-before-next-prompt
-     (format "\n*** %s\n\n%s\n" (capitalize role) text))))
+      ;; User message: new exchange at end of conversation
+      (save-excursion
+        (goto-char (templedb-agent--end-of-conversation))
+        (let ((inhibit-read-only t))
+          (insert (format "\n** %s\n\n*** User\n\n%s\n"
+                          (templedb-agent--exchange-title text) text))))
+    ;; Non-user: insert at end of current exchange
+    (save-excursion
+      (goto-char (templedb-agent--end-of-current-exchange))
+      (let ((inhibit-read-only t))
+        (insert (format "\n*** %s\n\n%s\n" (capitalize role) text))))))
 
 (defun templedb-agent--start-streaming ()
-  "Prepare for streaming assistant response."
+  "Prepare for streaming assistant response within the current exchange."
   (setq templedb-agent--streaming-text "")
   (save-excursion
-    (goto-char (point-min))
-    (if (re-search-forward "^\\* Next Prompt" nil t)
-        (progn
-          (forward-line -1)
-          (let ((inhibit-read-only t))
-            (insert "\n*** Assistant\n\n")
-            (setq templedb-agent--streaming-marker (point-marker))))
-      (goto-char (point-max))
-      (let ((inhibit-read-only t))
-        (insert "\n*** Assistant\n\n")
-        (setq templedb-agent--streaming-marker (point-marker))))))
+    (goto-char (templedb-agent--end-of-current-exchange))
+    (let ((inhibit-read-only t))
+      (insert "\n*** Assistant\n\n")
+      (setq templedb-agent--streaming-marker (point-marker)))))
 
 (defun templedb-agent--append-streaming (text)
   "Append TEXT to the streaming assistant response.
@@ -359,10 +373,7 @@ Shows tool name, input as code block, status indicator."
         (tool-id (alist-get 'tool_id data)))
     (with-undo-amalgamate
       (save-excursion
-        (goto-char (point-min))
-        (if (re-search-forward "^\\* Next Prompt" nil t)
-            (forward-line -1)
-          (goto-char (point-max)))
+        (goto-char (templedb-agent--end-of-current-exchange))
         (let ((inhibit-read-only t))
           (insert (format "\n*** %s %s\n" status (or summary tool-name "tool")))
           (when (and tool-input (not (string-empty-p tool-input)))

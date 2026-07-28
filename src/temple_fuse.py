@@ -97,7 +97,7 @@ class TempleFS(Operations):
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
@@ -126,15 +126,25 @@ class TempleFS(Operations):
             conn.close()
 
     class _BorrowedConn:
-        """Context manager for borrowing a pooled connection."""
+        """Context manager for borrowing a pooled connection.
+
+        On exit, rolls back any open transaction before returning the
+        connection to the pool — prevents leaked write locks.
+        """
         def __init__(self, fs):
             self._fs = fs
             self._conn = None
         def __enter__(self):
             self._conn = self._fs._conn()
             return self._conn
-        def __exit__(self, *exc):
+        def __exit__(self, exc_type, exc_val, exc_tb):
             if self._conn is not None:
+                if exc_type is not None:
+                    # Exception occurred — ensure no dangling transaction
+                    try:
+                        self._conn.execute("ROLLBACK")
+                    except Exception:
+                        pass  # No transaction active, that's fine
                 self._fs._return_conn(self._conn)
                 self._conn = None
 
@@ -556,7 +566,11 @@ class TempleFS(Operations):
     # ── Write-back to DB ──────────────────────────────────────────────────
 
     def _write_file(self, slug, file_path, content: bytes):
-        """Write file content back to the database."""
+        """Write file content back to the database.
+
+        All writes are wrapped in a single transaction with guaranteed
+        ROLLBACK on failure, preventing leaked write locks.
+        """
         with self._borrow() as conn:
             project = self._get_project(conn, slug)
             if not project:
@@ -573,48 +587,56 @@ class TempleFS(Operations):
                 text = None
                 content_type = "binary"
 
-            # Upsert content blob
-            conn.execute("""
-                INSERT OR IGNORE INTO content_blobs
-                (hash_sha256, content_text, content_blob, content_type, encoding,
-                 file_size_bytes, reference_count)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
-            """, (
-                content_hash,
-                text if content_type == "text" else None,
-                content if content_type == "binary" else None,
-                content_type, "utf-8",
-                len(content),
-            ))
-
-            # Get file_id
+            # Get file_id (read-only, before transaction)
             file_row = conn.execute(
                 "SELECT id FROM project_files WHERE project_id = ? AND file_path = ?",
                 (project["id"], file_path)
             ).fetchone()
 
             if not file_row:
-                # File doesn't exist yet, create it
+                # _create_file manages its own transaction
                 self._create_file(conn, project["id"], slug, file_path, content)
                 self._invalidate_tree(project["id"])
                 return
 
             file_id = file_row["id"]
 
-            # Update file_contents: upsert current version
-            line_count = text.count('\n') + 1 if (content_type == "text" and text) else 0
-            conn.execute("""
-                INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
-                VALUES (?, ?, ?, ?, 1)
-                ON CONFLICT(file_id, is_current) DO UPDATE SET
-                    content_hash = excluded.content_hash,
-                    file_size_bytes = excluded.file_size_bytes,
-                    line_count = excluded.line_count,
-                    updated_at = datetime('now')
-            """, (file_id, content_hash, len(content), line_count))
+            # Short-lived write transaction: BEGIN → writes → COMMIT
+            conn.execute("BEGIN")
+            try:
+                # Upsert content blob
+                conn.execute("""
+                    INSERT OR IGNORE INTO content_blobs
+                    (hash_sha256, content_text, content_blob, content_type, encoding,
+                     file_size_bytes, reference_count)
+                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                """, (
+                    content_hash,
+                    text if content_type == "text" else None,
+                    content if content_type == "binary" else None,
+                    content_type, "utf-8",
+                    len(content),
+                ))
 
-            # Auto-stage for VCS
-            self._auto_stage(conn, project["id"], file_id, "modified")
+                # Update file_contents: upsert current version
+                line_count = text.count('\n') + 1 if (content_type == "text" and text) else 0
+                conn.execute("""
+                    INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
+                    VALUES (?, ?, ?, ?, 1)
+                    ON CONFLICT(file_id, is_current) DO UPDATE SET
+                        content_hash = excluded.content_hash,
+                        file_size_bytes = excluded.file_size_bytes,
+                        line_count = excluded.line_count,
+                        updated_at = datetime('now')
+                """, (file_id, content_hash, len(content), line_count))
+
+                # Auto-stage for VCS
+                self._auto_stage(conn, project["id"], file_id, "modified")
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
             self._invalidate_tree(project["id"])
             logger.debug(f"FUSE write: {slug}/{file_path} ({len(content)} bytes, hash={content_hash[:12]})")
 
@@ -629,59 +651,63 @@ class TempleFS(Operations):
             text = None
             content_type = "binary"
 
-        # Content blob
+        # Wrap in BEGIN/COMMIT with guaranteed ROLLBACK on failure
         conn.execute("BEGIN")
-        conn.execute("""
-            INSERT OR IGNORE INTO content_blobs
-            (hash_sha256, content_text, content_blob, content_type, encoding,
-             file_size_bytes, reference_count)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-        """, (
-            content_hash,
-            text if content_type == "text" else None,
-            content if content_type == "binary" else None,
-            content_type, "utf-8",
-            len(content),
-        ))
+        try:
+            conn.execute("""
+                INSERT OR IGNORE INTO content_blobs
+                (hash_sha256, content_text, content_blob, content_type, encoding,
+                 file_size_bytes, reference_count)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+            """, (
+                content_hash,
+                text if content_type == "text" else None,
+                content if content_type == "binary" else None,
+                content_type, "utf-8",
+                len(content),
+            ))
 
-        # Map file extension to file_type_id
-        ext = Path(file_path).suffix.lstrip(".").lower()
-        ext_to_type = {
-            "py": "python_script", "js": "javascript", "ts": "typescript",
-            "nix": "nix", "sql": "sql_file", "sh": "shell_script",
-            "md": "markdown", "json": "json", "yaml": "yaml", "yml": "yaml",
-            "toml": "toml", "html": "html", "css": "css", "txt": "text_file",
-        }
-        type_name = ext_to_type.get(ext)
-        ft_row = None
-        if type_name:
-            ft_row = conn.execute(
-                "SELECT id FROM file_types WHERE type_name = ? LIMIT 1", (type_name,)
-            ).fetchone()
-        if not ft_row:
-            ft_row = conn.execute("SELECT id FROM file_types LIMIT 1").fetchone()
-        file_type_id = ft_row["id"] if ft_row else 1
+            # Map file extension to file_type_id
+            ext = Path(file_path).suffix.lstrip(".").lower()
+            ext_to_type = {
+                "py": "python_script", "js": "javascript", "ts": "typescript",
+                "nix": "nix", "sql": "sql_file", "sh": "shell_script",
+                "md": "markdown", "json": "json", "yaml": "yaml", "yml": "yaml",
+                "toml": "toml", "html": "html", "css": "css", "txt": "text_file",
+            }
+            type_name = ext_to_type.get(ext)
+            ft_row = None
+            if type_name:
+                ft_row = conn.execute(
+                    "SELECT id FROM file_types WHERE type_name = ? LIMIT 1", (type_name,)
+                ).fetchone()
+            if not ft_row:
+                ft_row = conn.execute("SELECT id FROM file_types LIMIT 1").fetchone()
+            file_type_id = ft_row["id"] if ft_row else 1
 
-        file_name = file_path.rsplit("/", 1)[-1]
+            file_name = file_path.rsplit("/", 1)[-1]
 
-        # Insert project_files
-        cursor = conn.execute("""
-            INSERT INTO project_files (project_id, file_type_id, file_path, file_name,
-                                       status, lines_of_code, last_modified)
-            VALUES (?, ?, ?, ?, 'active', ?, datetime('now'))
-        """, (project_id, file_type_id, file_path, file_name,
-              text.count('\n') + 1 if text else 0))
-        file_id = cursor.lastrowid
+            # Insert project_files
+            cursor = conn.execute("""
+                INSERT INTO project_files (project_id, file_type_id, file_path, file_name,
+                                           status, lines_of_code, last_modified)
+                VALUES (?, ?, ?, ?, 'active', ?, datetime('now'))
+            """, (project_id, file_type_id, file_path, file_name,
+                  text.count('\n') + 1 if text else 0))
+            file_id = cursor.lastrowid
 
-        # file_contents
-        line_count = text.count('\n') + 1 if (content_type == "text" and text) else 0
-        conn.execute("""
-            INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
-            VALUES (?, ?, ?, ?, 1)
-        """, (file_id, content_hash, len(content), line_count))
+            # file_contents
+            line_count = text.count('\n') + 1 if (content_type == "text" and text) else 0
+            conn.execute("""
+                INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
+                VALUES (?, ?, ?, ?, 1)
+            """, (file_id, content_hash, len(content), line_count))
 
-        self._auto_stage(conn, project_id, file_id, "added")
-        conn.execute("COMMIT")
+            self._auto_stage(conn, project_id, file_id, "added")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     def _auto_stage(self, conn, project_id, file_id, change_state):
         """Auto-stage a file change in vcs_working_state."""
