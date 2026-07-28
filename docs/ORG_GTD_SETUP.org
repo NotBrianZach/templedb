@@ -1,0 +1,187 @@
+#+TITLE: Org GTD Setup & TempleDB Integration
+#+AUTHOR: TempleDB
+#+DATE: 2026-07-28
+
+* Overview
+
+TempleDB integrates with Org mode's GTD (Getting Things Done) workflow.
+Project tasks, notes, deploy logs, and incidents are captured via Org and
+linked to TempleDB projects through the =:TEMPLEDB_PROJECT:= property.
+
+* File Layout
+
+All files live in =~/org/=:
+
+| File          | Purpose                         | Agenda? |
+|---------------+---------------------------------+---------|
+| inbox.org     | Capture landing zone            | yes     |
+| tasks.org     | Standalone active tasks         | yes     |
+| projects.org  | Multi-step outcomes             | yes     |
+| someday.org   | Ideas for weekly review         | yes     |
+| waiting.org   | Delegated / blocked items       | yes     |
+| tickler.org   | Future-dated reminders          | yes     |
+| journal.org   | Daily journal entries           | yes     |
+| gcal.org      | Google Calendar sync            | yes     |
+| templedb.org  | TempleDB project tasks & notes  | yes     |
+| archive.org   | Completed items                 | no      |
+| README.org    | This system's documentation     | yes     |
+
+* TODO States
+
+#+begin_example
+TODO  ->  NEXT  ->  DONE
+  |         |
+  v         v
+WAITING  CANCELLED
+  |
+  v
+SOMEDAY
+#+end_example
+
+| State     | Key | Meaning                    | Face    |
+|-----------+-----+----------------------------+---------|
+| TODO      | t   | Not started                | default |
+| NEXT      | n   | Very next physical action  | orange  |
+| WAITING   | w   | Blocked (logs note)        | blue    |
+| DONE      | d   | Completed                  | green   |
+| CANCELLED | c   | No longer relevant (logs)  | red     |
+| SOMEDAY   | s   | Maybe eventually           | sage    |
+
+* Capture Templates
+
+** Standard GTD
+
+| Key     | Template        | Destination     |
+|---------+-----------------+-----------------|
+| =SPC o c t= | Todo           | inbox.org       |
+| =SPC o c n= | Note           | inbox.org       |
+| =SPC o c p= | Project        | projects.org    |
+| =SPC o c w= | Waiting For    | waiting.org     |
+| =SPC o c s= | Someday        | someday.org     |
+| =SPC o c j= | Journal        | journal.org     |
+| =SPC o c h= | Habit          | tasks.org       |
+| =SPC o c a= | AI Query       | ai-queries.org  |
+
+** TempleDB-Specific
+
+| Key      | Template     | Destination          |
+|----------+--------------+----------------------|
+| =SPC o c T t= | Project TODO  | templedb.org > Tasks     |
+| =SPC o c T n= | Project Note  | templedb.org > Notes     |
+| =SPC o c T d= | Deploy Log    | templedb.org > Deploy Log|
+| =SPC o c T i= | Incident      | templedb.org > Incidents |
+
+TempleDB capture templates prompt for the project slug and add a
+=:TEMPLEDB_PROJECT:= property for filtering and querying.
+
+* Agenda Views
+
+| Key     | View              | Shows                      |
+|---------+-------------------+----------------------------|
+| =SPC o a d= | Daily Agenda     | Today + scheduled          |
+| =SPC o a g= | GTD Review       | NEXT, WAITING, TODO groups |
+| =SPC o a n= | Next Actions     | NEXT items only            |
+| =SPC o a w= | Waiting For      | WAITING items only         |
+| =SPC o a S= | Someday/Maybe    | SOMEDAY items only         |
+| =SPC o a p= | Projects         | Tagged :PROJECT:           |
+
+The daily agenda uses =org-super-agenda= grouping:
+1. Due Today
+2. Overdue
+3. Next Actions
+4. Waiting For
+5. Upcoming Deadlines
+6. Projects
+7. Inbox (unprocessed)
+
+* Keybindings
+
+** Global
+
+| Key      | Action                      |
+|----------+-----------------------------|
+| =SPC o a= | Open agenda                |
+| =SPC o c= | Capture                    |
+| =SPC o r= | Refile                     |
+| =SPC o t= | Cycle TODO state           |
+| =SPC o s= | Schedule                   |
+| =SPC o d= | Set deadline               |
+| =SPC o A= | Archive subtree            |
+| =SPC o I= | Open inbox.org             |
+| =SPC o P= | Open projects.org          |
+| =SPC o S= | Open someday.org           |
+| =SPC o W= | Open waiting.org           |
+
+** TempleDB
+
+| Key          | Action                              |
+|--------------+-------------------------------------|
+| =SPC a T n=  | Capture TODO for TempleDB project   |
+| =SPC a T A n= | Start Temple Agent session         |
+
+** In Org Buffers
+
+| Key        | Action           |
+|------------+------------------|
+| =TAB=      | Fold/unfold      |
+| =S-TAB=    | Cycle all folds  |
+| =C-c C-t=  | Toggle TODO      |
+| =C-c C-s=  | Schedule         |
+| =C-c C-d=  | Deadline         |
+| =C-c C-w=  | Refile           |
+
+* GTD Workflow
+
+** Daily Review
+
+1. Open inbox (=SPC o I=)
+2. Process each item:
+   - Actionable + quick? Do it now
+   - Actionable + project? Move to projects.org (=SPC o r=)
+   - Actionable + single? Move to tasks.org
+   - Not actionable? Someday or archive
+3. Check daily agenda (=SPC o a d=)
+4. Work from Next Actions (=SPC o a n=)
+
+** Weekly Review
+
+1. Open GTD review (=SPC o a g=)
+2. Process inbox completely
+3. Review each project -- does it have a NEXT action?
+4. Review waiting items -- follow up?
+5. Review someday -- promote anything?
+6. Review calendar for upcoming
+
+* TempleDB Integration
+
+** How It Works
+
+TempleDB projects link to Org via the =:TEMPLEDB_PROJECT:= property.
+This lets you:
+
+- Filter agenda by project: search for property
+- Track tasks per TempleDB project
+- Log deploys and incidents with timestamps
+- Refile between GTD and TempleDB contexts
+
+** Temple Agent + Org
+
+The Temple Agent buffer itself uses Org mode, so you get:
+- Folding of conversation exchanges
+- Org tables in context basket
+- TODO states on tool headings (RUNNING/DONE/FAILED)
+- Property drawers for metadata
+
+Agent sessions can reference org tasks via =, x b= (add buffer).
+
+** Future: Task Proposals
+
+The spec calls for a task/proposal system where:
+1. User asks for a change in the agent
+2. Claude makes a plan
+3. Plan appears as Org TODO items
+4. User approves specific items
+5. Claude gets narrow permissions to execute approved items
+6. Results show as DONE/FAILED
+
+This is not yet implemented but the Org structure supports it.

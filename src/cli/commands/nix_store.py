@@ -125,6 +125,7 @@ class NixStoreCommands(Command):
                 print(f"Generation {args.generation} not found for {machine}")
                 return 1
 
+            gen = dict(gen)
             print(f"Generation: {gen['generation_number']} on {gen['machine_name']}")
             print(f"  Toplevel:  {gen['toplevel_path']}")
             print(f"  Switched:  {gen['switched_at']}")
@@ -160,6 +161,7 @@ class NixStoreCommands(Command):
                 print(f"Closure not recorded for {path}. Run 'templedb nix scan' first.")
                 return 1
 
+            closure = dict(closure)
             print(f"Closure: {path}")
             print(f"  Hash:   {closure['closure_hash'][:16]}")
             print(f"  Paths:  {closure['total_paths']}")
