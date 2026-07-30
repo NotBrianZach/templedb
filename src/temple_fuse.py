@@ -20,6 +20,8 @@ Requires: fusepy (python3Packages.fusepy in nixpkgs)
 """
 
 import calendar
+import collections
+import concurrent.futures
 import errno
 import hashlib
 import logging
@@ -51,7 +53,15 @@ _WRITE_BUFFERS = {}  # fd -> {"path": str, "data": bytearray, "dirty": bool}
 _NEXT_FD = 100
 _FD_LOCK = threading.Lock()
 
-_CACHE_TTL = 5.0  # seconds before tree cache expires
+_CACHE_TTL = 30.0  # seconds before tree cache expires (raised from 5s)
+_PROJECT_CACHE_TTL = 300.0  # 5 min — projects basically never change
+_CONTENT_CACHE_MAX = 256  # max entries in content LRU cache
+_OP_TIMEOUT = 3.0  # max seconds any FUSE operation can take before EIO
+
+# Thread pool for timeout-wrapped operations
+_OP_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=16, thread_name_prefix="fuse-op"
+)
 
 
 def _get_db_path():
@@ -74,6 +84,16 @@ def _parse_db_datetime(s):
         return 0.0
 
 
+def _with_timeout(fn, *args):
+    """Run a FUSE operation with a deadline. Returns EIO on timeout."""
+    try:
+        future = _OP_EXECUTOR.submit(fn, *args)
+        return future.result(timeout=_OP_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        logger.error(f"FUSE op timed out after {_OP_TIMEOUT}s: {fn.__name__} args={args[:1]}")
+        raise FuseOSError(errno.EIO)
+
+
 class TempleFS(Operations):
     """FUSE filesystem backed by TempleDB's SQLite database."""
 
@@ -82,82 +102,154 @@ class TempleFS(Operations):
         self.readonly = readonly
         self.uid = os.getuid()
         self.gid = os.getgid()
-        # Connection pool with bounded size
-        self._pool = queue.Queue(maxsize=pool_size)
-        self._pool_size = pool_size
-        self._pool_created = 0
-        self._pool_lock = threading.Lock()
+
+        # Read-only connection pool (large — reads never block on writers in WAL)
+        self._ro_pool = queue.Queue(maxsize=pool_size)
+        self._ro_pool_created = 0
+        self._ro_pool_lock = threading.Lock()
+        self._ro_pool_size = pool_size
+
+        # Read-write connection pool (small — only for writes)
+        self._rw_pool = queue.Queue(maxsize=4)
+        self._rw_pool_created = 0
+        self._rw_pool_lock = threading.Lock()
+        self._rw_pool_size = 4
+
         # Per-project directory tree cache
         self._tree_cache = {}
         self._tree_lock = threading.Lock()
 
-    def _make_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None,
-                               check_same_thread=False)
+        # Project slug -> {id, slug, expires} cache
+        self._project_cache = {}
+        self._project_lock = threading.Lock()
+
+        # Content LRU cache: (project_id, file_path) -> bytes
+        self._content_cache = collections.OrderedDict()
+        self._content_lock = threading.Lock()
+
+    def _make_conn(self, readonly=False) -> sqlite3.Connection:
+        if readonly:
+            uri = f"file:{self.db_path}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=5.0,
+                                   isolation_level=None, check_same_thread=False)
+        else:
+            conn = sqlite3.connect(self.db_path, timeout=30.0,
+                                   isolation_level=None, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute(f"PRAGMA busy_timeout={'5000' if readonly else '30000'}")
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
-    def _conn(self) -> sqlite3.Connection:
-        """Borrow a connection from the pool. Must be returned via _return_conn."""
+    def _conn(self, readonly=True) -> sqlite3.Connection:
+        """Borrow a connection from the appropriate pool."""
+        if readonly:
+            pool, lock, created_attr, size = (
+                self._ro_pool, self._ro_pool_lock, '_ro_pool_created', self._ro_pool_size
+            )
+        else:
+            pool, lock, created_attr, size = (
+                self._rw_pool, self._rw_pool_lock, '_rw_pool_created', self._rw_pool_size
+            )
+
         try:
-            return self._pool.get_nowait()
+            return pool.get_nowait()
         except queue.Empty:
-            with self._pool_lock:
-                if self._pool_created < self._pool_size:
-                    self._pool_created += 1
-                    return self._make_conn()
-            # Pool exhausted — wait briefly then fail with EIO rather than
-            # hanging indefinitely (which causes permanent FUSE deadlocks)
+            with lock:
+                if getattr(self, created_attr) < size:
+                    setattr(self, created_attr, getattr(self, created_attr) + 1)
+                    return self._make_conn(readonly=readonly)
             try:
-                return self._pool.get(timeout=5.0)
+                return pool.get(timeout=5.0)
             except queue.Empty:
-                logger.error("FUSE connection pool exhausted for 5s, returning EIO")
+                logger.error(f"FUSE {'RO' if readonly else 'RW'} connection pool exhausted, returning EIO")
                 raise FuseOSError(errno.EIO)
 
-    def _return_conn(self, conn: sqlite3.Connection):
-        """Return a connection to the pool."""
+    def _return_conn(self, conn: sqlite3.Connection, readonly=True):
+        """Return a connection to the appropriate pool."""
+        pool = self._ro_pool if readonly else self._rw_pool
         try:
-            self._pool.put_nowait(conn)
+            pool.put_nowait(conn)
         except queue.Full:
             conn.close()
 
     class _BorrowedConn:
-        """Context manager for borrowing a pooled connection.
-
-        On exit, rolls back any open transaction before returning the
-        connection to the pool — prevents leaked write locks.
-        """
-        def __init__(self, fs):
+        """Context manager for borrowing a pooled connection."""
+        def __init__(self, fs, readonly=True):
             self._fs = fs
             self._conn = None
+            self._readonly = readonly
         def __enter__(self):
-            self._conn = self._fs._conn()
+            self._conn = self._fs._conn(readonly=self._readonly)
             return self._conn
         def __exit__(self, exc_type, exc_val, exc_tb):
             if self._conn is not None:
-                if exc_type is not None:
-                    # Exception occurred — ensure no dangling transaction
+                if exc_type is not None and not self._readonly:
                     try:
                         self._conn.execute("ROLLBACK")
                     except Exception:
-                        pass  # No transaction active, that's fine
-                self._fs._return_conn(self._conn)
+                        pass
+                self._fs._return_conn(self._conn, readonly=self._readonly)
                 self._conn = None
 
-    def _borrow(self):
-        return self._BorrowedConn(self)
+    def _borrow(self, readonly=True):
+        return self._BorrowedConn(self, readonly=readonly)
 
     def destroy(self, path):
         """Called on unmount — close all pooled connections."""
-        while not self._pool.empty():
-            try:
-                self._pool.get_nowait().close()
-            except queue.Empty:
-                break
+        for pool in (self._ro_pool, self._rw_pool):
+            while not pool.empty():
+                try:
+                    pool.get_nowait().close()
+                except queue.Empty:
+                    break
+
+    # ── Caches ─────────────────────────────────────────────────────────────
+
+    def _get_project_cached(self, conn, slug):
+        """Get project by slug with in-memory cache."""
+        with self._project_lock:
+            cached = self._project_cache.get(slug)
+            if cached and time.time() < cached["expires"]:
+                return cached
+
+        row = conn.execute(
+            "SELECT id, slug FROM projects WHERE slug = ?", (slug,)
+        ).fetchone()
+        if row:
+            entry = {"id": row["id"], "slug": row["slug"],
+                     "expires": time.time() + _PROJECT_CACHE_TTL}
+            with self._project_lock:
+                self._project_cache[slug] = entry
+            return entry
+        return None
+
+    def _get_content_cached(self, conn, project_id, file_path) -> bytes:
+        """Get file content with LRU cache."""
+        key = (project_id, file_path)
+        with self._content_lock:
+            if key in self._content_cache:
+                self._content_cache.move_to_end(key)
+                return self._content_cache[key]
+
+        content = self._get_file_content_raw(conn, project_id, file_path)
+        if content is not None:
+            with self._content_lock:
+                self._content_cache[key] = content
+                if len(self._content_cache) > _CONTENT_CACHE_MAX:
+                    self._content_cache.popitem(last=False)
+        return content
+
+    def _invalidate_content_cache(self, project_id, file_path=None):
+        """Invalidate content cache entries after a write."""
+        with self._content_lock:
+            if file_path:
+                self._content_cache.pop((project_id, file_path), None)
+            else:
+                keys = [k for k in self._content_cache if k[0] == project_id]
+                for k in keys:
+                    del self._content_cache[k]
 
     # ── Directory tree cache ─────────────────────────────────────────────
 
@@ -241,7 +333,8 @@ class TempleFS(Operations):
             (project_id, file_path)
         ).fetchone()
 
-    def _get_file_content(self, conn, project_id, file_path) -> bytes:
+    def _get_file_content_raw(self, conn, project_id, file_path) -> bytes:
+        """Raw DB fetch for file content (no cache)."""
         row = self._get_file(conn, project_id, file_path)
         if not row:
             return None
@@ -252,22 +345,29 @@ class TempleFS(Operations):
             return bytes(row["content_blob"])
         return b""
 
+    def _get_file_content(self, conn, project_id, file_path) -> bytes:
+        """Get file content with caching."""
+        return self._get_content_cached(conn, project_id, file_path)
+
     def _list_projects(self, conn):
         return conn.execute(
             "SELECT slug FROM projects ORDER BY slug"
         ).fetchall()
 
-    # ── FUSE Operations ───────────────────────────────────────────────────
+    # ── FUSE Operations (timeout-wrapped) ─────────────────────────────────
 
     def getattr(self, path, fh=None):
+        return _with_timeout(self._getattr_impl, path, fh)
+
+    def _getattr_impl(self, path, fh=None):
         slug, file_path = self._parse_path(path)
 
         # Root directory
         if slug is None:
             return self._dir_stat()
 
-        with self._borrow() as conn:
-            project = self._get_project(conn, slug)
+        with self._borrow(readonly=True) as conn:
+            project = self._get_project_cached(conn, slug)
             if not project:
                 raise FuseOSError(errno.ENOENT)
 
@@ -297,42 +397,49 @@ class TempleFS(Operations):
         raise FuseOSError(errno.ENOENT)
 
     def readdir(self, path, fh):
-        yield "."
-        yield ".."
+        return _with_timeout(self._readdir_impl, path, fh)
+
+    def _readdir_impl(self, path, fh):
+        entries = [".", ".."]
 
         slug, file_path = self._parse_path(path)
 
         if slug is None:
             # Root: list projects
-            with self._borrow() as conn:
+            with self._borrow(readonly=True) as conn:
                 for row in self._list_projects(conn):
-                    yield row["slug"]
-            return
+                    entries.append(row["slug"])
+            return entries
 
-        with self._borrow() as conn:
-            project = self._get_project(conn, slug)
+        with self._borrow(readonly=True) as conn:
+            project = self._get_project_cached(conn, slug)
             if not project:
-                return
+                return entries
 
             tree = self._get_tree(conn, project["id"])
             dir_key = file_path or ""
             for entry in sorted(tree["children"].get(dir_key, ())):
-                yield entry
+                entries.append(entry)
+
+        return entries
 
     def read(self, path, size, offset, fh):
-        # Check write buffer first
+        # Check write buffer first (no timeout needed — pure memory)
         with _FD_LOCK:
             buf = _WRITE_BUFFERS.get(fh)
         if buf is not None:
             data = bytes(buf["data"])
             return data[offset:offset + size]
 
+        return _with_timeout(self._read_impl, path, size, offset, fh)
+
+    def _read_impl(self, path, size, offset, fh):
         slug, file_path = self._parse_path(path)
         if not slug or not file_path:
             raise FuseOSError(errno.EISDIR)
 
-        with self._borrow() as conn:
-            project = self._get_project(conn, slug)
+        with self._borrow(readonly=True) as conn:
+            project = self._get_project_cached(conn, slug)
             if not project:
                 raise FuseOSError(errno.ENOENT)
 
@@ -343,13 +450,16 @@ class TempleFS(Operations):
             return content[offset:offset + size]
 
     def open(self, path, flags):
+        return _with_timeout(self._open_impl, path, flags)
+
+    def _open_impl(self, path, flags):
         global _NEXT_FD
         slug, file_path = self._parse_path(path)
         if not slug or not file_path:
             raise FuseOSError(errno.EISDIR)
 
-        with self._borrow() as conn:
-            project = self._get_project(conn, slug)
+        with self._borrow(readonly=True) as conn:
+            project = self._get_project_cached(conn, slug)
             if not project:
                 raise FuseOSError(errno.ENOENT)
 
@@ -392,8 +502,8 @@ class TempleFS(Operations):
         else:
             # Load content into a temporary buffer
             slug, file_path = self._parse_path(path)
-            with self._borrow() as conn:
-                project = self._get_project(conn, slug)
+            with self._borrow(readonly=True) as conn:
+                project = self._get_project_cached(conn, slug)
                 content = self._get_file_content(conn, project["id"], file_path) or b""
             # Find existing buffer for this path
             with _FD_LOCK:
@@ -419,13 +529,13 @@ class TempleFS(Operations):
         if not buf["dirty"]:
             return 0
 
-        # Write back to database
+        # Write back to database (uses RW pool, still timeout-wrapped)
         slug, file_path = self._parse_path(path)
         if not slug or not file_path:
             return 0
 
         try:
-            self._write_file(slug, file_path, bytes(buf["data"]))
+            _with_timeout(self._write_file, slug, file_path, bytes(buf["data"]))
         except Exception as e:
             logger.error(f"FUSE DATA LOSS: failed to write {path} to DB: {e}")
             print(f"FUSE DATA LOSS: failed to write {path} to DB: {e}", file=sys.stderr)
@@ -434,6 +544,9 @@ class TempleFS(Operations):
 
     def create(self, path, mode, fi=None):
         """Create a new file."""
+        return _with_timeout(self._create_impl, path, mode, fi)
+
+    def _create_impl(self, path, mode, fi=None):
         global _NEXT_FD
         if self.readonly:
             raise FuseOSError(errno.EROFS)
@@ -442,14 +555,15 @@ class TempleFS(Operations):
         if not slug or not file_path:
             raise FuseOSError(errno.EACCES)
 
-        with self._borrow() as conn:
-            project = self._get_project(conn, slug)
+        with self._borrow(readonly=False) as conn:
+            project = self._get_project_cached(conn, slug)
             if not project:
                 raise FuseOSError(errno.ENOENT)
 
             # Create empty file in DB
             self._create_file(conn, project["id"], slug, file_path, b"")
             self._invalidate_tree(project["id"])
+            self._invalidate_content_cache(project["id"], file_path)
 
         with _FD_LOCK:
             fd = _NEXT_FD
@@ -463,6 +577,9 @@ class TempleFS(Operations):
 
     def unlink(self, path):
         """Delete a file."""
+        return _with_timeout(self._unlink_impl, path)
+
+    def _unlink_impl(self, path):
         if self.readonly:
             raise FuseOSError(errno.EROFS)
 
@@ -470,8 +587,8 @@ class TempleFS(Operations):
         if not slug or not file_path:
             raise FuseOSError(errno.EACCES)
 
-        with self._borrow() as conn:
-            project = self._get_project(conn, slug)
+        with self._borrow(readonly=False) as conn:
+            project = self._get_project_cached(conn, slug)
             if not project:
                 raise FuseOSError(errno.ENOENT)
 
@@ -488,20 +605,23 @@ class TempleFS(Operations):
             )
             self._auto_stage(conn, project["id"], row["id"], "deleted")
             self._invalidate_tree(project["id"])
+            self._invalidate_content_cache(project["id"], file_path)
 
     def mkdir(self, path, mode):
         """Directories are implicit in TempleDB (derived from file paths). No-op."""
         pass
 
     def rmdir(self, path):
-        """Directories are implicit. Remove all files under this path."""
+        """Directories are implicit. No-op."""
         if self.readonly:
             raise FuseOSError(errno.EROFS)
-        # No-op: directories don't exist as entries
         pass
 
     def rename(self, old, new):
         """Rename/move a file."""
+        return _with_timeout(self._rename_impl, old, new)
+
+    def _rename_impl(self, old, new):
         if self.readonly:
             raise FuseOSError(errno.EROFS)
 
@@ -514,8 +634,8 @@ class TempleFS(Operations):
         if not old_path or not new_path:
             raise FuseOSError(errno.EACCES)
 
-        with self._borrow() as conn:
-            project = self._get_project(conn, old_slug)
+        with self._borrow(readonly=False) as conn:
+            project = self._get_project_cached(conn, old_slug)
             if not project:
                 raise FuseOSError(errno.ENOENT)
 
@@ -532,6 +652,7 @@ class TempleFS(Operations):
                 (new_path, new_name, row["id"])
             )
             self._invalidate_tree(project["id"])
+            self._invalidate_content_cache(project["id"])
 
     # ── Stat helpers ──────────────────────────────────────────────────────
 
@@ -566,13 +687,9 @@ class TempleFS(Operations):
     # ── Write-back to DB ──────────────────────────────────────────────────
 
     def _write_file(self, slug, file_path, content: bytes):
-        """Write file content back to the database.
-
-        All writes are wrapped in a single transaction with guaranteed
-        ROLLBACK on failure, preventing leaked write locks.
-        """
-        with self._borrow() as conn:
-            project = self._get_project(conn, slug)
+        """Write file content back to the database."""
+        with self._borrow(readonly=False) as conn:
+            project = self._get_project_cached(conn, slug)
             if not project:
                 return
 
@@ -594,9 +711,9 @@ class TempleFS(Operations):
             ).fetchone()
 
             if not file_row:
-                # _create_file manages its own transaction
                 self._create_file(conn, project["id"], slug, file_path, content)
                 self._invalidate_tree(project["id"])
+                self._invalidate_content_cache(project["id"], file_path)
                 return
 
             file_id = file_row["id"]
@@ -638,6 +755,7 @@ class TempleFS(Operations):
                 raise
 
             self._invalidate_tree(project["id"])
+            self._invalidate_content_cache(project["id"], file_path)
             logger.debug(f"FUSE write: {slug}/{file_path} ({len(content)} bytes, hash={content_hash[:12]})")
 
     def _create_file(self, conn, project_id, slug, file_path, content: bytes):
@@ -776,6 +894,7 @@ def mount(mountpoint: str, db_path: str = None, foreground: bool = False,
     print(f"TempleDB FUSE mount: {mountpoint}")
     print(f"  Database: {fs.db_path}")
     print(f"  Mode: {'read-only' if readonly else 'read-write'}")
+    print(f"  Op timeout: {_OP_TIMEOUT}s (returns EIO on timeout)")
     if not foreground:
         print(f"  Running in background (unmount with: fusermount -u {mountpoint})")
 

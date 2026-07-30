@@ -35,6 +35,24 @@
   :type '(choice (const "fake") (const "claude-code"))
   :group 'templedb-agent)
 
+(defcustom templedb-agent-permission-mode "bypassPermissions"
+  "Permission mode for Claude. Controls what tools Claude can use without asking.
+- bypassPermissions: allow everything (default, no approval needed)
+- acceptEdits: auto-accept file edits, ask for bash
+- plan: read-only, no edits or bash allowed
+- default: ask for everything (may block in pipe mode)"
+  :type '(choice (const "bypassPermissions")
+                 (const "acceptEdits")
+                 (const "plan")
+                 (const "default"))
+  :group 'templedb-agent)
+
+(defcustom templedb-agent-default-model nil
+  "Default model for new sessions. nil uses Claude default."
+  :type '(choice (const nil) (const "sonnet") (const "opus") (const "haiku")
+                 (string :tag "Model ID"))
+  :group 'templedb-agent)
+
 ;;;; State
 
 (defvar-local templedb-agent--session-id nil "Current session ID.")
@@ -54,6 +72,10 @@
 (defvar-local templedb-agent--streaming-text "" "Accumulated streaming text.")
 (defvar-local templedb-agent--streaming-marker nil "Streaming insert marker.")
 (defvar-local templedb-agent--now-text "" "Now section text.")
+(defvar-local templedb-agent--run-timer nil "Timer for elapsed time display.")
+(defvar-local templedb-agent--run-start-time nil "Start time of current run.")
+(defvar-local templedb-agent--selected-files nil
+  "Alist of (slug . list-of-file-paths) for selected files context.")
 
 ;;;; Process management
 
@@ -155,16 +177,23 @@
       ("run.started"
        (setq templedb-agent--run-id (alist-get 'run_id event))
        (templedb-agent--set-now (or summary "Working..."))
-       (templedb-agent--set-status "running"))
+       (templedb-agent--set-status "running")
+       (templedb-agent--start-timer))
       ("run.completed"
+       (templedb-agent--stop-timer)
        (templedb-agent--set-now (or summary "Ready"))
        (templedb-agent--set-status "waiting")
-       (templedb-agent--finalize-streaming))
+       (templedb-agent--finalize-streaming)
+       (templedb-agent--save-notes-to-db)
+       (templedb-agent--notify-if-hidden "Run completed"))
       ("run.failed"
+       (templedb-agent--stop-timer)
        (templedb-agent--set-now (format "Failed: %s" (or summary "unknown error")))
        (templedb-agent--set-status "failed")
-       (templedb-agent--finalize-streaming))
+       (templedb-agent--finalize-streaming)
+       (templedb-agent--notify-if-hidden "Run failed"))
       ("run.interrupted"
+       (templedb-agent--stop-timer)
        (templedb-agent--set-now "Interrupted")
        (templedb-agent--set-status "interrupted")
        (templedb-agent--finalize-streaming))
@@ -222,6 +251,7 @@
     (insert "| =, x a=        | Add project to context                     |\n")
     (insert "| =, x r=        | Remove project from context                |\n")
     (insert "| =, x t=        | Toggle context item                        |\n")
+    (insert "| =, x f=        | Add project file to context (with picker)  |\n")
     (insert "| =, x b=        | Add current buffer to context              |\n")
     (insert "| =, x v=        | Add selected region to context             |\n")
     (insert "| =, i=          | Send guidance while Claude works           |\n")
@@ -230,6 +260,10 @@
     (insert "| =, s s=        | Switch session                             |\n")
     (insert "| =, s f=        | Fork session                               |\n")
     (insert "| =, s q=        | Close session                              |\n")
+    (insert "| =, /=          | Slash command (/compact, /review, /cost)   |\n")
+    (insert "| =, P=          | Toggle plan mode (read-only)               |\n")
+    (insert "| =, M=          | Switch model (sonnet, opus, haiku)         |\n")
+    (insert "| =, p=          | Set permission mode                        |\n")
     (insert "| =, ?=          | Debug info (process, stderr, pending)      |\n")
     (insert "| =, K=          | Kill stuck process                         |\n")
     (insert "| =TAB=          | Fold/unfold section                        |\n\n")
@@ -352,7 +386,7 @@ Uses `with-undo-amalgamate' so all streaming chunks become one undo entry."
         (let ((inhibit-read-only t))
           (insert text)
           (set-marker templedb-agent--streaming-marker (point)))))
-    (templedb-agent--auto-scroll))))
+    (templedb-agent--auto-scroll)))
 
 (defun templedb-agent--finalize-streaming ()
   "Finalize the streaming response."
@@ -531,6 +565,44 @@ Matches by TOOL_ID property for reliability, falls back to summary text."
      (content . ,(format "[Guidance] %s" guidance)))
    (lambda (_result) nil)))
 
+(defun templedb-agent-slash (command)
+  "Send a slash COMMAND to Claude (e.g. /compact, /review, /cost)."
+  (interactive "sSlash command: ")
+  (let ((cmd (if (string-prefix-p "/" command) command (concat "/" command))))
+    (templedb-agent--insert-conversation-entry "user" cmd)
+    (templedb-agent--send
+     "message.send"
+     `((session_id . ,templedb-agent--session-id)
+       (content . ,cmd)
+       (context . ,(templedb-agent--build-context-payload)))
+     (lambda (_result) nil))))
+
+(defun templedb-agent-set-permission-mode (mode)
+  "Set the permission MODE for this session."
+  (interactive
+   (list (completing-read "Permission mode: "
+                          '("bypassPermissions" "acceptEdits" "plan" "default")
+                          nil t)))
+  (setq templedb-agent-permission-mode mode)
+  (message "Permission mode: %s" mode))
+
+(defun templedb-agent-plan-mode ()
+  "Toggle plan mode (read-only, no edits)."
+  (interactive)
+  (if (equal templedb-agent-permission-mode "plan")
+      (progn
+        (setq templedb-agent-permission-mode "bypassPermissions")
+        (message "Plan mode OFF (full permissions)"))
+    (setq templedb-agent-permission-mode "plan")
+    (message "Plan mode ON (read-only)")))
+
+(defun templedb-agent-set-model (model)
+  "Set the MODEL for this session."
+  (interactive
+   (list (completing-read "Model: " '("sonnet" "opus" "haiku") nil nil)))
+  (setq templedb-agent-default-model model)
+  (message "Model: %s" model))
+
 (defun templedb-agent-refresh ()
   "Refresh the buffer from database state."
   (interactive)
@@ -567,6 +639,95 @@ Matches by TOOL_ID property for reliability, falls back to summary text."
           (nreverse slugs)))
     (error nil)))
 
+(defun templedb-agent--wait-then-check-or-create (buf project &optional attempts)
+  "Wait for process, then check for existing session or create new one."
+  (let ((n (or attempts 0)))
+    (if (and (buffer-live-p buf)
+             (with-current-buffer buf
+               (and templedb-agent--process
+                    (process-live-p templedb-agent--process))))
+        (with-current-buffer buf
+          (templedb-agent--send
+           "session.last"
+           `((project . ,project))
+           (lambda (result)
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (if (and result (alist-get 'id result)
+                          (member (alist-get 'status result)
+                                  '("waiting" "interrupted" "running" "created")))
+                     (if (y-or-n-p
+                          (format "Resume session #%d (%s)? "
+                                  (alist-get 'id result)
+                                  (or (alist-get 'title result) "untitled")))
+                         (templedb-agent--do-open-session buf (alist-get 'id result))
+                       (templedb-agent--do-create-session buf))
+                   (templedb-agent--do-create-session buf)))))))
+      (if (< n 10)
+          (run-at-time 0.2 nil
+                       (lambda ()
+                         (templedb-agent--wait-then-check-or-create buf project (1+ n))))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (templedb-agent--set-now "Failed to start agent process")))))))
+
+(defun templedb-agent--do-create-session (buf)
+  "Create a new session in BUF."
+  (templedb-agent--send
+   "session.create"
+   `((provider . ,templedb-agent--provider)
+     (project . ,templedb-agent--project))
+   (lambda (result)
+     (when (buffer-live-p buf)
+       (with-current-buffer buf
+         (setq templedb-agent--session-id (alist-get 'id result))
+         (templedb-agent--render-buffer)
+         (templedb-agent--set-now "Ready")
+         (message "Temple Agent session %d created"
+                  templedb-agent--session-id))))))
+
+(defun templedb-agent--do-open-session (buf session-id)
+  "Open existing session SESSION-ID in BUF."
+  (setq templedb-agent--session-id session-id)
+  (templedb-agent--send
+   "session.open"
+   `((session_id . ,session-id))
+   (lambda (result)
+     (when (buffer-live-p buf)
+       (with-current-buffer buf
+         (let ((session (alist-get 'session result))
+               (org-text (alist-get 'org result))
+               (notes (alist-get 'notes result)))
+           (setq templedb-agent--project
+                 (or (alist-get 'project_slug session) templedb-agent--project))
+           (setq templedb-agent--provider (alist-get 'provider_name session))
+           (setq templedb-agent--status (alist-get 'status session))
+           (if org-text
+               (let ((inhibit-read-only t))
+                 (erase-buffer) (insert org-text))
+             (templedb-agent--render-buffer))
+           (when notes
+             (when-let ((g (alist-get 'goal_org notes)))
+               (templedb-agent--set-section-text "Goal" g))
+             (when-let ((n (alist-get 'notes_org notes)))
+               (templedb-agent--set-section-text "Notes" n))
+             (when-let ((s (alist-get 'scratch_org notes)))
+               (templedb-agent--set-section-text "Scratch" s)))
+           (message "Temple Agent session %d resumed" session-id)))))))
+
+(defun templedb-agent--set-section-text (heading text)
+  "Set the text content of an Org section by HEADING name."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward (format "^\\* %s\n\n" (regexp-quote heading)) nil t)
+      (let ((start (point))
+            (end (if (re-search-forward "^\\* " nil t)
+                     (match-beginning 0) (point-max))))
+        (let ((inhibit-read-only t))
+          (delete-region start end)
+          (goto-char start)
+          (insert text "\n\n"))))))
+
 (defun templedb-agent--wait-and-create-session (buf &optional attempts)
   "Wait for the agent process to be ready, then create a session."
   (let ((n (or attempts 0)))
@@ -597,7 +758,8 @@ Matches by TOOL_ID property for reliability, falls back to summary text."
 
 ;;;###autoload
 (defun templedb-agent-new (project)
-  "Start a new Temple Agent session for PROJECT."
+  "Start a new Temple Agent session for PROJECT.
+If PROJECT has a recent session, offers to resume it."
   (interactive
    (list (completing-read "Project: " (templedb-agent--project-slugs) nil nil)))
   (let* ((buf-name (format "*Temple Agent: %s*" project))
@@ -612,7 +774,8 @@ Matches by TOOL_ID property for reliability, falls back to summary text."
     (templedb-agent--render-buffer)
     (templedb-agent--set-now "Starting agent...")
     (templedb-agent--start-process)
-    (templedb-agent--wait-and-create-session buf)))
+    ;; Check for existing session to resume
+    (templedb-agent--wait-then-check-or-create buf project)))
 
 (defun templedb-agent--wait-and-open-session (buf session-id &optional attempts)
   "Wait for the agent process, then open a session."
@@ -1032,9 +1195,12 @@ Includes goal text and per-project context items."
           (push (cons (symbol-name (car pair)) (if (cdr pair) t :json-false))
                 item-obj))
         (push `((slug . ,slug) (items . ,item-obj)) projects-payload)))
-    (let ((payload `((projects . ,(vconcat (nreverse projects-payload))))))
+    (let ((payload `((projects . ,(vconcat (nreverse projects-payload)))
+                      (permission_mode . ,templedb-agent-permission-mode))))
       (when goal
         (push (cons 'goal goal) payload))
+      (when templedb-agent-default-model
+        (push (cons 'model templedb-agent-default-model) payload))
       payload)))
 
 (defun templedb-agent-add-project (project)
@@ -1128,6 +1294,52 @@ Includes goal text and per-project context items."
        (lambda (_result) nil)))
     (switch-to-buffer-other-window agent-buf)))
 
+;;;; Work log viewer
+
+;;;###autoload
+(defun templedb-agent-work-log (&optional project)
+  "Show the agent work log as an Org buffer.
+Optionally filter by PROJECT slug."
+  (interactive
+   (list (when current-prefix-arg
+           (completing-read "Project: " (templedb-agent--project-slugs) nil t))))
+  (let* ((cmd (if project
+                  (list templedb-agent-executable "ai" "agent" "log"
+                        "--project" project "--limit" "50")
+                (list templedb-agent-executable "ai" "agent" "log" "--limit" "50")))
+         (output (with-temp-buffer
+                   (apply #'call-process (car cmd) nil t nil (cdr cmd))
+                   (buffer-string))))
+    (with-current-buffer (get-buffer-create "*Temple Agent Work Log*")
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "#+TITLE: Temple Agent Work Log\n")
+        (when project (insert (format "#+SUBTITLE: Project: %s\n" project)))
+        (insert (format "#+DATE: %s\n\n" (format-time-string "%Y-%m-%d %H:%M")))
+        (if (string-match-p "No work log" output)
+            (insert "No entries yet. Work log entries are created automatically\nwhen agent runs complete.\n")
+          ;; Parse the CLI output into Org headings
+          (let ((lines (split-string output "\n" t)))
+            (dolist (line lines)
+              (cond
+               ;; Timestamp line: [2026-07-28 12:34] bza (completed $0.0234)
+               ((string-match "^\\[\\([^]]+\\)\\] \\([^ ]+\\) (\\(.*\\))" line)
+                (insert (format "* %s — %s (%s)\n"
+                                (match-string 2 line)
+                                (match-string 1 line)
+                                (match-string 3 line))))
+               ;; Question line
+               ((string-match "^  Q: \\(.*\\)" line)
+                (insert (format "  *Q:* %s\n" (match-string 1 line))))
+               ;; Summary line
+               ((string-match "^  \\(.*\\)" line)
+                (insert (format "  %s\n" (match-string 1 line))))
+               (t (insert "\n")))))))
+      (org-mode)
+      (goto-char (point-min))
+      (read-only-mode 1)
+      (display-buffer (current-buffer)))))
+
 ;;;; Major mode
 
 (defvar templedb-agent-mode-map
@@ -1141,14 +1353,127 @@ Includes goal text and per-project context items."
 (define-derived-mode templedb-agent-mode org-mode "TAgent"
   "Major mode for Temple Agent sessions."
   (setq-local buffer-read-only nil)
-  ;; Raise undo limit -- streaming creates large entries
-  (setq-local undo-outer-limit 50000000)  ; 50MB
-  ;; Enable word wrap so long lines are visible
+  (setq-local undo-outer-limit 50000000)
   (visual-line-mode 1)
   (setq-local word-wrap t)
   (setq-local truncate-lines nil)
+  ;; Mode-line shows session info
+  (setq mode-line-buffer-identification
+        '(:eval (format "TAgent #%s %s [%s]"
+                        (or templedb-agent--session-id "?")
+                        (or templedb-agent--project "")
+                        (or templedb-agent--status "?"))))
   (use-local-map (make-composed-keymap
                   templedb-agent-mode-map org-mode-map)))
+
+;;;; Timer
+
+(defun templedb-agent--start-timer ()
+  "Start the elapsed time timer."
+  (setq templedb-agent--run-start-time (current-time))
+  (templedb-agent--stop-timer)
+  (let ((buf (current-buffer)))
+    (setq templedb-agent--run-timer
+          (run-with-timer
+           1 1
+           (lambda ()
+             (when (and (buffer-live-p buf)
+                        (with-current-buffer buf templedb-agent--run-start-time))
+               (with-current-buffer buf
+                 (let* ((elapsed (float-time (time-subtract (current-time)
+                                                             templedb-agent--run-start-time)))
+                        (mins (floor (/ elapsed 60)))
+                        (secs (floor (mod elapsed 60)))
+                        (time-str (if (> mins 0)
+                                      (format "%dm %ds" mins secs)
+                                    (format "%ds" secs))))
+                   (force-mode-line-update)))))))))
+
+(defun templedb-agent--stop-timer ()
+  "Stop the elapsed time timer."
+  (when templedb-agent--run-timer
+    (cancel-timer templedb-agent--run-timer)
+    (setq templedb-agent--run-timer nil))
+  (setq templedb-agent--run-start-time nil))
+
+;;;; Notifications
+
+(defun templedb-agent--notify-if-hidden (message)
+  "Show MESSAGE as notification if the agent buffer is not visible."
+  (unless (get-buffer-window (current-buffer))
+    (message "Temple Agent: %s (session #%s)"
+             message (or templedb-agent--session-id "?"))))
+
+;;;; Notes persistence
+
+(defun templedb-agent--get-section-text (heading)
+  "Get the text content of an Org section by HEADING name."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward (format "^\\* %s\n\n" (regexp-quote heading)) nil t)
+      (let ((start (point))
+            (end (if (re-search-forward "^\\* " nil t)
+                     (match-beginning 0) (point-max))))
+        (let ((text (string-trim (buffer-substring-no-properties start end))))
+          ;; Filter out placeholder text
+          (cond
+           ((string-match-p "^Set your goal here" text) nil)
+           ((string-empty-p text) nil)
+           (t text)))))))
+
+(defun templedb-agent--save-notes-to-db ()
+  "Save Goal, Notes, and Scratch sections to the database."
+  (when templedb-agent--session-id
+    (let ((goal (templedb-agent--get-section-text "Goal"))
+          (notes (templedb-agent--get-section-text "Notes"))
+          (scratch (templedb-agent--get-section-text "Scratch")))
+      (when (or goal notes scratch)
+        (templedb-agent--send
+         "notes.set"
+         `((session_id . ,templedb-agent--session-id)
+           ,@(when goal `((goal . ,goal)))
+           ,@(when notes `((notes . ,notes)))
+           ,@(when scratch `((scratch . ,scratch))))
+         (lambda (_result) nil))))))
+
+;;;; Selected files
+
+(defun templedb-agent-add-file (file-path)
+  "Add a specific project file to the selected files context.
+Prompts with completion from the project file index."
+  (interactive
+   (let* ((project (if (= (length templedb-agent--projects) 1)
+                       (car templedb-agent--projects)
+                     (completing-read "Project: " templedb-agent--projects nil t)))
+          (files-output (templedb-agent--query-detail
+                         (format "SELECT file_path FROM project_files
+                                  WHERE project_id=(SELECT id FROM projects WHERE slug='%s')
+                                    AND status='active' ORDER BY file_path" project)))
+          (files (split-string files-output "\n" t))
+          (file (completing-read (format "File (%s): " project) files nil t)))
+     (list file)))
+  (let ((project (or (car templedb-agent--projects) templedb-agent--project)))
+    ;; Add to selected files list
+    (let ((existing (assoc project templedb-agent--selected-files)))
+      (if existing
+          (unless (member file-path (cdr existing))
+            (setcdr existing (cons file-path (cdr existing))))
+        (push (cons project (list file-path)) templedb-agent--selected-files)))
+    ;; Enable selected_files in context config
+    (let ((entry (assoc project templedb-agent--context-config)))
+      (when entry
+        (setf (alist-get 'selected_files (cdr entry)) t)))
+    (templedb-agent--render-context-section)
+    (message "Added %s to context" file-path)))
+
+;;;; Session auto-restore
+
+(defun templedb-agent--check-existing-session (project callback)
+  "Check if PROJECT has an existing session, call CALLBACK with session or nil."
+  (templedb-agent--send
+   "session.last"
+   `((project . ,project))
+   callback))
 
 ;;;; Cleanup and debugging
 

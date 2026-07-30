@@ -20,17 +20,61 @@ The FUSE mount is the primary editing interface for TempleDB. It exposes the dat
 
 ---
 
+## Non-Blocking Architecture
+
+TempleFS is designed to never hang callers, even under SQLite contention. Three layers ensure this:
+
+### 1. Timeout-Wrapped Operations
+
+Every FUSE operation (`getattr`, `readdir`, `read`, `open`, `create`, `unlink`, `rename`, `release`) runs inside a 3-second timeout via `concurrent.futures.ThreadPoolExecutor`. If a DB query takes too long, the operation returns `EIO` (I/O error) instead of hanging indefinitely.
+
+This prevents the critical failure mode where a process (e.g., Claude Code, `ls`, `find`) issues a `stat()` on the FUSE mount and gets stuck in `request_wait_answer` in kernel space — an unrecoverable hang that requires `kill -9`.
+
+```python
+_OP_TIMEOUT = 3.0  # seconds before EIO
+
+def _with_timeout(fn, *args):
+    future = _OP_EXECUTOR.submit(fn, *args)
+    return future.result(timeout=_OP_TIMEOUT)  # raises FuseOSError(EIO) on timeout
+```
+
+### 2. Read-Only Connection Pool
+
+FUSE uses **separate connection pools for reads and writes**:
+
+| Pool | Size | Timeout | Mode | Used By |
+|------|------|---------|------|---------|
+| RO pool | 16 conns | 5s busy_timeout | `?mode=ro` | `getattr`, `readdir`, `read`, `open` |
+| RW pool | 4 conns | 30s busy_timeout | read-write | `create`, `unlink`, `rename`, `release` (write-back) |
+
+In WAL mode, read-only connections **never block on writers**. This eliminates the primary source of FUSE hangs: a writer holding a WAL lock while FUSE tries to `stat()` a file.
+
+### 3. Aggressive Caching
+
+Three caches minimize DB round-trips:
+
+| Cache | TTL | Purpose |
+|-------|-----|---------|
+| **Tree cache** | 30s | Directory structure + file metadata per project |
+| **Project cache** | 5 min | slug → project ID mapping (projects rarely change) |
+| **Content LRU** | 256 entries | File content bytes, avoids re-reading on `stat` → `open` → `read` |
+
+All caches are invalidated on write operations. The tree cache is also invalidated by external `templedb file set` commands via the sentinel file mechanism.
+
+---
+
 ## Write Pipeline
 
 When you edit a file through the FUSE mount, this is the full path from save to staged:
 
 ```
 1. write()         → data buffered in memory (_write_buffers[fd])
-2. release()       → file closed, triggers _write_file()
-3. _write_file()   → SHA-256 hash computed
+2. release()       → file closed, triggers _write_file() via timeout wrapper
+3. _write_file()   → SHA-256 hash computed, uses RW connection pool
 4.                 → INSERT INTO content_blobs (deduplicated by hash)
 5.                 → UPDATE file_contents (new hash, size, line count)
 6. _auto_stage()   → INSERT INTO vcs_working_state (staged=1)
+7.                 → content + tree caches invalidated
 ```
 
 ### Content storage
@@ -57,29 +101,57 @@ There is no separate `git add` step. Saving a file through FUSE is staging the f
 When you read a file through the FUSE mount:
 
 ```
-1. open()    → look up file in project_files by path
-2. read()    → fetch content_hash from file_contents
-             → read content from content_blobs by hash
-             → return bytes to caller
+1. getattr() → check tree cache (30s TTL), project cache (5min TTL)
+             → serves file size/mtime without hitting DB if cached
+2. open()    → check content LRU cache
+             → on miss: fetch from content_blobs via RO connection
+3. read()    → serve from in-memory write buffer
+             → content already loaded at open() time
 ```
 
-FUSE serves the **current file content** — it does not expose branches, commit history, or diffs as filesystem paths. For VCS history, use the CLI.
+All read operations use the **read-only connection pool** and are wrapped in a **3-second timeout**.
 
 ---
 
 ## FUSE Operations Supported
 
-| Operation | VCS Effect |
-|-----------|------------|
-| `read` | Serves content from `content_blobs` |
-| `write` | Buffers in memory until close |
-| `release` (close) | Writes to `content_blobs`, updates `file_contents`, auto-stages |
-| `create` | New file → `project_files` + `file_contents` + auto-stage as `added` |
-| `unlink` (delete) | Removes file, auto-stages as `deleted` |
-| `rename` | Updates path in `project_files`, auto-stages |
-| `truncate` | Modifies content, auto-stages as `modified` |
-| `getattr` | Returns file metadata (size, timestamps) from DB |
-| `readdir` | Lists files/directories from `project_files` |
+| Operation | VCS Effect | Pool | Timeout |
+|-----------|------------|------|---------|
+| `read` | Serves content from `content_blobs` | RO | 3s |
+| `write` | Buffers in memory until close | N/A | N/A |
+| `release` (close) | Writes to `content_blobs`, updates `file_contents`, auto-stages | RW | 3s |
+| `create` | New file → `project_files` + `file_contents` + auto-stage as `added` | RW | 3s |
+| `unlink` (delete) | Removes file, auto-stages as `deleted` | RW | 3s |
+| `rename` | Updates path in `project_files`, auto-stages | RW | 3s |
+| `truncate` | Modifies content, auto-stages as `modified` | RO (read) | N/A |
+| `getattr` | Returns file metadata (size, timestamps) from cache/DB | RO | 3s |
+| `readdir` | Lists files/directories from cache/DB | RO | 3s |
+
+---
+
+## Error Handling
+
+### Timeout (EIO)
+
+If a FUSE operation exceeds 3 seconds, callers receive `EIO` (errno 5). This is logged:
+
+```
+FUSE op timed out after 3.0s: _getattr_impl args=('/templedb/src/main.py',)
+```
+
+The caller can retry — subsequent attempts will likely succeed once DB contention clears.
+
+### Pool Exhaustion (EIO)
+
+If all connections in a pool are in use for >5 seconds, new requests receive `EIO`. This is logged:
+
+```
+FUSE RO connection pool exhausted, returning EIO
+```
+
+### Write Failures
+
+If `release()` fails to flush a dirty buffer to the DB (timeout or other error), it logs a `FUSE DATA LOSS` warning to stderr. The data was in the write buffer but could not be persisted.
 
 ---
 
@@ -133,6 +205,16 @@ templedb mount-status            # check active mounts
 templedb unmount ~/temple        # unmount
 ```
 
+### CLI bypass (when FUSE is down)
+
+```bash
+templedb file cat templedb src/temple_fuse.py         # read file from DB
+templedb file ls templedb                             # list all files
+templedb file set templedb src/foo.py -c "content"    # write content to DB
+templedb file edit templedb src/foo.py                # edit in $EDITOR
+templedb file checkout templedb src/foo.py -o /tmp/   # extract to filesystem
+```
+
 ---
 
 ## Branch Switching
@@ -184,16 +266,22 @@ These are accessed through the CLI, GUI, or MCP server instead.
                         │               │
                    read content    auto-stage
                         │               │
-               ┌────────┴───────────────┴──────────┐
-               │          FUSE Mount               │
-               │       ~/temple/<project>/         │
-               └────────▲──────────────────────────┘
-                        │
-                  standard file I/O
-                        │
-               ┌────────┴──────────────────────────┐
-               │    vim / VS Code / any editor     │
-               └───────────────────────────────────┘
+          ┌─────────────┴───────────────┴──────────┐
+          │            FUSE Mount                   │
+          │         ~/temple/<project>/             │
+          │                                        │
+          │  ┌─────────────────────────────────┐   │
+          │  │  Timeout Layer (3s → EIO)       │   │
+          │  │  RO Pool (16) │ RW Pool (4)     │   │
+          │  │  Tree Cache   │ Content LRU     │   │
+          │  └─────────────────────────────────┘   │
+          └────────▲───────────────────────────────┘
+                   │
+             standard file I/O
+                   │
+          ┌────────┴──────────────────────────┐
+          │  vim / VS Code / Claude Code      │
+          └───────────────────────────────────┘
 ```
 
 The FUSE mount is one of several interfaces to the database (alongside CLI, GUI, MCP, and git daemon). All interfaces read from and write to the same SQLite database — the single source of truth.

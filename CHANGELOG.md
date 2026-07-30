@@ -7,6 +7,17 @@ All notable changes to TempleDB are documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **FUSE non-blocking architecture** - TempleFS no longer hangs callers when SQLite is slow
+  - All FUSE operations (`getattr`, `readdir`, `read`, `open`, `create`, `unlink`, `rename`,
+    `release`) are now wrapped in a 3-second timeout — returns `EIO` instead of hanging forever
+  - Separate read-only (16 conns, 5s busy_timeout) and read-write (4 conns, 30s busy_timeout)
+    connection pools — RO connections in WAL mode never block on writers
+  - Project slug cache (5 min TTL) eliminates a DB query per `getattr`/`readdir`
+  - Content LRU cache (256 entries) avoids repeated DB reads for `stat` → `open` → `read`
+  - Tree cache TTL increased from 5s to 30s
+  - Prevents the critical failure where Claude Code (or any process) gets stuck in kernel-level
+    `request_wait_answer` on a FUSE operation and becomes unkillable
+
 - **VCS working state detection** - `vcs status --refresh` and `vcs add --all` now correctly
   detect externally-edited files (commit `596cf16`)
   - `WorkingStateDetector.detect_changes()` now queries `vcs_file_states` for last committed
