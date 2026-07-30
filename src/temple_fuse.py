@@ -748,7 +748,7 @@ class TempleFS(Operations):
                 """, (file_id, content_hash, len(content), line_count))
 
                 # Auto-stage for VCS
-                self._auto_stage(conn, project["id"], file_id, "modified")
+                self._auto_stage(conn, project["id"], file_id, "modified", content_hash)
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
@@ -821,13 +821,13 @@ class TempleFS(Operations):
                 VALUES (?, ?, ?, ?, 1)
             """, (file_id, content_hash, len(content), line_count))
 
-            self._auto_stage(conn, project_id, file_id, "added")
+            self._auto_stage(conn, project_id, file_id, "added", content_hash)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
 
-    def _auto_stage(self, conn, project_id, file_id, change_state):
+    def _auto_stage(self, conn, project_id, file_id, change_state, content_hash=None):
         """Auto-stage a file change in vcs_working_state."""
         try:
             # Get active branch (falls back to default)
@@ -843,13 +843,13 @@ class TempleFS(Operations):
             if not branch:
                 return
 
-            # Upsert working state
+            # Upsert working state (include content_hash so commit records the right snapshot)
             conn.execute("""
-                INSERT INTO vcs_working_state (project_id, branch_id, file_id, state, staged, last_modified)
-                VALUES (?, ?, ?, ?, 1, datetime('now'))
+                INSERT INTO vcs_working_state (project_id, branch_id, file_id, state, staged, content_hash, last_modified)
+                VALUES (?, ?, ?, ?, 1, ?, datetime('now'))
                 ON CONFLICT (project_id, branch_id, file_id)
-                DO UPDATE SET state = excluded.state, staged = 1, last_modified = datetime('now')
-            """, (project_id, branch["id"], file_id, change_state))
+                DO UPDATE SET state = excluded.state, staged = 1, content_hash = excluded.content_hash, last_modified = datetime('now')
+            """, (project_id, branch["id"], file_id, change_state, content_hash))
         except Exception as e:
             logger.debug(f"Auto-stage failed (non-fatal): {e}")
 

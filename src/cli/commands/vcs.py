@@ -378,7 +378,8 @@ class VCSCommands(Command):
         # Get staged files with content info
         # content_text lives in content_blobs (CAS), not file_contents
         staged = self.vcs_repo.query_all("""
-            SELECT ws.*, cb.content_text, fc.file_size_bytes, fc.line_count
+            SELECT ws.*, cb.content_text, fc.file_size_bytes, fc.line_count,
+                   fc.content_hash AS fc_content_hash
             FROM vcs_working_state ws
             LEFT JOIN file_contents fc ON ws.file_id = fc.file_id AND fc.is_current = 1
             LEFT JOIN content_blobs cb ON fc.content_hash = cb.hash_sha256
@@ -432,9 +433,9 @@ class VCSCommands(Command):
 
         # Create file states and update file_contents
         for file in staged:
-            # content_hash in working_state is the hash of the file on disk
-            # (set by detect_changes / refresh). Use it for the commit.
-            ws_hash = file['content_hash'] or 'DELETED'
+            # content_hash from working_state (set by FUSE _auto_stage or detect_changes).
+            # Fall back to file_contents hash (DB source of truth) if working_state hash is NULL.
+            ws_hash = file['content_hash'] or file.get('fc_content_hash') or 'DELETED'
             file_size = file.get('file_size_bytes', 0) or 0
             line_count = file.get('line_count')
             content_text = file.get('content_text')
