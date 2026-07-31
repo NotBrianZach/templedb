@@ -536,7 +536,45 @@ class SystemService:
         ))
 
         logger.info(f"Recorded deployment {deployment_id} for {project_slug}")
+
+        # Record NixOS generation with VCS linkage
+        if result['success']:
+            try:
+                self._record_nix_generation(
+                    project_slug=project_slug,
+                    project_id=project['id'],
+                    switch_action=command,
+                    system_deployment_id=deployment_id,
+                    toplevel_path=os.readlink("/run/current-system"),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to record nix generation: {e}")
+
         return deployment_id
+
+    def _record_nix_generation(self, project_slug: str, project_id: int,
+                               switch_action: str, system_deployment_id: int,
+                               toplevel_path: str):
+        """Record a NixOS generation with full VCS and closure linkage."""
+        from services.nix_store_service import NixStoreService
+
+        # Find the latest VCS commit for this project
+        commit = query_one("""
+            SELECT c.id, c.commit_hash FROM vcs_commits c
+            JOIN vcs_branches b ON c.id = b.head_commit_id
+            WHERE b.project_id = ? AND b.is_default = 1
+        """, (project_id,))
+
+        svc = NixStoreService()
+        svc.record_generation(
+            toplevel_path=toplevel_path,
+            switch_action=switch_action,
+            commit_id=commit["id"] if commit else None,
+            commit_hash=commit["commit_hash"] if commit else None,
+            project_id=project_id,
+            system_deployment_id=system_deployment_id,
+        )
+        logger.info(f"Recorded nix generation for {project_slug} → {toplevel_path[:60]}")
 
     def get_active_deployment(self) -> Optional[Dict[str, Any]]:
         """Get currently active system deployment"""

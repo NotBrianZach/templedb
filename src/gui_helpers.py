@@ -138,6 +138,7 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("status",   "/status",    "Status",     ", i"),
             ("systemd",  "/systemd",   "Systemd",    ", u"),
             ("fleet-sync", "/fleet-sync", "Fleet Sync", ", F"),
+            ("nix-store", "/nix-store",  "Nix Store",  ", X"),
             ("tests", "/tests",        "Tests",      ", t"),
         ]
     )

@@ -240,15 +240,27 @@ class AgentService:
                     full_text = event.get("data", {}).get("full_text", "".join(accumulated_text))
                     store.update_message_content(assistant_msg["id"], full_text)
 
-                # Mark run complete
+                # Mark run complete and log
                 if event_type == RUN_COMPLETED:
                     store.complete_run(run_id, status=RUN_STATUS_COMPLETED)
                     store.update_session_status(session_id, SESSION_WAITING)
+                    try:
+                        store.create_work_log_entry(
+                            session_id, run_id, status="completed",
+                            stats=event.get("data", {}))
+                    except Exception as log_err:
+                        logger.warning(f"Work log write failed: {log_err}")
 
                 if event_type == RUN_FAILED:
                     error = event.get("data", {}).get("error", "Unknown error")
                     store.complete_run(run_id, status=RUN_STATUS_FAILED, error_text=error)
                     store.update_session_status(session_id, SESSION_FAILED)
+                    try:
+                        store.create_work_log_entry(
+                            session_id, run_id, status="failed",
+                            stats=event.get("data", {}))
+                    except Exception as log_err:
+                        logger.warning(f"Work log write failed: {log_err}")
 
         except Exception as e:
             # Flush any accumulated text

@@ -840,3 +840,18 @@ class NixDeployBackend(BaseService):
             deployment_id,
             machine_id,
         ))
+
+        # Record nix generation for successful fleet deploys
+        if result.success and result.new_profile:
+            try:
+                from services.nix_store_service import NixStoreService
+                svc = NixStoreService()
+                svc.record_generation(
+                    toplevel_path=result.new_profile,
+                    machine_name=result.machine.machine_name,
+                    switch_action="switch",
+                    deployment_id=deployment_id,
+                )
+                logger.info(f"Recorded nix generation for fleet deploy: {result.machine.machine_name}")
+            except Exception as e:
+                logger.warning(f"Failed to record nix generation for {result.machine.machine_name}: {e}")

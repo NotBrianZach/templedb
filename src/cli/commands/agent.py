@@ -115,6 +115,44 @@ class AgentCommands(Command):
         service.close_session(session_id)
         return 0
 
+    def log(self, args):
+        """Show the agent work log."""
+        from agent import store
+
+        project_id = None
+        project = getattr(args, 'project', None)
+        if project:
+            p = self.query_one("SELECT id FROM projects WHERE slug = ?", (project,))
+            if p:
+                project_id = p['id']
+
+        entries = store.get_work_log(project_id=project_id,
+                                      limit=getattr(args, 'limit', 20))
+
+        if getattr(args, 'json', False):
+            print(json.dumps(entries, default=str))
+            return 0
+
+        if not entries:
+            print("No work log entries.")
+            return 0
+
+        for e in entries:
+            ts = e.get('created_at', '')[:16]
+            proj = e.get('project_slug', '?')
+            status = e.get('status', '')
+            user_msg = (e.get('user_message') or '')[:60]
+            summary = e.get('summary', '')
+            cost = e.get('cost_usd')
+            cost_str = f" ${cost:.4f}" if cost else ""
+
+            print(f"[{ts}] {proj} ({status}{cost_str})")
+            print(f"  Q: {user_msg}")
+            print(f"  {summary}")
+            print()
+
+        return 0
+
 
 def register_agent_commands(subparsers, cli):
     """Register agent subcommands under 'ai agent'."""
@@ -145,6 +183,12 @@ def register_agent_commands(subparsers, cli):
                              help='Session ID (0 = create new)')
     chat_parser.add_argument('--provider', default='fake', help='Provider for new session')
     cli.commands['ai.agent.chat'] = cmd.chat
+
+    # log
+    log_parser = agent_sub.add_parser('log', help='Show agent work log')
+    log_parser.add_argument('--project', help='Filter by project slug')
+    log_parser.add_argument('--limit', type=int, default=20, help='Number of entries')
+    cli.commands['ai.agent.log'] = cmd.log
 
     # Default handler for bare 'ai agent'
     cli.commands['ai.agent'] = cmd.sessions

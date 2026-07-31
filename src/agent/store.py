@@ -340,6 +340,135 @@ def set_notes(session_id, goal_org=None, notes_org=None, scratch_org=None):
     return get_notes(session_id)
 
 
+# --- Work Log ---
+
+def create_work_log_entry(session_id, run_id, status="completed", stats=None):
+    """Auto-generate a work log entry from a completed run.
+
+    Extracts the user message, tool usage summary, files touched,
+    and assistant response preview from the run's events and messages.
+    """
+    session = get_session(session_id)
+    if not session:
+        return None
+
+    stats = stats or {}
+    messages = get_messages(session_id)
+    events = get_all_run_events(run_id) if run_id else []
+
+    # Find the user message that triggered this run
+    user_msg = ""
+    for m in reversed(messages):
+        if m["role"] == "user":
+            user_msg = m["content_text"]
+            break
+
+    # Find the assistant response
+    assistant_text = ""
+    for m in reversed(messages):
+        if m["role"] == "assistant" and m.get("run_id") == run_id:
+            assistant_text = m["content_text"]
+            break
+    if not assistant_text:
+        # Fallback: last assistant message
+        for m in reversed(messages):
+            if m["role"] == "assistant" and m["content_text"]:
+                assistant_text = m["content_text"]
+                break
+
+    # Extract tool usage from events
+    tools_used = set()
+    files_read = set()
+    files_modified = set()
+    commands_run = []
+
+    for evt in events:
+        etype = evt.get("event_type", "")
+        payload = evt.get("payload_json")
+        if payload:
+            try:
+                data = json.loads(payload) if isinstance(payload, str) else payload
+            except (json.JSONDecodeError, TypeError):
+                data = {}
+        else:
+            data = {}
+
+        tool_name = data.get("tool_name", "")
+        tool_input = data.get("tool_input", "")
+
+        if etype in ("tool.started", "tool.completed"):
+            if tool_name:
+                tools_used.add(tool_name)
+
+            if tool_name in ("Read", "read") and tool_input:
+                # Extract file path from input
+                for line in tool_input.split("\n"):
+                    line = line.strip()
+                    if line and not line.startswith("offset") and not line.startswith("limit"):
+                        files_read.add(line)
+
+            if tool_name in ("Edit", "edit", "Write", "write") and tool_input:
+                path = tool_input.split("\n")[0].strip() if tool_input else ""
+                if path and not path.startswith("-") and not path.startswith("+"):
+                    files_modified.add(path)
+
+            if tool_name in ("Bash", "bash") and tool_input:
+                commands_run.append(tool_input[:200])
+
+    # Build summary
+    summary_parts = []
+    if tools_used:
+        summary_parts.append(f"Tools: {', '.join(sorted(tools_used))}")
+    if files_modified:
+        summary_parts.append(f"Modified: {', '.join(sorted(files_modified)[:5])}")
+    if files_read:
+        summary_parts.append(f"Read: {len(files_read)} files")
+    summary = "; ".join(summary_parts) if summary_parts else "No tools used"
+
+    now = _now()
+    entry_id = execute(
+        """INSERT INTO agent_work_log
+           (session_id, run_id, project_id, user_message, summary,
+            tools_used, files_read, files_modified, commands_run,
+            assistant_response_preview, status,
+            cost_usd, input_tokens, output_tokens, duration_ms, num_turns,
+            created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (session_id, run_id, session.get("project_id"),
+         user_msg[:1000], summary,
+         json.dumps(sorted(tools_used)),
+         json.dumps(sorted(files_read)[:20]),
+         json.dumps(sorted(files_modified)[:20]),
+         json.dumps(commands_run[:10]),
+         assistant_text[:500], status,
+         stats.get("cost_usd"), stats.get("input_tokens"),
+         stats.get("output_tokens"), stats.get("duration_ms"),
+         stats.get("turns"),
+         now),
+    )
+    return entry_id
+
+
+def get_work_log(project_id=None, limit=50):
+    """Get work log entries, optionally filtered by project."""
+    if project_id:
+        return query_all(
+            """SELECT wl.*, s.title as session_title, p.slug as project_slug
+               FROM agent_work_log wl
+               LEFT JOIN agent_sessions s ON wl.session_id = s.id
+               LEFT JOIN projects p ON wl.project_id = p.id
+               WHERE wl.project_id = ?
+               ORDER BY wl.created_at DESC LIMIT ?""",
+            (project_id, limit))
+    return query_all(
+        """SELECT wl.*, s.title as session_title, p.slug as project_slug
+           FROM agent_work_log wl
+           LEFT JOIN agent_sessions s ON wl.session_id = s.id
+           LEFT JOIN projects p ON wl.project_id = p.id
+           ORDER BY wl.created_at DESC LIMIT ?""",
+        (limit,))
+
+
 # --- Recovery ---
 
 def recover_interrupted_sessions():

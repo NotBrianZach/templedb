@@ -688,6 +688,11 @@ try:
 except Exception as e:
     logger.warning(f'Failed to load GUI page nix: {e}')
 try:
+    from gui_pages.nix_store import router as nix_store_router
+    app.include_router(nix_store_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page nix_store: {e}')
+try:
     from gui_pages.projects import router as projects_router
     app.include_router(projects_router)
 except Exception as e:
