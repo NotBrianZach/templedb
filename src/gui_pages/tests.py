@@ -495,7 +495,7 @@ def tests_toggle(slug: str, test_id: int):
             f'<td>{toggle_btn} {delete_btn}</td></tr>')
 
 
-@app.delete("/tests/{slug}/delete/{test_id}", response_class=HTMLResponse)
+@router.delete("/tests/{slug}/delete/{test_id}", response_class=HTMLResponse)
 def tests_delete(slug: str, test_id: int):
     """Delete a test definition."""
     execute("DELETE FROM project_tests WHERE id = ?", (test_id,))
@@ -528,7 +528,7 @@ def tests_dep_toggle(slug: str, dep_id: int):
     return RedirectResponse(f"/tests/{slug}", status_code=303)
 
 
-@app.delete("/tests/{slug}/dep/delete/{dep_id}", response_class=HTMLResponse)
+@router.delete("/tests/{slug}/dep/delete/{dep_id}", response_class=HTMLResponse)
 def tests_dep_delete(slug: str, dep_id: int):
     """Delete a test dependency."""
     execute("DELETE FROM project_test_deps WHERE id = ?", (dep_id,))

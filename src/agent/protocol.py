@@ -122,6 +122,7 @@ class ProtocolServer:
             "notes.get": self._handle_notes_get,
             "notes.set": self._handle_notes_set,
             "session.fork": self._handle_session_fork,
+            "session.last": self._handle_session_last,
         }
 
         handler = handlers.get(method)
@@ -181,6 +182,14 @@ class ProtocolServer:
             limit=params.get("limit", 50),
         )
         self._respond(request_id, result=sessions)
+
+    def _handle_session_last(self, request_id, params):
+        """Return the most recent session for a project (or None)."""
+        sessions = self.service.list_sessions(
+            project_slug=params.get("project"),
+            limit=1,
+        )
+        self._respond(request_id, result=sessions[0] if sessions else None)
 
     def _handle_session_close(self, request_id, params):
         session_id = params.get("session_id")

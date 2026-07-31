@@ -305,7 +305,4 @@ def fleet_sync_pull(machine_name: str):
         return HTMLResponse(_msg(f"Error: {e}", ok=False))
 
 
-# ── Split page modules ──
-from gui_pages.tests import router as tests_router
-app.include_router(tests_router)
 

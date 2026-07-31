@@ -746,30 +746,4 @@ def _systemd_state_cell(active: str, sub: str) -> str:
     return f'<span style="color:{color}">{html.escape(active)}</span> <span class="muted">({html.escape(sub)})</span>'
 
 
-from gui_pages.systemd import router as systemd_router
-app.include_router(systemd_router)
-
-from gui_pages.deploy import router as deploy_router
-app.include_router(deploy_router)
-
-from gui_pages.audit import router as audit_router
-app.include_router(audit_router)
-
-from gui_pages.domains import router as domains_router
-app.include_router(domains_router)
-
-from gui_pages.graph import router as graph_router
-app.include_router(graph_router)
-
-from gui_pages.schema import router as schema_router
-app.include_router(schema_router)
-
-from gui_pages.docs import router as docs_router
-app.include_router(docs_router)
-
-from gui_pages.code import router as code_router
-app.include_router(code_router)
-
-from gui_pages.nix import router as nix_router
-app.include_router(nix_router)
 

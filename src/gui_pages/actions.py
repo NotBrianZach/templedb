@@ -9,7 +9,7 @@ from fastapi import APIRouter, Form, Query
 from fastapi.responses import HTMLResponse
 
 from db_utils import execute, query_all, query_one
-from gui_helpers import _base, _table, _search_bar, _file_link, _msg, _status_badge, CSS
+from gui_helpers import _base, _table, _search_bar, _file_link, _msg, _status_badge, _run, CSS
 
 router = APIRouter()
 
@@ -232,8 +232,5 @@ def backup_gcs():
     rc, out, err = _run("storage", "backup", "gcs")
     return HTMLResponse(_msg(out or err or "Done", ok=rc == 0))
 
-
-from gui_pages.settings import router as settings_router
-app.include_router(settings_router)
 
 

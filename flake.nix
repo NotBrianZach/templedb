@@ -39,6 +39,35 @@
           installPhase = ''
             runHook preInstall
 
+            # Drift check: `src = ./.;` uses only git-tracked files. TempleDB's
+            # source of truth is the DB (edited via ~/temple/templedb/ FUSE
+            # mount); git is only updated by `templedb publish run templedb`.
+            # If someone edits through the DB and never publishes, whole modules
+            # silently disappear from the build. Fail early with a clear pointer
+            # instead of shipping a broken package that errors at runtime with
+            # things like "Unknown method: session.last".
+            required_files=(
+              src/agent/protocol.py
+              src/agent/service.py
+              src/agent/store.py
+              src/cli/commands/agent.py
+              src/gui_pages/dashboard.py
+              src/nix_ast_parser.py
+              src/services/config_compiler.py
+              src/services/nix_store_service.py
+            )
+            missing=()
+            for f in "''${required_files[@]}"; do
+              [ -f "$f" ] || missing+=("$f")
+            done
+            if [ ''${#missing[@]} -gt 0 ]; then
+              echo "ERROR: templedb build is missing files that exist in the DB but were never published to git:" >&2
+              printf '  - %s\n' "''${missing[@]}" >&2
+              echo "" >&2
+              echo "Fix: run 'templedb publish run templedb -m \"sync\"' to materialize the DB to git, then rebuild." >&2
+              exit 1
+            fi
+
             SITE="$out/${python.sitePackages}"
             mkdir -p "$SITE" "$out/bin"
 

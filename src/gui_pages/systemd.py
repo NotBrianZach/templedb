@@ -330,6 +330,4 @@ def _fleet_sync_format_probe(result: dict, sync_projects: list[str]) -> str:
     return f'<span style="color:#4a9a6a">SSH &#x2713;</span> | {" | ".join(parts)}'
 
 
-from gui_pages.fleet_sync import router as fleet_sync_router
-app.include_router(fleet_sync_router)
 
