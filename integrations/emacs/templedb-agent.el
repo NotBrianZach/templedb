@@ -386,7 +386,7 @@ Uses `with-undo-amalgamate' so all streaming chunks become one undo entry."
         (let ((inhibit-read-only t))
           (insert text)
           (set-marker templedb-agent--streaming-marker (point)))))
-    (templedb-agent--auto-scroll))))
+    (templedb-agent--auto-scroll)))
 
 (defun templedb-agent--finalize-streaming ()
   "Finalize the streaming response."
