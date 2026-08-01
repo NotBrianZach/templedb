@@ -329,12 +329,15 @@ class FileCommands(Command):
                     (project_id,))
             if branch:
                 change_state = "modified" if file_record else "added"
+                # content_hash must be set here — vcs commit reads content via
+                # ws.content_hash, not file_contents. Without this, `file set`
+                # followed by `vcs commit` silently records the previous content.
                 base.execute("""
-                    INSERT INTO vcs_working_state (project_id, branch_id, file_id, state, staged, last_modified)
-                    VALUES (?, ?, ?, ?, 1, datetime('now'))
+                    INSERT INTO vcs_working_state (project_id, branch_id, file_id, content_hash, state, staged, last_modified)
+                    VALUES (?, ?, ?, ?, ?, 1, datetime('now'))
                     ON CONFLICT (project_id, branch_id, file_id)
-                    DO UPDATE SET state = excluded.state, staged = 1, last_modified = datetime('now')
-                """, (project_id, branch['id'], file_id, change_state))
+                    DO UPDATE SET content_hash = excluded.content_hash, state = excluded.state, staged = 1, last_modified = datetime('now')
+                """, (project_id, branch['id'], file_id, content_hash, change_state))
         except Exception as e:
             logger.debug(f"Auto-stage failed (non-fatal): {e}")
 
