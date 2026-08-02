@@ -39,6 +39,14 @@ def register(cli):
     p.add_argument('hash_prefix', help='Hash prefix (>=8 chars)')
     p.add_argument('--host', help='Disambiguate when a hash prefix matches multiple hosts')
 
+    p = sub.add_parser('promote', help='Write an AST build\'s files into the live system_config checkout')
+    p.add_argument('hash_prefix', help='Hash prefix (>=8 chars)')
+    p.add_argument('--host', help='Disambiguate when a hash prefix matches multiple hosts')
+    p.add_argument('--yes', action='store_true',
+                   help='Skip the "N files will change" confirmation prompt')
+    p.add_argument('--force-unbuildable', action='store_true',
+                   help='Promote even if the build was never verified with `--nix-build`')
+
 
 def handle(args):
     cmd = args.ast_command
@@ -52,8 +60,10 @@ def handle(args):
         return _handle_list(svc, args)
     elif cmd == 'show':
         return _handle_show(svc, args)
+    elif cmd == 'promote':
+        return _handle_promote(svc, args)
     else:
-        print("Usage: templedb ast {build|diff|list|show}", file=sys.stderr)
+        print("Usage: templedb ast {build|diff|list|show|promote}", file=sys.stderr)
         return 1
 
 
@@ -122,4 +132,49 @@ def _handle_show(svc, args):
         print(f"no build matching {args.hash_prefix!r}", file=sys.stderr)
         return 1
     print(json.dumps(row, indent=2, default=str))
+    return 0
+
+
+def _handle_promote(svc, args):
+    row = svc.get_build(args.hash_prefix, host_name=args.host)
+    if not row:
+        print(f"no build matching {args.hash_prefix!r}", file=sys.stderr)
+        return 1
+
+    # Show what's already promoted for this host and what would change
+    current = svc.current_promoted(row['host_name'])
+    if current and current['output_hash'] == row['output_hash']:
+        print(f"build {row['output_hash'][:12]} is already the promoted build for "
+              f"{row['host_name']} (promoted {current['promoted_at']})")
+        return 0
+    if current:
+        print(f"currently promoted for {row['host_name']}: "
+              f"{current['output_hash'][:12]} ({current['promoted_at']})")
+
+    try:
+        diff = svc.diff(args.hash_prefix, 'live', host_name=args.host)
+    except ValueError as e:
+        diff = f"(could not compute diff: {e})"
+    changed_files = sum(1 for line in diff.splitlines() if line.startswith('--- '))
+    print(f"promoting {row['output_hash'][:12]} for {row['host_name']} "
+          f"— {changed_files} file(s) will change")
+
+    if not args.yes:
+        print("re-run with --yes to actually write. (Use `templedb ast diff "
+              f"{row['output_hash'][:12]} live --host {row['host_name']}` to see diff.)")
+        return 0
+
+    try:
+        result = svc.promote(
+            args.hash_prefix, host_name=args.host,
+            require_buildable=not args.force_unbuildable,
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"promoted. wrote {len(result['_written_files'])} file(s):")
+    for f in result['_written_files']:
+        print(f"  {f}")
+    print(f"next: run `sudo nixos-rebuild switch --flake ~/.config/templedb/checkouts/system_config#{row['host_name']}`")
     return 0

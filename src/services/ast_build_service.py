@@ -27,11 +27,16 @@ logger = get_logger("AstBuildService")
 BUILDS_ROOT = Path.home() / ".config" / "templedb" / "ast-builds"
 LIVE_CHECKOUT = Path.home() / ".config" / "templedb" / "checkouts" / "system_config"
 SCOPES = ("system", "home", "flake")
+DEFAULT_SCOPES = ("system", "home")  # flake excluded: parser can't roundtrip outputs FnDef body yet
 SCOPE_FILENAME = {
     "system": "configuration.nix",
     "home": "home.nix",
     "flake": "flake.nix",
 }
+# When AST-inlined host config is emitted, the live flake's mkHost still
+# references ./hosts/<host>.nix. Stub that file so the module isn't applied
+# twice on top of what AST already merged in.
+_EMPTY_HOST_MODULE = "{...}: {config, lib, pkgs, ...}: {\n  # AST-inlined; overlay content is in configuration.nix\n}\n"
 
 
 class AstBuildService(BaseService):
@@ -47,7 +52,7 @@ class AstBuildService(BaseService):
         Returns a dict describing the build. Idempotent: existing (host, hash)
         with an on-disk dir short-circuits everything after emit+hash.
         """
-        scopes = list(scopes) if scopes else list(SCOPES)
+        scopes = list(scopes) if scopes else list(DEFAULT_SCOPES)
         for s in scopes:
             if s not in SCOPES:
                 raise ValueError(f"unknown scope: {s}")
@@ -79,39 +84,49 @@ class AstBuildService(BaseService):
 
         build_dir = BUILDS_ROOT / host_name / output_hash
 
-        # 3. Idempotency: skip write if dir already exists AND a row exists
+        # 3. Idempotency: skip write if dir already exists AND a row exists.
+        # If caller wants nix build verification and previous build was never
+        # verified (or copy_support_files needs re-copying), fall through to
+        # re-verify but skip the file write itself.
         existing = query_one(
             "SELECT * FROM ast_builds WHERE output_hash = ? AND host_name = ?",
             (output_hash, host_name),
         )
-        if existing and build_dir.exists():
-            logger.info(f"build {output_hash[:12]} already exists for {host_name}, skipping write")
+        skip_write = bool(existing and build_dir.exists())
+        needs_nix_build = run_nix_build and (not existing or existing["nix_buildable"] is None)
+        if skip_write and not needs_nix_build:
+            logger.info(f"build {output_hash[:12]} already exists for {host_name}, skipping")
             return self._row_to_dict(existing)
 
-        # 4. Write to tmp dir, atomic rename
-        BUILDS_ROOT.mkdir(parents=True, exist_ok=True)
-        (BUILDS_ROOT / host_name).mkdir(exist_ok=True)
-        tmp_dir = Path(tempfile.mkdtemp(prefix=f".{output_hash[:8]}-", dir=BUILDS_ROOT / host_name))
-        try:
-            for name, body in files.items():
-                self._write_atomic(tmp_dir / name, body)
-            (tmp_dir / "manifest.json").write_bytes(manifest_bytes + b"\n")
-
-            if copy_support_files:
-                self._copy_support_files(tmp_dir, files.keys())
-
-            # If build_dir was created by a racing process between our check
-            # and now, os.rename raises OSError. Treat as idempotent success.
+        # 4. Write to tmp dir, atomic rename (unless idempotent skip)
+        if not skip_write:
+            BUILDS_ROOT.mkdir(parents=True, exist_ok=True)
+            (BUILDS_ROOT / host_name).mkdir(exist_ok=True)
+            tmp_dir = Path(tempfile.mkdtemp(prefix=f".{output_hash[:8]}-",
+                                            dir=BUILDS_ROOT / host_name))
             try:
-                os.rename(tmp_dir, build_dir)
-            except OSError:
-                if build_dir.exists():
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-                else:
-                    raise
-        except Exception:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            raise
+                for name, body in files.items():
+                    self._write_atomic(tmp_dir / name, body)
+                (tmp_dir / "manifest.json").write_bytes(manifest_bytes + b"\n")
+
+                if copy_support_files:
+                    self._copy_support_files(tmp_dir, files.keys(), host_name)
+
+                # If build_dir was created by a racing process between our check
+                # and now, os.rename raises OSError. Treat as idempotent success.
+                try:
+                    os.rename(tmp_dir, build_dir)
+                except OSError:
+                    if build_dir.exists():
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+                    else:
+                        raise
+            except Exception:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                raise
+        elif copy_support_files:
+            # Existing dir but caller now wants support files. Layer them in.
+            self._copy_support_files(build_dir, files.keys(), host_name)
 
         # 5. Optional nix build verification
         buildable = None
@@ -178,6 +193,87 @@ class AstBuildService(BaseService):
                 chunks.append("".join(d))
         return "\n".join(chunks) if chunks else ""
 
+    def promote(self, hash_prefix: str, host_name: Optional[str] = None,
+                require_buildable: bool = True) -> dict:
+        """Write an AST build's files into the live system_config checkout.
+
+        For each AST-emitted file (configuration.nix, home.nix), atomically
+        overwrite the live copy via tmp+rename. Also stub `hosts/<host>.nix`
+        as an empty module because AST configuration.nix already inlined the
+        host overlay; leaving the original host file in place would double-
+        apply through the flake's mkHost.
+
+        Returns the updated ast_builds row dict.
+        """
+        row = self.get_build(hash_prefix, host_name)
+        if not row:
+            raise ValueError(f"no build matches {hash_prefix!r}")
+        if require_buildable and row.get("nix_buildable") != 1:
+            raise ValueError(
+                f"build {row['output_hash'][:12]} for {row['host_name']} not "
+                f"verified as buildable (nix_buildable={row.get('nix_buildable')!r}). "
+                f"Re-run with `templedb ast build --host {row['host_name']} --nix-build` "
+                f"or pass require_buildable=False to force."
+            )
+
+        build_dir = Path(row["output_path"])
+        if not build_dir.exists():
+            raise ValueError(f"build dir missing on disk: {build_dir}")
+        if not LIVE_CHECKOUT.exists():
+            raise ValueError(f"live checkout missing at {LIVE_CHECKOUT}")
+
+        # Which files does this build own? Read from manifest so we're
+        # explicit about what we're writing.
+        manifest = json.loads((build_dir / "manifest.json").read_text())
+        ast_files = [f["name"] for f in manifest["files"]]
+
+        written = []
+        for name in ast_files:
+            src = build_dir / name
+            if not src.exists():
+                logger.warning(f"manifest lists {name} but not on disk in build; skipping")
+                continue
+            dst = LIVE_CHECKOUT / name
+            self._replace_atomic(dst, src.read_text())
+            written.append(name)
+
+        # Stub the host-specific module file
+        host_module_rel = f"hosts/{row['host_name']}.nix"
+        host_module_dst = LIVE_CHECKOUT / host_module_rel
+        host_module_dst.parent.mkdir(parents=True, exist_ok=True)
+        self._replace_atomic(host_module_dst, _EMPTY_HOST_MODULE)
+        written.append(host_module_rel)
+
+        # Record promotion
+        execute(
+            "UPDATE ast_builds SET promoted_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (row["id"],),
+        )
+        logger.info(f"promoted {row['output_hash'][:12]} for {row['host_name']}: "
+                    f"wrote {len(written)} files to {LIVE_CHECKOUT}")
+        updated = query_one("SELECT * FROM ast_builds WHERE id = ?", (row["id"],))
+        result = self._row_to_dict(updated)
+        result["_written_files"] = written
+        return result
+
+    def current_promoted(self, host_name: str) -> Optional[dict]:
+        """Return the most recently promoted build for a host, if any."""
+        row = query_one(
+            "SELECT * FROM ast_builds WHERE host_name = ? AND promoted_at IS NOT NULL "
+            "ORDER BY promoted_at DESC LIMIT 1",
+            (host_name,),
+        )
+        return self._row_to_dict(row) if row else None
+
+    def _replace_atomic(self, dst: Path, body: str):
+        """Overwrite `dst` with `body` via tmp+rename in the same directory."""
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_suffix(dst.suffix + f".ast-promote.{os.getpid()}")
+        tmp.write_text(body)
+        with open(tmp, "rb") as f:
+            os.fsync(f.fileno())
+        os.rename(tmp, dst)
+
     def list_builds(self, host_name: Optional[str] = None) -> List[dict]:
         if host_name:
             rows = query_all(
@@ -210,14 +306,19 @@ class AstBuildService(BaseService):
         with open(path, "rb") as f:
             os.fsync(f.fileno())
 
-    def _copy_support_files(self, dest: Path, ast_filenames):
+    def _copy_support_files(self, dest: Path, ast_filenames, host_name: Optional[str] = None):
         """Copy every file from the live checkout that we didn't emit ourselves.
-        Skips .git, common junk, and files the AST already produced."""
+        Skips .git, common junk, and files the AST already produced.
+
+        Also stubs hosts/<host_name>.nix as an empty module: the live flake's
+        mkHost still imports it, but AST configuration.nix already inlined the
+        host overlay, so we'd double-apply without this stub."""
         if not LIVE_CHECKOUT.exists():
             logger.warning(f"live checkout missing at {LIVE_CHECKOUT}, no support files to copy")
             return
         ast_names = set(ast_filenames)
         skip_dirs = {".git", "node_modules", "__pycache__"}
+        stub_target = f"hosts/{host_name}.nix" if host_name else None
         for src in LIVE_CHECKOUT.rglob("*"):
             rel = src.relative_to(LIVE_CHECKOUT)
             if any(part in skip_dirs for part in rel.parts):
@@ -229,6 +330,9 @@ class AstBuildService(BaseService):
                 target.mkdir(parents=True, exist_ok=True)
             elif src.is_file() or src.is_symlink():
                 target.parent.mkdir(parents=True, exist_ok=True)
+                if str(rel) == stub_target:
+                    target.write_text(_EMPTY_HOST_MODULE)
+                    continue
                 if src.is_symlink():
                     linkto = os.readlink(src)
                     if target.exists() or target.is_symlink():
