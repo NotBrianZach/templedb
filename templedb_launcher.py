@@ -10,11 +10,26 @@ from pathlib import Path
 
 _LOCAL = Path(__file__).parent
 
-# Prepend local src/ so new modules (repositories, checkout, etc.) and patched
-# modules are found before the installed Nix store version.
+# sys.path priority order (highest first):
+#   1. Materialized checkout — kept fresh by `templedb publish run`, so it
+#      always matches the DB. Prefer this to avoid drift.
+#   2. Local src/ — historical patches and dev overrides. Wins over the nix
+#      package but loses to the checkout when both exist.
+#   3. Nix package (via env PYTHONPATH set by the wrapper).
+#
+# The checkout path used to shadow-drift silently: the launcher only added
+# _LOCAL/src, and if a dev forgot to sync it to the DB, stale code shipped.
+# Prepending the checkout closes that gap without disturbing the fallback.
+_HOME = Path.home()
+_CHECKOUT_SRC = _HOME / ".config" / "templedb" / "checkouts" / "templedb" / "src"
+
 _src = _LOCAL / "src"
 if _src.exists() and str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
+
+# Inserted last so it ends up at index 0 (ahead of _LOCAL/src).
+if _CHECKOUT_SRC.exists() and str(_CHECKOUT_SRC) not in sys.path:
+    sys.path.insert(0, str(_CHECKOUT_SRC))
 
 # Map module names to local patched files
 _PATCHES = {}

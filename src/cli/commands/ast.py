@@ -47,6 +47,16 @@ def register(cli):
     p.add_argument('--force-unbuildable', action='store_true',
                    help='Promote even if the build was never verified with `--nix-build`')
 
+    p = sub.add_parser('deploy', help='Promote a build and run `nixos-rebuild switch` locally')
+    p.add_argument('hash_prefix', help='Hash prefix (>=8 chars)')
+    p.add_argument('--host', help='Disambiguate when a hash prefix matches multiple hosts')
+    p.add_argument('--mode', default='switch', choices=['switch', 'test', 'boot', 'dry-activate'],
+                   help='nixos-rebuild mode (default: switch)')
+    p.add_argument('--yes', action='store_true',
+                   help='Skip the confirmation prompt')
+    p.add_argument('--force-unbuildable', action='store_true',
+                   help='Deploy even if the build was never verified with `--nix-build`')
+
 
 def handle(args):
     cmd = args.ast_command
@@ -62,8 +72,10 @@ def handle(args):
         return _handle_show(svc, args)
     elif cmd == 'promote':
         return _handle_promote(svc, args)
+    elif cmd == 'deploy':
+        return _handle_deploy(svc, args)
     else:
-        print("Usage: templedb ast {build|diff|list|show|promote}", file=sys.stderr)
+        print("Usage: templedb ast {build|diff|list|show|promote|deploy}", file=sys.stderr)
         return 1
 
 
@@ -178,3 +190,81 @@ def _handle_promote(svc, args):
         print(f"  {f}")
     print(f"next: run `sudo nixos-rebuild switch --flake ~/.config/templedb/checkouts/system_config#{row['host_name']}`")
     return 0
+
+
+def _handle_deploy(svc, args):
+    """Promote an AST build then invoke SystemService.switch_system locally.
+
+    Order: verify buildable → confirm with user → promote → switch_system.
+    Refuses if the target host doesn't match the current machine's hostname
+    (deploying host A's config on machine B would activate the wrong system).
+    """
+    import socket
+    row = svc.get_build(args.hash_prefix, host_name=args.host)
+    if not row:
+        print(f"no build matching {args.hash_prefix!r}", file=sys.stderr)
+        return 1
+
+    local_host = socket.gethostname()
+    if row['host_name'] != local_host:
+        print(f"error: build is for host {row['host_name']!r} but this machine "
+              f"is {local_host!r}. Refusing to activate the wrong host's config. "
+              f"Use `templedb ast promote` alone on the correct machine, or "
+              f"deploy via fleet from a controller.", file=sys.stderr)
+        return 1
+
+    if not args.force_unbuildable and row.get('nix_buildable') != 1:
+        print(f"error: build {row['output_hash'][:12]} not verified. Run "
+              f"`templedb ast build --host {row['host_name']} --nix-build` first, "
+              f"or pass --force-unbuildable.", file=sys.stderr)
+        return 1
+
+    print(f"deploying {row['output_hash'][:12]} to {local_host} "
+          f"(mode: {args.mode})")
+    if not args.yes:
+        print(f"re-run with --yes to promote and run `nixos-rebuild {args.mode}`.")
+        return 0
+
+    # Promote first
+    try:
+        result = svc.promote(
+            args.hash_prefix, host_name=args.host,
+            require_buildable=not args.force_unbuildable,
+        )
+        print(f"promoted. wrote {len(result['_written_files'])} file(s).")
+    except ValueError as e:
+        print(f"promote error: {e}", file=sys.stderr)
+        return 1
+
+    # Then rebuild locally via SystemService
+    from services.system_service import SystemService, SystemServiceError
+    from pathlib import Path
+    sysvc = SystemService()
+    checkout_path = Path.home() / ".config" / "templedb" / "checkouts" / "system_config"
+
+    try:
+        if args.mode == 'switch':
+            rebuild = sysvc.switch_system(
+                project_slug='system_config',
+                checkout_path=checkout_path,
+            )
+        elif args.mode == 'test':
+            rebuild = sysvc.test_system(
+                project_slug='system_config',
+                checkout_path=checkout_path,
+            )
+        elif args.mode == 'boot':
+            rebuild = sysvc._run_nixos_rebuild(
+                'boot', checkout_path=checkout_path)
+        elif args.mode == 'dry-activate':
+            rebuild = sysvc._run_nixos_rebuild(
+                'dry-activate', checkout_path=checkout_path)
+    except SystemServiceError as e:
+        print(f"rebuild error: {e}", file=sys.stderr)
+        return 2
+
+    if isinstance(rebuild, dict) and rebuild.get('success'):
+        print(f"✓ nixos-rebuild {args.mode} succeeded")
+        return 0
+    print(f"nixos-rebuild {args.mode} returned: {rebuild}", file=sys.stderr)
+    return 2
