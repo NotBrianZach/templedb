@@ -6,6 +6,7 @@ Supports project ownership, host inheritance, and code generation.
 See: docs/CONFIG_COMPILER_SPEC.md
 """
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -292,7 +293,9 @@ class ConfigCompilerService(BaseService):
     def resolve(self, scope: str, host_name: Optional[str] = None) -> ConfigNode:
         """Resolve the full tree for a scope, applying host inheritance.
 
-        Returns an in-memory ConfigNode tree ready for the backend.
+        Uses structural deep-merge (see docs/AST_MERGE_SEMANTICS.md):
+        AttrSets recurse by name, Lists concatenate in priority order,
+        same-callee Withs unwrap-merge-rewrap, leaves last-wins.
         """
         root_id = self.get_root(scope)
         if not root_id:
@@ -300,7 +303,6 @@ class ConfigCompilerService(BaseService):
 
         host_chain = self.host_chain(host_name) if host_name else []
 
-        # Load all enabled nodes for this scope
         all_nodes = query_all(
             """SELECT cn.*, GROUP_CONCAT(p.slug) as owner_slugs
                FROM config_nodes cn
@@ -310,8 +312,7 @@ class ConfigCompilerService(BaseService):
                GROUP BY cn.id""",
         )
 
-        # Index by id
-        by_id = {}
+        by_id: Dict[int, ConfigNode] = {}
         for row in all_nodes:
             node = ConfigNode(
                 id=row['id'], parent_id=row['parent_id'], name=row['name'],
@@ -323,73 +324,151 @@ class ConfigCompilerService(BaseService):
             )
             by_id[node.id] = node
 
-        # Build tree from root
+        children_index: Dict[int, List[ConfigNode]] = defaultdict(list)
+        for n in by_id.values():
+            if n.parent_id is not None:
+                children_index[n.parent_id].append(n)
+
+        # Priority: shared=0, then host chain root→leaf so most-specific wins for leaves.
+        priority: Dict[Optional[int], int] = {None: 0}
+        for i, host_id in enumerate(reversed(host_chain)):
+            priority[host_id] = i + 1
+
         root = by_id.get(root_id)
         if not root:
             raise ValueError(f"Root node {root_id} not found or disabled")
 
-        self._build_children(root, by_id, host_chain)
-        return root
+        return self._materialize(root, children_index, priority)
 
-    def _build_children(self, parent: ConfigNode, by_id: Dict[int, ConfigNode],
-                        host_chain: List[int]):
-        """Recursively build children, applying host resolution."""
-        # Find all direct children of this parent
-        candidates = [n for n in by_id.values() if n.parent_id == parent.id]
+    # ── Deep-merge resolver (see docs/AST_MERGE_SEMANTICS.md) ────────
 
-        if parent.node_type in ('AttrSet', 'LetIn'):
-            # Named children: resolve host overrides by name
-            by_name: Dict[str, List[ConfigNode]] = {}
-            unnamed = []
-            for c in candidates:
-                if c.name is not None:
-                    by_name.setdefault(c.name, []).append(c)
-                else:
-                    unnamed.append(c)
+    def _resolve_position(self, nodes: List[ConfigNode],
+                          children_index: Dict[int, List[ConfigNode]],
+                          priority: Dict[Optional[int], int]) -> Optional[ConfigNode]:
+        """Merge candidates at the same tree position by structural rules."""
+        if not nodes:
+            return None
+        ordered = sorted(nodes, key=lambda n: priority.get(n.host_id, 0))
+        types = {n.node_type for n in ordered}
 
-            for name, nodes in by_name.items():
-                winner = self._resolve_host(nodes, host_chain)
-                if winner:
-                    parent.children.append(winner)
+        if len(ordered) > 1 and types == {'With'} \
+                and len({n.callee for n in ordered}) == 1:
+            return self._merge_withs(ordered, children_index, priority)
 
-            # Unnamed children (e.g. body of LetIn)
-            for c in unnamed:
-                if self._host_visible(c, host_chain):
-                    parent.children.append(c)
+        if types <= {'AttrSet', 'RecAttrSet'}:
+            return self._merge_attrsets(ordered, children_index, priority)
 
-        elif parent.node_type in ('List', 'With', 'FnCall', 'FnDef',
-                                   'Binding', 'Conditional', 'Assert',
-                                   'BinOp', 'UnaryOp', 'Select', 'HasAttr',
-                                   'Interpolation', 'Import'):
-            # Ordered children: keep all that are host-visible
-            visible = [c for c in candidates if self._host_visible(c, host_chain)]
-            parent.children.extend(visible)
+        if types == {'List'}:
+            return self._merge_lists(ordered, children_index, priority)
 
-        # Sort children
-        parent.children.sort(key=lambda c: (c.sort_order, c.name or ''))
+        return self._materialize(ordered[-1], children_index, priority)
 
-        # Recurse
-        for child in parent.children:
-            self._build_children(child, by_id, host_chain)
-
-    def _resolve_host(self, nodes: List[ConfigNode], host_chain: List[int]) -> Optional[ConfigNode]:
-        """Pick the most specific host-matching node."""
-        # Priority: exact host match (by chain order) > NULL
-        for host_id in host_chain:
-            for n in nodes:
-                if n.host_id == host_id:
-                    return n
-        # Fall back to global (NULL)
+    def _merge_attrsets(self, nodes, children_index, priority):
+        """Deep-merge N AttrSet/RecAttrSet nodes: group children by name, recurse."""
+        winner = nodes[-1]
+        new = self._clone(winner)
+        by_name: Dict[str, List[ConfigNode]] = defaultdict(list)
+        unnamed: List[ConfigNode] = []
         for n in nodes:
-            if n.host_id is None:
-                return n
-        return None
+            for k in children_index.get(n.id, []):
+                if not self._is_visible(k, priority):
+                    continue
+                if k.name:
+                    by_name[k.name].append(k)
+                else:
+                    unnamed.append(k)
+        for name, group in by_name.items():
+            merged = self._resolve_position(group, children_index, priority)
+            if merged is not None:
+                new.children.append(merged)
+        for u in unnamed:
+            new.children.append(self._materialize(u, children_index, priority))
+        new.children.sort(key=lambda c: (c.sort_order, c.name or ''))
+        return new
 
-    def _host_visible(self, node: ConfigNode, host_chain: List[int]) -> bool:
-        """Check if a node is visible for the given host chain."""
-        if node.host_id is None:
-            return True
-        return node.host_id in host_chain
+    def _merge_lists(self, nodes, children_index, priority):
+        """Concatenate N List nodes' children in priority order (shared first)."""
+        winner = nodes[-1]
+        new = self._clone(winner)
+        for n in nodes:
+            for k in children_index.get(n.id, []):
+                if not self._is_visible(k, priority):
+                    continue
+                new.children.append(self._materialize(k, children_index, priority))
+        for i, c in enumerate(new.children):
+            c.sort_order = i
+        return new
+
+    def _merge_withs(self, nodes, children_index, priority):
+        """Unwrap same-callee `With` nodes, merge inner content by position, rewrap."""
+        winner = nodes[-1]
+        new = self._clone(winner)
+        inner_by_name: Dict[str, List[ConfigNode]] = defaultdict(list)
+        inner_unnamed_by_type: Dict[str, List[ConfigNode]] = defaultdict(list)
+        for n in nodes:
+            for k in children_index.get(n.id, []):
+                if not self._is_visible(k, priority):
+                    continue
+                if k.name:
+                    inner_by_name[k.name].append(k)
+                else:
+                    inner_unnamed_by_type[k.node_type].append(k)
+        for name, group in inner_by_name.items():
+            merged = self._resolve_position(group, children_index, priority)
+            if merged is not None:
+                new.children.append(merged)
+        for _t, group in inner_unnamed_by_type.items():
+            merged = self._resolve_position(group, children_index, priority)
+            if merged is not None:
+                new.children.append(merged)
+        return new
+
+    def _materialize(self, node: ConfigNode,
+                     children_index: Dict[int, List[ConfigNode]],
+                     priority: Dict[Optional[int], int]) -> ConfigNode:
+        """Clone a node and recursively resolve its children (single-parent path).
+
+        For AttrSet-like parents, still groups children by name so that a
+        single-parent subtree with mixed host_ids gets merged correctly.
+        """
+        new = self._clone(node)
+        kids = [k for k in children_index.get(node.id, [])
+                if self._is_visible(k, priority)]
+        if node.node_type in ('AttrSet', 'RecAttrSet'):
+            by_name: Dict[str, List[ConfigNode]] = defaultdict(list)
+            unnamed: List[ConfigNode] = []
+            for k in kids:
+                if k.name:
+                    by_name[k.name].append(k)
+                else:
+                    unnamed.append(k)
+            for name, group in by_name.items():
+                merged = self._resolve_position(group, children_index, priority)
+                if merged is not None:
+                    new.children.append(merged)
+            for u in unnamed:
+                new.children.append(self._materialize(u, children_index, priority))
+            new.children.sort(key=lambda c: (c.sort_order, c.name or ''))
+        else:
+            for k in kids:
+                new.children.append(self._materialize(k, children_index, priority))
+        return new
+
+    def _is_visible(self, node: ConfigNode,
+                    priority: Dict[Optional[int], int]) -> bool:
+        """Node is visible if it's shared or its host is in the resolve chain."""
+        return node.host_id is None or node.host_id in priority
+
+    def _clone(self, node: ConfigNode) -> ConfigNode:
+        """Shallow-clone a ConfigNode with an empty children list."""
+        return ConfigNode(
+            id=node.id, parent_id=node.parent_id, name=node.name,
+            sort_order=node.sort_order, node_type=node.node_type,
+            value=node.value, callee=node.callee, operator=node.operator,
+            scope=node.scope, host_id=node.host_id, enabled=node.enabled,
+            description=node.description, category=node.category,
+            owner_slugs=list(node.owner_slugs), children=[]
+        )
 
     # ── Tree queries ──────────────────────────────────────────────────
 

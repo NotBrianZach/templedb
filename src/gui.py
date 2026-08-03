@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from db_utils import execute, query_all, query_one
 from config import FUSE_MOUNT_PATH
 from logger import get_logger
+from gui_helpers import _status_badge
 
 logger = get_logger("gui")
 

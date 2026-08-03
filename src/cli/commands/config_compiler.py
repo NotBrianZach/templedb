@@ -89,6 +89,9 @@ def register(cli):
     p.add_argument('--replace', action='store_true',
                    help='Replace existing nodes in this scope (default: error if non-empty)')
     p.add_argument('--project', help='Assign all leaf nodes to this project')
+    p.add_argument('--host', help='Import as an overlay for a specific host. '
+                                  'Deep-merges into existing shared (host_id=NULL) AttrSets, '
+                                  'tagging only new leaves/subtrees with the host.')
 
     # import-all
     p = sub.add_parser('import-all', help='Import configuration.nix, home.nix, flake.nix from a directory')
@@ -371,12 +374,16 @@ def _handle_stats(svc):
     return 0
 
 
-def _import_nix_file(svc, filepath, scope, project_slug=None):
+def _import_nix_file(svc, filepath, scope, project_slug=None, host_id=None):
     """Parse a .nix file and insert into config_nodes for the given scope.
 
     Returns (node_count, error_message).
     Handles structural unwrapping: configuration.nix has two FnDef wrappers,
     home.nix has one, flake.nix has none.
+
+    When host_id is set, deep-merges into existing shared (host_id=NULL)
+    AttrSets rather than duplicating them: intermediate AttrSets are reused,
+    only new leaves and subtrees are inserted with the host tag.
     """
     try:
         from nix_ast_parser import parse_nix_file, ASTNode
@@ -416,34 +423,24 @@ def _import_nix_file(svc, filepath, scope, project_slug=None):
 
     merge_attrsets(ast)
 
-    # Unwrap file-level structure to get bindings + body
+    # Unwrap file-level structure to get bindings + body.
+    # System/home configs may have 0, 1, or 2 outer FnDef wrappers depending on
+    # whether they take module args and system args separately. Skip past any
+    # FnDef wrappers until we hit LetIn or AttrSet.
     bindings = []
     body_children = []
 
-    if scope == 'system':
-        # FnDef → FnDef → LetIn → {bindings, body}
-        if ast.node_type == 'FnDef' and len(ast.children) >= 2:
-            fn2 = ast.children[1]  # inner FnDef
-            if fn2.node_type == 'FnDef' and len(fn2.children) >= 2:
-                inner = fn2.children[1]  # LetIn or AttrSet
-                if inner.node_type == 'LetIn':
-                    bindings = [c for c in inner.children if c.node_type == 'Binding']
-                    body = [c for c in inner.children if c.node_type != 'Binding']
-                    if body and body[0].node_type == 'AttrSet':
-                        body_children = body[0].children
-                elif inner.node_type == 'AttrSet':
-                    body_children = inner.children
-    elif scope == 'home':
-        # FnDef → LetIn → {bindings, body}
-        if ast.node_type == 'FnDef' and len(ast.children) >= 2:
-            inner = ast.children[1]
-            if inner.node_type == 'LetIn':
-                bindings = [c for c in inner.children if c.node_type == 'Binding']
-                body = [c for c in inner.children if c.node_type != 'Binding']
-                if body and body[0].node_type == 'AttrSet':
-                    body_children = body[0].children
-            elif inner.node_type == 'AttrSet':
-                body_children = inner.children
+    if scope in ('system', 'home'):
+        inner = ast
+        while inner.node_type == 'FnDef' and len(inner.children) >= 2:
+            inner = inner.children[1]
+        if inner.node_type == 'LetIn':
+            bindings = [c for c in inner.children if c.node_type == 'Binding']
+            body = [c for c in inner.children if c.node_type != 'Binding']
+            if body and body[0].node_type == 'AttrSet':
+                body_children = body[0].children
+        elif inner.node_type == 'AttrSet':
+            body_children = inner.children
     elif scope == 'flake':
         # Direct AttrSet
         if ast.node_type == 'AttrSet':
@@ -453,14 +450,29 @@ def _import_nix_file(svc, filepath, scope, project_slug=None):
         return 0, f"Could not extract config body from {filepath} for scope {scope}"
 
     # Insert into DB
-    from db_utils import execute
+    from db_utils import execute, query_one
     root_id = svc.get_root(scope)
 
     def insert_ast(node, parent_db_id):
+        # Host-overlay path: reuse existing shared AttrSets under the same name
+        # so per-host imports layer onto shared config instead of shadowing it.
+        if host_id is not None and node.name and node.node_type in ('AttrSet', 'RecAttrSet'):
+            existing = query_one(
+                """SELECT id FROM config_nodes
+                   WHERE parent_id = ? AND name = ? AND host_id IS NULL
+                     AND node_type IN ('AttrSet', 'RecAttrSet')""",
+                (parent_db_id, node.name),
+            )
+            if existing:
+                count = 0
+                for child in node.children:
+                    count += insert_ast(child, existing['id'])
+                return count
+
         node_id = svc.add_node(
             parent_id=parent_db_id, name=node.name, node_type=node.node_type,
             value=node.value, callee=node.callee, operator=node.operator,
-            sort_order=node.sort_order,
+            sort_order=node.sort_order, host_id=host_id,
         )
         count = 1
         for child in node.children:
@@ -498,9 +510,26 @@ def _handle_import(svc, args):
         print(f"File not found: {args.file}", file=sys.stderr)
         return 1
 
-    # Check if scope already has data
+    host_id = _host_id(svc, args.host) if getattr(args, 'host', None) else None
+
     root_id = svc.get_root(args.scope)
-    if root_id:
+    if host_id is not None:
+        # Host overlay: clear existing nodes tagged to this host in this scope
+        # so re-import is idempotent. Shared (host_id=NULL) nodes are preserved.
+        existing = query_all(
+            """WITH RECURSIVE tree(id) AS (
+                 SELECT id FROM config_nodes WHERE parent_id = ? AND host_id = ?
+                 UNION ALL
+                 SELECT cn.id FROM config_nodes cn JOIN tree t ON cn.parent_id = t.id
+               ) SELECT id FROM tree""",
+            (root_id, host_id),
+        )
+        if existing:
+            for c in existing:
+                execute("DELETE FROM config_nodes WHERE id = ?", (c['id'],))
+            print(f"Cleared {len(existing)} existing nodes for host '{args.host}' in {args.scope}")
+    elif root_id:
+        # Non-host import into a shared scope: original semantics
         children = query_all("SELECT id FROM config_nodes WHERE parent_id = ?", (root_id,))
         if children and not args.replace:
             print(f"Scope '{args.scope}' already has {len(children)} children. "
@@ -511,12 +540,13 @@ def _handle_import(svc, args):
                 execute("DELETE FROM config_nodes WHERE id = ?", (c['id'],))
             print(f"Cleared {len(children)} existing children from {args.scope} scope")
 
-    count, err = _import_nix_file(svc, args.file, args.scope, args.project)
+    count, err = _import_nix_file(svc, args.file, args.scope, args.project, host_id=host_id)
     if err:
         print(f"Error: {err}", file=sys.stderr)
         return 1
 
-    print(f"Imported {count} nodes into {args.scope} scope from {args.file}")
+    label = f"{args.scope} scope" + (f" (host {args.host})" if args.host else "")
+    print(f"Imported {count} nodes into {label} from {args.file}")
     s = svc.stats()
     print(f"Total: {s['total_nodes']} nodes, {s['raw_nix_count']} RawNix")
     return 0

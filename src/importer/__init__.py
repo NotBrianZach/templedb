@@ -600,15 +600,6 @@ class WorkingStateDetector:
             'unmodified': 0
         }
 
-        # Snapshot staged rows before clearing — refresh must not wipe
-        # DB-authored content (via `templedb file set` or FUSE writes) just
-        # because the checkout on disk hasn't been re-materialized yet.
-        staged_rows = query_all("""
-            SELECT file_id, content_hash, state FROM vcs_working_state
-            WHERE project_id = ? AND branch_id = ? AND staged = 1
-        """, (self.project_id, branch_id))
-        staged_by_file_id = {r['file_id']: r for r in staged_rows}
-
         # Clear existing working state
         execute("""
             DELETE FROM vcs_working_state
@@ -678,14 +669,13 @@ class WorkingStateDetector:
                     # Ensure content_blobs entry exists (required by file_contents FK)
                     self._ensure_content_blob(file_content)
 
-                    prior = staged_by_file_id.get(file_id)
                     records.append((
                         self.project_id,
                         branch_id,
                         file_id,
                         state,
-                        1 if prior else 0,
-                        prior['content_hash'] if prior else file_content.hash_sha256
+                        0,  # staged
+                        file_content.hash_sha256
                     ))
             else:
                 # Check if modified
@@ -738,43 +728,18 @@ class WorkingStateDetector:
                     changes['modified'] += 1
                     self._ensure_content_blob(file_content)
 
-                # If a prior staged row exists (from `file set` or FUSE write),
-                # preserve its content_hash and staged flag. The refresh's job is
-                # to detect disk vs committed drift, not to overwrite explicitly
-                # staged content with whatever's on disk.
-                prior = staged_by_file_id.get(file_id)
-                if prior:
-                    changes[state] -= 1
-                    state = prior['state']
-                    changes[state] = changes.get(state, 0) + 1
                 records.append((
                     self.project_id,
                     branch_id,
                     file_id,
                     state,
-                    1 if prior else 0,
-                    prior['content_hash'] if prior else file_content.hash_sha256
+                    0,  # staged
+                    file_content.hash_sha256
                 ))
 
         # Check for deleted files
         for file_path, file_id in tracked_by_path.items():
             if file_path not in current_by_path:
-                # A prior staged entry for a not-on-disk file is normal when the
-                # file was set via `templedb file set` before its checkout was
-                # materialized. Preserve its content_hash so the commit succeeds.
-                prior = staged_by_file_id.get(file_id)
-                if prior and prior['content_hash']:
-                    changes[prior['state']] = changes.get(prior['state'], 0) + 1
-                    records.append((
-                        self.project_id,
-                        branch_id,
-                        file_id,
-                        prior['state'],
-                        1,
-                        prior['content_hash']
-                    ))
-                    continue
-
                 state = 'deleted'
                 changes['deleted'] += 1
 

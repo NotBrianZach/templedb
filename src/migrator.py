@@ -61,6 +61,7 @@ MIGRATION_SEQUENCE = [
     "076_agent_work_log.sql",
     "077_config_compiler.sql",
     "078_config_compiler_full_nix_ast.sql",
+    "079_ast_builds.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",

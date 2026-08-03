@@ -3,6 +3,7 @@
 Manages the lifecycle of sessions and runs, dispatches to providers,
 handles streaming with batched writes, and crash recovery.
 """
+import os
 import threading
 import time
 import json
@@ -23,11 +24,43 @@ from agent.events import (
 )
 from agent import store
 from agent.providers.fake import FakeProvider
+from db_utils import query_one
 
 logger = get_logger("AgentService")
 
 # Minimum interval between DB writes for streaming text (seconds)
 FLUSH_INTERVAL = 0.25
+
+
+def _resolve_cwd(session, context):
+    """Pick a cwd for the provider subprocess so `CLAUDE.md` autoloads.
+
+    Prefers the first project slug in `context["projects"]` (what the client
+    marked as "in context basket"), then falls back to the session's own
+    `project_id`. Returns a directory path or None.
+    """
+    if context and context.get("cwd"):
+        return context["cwd"]
+
+    slug = None
+    if context:
+        projects = context.get("projects") or []
+        if projects and isinstance(projects[0], dict):
+            slug = projects[0].get("slug")
+
+    row = None
+    if slug:
+        row = query_one("SELECT repo_url FROM projects WHERE slug = ?", (slug,))
+    elif session and session.get("project_id"):
+        row = query_one("SELECT repo_url FROM projects WHERE id = ?",
+                        (session["project_id"],))
+
+    if not row:
+        return None
+    path = row["repo_url"]
+    if path and os.path.isdir(path):
+        return path
+    return None
 
 
 def _get_provider(provider_kind, config=None):
@@ -185,6 +218,12 @@ class AgentService:
         # Build message history for provider
         messages = store.get_messages(session_id)
         message_list = [{"role": m["role"], "content_text": m["content_text"]} for m in messages]
+
+        # Inject cwd so Claude Code auto-loads the project's CLAUDE.md
+        cwd = _resolve_cwd(session, context)
+        if cwd:
+            context = dict(context) if context else {}
+            context["cwd"] = cwd
 
         # Create placeholder assistant message for streaming
         assistant_msg = store.add_message(session_id, ROLE_ASSISTANT, "", run_id=run_id)
