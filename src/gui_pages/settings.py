@@ -32,6 +32,14 @@ _highlight_template = _highlight_template
 TEMPLEDB = TEMPLEDB
 
 
+def _backup_history_exists() -> bool:
+    try:
+        query_one("SELECT 1 FROM backup_history LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_redirect(q: str = Query(""), host: str = Query("")):
     from fastapi.responses import RedirectResponse

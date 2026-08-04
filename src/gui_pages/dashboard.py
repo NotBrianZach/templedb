@@ -83,6 +83,14 @@ def _highlight_template(template: str) -> str:
 
 # ── Root ──────────────────────────────────────────────────────────────────────
 
+def _backup_history_exists() -> bool:
+    try:
+        query_one("SELECT 1 FROM backup_history LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
 @router.get("/", response_class=HTMLResponse)
 def root():
     # ── Stats ──────────────────────────────────────────────────────────────────

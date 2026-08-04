@@ -303,6 +303,14 @@ def _colorize_diff(diff: str) -> str:
     return "\n".join(out)
 
 
+def _backup_history_exists() -> bool:
+    try:
+        query_one("SELECT 1 FROM backup_history LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
 def _highlight_template(template: str) -> str:
     """Highlight ${VAR} references in compound var templates."""
     def replace(m):
