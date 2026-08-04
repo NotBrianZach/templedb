@@ -59,6 +59,102 @@ class DeployCommands(DeployOpsMixin, Command):
         targets = [row['target'] for row in rows if row['target']]
         return sorted(set(targets))  # Return unique sorted list
 
+    def _deploy_via_ast(self, project_slug: str, ast_target: dict, dry_run: bool) -> int:
+        """Deploy the AST-emitted config for a host via the ast pipeline.
+
+        Called from deploy() when a target's provider is 'ast'. Wraps
+        AstBuildService.build (with --nix-build) → promote → deploy,
+        and records the outcome in deployment_history so the unified
+        `templedb deploy history` view sees ast deploys too.
+        """
+        import socket
+        import time
+        from services.ast_build_service import AstBuildService
+
+        host_name = ast_target['target_name']
+        project = db_utils.query_one(
+            "SELECT id FROM projects WHERE slug = ?", (project_slug,)
+        )
+        started = time.time()
+
+        # Insert an in_progress row up front so failures show up in history.
+        db_utils.execute(
+            """INSERT INTO deployment_history
+               (project_id, target_name, deployment_type, status, deployment_method)
+               VALUES (?, ?, 'deploy', 'in_progress', 'ast')""",
+            (project['id'], host_name),
+        )
+        row = db_utils.query_one("SELECT last_insert_rowid() as id")
+        deployment_id = row['id']
+
+        def _finish(status: str, msg: str = None, commit_hash: str = None) -> int:
+            duration_ms = int((time.time() - started) * 1000)
+            db_utils.execute(
+                """UPDATE deployment_history
+                     SET status = ?, completed_at = datetime('now'),
+                         duration_ms = ?, commit_hash = ?, error_message = ?
+                   WHERE id = ?""",
+                (status, duration_ms, commit_hash, msg, deployment_id),
+            )
+            return 0 if status == 'success' else 1
+
+        try:
+            svc = AstBuildService()
+            print(f"AST deploy: {project_slug} → {host_name}")
+
+            # Stage 1: build + nix-build verify
+            print(f"  building & verifying...")
+            result = svc.build(host_name=host_name, run_nix_build=True,
+                               copy_support_files=True)
+            build_hash = result['output_hash']
+            print(f"  hash: {build_hash[:12]}  nix build: "
+                  f"{'OK' if result.get('nix_buildable') == 1 else 'FAILED'}")
+            if result.get('nix_buildable') != 1:
+                err = (result.get('nix_build_error') or 'unknown').splitlines()[-1]
+                return _finish('failed', f"nix-build failed: {err}",
+                               commit_hash=build_hash[:16])
+
+            if dry_run:
+                print(f"  (dry-run) would promote {build_hash[:12]} and "
+                      f"nixos-rebuild switch --host {host_name}")
+                return _finish('success', 'dry-run', commit_hash=build_hash[:16])
+
+            # Stage 2: promote — write emitted .nix files into system_config checkout
+            print(f"  promoting into system_config checkout...")
+            svc.promote(build_hash[:12], host_name=host_name,
+                        require_buildable=True)
+
+            # Stage 3: activate (only if we are on the target host)
+            local_host = socket.gethostname()
+            if host_name != local_host:
+                print(f"  ✓ promoted (not activating: local={local_host} "
+                      f"!= target={host_name}; run nixos-rebuild on the "
+                      f"target machine to activate)")
+                return _finish('success', 'promoted-no-activation',
+                               commit_hash=build_hash[:16])
+
+            print(f"  running nixos-rebuild switch...")
+            from services.system_service import SystemService, SystemServiceError
+            from pathlib import Path
+            sysvc = SystemService()
+            checkout_path = Path.home() / ".config" / "templedb" / "checkouts" / "system_config"
+            try:
+                rebuild = sysvc.switch_system(project_slug='system_config',
+                                              checkout_path=checkout_path)
+            except SystemServiceError as e:
+                return _finish('failed', f"nixos-rebuild switch: {e}",
+                               commit_hash=build_hash[:16])
+
+            if isinstance(rebuild, dict) and rebuild.get('success'):
+                print(f"  ✓ activated")
+                return _finish('success', 'switched', commit_hash=build_hash[:16])
+            return _finish('failed', f"nixos-rebuild returned: {rebuild}",
+                           commit_hash=build_hash[:16])
+
+        except Exception as e:
+            print(f"  ✗ {e}", file=sys.stderr)
+            return _finish('failed', str(e))
+
     def deploy(self, args) -> int:
         """Deploy project from TempleDB"""
         from error_handler import ResourceNotFoundError, DeploymentError
@@ -130,6 +226,22 @@ class DeployCommands(DeployOpsMixin, Command):
             mutable = hasattr(args, 'mutable') and args.mutable
             no_fhs = hasattr(args, 'no_fhs') and args.no_fhs
             no_script = hasattr(args, 'no_script') and args.no_script
+
+            # AST provider: dispatch to the AST-build/promote/deploy pipeline
+            # instead of the app-deploy path. This makes system_config a
+            # first-class deploy project so `templedb deploy run system_config
+            # --target zMothership2` is equivalent to the older
+            # `templedb ast deploy <hash> --host zMothership2` invocation.
+            # Recorded in deployment_history so the unified audit works.
+            ast_target = db_utils.query_one(
+                """SELECT dt.id, dt.target_name, dt.host, dt.provider
+                     FROM deployment_targets dt
+                     JOIN projects p ON p.id = dt.project_id
+                    WHERE p.slug = ? AND dt.target_name = ? AND dt.provider = 'ast'""",
+                (project_slug, target),
+            )
+            if ast_target:
+                return self._deploy_via_ast(project_slug, ast_target, dry_run)
 
             # Check for registered deployment script (skip if --no-script flag)
             deploy_script = None

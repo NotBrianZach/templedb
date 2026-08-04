@@ -144,6 +144,7 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("domains",  "/domains",   "Domains",    ", O"),
             ("docs",     "/docs",      "Docs",       ", k"),
             ("code",     "/code",      "Code",       ", C"),
+            ("config-ast", "/config-ast", "Config AST", ", A"),
             ("graph",    "/graph",     "Graph",      ", g"),
             ("schema-browser", "/schema-browser", "Schema", ", Q"),
             ("settings", "/settings",  "Settings",   ", S"),
@@ -664,6 +665,11 @@ try:
     app.include_router(code_router)
 except Exception as e:
     logger.warning(f'Failed to load GUI page code: {e}')
+try:
+    from gui_pages.config_ast import router as config_ast_router
+    app.include_router(config_ast_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page config_ast: {e}')
 try:
     from gui_pages.deploy import router as deploy_router
     app.include_router(deploy_router)

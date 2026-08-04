@@ -321,6 +321,120 @@ try:
         def tool_backup_gcs(args):
             return _gcs_backup_push()
 
+        # ── AST tools for agents ──────────────────────────────────────
+        # Structured read/write access to the config-compiler AST so
+        # agents can grab a focused subtree of NixOS/home config as
+        # typed context instead of reading whole .nix files, and can
+        # propose changes as validated AST diffs instead of Edit-through-
+        # FUSE writes (which have historically truncated silently).
+        def tool_ast_subtree(args):
+            import json as _json
+            try:
+                from services.config_compiler import ConfigCompilerService
+                svc = ConfigCompilerService()
+                scope = args.get("scope", "system")
+                host = args.get("host") or None
+                path = args.get("path") or ""
+                tree = svc.resolve(scope, host)
+                node = tree
+                if path:
+                    for part in path.split("."):
+                        child = None
+                        for c in node.children:
+                            if c.name == part:
+                                child = c; break
+                        if child is None:
+                            return {"content": [{"type": "text",
+                                "text": f"no node at path {path!r} in scope={scope} host={host}"}],
+                                "isError": True}
+                        node = child
+                out = svc.emit_json(node)
+                # Truncate deep subtrees so a naive whole-scope query doesn't
+                # blow the context window; agents can re-query a deeper path.
+                text = _json.dumps(out, indent=2, default=str)
+                if len(text) > 40000:
+                    text = text[:40000] + "\n\n… (truncated at 40KB; request a narrower path)"
+                return {"content": [{"type": "text", "text": text}]}
+            except Exception as e:
+                return {"content": [{"type": "text", "text": f"error: {e}"}], "isError": True}
+
+        def tool_ast_apply(args):
+            """Apply a list of typed AST operations in a single DB transaction.
+            operations = [
+              {"op": "set_leaf",       "scope": "system", "path": "services.x.enable",
+               "value": "true", "node_type": "Bool", "host": null?},
+              {"op": "add_list_item",  "scope": "system", "path": "environment.systemPackages",
+               "value": "htop", "node_type": "Package", "host": "zMothership2"},
+              {"op": "enable",         "node_id": 938},
+              {"op": "disable",        "node_id": 938},
+              {"op": "remove",         "node_id": 1151}
+            ]
+            """
+            import json as _json
+            try:
+                from services.config_compiler import ConfigCompilerService
+                svc = ConfigCompilerService()
+                ops = args.get("operations") or []
+                if not isinstance(ops, list) or not ops:
+                    return {"content": [{"type": "text",
+                        "text": "operations must be a non-empty list"}], "isError": True}
+                results = []
+                # Resolve host names → ids up front so ops referring to a
+                # bad host name fail fast, before any partial mutation.
+                host_ids = {}
+                for op in ops:
+                    hn = op.get("host")
+                    if hn and hn not in host_ids:
+                        hrow = svc.get_host(hn)
+                        if not hrow:
+                            return {"content": [{"type": "text",
+                                "text": f"unknown host {hn!r}"}], "isError": True}
+                        host_ids[hn] = hrow["id"]
+                # Apply (single-connection auto-commit; TempleDB writes are
+                # each their own txn — no BEGIN/COMMIT wrapper here yet, so
+                # partial success is possible on op-level exception).
+                for op in ops:
+                    kind = op.get("op")
+                    host_id = host_ids.get(op.get("host"))
+                    try:
+                        if kind == "set_leaf":
+                            nid = svc.set_leaf(
+                                scope=op["scope"], path=op["path"],
+                                value=str(op["value"]),
+                                node_type=op.get("node_type", "String"),
+                                host_id=host_id, category=op.get("category"),
+                                project_slug=op.get("project"),
+                            )
+                            results.append({"op": kind, "path": op["path"], "node_id": nid, "ok": True})
+                        elif kind == "add_list_item":
+                            nid = svc.add_list_item(
+                                scope=op["scope"], path=op["path"],
+                                value=str(op["value"]),
+                                node_type=op.get("node_type", "Identifier"),
+                                host_id=host_id, category=op.get("category"),
+                                project_slug=op.get("project"),
+                            )
+                            results.append({"op": kind, "path": op["path"], "node_id": nid, "ok": True})
+                        elif kind == "enable":
+                            svc.enable_node(op["node_id"])
+                            results.append({"op": kind, "node_id": op["node_id"], "ok": True})
+                        elif kind == "disable":
+                            svc.disable_node(op["node_id"])
+                            results.append({"op": kind, "node_id": op["node_id"], "ok": True})
+                        elif kind == "remove":
+                            svc.remove_node(op["node_id"])
+                            results.append({"op": kind, "node_id": op["node_id"], "ok": True})
+                        else:
+                            results.append({"op": kind, "ok": False,
+                                            "error": f"unknown op kind: {kind}"})
+                    except Exception as e:
+                        results.append({"op": kind, "ok": False, "error": str(e)})
+                text = _json.dumps({"results": results}, indent=2)
+                any_fail = any(not r.get("ok") for r in results)
+                return {"content": [{"type": "text", "text": text}], "isError": any_fail}
+            except Exception as e:
+                return {"content": [{"type": "text", "text": f"error: {e}"}], "isError": True}
+
         self.tools.update({
             "templedb_var_set":          tool_var_set,
             "templedb_var_get":          tool_var_get,
@@ -333,6 +447,8 @@ try:
             "templedb_nixos_config_set": tool_nixos_config_set,
             "templedb_nixos_generate":   tool_nixos_generate,
             "templedb_backup_gcs":       tool_backup_gcs,
+            "templedb_ast_subtree":      tool_ast_subtree,
+            "templedb_ast_apply":        tool_ast_apply,
         })
 
     _MCPServer.__init__ = _patched_mcp_init
@@ -418,6 +534,39 @@ try:
             {"name": "templedb_backup_gcs",
              "description": "Push a fresh templedb backup to Google Cloud Storage using credentials stored in the DB.",
              "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "templedb_ast_subtree",
+             "description":
+                 "Read a typed AST subtree from the NixOS config-compiler. "
+                 "Returns the resolved node tree at (scope, path) for a given host, "
+                 "with each node's type, value, callee, owner projects, and host scope. "
+                 "Prefer this over reading whole .nix files when you only need a slice — "
+                 "e.g. path='services.pipewire' scope='system' host='zMothership2' returns "
+                 "just the pipewire subtree after shared+host deep-merge. Truncates at 40KB.",
+             "inputSchema": {"type": "object", "properties": {
+                 "scope": {"type": "string", "enum": ["system", "home", "flake"],
+                           "description": "AST scope (defaults to 'system')"},
+                 "path":  {"type": "string",
+                           "description": "Dotted attribute path (empty = root)"},
+                 "host":  {"type": "string",
+                           "description": "Host name (see templedb config-ast host list); "
+                                          "omit for shared-only view"},
+             }}},
+            {"name": "templedb_ast_apply",
+             "description":
+                 "Apply a list of typed AST operations to config_nodes. Each op is one of: "
+                 "set_leaf {scope,path,value,node_type,host?,project?}, "
+                 "add_list_item {scope,path,value,node_type,host?,project?}, "
+                 "enable {node_id}, disable {node_id}, remove {node_id}. "
+                 "Returns per-op status. Use this INSTEAD of file editing when changing "
+                 "NixOS config — it sidesteps the FUSE write-path entirely and produces "
+                 "structured changes that flow through the AST-deploy pipeline. "
+                 "After a successful apply, run `templedb deploy run system_config "
+                 "--target <host>` (or `templedb ast build --host <host> --nix-build`) "
+                 "to promote and activate.",
+             "inputSchema": {"type": "object", "properties": {
+                 "operations": {"type": "array", "items": {"type": "object"},
+                                "description": "List of typed op objects"},
+             }, "required": ["operations"]}},
         ]
 
     _MCPServer.get_tool_definitions = _patched_list_tools
