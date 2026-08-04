@@ -548,6 +548,39 @@ class ConfigCompilerService(BaseService):
 
     # ── Nix backend ───────────────────────────────────────────────────
 
+    def _emit_fndef_params(self, params_node: 'ConfigNode',
+                           at_bind_node: Optional['ConfigNode'] = None) -> str:
+        """Reconstruct FnDef params source from the JSON blob or bare identifier
+        stored by _convert_formals in the parser.
+
+        Handles three forms:
+          - bare identifier:   `x:` → params.value == "x"     → returns "x"
+          - formals AttrSet:   `{a, b, ...}:` → JSON dict     → returns "{ a, b, ... }"
+          - formals @-bind:    `{a, ...}@inputs:` → JSON dict with at → returns "{ a, ... }@inputs"
+
+        The @-bind name may also come from a sibling at_bind ConfigNode
+        (the parser stores it there when the bind lives between formals
+        and the body as a separate identifier child).
+        """
+        import json as _json
+        val = (params_node.value or "").strip()
+        # Bare identifier fast path
+        if val and not val.startswith("{"):
+            return val
+        try:
+            payload = _json.loads(val)
+        except (ValueError, TypeError):
+            # Legacy row or unexpected content — pass through verbatim.
+            return val
+        formals = payload.get("formals") or []
+        ellipsis = payload.get("ellipsis")
+        at = payload.get("at") or (at_bind_node.value if at_bind_node else None)
+        parts = list(formals)
+        if ellipsis:
+            parts.append("...")
+        inner = ", ".join(parts) if parts else ""
+        return f"{{ {inner} }}" + (f"@{at}" if at else "")
+
     def emit_nix(self, node: ConfigNode, indent_level: int = 0) -> str:
         """Emit a ConfigNode tree as Nix source code."""
         ind = "  " * indent_level
@@ -613,8 +646,15 @@ class ConfigCompilerService(BaseService):
             case 'FnDef':
                 params = node.get_child('params')
                 body = node.get_child('body')
+                at_bind = node.get_child('at_bind')
                 if params and body:
-                    return f'{params.value}: {self.emit_nix(body, indent_level)}'
+                    # Params can be either an identifier (bare "x") or a
+                    # JSON blob from _convert_formals: e.g.
+                    # {"formals":["self","nixpkgs"],"ellipsis":true,"at":"inputs"}
+                    # Reconstruct proper Nix syntax `{ self, nixpkgs, ... }`
+                    # so the emit round-trips and nix can parse it.
+                    params_str = self._emit_fndef_params(params, at_bind)
+                    return f'{params_str}: {self.emit_nix(body, indent_level)}'
                 # Fallback: single unnamed child
                 if node.children:
                     return self.emit_nix(node.children[0], indent_level)

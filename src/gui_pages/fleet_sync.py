@@ -2,6 +2,7 @@
 import html
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -17,10 +18,6 @@ from db_utils import execute, query_all, query_one
 router = APIRouter()
 
 from gui_helpers import _base, _msg, _run, _search_bar, _status_badge, _table
-# _fleet_sync_* helpers currently live in gui_pages/systemd.py (misplaced
-# during the gui.py → gui_pages/ refactor; belongs here). Imported cross-
-# module to unblock 500s; move follow-up ticket.
-from gui_pages.systemd import _fleet_sync_format_probe, _fleet_sync_get_hosts, _fleet_sync_probe
 _base = _base
 _table = _table
 _search_bar = _search_bar
@@ -309,4 +306,126 @@ def fleet_sync_pull(machine_name: str):
         return HTMLResponse(_msg(f"Error: {e}", ok=False))
 
 
+
+
+
+# ── Helpers (moved from gui_pages/systemd.py in a2763ce5+1) ──
+
+def _fleet_sync_get_hosts() -> list[dict]:
+    """Discover NixOS hosts from system_config flake.nix and known IPs."""
+    hosts = []
+    checkout = Path.home() / ".config" / "templedb" / "checkouts" / "system_config"
+    flake = checkout / "flake.nix"
+    if flake.exists():
+        content = flake.read_text()
+        for m in re.finditer(r'nixosConfigurations\.(\w+)\s*=', content):
+            name = m.group(1)
+            hosts.append({"name": name, "host": None, "user": "zach", "port": 22})
+
+    # Resolve IPs from fleet_machines
+    ip_map = {}
+    try:
+        machines = query_all("SELECT machine_name, target_host FROM fleet_machines")
+        for m in machines:
+            ip_map[m["machine_name"]] = m["target_host"]
+    except Exception:
+        pass
+
+    # Known host fallbacks
+    import socket
+    hostname = socket.gethostname()
+    known = {"zMothership2": "localhost" if hostname == "zMothership2" else "192.168.8.164",
+             "zMothership3": "localhost" if hostname == "zMothership3" else "192.168.8.172"}
+    for k, v in known.items():
+        if k not in ip_map:
+            ip_map[k] = v
+
+    for h in hosts:
+        h["host"] = ip_map.get(h["name"])
+    return hosts
+
+def _fleet_sync_probe(host_info: dict, projects: list[str]) -> dict:
+    """SSH into a host and get its DB sync state."""
+    import socket
+    name = host_info["name"]
+    host = host_info["host"]
+    user = host_info.get("user", "zach")
+
+    result = {"name": name, "host": host or "unknown", "ssh": False, "projects": {}, "error": None}
+
+    if not host:
+        result["error"] = "No IP configured"
+        return result
+
+    # Local machine
+    if host == "localhost" or name == socket.gethostname():
+        result["ssh"] = True
+        for slug in projects:
+            head = query_one("""
+                SELECT c.commit_hash, c.commit_message, c.commit_timestamp
+                FROM vcs_commits c
+                JOIN vcs_branches b ON c.id = b.head_commit_id
+                JOIN projects p ON b.project_id = p.id
+                WHERE p.slug = ? AND b.branch_name = 'main'
+            """, (slug,))
+            if head:
+                result["projects"][slug] = {
+                    "hash": head["commit_hash"], "message": head["commit_message"], "date": head["commit_timestamp"]}
+        return result
+
+    # Remote machine
+    try:
+        ssh_base = ["ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
+                     "-o", "BatchMode=yes", f"{user}@{host}"]
+
+        r = subprocess.run(ssh_base + ["echo ok"], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            result["error"] = "SSH failed"
+            return result
+        result["ssh"] = True
+
+        for slug in projects:
+            r = subprocess.run(
+                ssh_base + [f"~/templeDB/templedb vcs log {slug} 2>/dev/null | head -5"],
+                capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                for line in r.stdout.strip().split("\n"):
+                    if line.startswith("commit "):
+                        result["projects"][slug] = {"hash": line.split()[1], "message": "", "date": ""}
+                        break
+
+    except subprocess.TimeoutExpired:
+        result["error"] = "SSH timeout"
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+def _fleet_sync_format_probe(result: dict, sync_projects: list[str]) -> str:
+    """Format probe result as HTML."""
+    if result.get("error"):
+        return f'<span style="color:#e94560">{html.escape(result["error"])}</span>'
+    if not result.get("ssh"):
+        return '<span class="muted">not probed</span>'
+
+    parts = []
+    for slug in sync_projects:
+        local_head = query_one("""
+            SELECT c.commit_hash FROM vcs_commits c
+            JOIN vcs_branches b ON c.id = b.head_commit_id
+            JOIN projects p ON b.project_id = p.id
+            WHERE p.slug = ? AND b.branch_name = 'main'
+        """, (slug,))
+        remote = result.get("projects", {}).get(slug, {})
+        remote_hash = remote.get("hash", "—")
+        local_hash = local_head["commit_hash"] if local_head else "—"
+
+        if remote_hash == "—":
+            badge = '<span style="color:#606080">no data</span>'
+        elif remote_hash == local_hash:
+            badge = '<span style="color:#4a9a6a">&#x2713; in-sync</span>'
+        else:
+            badge = f'<span style="color:#e9a045">&#x26a0; stale ({html.escape(remote_hash[:8])})</span>'
+        parts.append(f'{html.escape(slug)}: {badge}')
+
+    return f'<span style="color:#4a9a6a">SSH &#x2713;</span> | {" | ".join(parts)}'
 

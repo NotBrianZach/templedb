@@ -180,18 +180,21 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
 
     if t == 'let_expression':
         node = ASTNode('LetIn')
+        # Skip 'let'/'in' keywords and comments between them and the body.
+        # A comment sitting between `in` and the real body used to be picked
+        # up as the body (via RawNix fallback) — leaving the actual attrset
+        # body silently dropped. Filter them out first so the last remaining
+        # non-binding_set child is the real body.
         for child in ts_node.children:
             if child.type == 'binding_set':
-                # Each binding becomes a Binding child
                 for bc in child.children:
                     if bc.type == 'binding':
                         binding = _convert_binding(bc, source)
                         if binding:
                             node.add(binding)
-            elif child.type in ('let', 'in'):
+            elif child.type in ('let', 'in', 'comment'):
                 continue
             else:
-                # The body expression
                 body = _convert(child, source)
                 if body is None:
                     body = _rawnix_fallback(child, source, "LetIn.body")
@@ -235,7 +238,11 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
 
     if t == 'function_expression':
         node = ASTNode('FnDef')
-        parts = [c for c in ts_node.children if c.type != ':']
+        # Filter out both ':' and '@' — tree-sitter emits '@' as a literal
+        # child between formals and the @-bind identifier. Without stripping
+        # it, parts[1] became the '@' fragment and got RawNix-wrapped as the
+        # body instead of the real let/attrset body.
+        parts = [c for c in ts_node.children if c.type not in (':', '@')]
         if len(parts) >= 2:
             # params
             param_node = parts[0]
@@ -246,11 +253,21 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
                 params = _convert_formals(param_node, source)
                 params.name = 'params'
                 node.add(params)
+            # Optional `@name` bind between formals and body — e.g.
+            # `outputs = { self, ... }@inputs: ...`. Tree-sitter emits
+            # this as an intermediate identifier child. If we see one,
+            # capture the name and shift the body slot forward, so body
+            # doesn't get set to the '@'/'inputs' fragment.
+            body_idx = 1
+            if len(parts) >= 3 and parts[1].type == 'identifier':
+                at_name = _text(parts[1], source)
+                node.add(ASTNode('String', name='at_bind', value=at_name))
+                body_idx = 2
             # body — fall back to RawNix on unhandled sub-expressions
             # rather than silently dropping (the flake outputs FnDef case).
-            body = _convert(parts[1], source)
+            body = _convert(parts[body_idx], source)
             if body is None:
-                body = _rawnix_fallback(parts[1], source, "FnDef.body")
+                body = _rawnix_fallback(parts[body_idx], source, "FnDef.body")
             body.name = 'body'
             node.add(body)
         return node

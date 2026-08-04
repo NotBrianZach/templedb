@@ -18,9 +18,7 @@ from db_utils import execute, query_all, query_one
 router = APIRouter()
 
 from gui_helpers import TEMPLEDB, _base, _file_link, _msg, _run, _search_bar, _status_badge, _table
-# CLI_REFERENCE currently lives in gui_pages/domains.py (misplaced — should
-# move to gui_helpers.py or its own module). Import to unblock /docs.
-from gui_pages.domains import CLI_REFERENCE
+from gui_helpers import CLI_REFERENCE
 _base = _base
 _table = _table
 _search_bar = _search_bar

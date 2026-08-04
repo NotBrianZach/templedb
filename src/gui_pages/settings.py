@@ -685,73 +685,12 @@ def system_page(q: str = Query(""), host: str = Query("")):
 
 # ── Systemd Monitor ──────────────────────────────────────────────────────────
 
-def _systemd_list_units(user: bool = False) -> list[dict]:
-    """List systemd units with their status."""
-    cmd = ["systemctl", "list-units", "--all", "--no-pager", "--no-legend", "--plain"]
-    if user:
-        cmd.insert(1, "--user")
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        units = []
-        for line in r.stdout.strip().split("\n"):
-            if not line.strip():
-                continue
-            parts = line.split(None, 4)
-            if len(parts) >= 4:
-                units.append({
-                    "unit": parts[0],
-                    "load": parts[1],
-                    "active": parts[2],
-                    "sub": parts[3],
-                    "description": parts[4] if len(parts) > 4 else "",
-                })
-        return units
-    except Exception:
-        return []
 
 
-def _systemd_unit_props(unit: str, user: bool = False) -> dict:
-    """Get properties for a single unit."""
-    cmd = ["systemctl", "show", unit,
-           "--property=ActiveState,SubState,MainPID,MemoryCurrent,ActiveEnterTimestamp,"
-           "InactiveEnterTimestamp,NRestarts,ExecMainStartTimestamp,FragmentPath,Description"]
-    if user:
-        cmd.insert(1, "--user")
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        props = {}
-        for line in r.stdout.strip().split("\n"):
-            if "=" in line:
-                k, v = line.split("=", 1)
-                props[k] = v
-        return props
-    except Exception:
-        return {}
 
 
-def _systemd_logs(unit: str, user: bool = False, lines: int = 50) -> str:
-    """Get recent journal logs for a unit."""
-    cmd = ["journalctl", "-u", unit, "--no-pager", f"-n{lines}", "--output=short-iso"]
-    if user:
-        cmd.insert(1, "--user")
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        return r.stdout.strip()
-    except Exception as e:
-        return f"Error fetching logs: {e}"
 
 
-def _systemd_state_cell(active: str, sub: str) -> str:
-    """Render colored state badge."""
-    if active == "active":
-        color = "#4a9a6a"
-    elif active == "failed":
-        color = "#e94560"
-    elif active == "activating" or active == "reloading":
-        color = "#e9a045"
-    else:
-        color = "#808098"
-    return f'<span style="color:{color}">{html.escape(active)}</span> <span class="muted">({html.escape(sub)})</span>'
 
 
 
