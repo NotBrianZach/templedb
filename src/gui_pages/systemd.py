@@ -2,6 +2,7 @@
 import html
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -17,6 +18,9 @@ from db_utils import execute, query_all, query_one
 router = APIRouter()
 
 from gui_helpers import _base, _msg, _run, _search_bar, _status_badge, _table
+# _systemd_* helpers currently live in gui_pages/settings.py (misplaced
+# during the gui.py → gui_pages/ refactor; belongs here).
+from gui_pages.settings import _systemd_list_units, _systemd_logs, _systemd_state_cell, _systemd_unit_props
 _base = _base
 _table = _table
 _search_bar = _search_bar

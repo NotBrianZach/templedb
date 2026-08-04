@@ -20,6 +20,7 @@ from config import FUSE_MOUNT_PATH
 router = APIRouter()
 
 from gui_helpers import TEMPLEDB, _base, _colorize_diff, _file_link, _highlight_template, _msg, _run, _search_bar, _status_badge, _table
+from gui_pages.env import _flake_inputs_html, _parse_flake_inputs
 _base = _base
 _table = _table
 _search_bar = _search_bar

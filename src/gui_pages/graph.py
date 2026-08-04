@@ -18,6 +18,7 @@ from db_utils import execute, query_all, query_one
 router = APIRouter()
 
 from gui_helpers import TEMPLEDB, _base, _file_link, _msg, _run, _search_bar, _status_badge, _table
+from gui_pages.code import _code_symbols_html
 _base = _base
 _table = _table
 _search_bar = _search_bar

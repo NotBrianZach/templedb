@@ -9,7 +9,7 @@ from fastapi import APIRouter, Form, Query
 from fastapi.responses import HTMLResponse
 
 from db_utils import execute, query_all, query_one
-from gui_helpers import _base, _table, _search_bar, _file_link, _msg, _status_badge, CSS
+from gui_helpers import _base, _table, _search_bar, _file_link, _msg, _run, _status_badge, CSS
 
 router = APIRouter()
 

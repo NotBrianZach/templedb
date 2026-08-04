@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import sqlite3 as _sqlite3
+from collections import defaultdict
 from pathlib import Path
 
 from fastapi import APIRouter, Form, Query

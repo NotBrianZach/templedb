@@ -15,9 +15,12 @@ Each node is a dict ready for insertion into config_nodes:
 
 import ctypes
 import glob
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
+
+_logger = logging.getLogger(__name__)
 
 
 def _find_grammar():
@@ -73,6 +76,26 @@ class ASTNode:
 def _text(node, source: bytes) -> str:
     """Get the source text of a tree-sitter node."""
     return source[node.start_byte:node.end_byte].decode()
+
+
+def _rawnix_fallback(ts_node, source: bytes, where: str) -> ASTNode:
+    """Wrap the raw source text as a RawNix node instead of returning None.
+
+    Called from parse sites where we would otherwise silently drop content
+    (LetIn body, With body, FnDef body, Conditional branches, Assert body,
+    unhandled apply_expression, parenthesized_expression that we couldn't
+    unwrap). Logs a warning so silent-drop stops being invisible — the
+    flake `outputs = { ... }: let ... in { ... }` case is the canonical
+    example that lost its whole body prior to this fix.
+    """
+    text = _text(ts_node, source) if ts_node is not None else ""
+    _logger.warning(
+        "nix_ast_parser: RawNix fallback at %s (tree-sitter type=%s, %d bytes) "
+        "— parser has no typed handler for this sub-expression; preserving "
+        "verbatim so downstream emit round-trips.",
+        where, getattr(ts_node, "type", "<none>"), len(text),
+    )
+    return ASTNode("RawNix", value=text)
 
 
 def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
@@ -170,20 +193,22 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
             else:
                 # The body expression
                 body = _convert(child, source)
-                if body:
-                    node.add(body)
+                if body is None:
+                    body = _rawnix_fallback(child, source, "LetIn.body")
+                body.name = 'body'
+                node.add(body)
         return node
 
     if t == 'if_expression':
         node = ASTNode('Conditional')
         parts = [c for c in ts_node.children if c.type not in ('if', 'then', 'else')]
         if len(parts) >= 3:
-            cond = _convert(parts[0], source)
-            then = _convert(parts[1], source)
-            els = _convert(parts[2], source)
-            if cond: cond.name = 'cond'; node.add(cond)
-            if then: then.name = 'then'; node.add(then)
-            if els: els.name = 'else'; node.add(els)
+            cond = _convert(parts[0], source) or _rawnix_fallback(parts[0], source, "Conditional.cond")
+            then = _convert(parts[1], source) or _rawnix_fallback(parts[1], source, "Conditional.then")
+            els  = _convert(parts[2], source) or _rawnix_fallback(parts[2], source, "Conditional.else")
+            cond.name = 'cond'; node.add(cond)
+            then.name = 'then'; node.add(then)
+            els.name  = 'else'; node.add(els)
         return node
 
     if t == 'with_expression':
@@ -191,20 +216,21 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
         if len(parts) >= 2:
             namespace = _text(parts[0], source)
             body = _convert(parts[1], source)
+            if body is None:
+                body = _rawnix_fallback(parts[1], source, "With.body")
             node = ASTNode('With', callee=namespace)
-            if body:
-                node.add(body)
+            node.add(body)
             return node
-        return None
+        return _rawnix_fallback(ts_node, source, "With.malformed")
 
     if t == 'assert_expression':
         node = ASTNode('Assert')
         parts = [c for c in ts_node.children if c.type not in ('assert', ';')]
         if len(parts) >= 2:
-            cond = _convert(parts[0], source)
-            body = _convert(parts[1], source)
-            if cond: cond.name = 'cond'; node.add(cond)
-            if body: body.name = 'body'; node.add(body)
+            cond = _convert(parts[0], source) or _rawnix_fallback(parts[0], source, "Assert.cond")
+            body = _convert(parts[1], source) or _rawnix_fallback(parts[1], source, "Assert.body")
+            cond.name = 'cond'; node.add(cond)
+            body.name = 'body'; node.add(body)
         return node
 
     if t == 'function_expression':
@@ -220,11 +246,13 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
                 params = _convert_formals(param_node, source)
                 params.name = 'params'
                 node.add(params)
-            # body
+            # body — fall back to RawNix on unhandled sub-expressions
+            # rather than silently dropping (the flake outputs FnDef case).
             body = _convert(parts[1], source)
-            if body:
-                body.name = 'body'
-                node.add(body)
+            if body is None:
+                body = _rawnix_fallback(parts[1], source, "FnDef.body")
+            body.name = 'body'
+            node.add(body)
         return node
 
     if t == 'apply_expression':

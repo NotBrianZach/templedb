@@ -16,7 +16,7 @@ from db_utils import execute, query_all, query_one
 
 router = APIRouter()
 
-from gui_helpers import _base, _msg, _run, _search_bar, _status_badge, _table
+from gui_helpers import _base, _deploy_logic_section, _file_link, _msg, _run, _search_bar, _status_badge, _table
 _base = _base
 _table = _table
 _search_bar = _search_bar

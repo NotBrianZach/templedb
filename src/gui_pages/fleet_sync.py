@@ -17,6 +17,10 @@ from db_utils import execute, query_all, query_one
 router = APIRouter()
 
 from gui_helpers import _base, _msg, _run, _search_bar, _status_badge, _table
+# _fleet_sync_* helpers currently live in gui_pages/systemd.py (misplaced
+# during the gui.py → gui_pages/ refactor; belongs here). Imported cross-
+# module to unblock 500s; move follow-up ticket.
+from gui_pages.systemd import _fleet_sync_format_probe, _fleet_sync_get_hosts, _fleet_sync_probe
 _base = _base
 _table = _table
 _search_bar = _search_bar
