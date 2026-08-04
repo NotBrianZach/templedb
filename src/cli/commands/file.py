@@ -178,6 +178,30 @@ class FileCommands(Command):
 
             self._write_content_to_db(project['id'], args.project, args.file_path, content)
 
+            # --verify: confirm the write actually landed in file_contents.is_current.
+            # Guards against the write-broken bug where later refresh/commit can revert.
+            if hasattr(args, 'verify') and args.verify:
+                from db_utils import query_one
+                expected_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
+                row = query_one(
+                    """SELECT fc.content_hash, fc.line_count
+                         FROM file_contents fc
+                         JOIN project_files pf ON pf.id = fc.file_id
+                        WHERE pf.project_id = ?
+                          AND pf.file_path  = ?
+                          AND fc.is_current = 1""",
+                    (project['id'], args.file_path)
+                )
+                if not row:
+                    logger.error(f"--verify: no file_contents.is_current row for {args.file_path}")
+                    return 2
+                if row['content_hash'] != expected_hash:
+                    logger.error(
+                        f"--verify: hash mismatch for {args.file_path}: "
+                        f"wrote {expected_hash[:12]} but DB has {row['content_hash'][:12]}"
+                    )
+                    return 2
+
             # If --stage flag, stage the file
             if hasattr(args, 'stage') and args.stage:
                 self.ctx.get_vcs_service().stage_files(
@@ -430,6 +454,9 @@ def register(cli):
     set_parser.add_argument('file_path', help='Path to file within project')
     set_parser.add_argument('-c', '--content', help='Content to write (otherwise reads from stdin)')
     set_parser.add_argument('-s', '--stage', action='store_true', help='Stage file after writing')
+    set_parser.add_argument('--verify', action='store_true',
+                            help='After write, confirm file_contents.is_current holds the written hash. '
+                                 'Exits 2 on mismatch. Guards against silent revert (see docs/known-bugs).')
     cli.commands['file.set'] = cmd.set
 
     # file ls (list files)
