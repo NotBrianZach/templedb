@@ -84,13 +84,29 @@ def _parse_db_datetime(s):
         return 0.0
 
 
-def _with_timeout(fn, *args):
-    """Run a FUSE operation with a deadline. Returns EIO on timeout."""
+def _with_timeout(fn, *args, _ctx: str = ""):
+    """Run a FUSE operation with a deadline. Returns EIO on timeout.
+
+    On timeout, the background future is *not* cancelled — it may still
+    complete after we've returned EIO to the caller. The DB writes in
+    `_write_file` are transactional (BEGIN/COMMIT/ROLLBACK) so the DB
+    stays consistent, but the caller can't tell whether the write
+    eventually landed.
+    """
+    started = time.monotonic()
+    future = _OP_EXECUTOR.submit(fn, *args)
     try:
-        future = _OP_EXECUTOR.submit(fn, *args)
         return future.result(timeout=_OP_TIMEOUT)
     except concurrent.futures.TimeoutError:
-        logger.error(f"FUSE op timed out after {_OP_TIMEOUT}s: {fn.__name__} args={args[:1]}")
+        elapsed = time.monotonic() - started
+        # Give the background future a brief chance to note whether it finished.
+        eventual = "still-running"
+        if future.done():
+            eventual = "completed-race" if future.exception() is None else f"failed:{future.exception()!r}"
+        logger.error(
+            "FUSE op timed out after %.2fs (limit=%.2fs): fn=%s ctx=%s eventual=%s",
+            elapsed, _OP_TIMEOUT, fn.__name__, _ctx or repr(args[:1]), eventual,
+        )
         raise FuseOSError(errno.EIO)
 
 
@@ -467,13 +483,23 @@ class TempleFS(Operations):
             if content is None:
                 raise FuseOSError(errno.ENOENT)
 
+        # Honor O_TRUNC: if the writer asked for truncate-on-open, start with
+        # an empty buffer. Without this, a subsequent partial write() would
+        # overlay the head of the buffer while the old tail leaked into the
+        # release-time DB write, producing frankenfile content.
+        initial_data = b"" if (flags & os.O_TRUNC) else content
+        dirty = bool(flags & os.O_TRUNC)
+        original_size = len(content)
+
         with _FD_LOCK:
             fd = _NEXT_FD
             _NEXT_FD += 1
             _WRITE_BUFFERS[fd] = {
                 "path": path,
-                "data": bytearray(content),
-                "dirty": False,
+                "data": bytearray(initial_data),
+                "dirty": dirty,
+                "original_size": original_size,
+                "opened_at": time.monotonic(),
             }
         return fd
 
@@ -521,7 +547,13 @@ class TempleFS(Operations):
         buf["dirty"] = True
 
     def release(self, path, fh):
-        """Called when file is closed. Flush dirty data to DB."""
+        """Called when file is closed. Flush dirty data to DB.
+
+        Returns -EIO on flush failure so the kernel/editor sees a save
+        error instead of silent success. Previously we returned 0 on
+        every path, so vim/emacs would report "written" even after a
+        FUSE DATA LOSS.
+        """
         if fh not in _WRITE_BUFFERS:
             return 0
 
@@ -529,16 +561,46 @@ class TempleFS(Operations):
         if not buf["dirty"]:
             return 0
 
-        # Write back to database (uses RW pool, still timeout-wrapped)
         slug, file_path = self._parse_path(path)
         if not slug or not file_path:
             return 0
 
+        data = bytes(buf["data"])
+        intended_size = len(data)
+        intended_hash = hashlib.sha256(data).hexdigest()
+        original_size = buf.get("original_size", -1)
+        session = time.monotonic() - buf.get("opened_at", time.monotonic())
+
+        # Sanity-warn on suspicious shrinks: e.g. an editor that opened
+        # with O_RDWR (no O_TRUNC), overlaid a shorter buffer, and closed.
+        # Not fatal — the write proceeds — but leaves a grep-able marker.
+        if original_size > 0 and intended_size < original_size * 0.5:
+            logger.warning(
+                "FUSE write shrinks %s from %d → %d bytes (%.0f%% loss) after %.2fs session; "
+                "if the writer meant to open with O_TRUNC, check its flags.",
+                path, original_size, intended_size,
+                100.0 * (1 - intended_size / original_size), session,
+            )
+
         try:
-            _with_timeout(self._write_file, slug, file_path, bytes(buf["data"]))
+            _with_timeout(
+                self._write_file, slug, file_path, data,
+                _ctx=f"release path={path} bytes={intended_size} hash={intended_hash[:12]}",
+            )
+        except FuseOSError:
+            # Already logged with rich context by _with_timeout / _write_file.
+            # Re-raise so kernel returns the error to the caller.
+            raise
         except Exception as e:
-            logger.error(f"FUSE DATA LOSS: failed to write {path} to DB: {e}")
-            print(f"FUSE DATA LOSS: failed to write {path} to DB: {e}", file=sys.stderr)
+            logger.error(
+                "FUSE DATA LOSS on release %s (%d bytes, hash=%s, session=%.2fs): %s",
+                path, intended_size, intended_hash[:12], session, e,
+            )
+            print(
+                f"FUSE DATA LOSS: {path} — {intended_size} bytes, hash={intended_hash[:12]}: {e}",
+                file=sys.stderr,
+            )
+            raise FuseOSError(errno.EIO)
 
         return 0
 
@@ -753,6 +815,30 @@ class TempleFS(Operations):
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+
+            # Post-commit verification: confirm file_contents.is_current
+            # actually holds the hash we just wrote. Guards against a
+            # racing writer, a rogue trigger, or a re-entrant refresh that
+            # would revert the row before anyone notices. Cheap — single
+            # PK-indexed lookup — worth it for a write hot path where
+            # silent revert used to be a bug class of its own.
+            actual = conn.execute(
+                "SELECT content_hash, file_size_bytes FROM file_contents "
+                "WHERE file_id = ? AND is_current = 1",
+                (file_id,),
+            ).fetchone()
+            if not actual or actual["content_hash"] != content_hash:
+                have = actual["content_hash"] if actual else "<no row>"
+                logger.error(
+                    "FUSE write verification FAILED for %s/%s: wrote hash=%s (%d bytes) "
+                    "but file_contents.is_current has %s",
+                    slug, file_path, content_hash[:12], len(content),
+                    have[:12] if have != "<no row>" else have,
+                )
+                raise RuntimeError(
+                    f"FUSE write verification failed: {slug}/{file_path} "
+                    f"expected hash={content_hash[:12]} got {have[:12] if have != '<no row>' else have}"
+                )
 
             self._invalidate_tree(project["id"])
             self._invalidate_content_cache(project["id"], file_path)
