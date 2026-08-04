@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from cli.commands import (
     project, vcs, env, var, search, deploy, storage, admin,
     gui_launcher, config, ai, merge,
-    domain, nixos, config_compiler,
+    domain, nixos, config_compiler, ast,
     file, tutorial, dev, deploy_history,
 )
 from cli.core import cli
@@ -159,6 +159,7 @@ def main():
     ai.register(cli)
     nixos.register(cli)
     config_compiler.register(cli)
+    ast.register(cli)
 
     # Lazy imports for optional modules
     try:

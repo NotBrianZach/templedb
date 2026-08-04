@@ -341,6 +341,28 @@ class FileCommands(Command):
         except Exception as e:
             logger.debug(f"Auto-stage failed (non-fatal): {e}")
 
+        # Mirror the write to the checkout dir if it exists, so a subsequent
+        # `vcs status --refresh` doesn't flag the file as disk-stale (it
+        # scans the checkout, and without this the disk-scan hash disagrees
+        # with the DB blob we just wrote). Cosmetic — commit correctness is
+        # already covered by the auto-stage above — but avoids confusing
+        # "modified" entries in status for files only edited via `file set`.
+        try:
+            import os
+            checkout = os.path.expanduser(
+                f"~/.config/templedb/checkouts/{project_slug}"
+            )
+            if os.path.isdir(checkout):
+                target = os.path.join(checkout, file_path)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                # Atomic write via tmp + rename to avoid partial reads.
+                tmp = f"{target}.tmp.{os.getpid()}"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp, target)
+        except Exception as e:
+            logger.debug(f"Checkout mirror failed (non-fatal): {e}")
+
 
 def register(cli):
     """Register file commands with CLI"""

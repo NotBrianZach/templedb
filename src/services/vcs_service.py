@@ -6,20 +6,9 @@ Handles staging, committing, branching, and diff operations for
 database-native version control.
 """
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
 
 from services.base import BaseService
 from error_handler import ResourceNotFoundError, ValidationError
-
-
-@dataclass
-class CommitResult:
-    """Result of a commit operation"""
-    commit_id: int
-    commit_hash: str
-    message: str
-    file_count: int
-    author: str
 
 
 class VCSService(BaseService):
@@ -283,81 +272,6 @@ class VCSService(BaseService):
         else:
             raise ValidationError("Must specify either file_patterns or unstage_all")
 
-    def commit(
-        self,
-        project_slug: str,
-        message: str,
-        author: Optional[str] = None,
-        branch_name: Optional[str] = None
-    ) -> CommitResult:
-        """
-        Create a commit from staged files.
-
-        Args:
-            project_slug: Project slug
-            message: Commit message
-            author: Author name (defaults to git config)
-            branch_name: Branch name (defaults to default branch)
-
-        Returns:
-            CommitResult with commit information
-
-        Raises:
-            ResourceNotFoundError: If project or branch not found
-            ValidationError: If no staged files
-        """
-        project = self.get_project(project_slug)
-
-        # Get author
-        if author is None:
-            author = self._get_author()
-
-        # Get branch
-        if branch_name:
-            branches = self.vcs_repo.get_branches(project['id'])
-            branch = next((b for b in branches if b['branch_name'] == branch_name), None)
-        else:
-            branch = self.get_current_branch(project['id'])
-
-        if not branch:
-            raise ResourceNotFoundError("Branch not found")
-
-        # Check for staged files
-        staged = self.vcs_repo.query_all("""
-            SELECT ws.*, fc.content_text, fc.file_size_bytes, fc.line_count
-            FROM vcs_working_state ws
-            LEFT JOIN file_contents fc ON ws.file_id = fc.file_id
-            WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged = 1
-        """, (project['id'], branch['id']))
-
-        if not staged:
-            raise ValidationError(
-                "No staged files to commit",
-                solution="Use 'templedb add' to stage files first"
-            )
-
-        # Create commit via repository
-        commit_result = self.vcs_repo.create_commit(
-            project_id=project['id'],
-            branch_id=branch['id'],
-            message=message,
-            author=author,
-            staged_files=staged
-        )
-
-        self.logger.info(
-            f"Created commit {commit_result['commit_hash'][:8]} "
-            f"with {len(staged)} files"
-        )
-
-        return CommitResult(
-            commit_id=commit_result['commit_id'],
-            commit_hash=commit_result['commit_hash'],
-            message=message,
-            file_count=len(staged),
-            author=author
-        )
-
     def get_status(self, project_slug: str) -> Dict[str, Any]:
         """
         Get VCS status for a project.
@@ -397,20 +311,3 @@ class VCSService(BaseService):
             'modified': modified,
             'untracked': untracked
         }
-
-    def _get_author(self) -> str:
-        """Get author name from git config or default"""
-        import subprocess
-        try:
-            result = subprocess.run(
-                ['git', 'config', 'user.name'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            author = result.stdout.strip()
-            if author:
-                return author
-        except Exception:
-            pass
-        return "unknown"

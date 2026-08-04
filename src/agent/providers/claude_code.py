@@ -210,12 +210,14 @@ class ClaudeCodeProvider(BaseProvider):
 
                     summary = _tool_summary(tool_name, tool_input)
                     input_text = _tool_input_display(tool_name, tool_input)
+                    target = _tool_target(tool_name, tool_input)
 
                     yield make_event(TOOL_STARTED,
                                      summary=summary,
                                      tool_name=tool_name,
                                      tool_id=tool_id,
-                                     tool_input=input_text)
+                                     tool_input=input_text,
+                                     tool_target=target)
 
                 elif block_type == "tool_result":
                     tool_use_id = block.get("tool_use_id", "")
@@ -243,6 +245,7 @@ class ClaudeCodeProvider(BaseProvider):
                         duration = round(time.time() - tool_info["start_time"], 1)
 
                     summary = _tool_summary(tool_name, tool_info.get("input", {}))
+                    target = _tool_target(tool_name, tool_info.get("input", {}))
 
                     if is_error:
                         yield make_event(TOOL_FAILED,
@@ -250,14 +253,16 @@ class ClaudeCodeProvider(BaseProvider):
                                          tool_name=tool_name,
                                          tool_id=tool_use_id,
                                          tool_output=output_text[:2000],
-                                         duration=duration)
+                                         duration=duration,
+                                         tool_target=target)
                     else:
                         yield make_event(TOOL_COMPLETED,
                                          summary=summary,
                                          tool_name=tool_name,
                                          tool_id=tool_use_id,
                                          tool_output=output_text[:2000],
-                                         duration=duration)
+                                         duration=duration,
+                                         tool_target=target)
 
         elif event_type == "rate_limit_event":
             info = event.get("rate_limit_info", {})
@@ -367,19 +372,5 @@ def _tool_input_display(tool_name, tool_input):
         return json.dumps(tool_input, indent=2)[:500]
 
 
-def _short_path(path):
-    """Shorten a file path for display."""
-    if not path:
-        return ""
-    parts = path.split("/")
-    if len(parts) > 3:
-        return "/".join(["..."] + parts[-3:])
-    return path
-
-
-def _truncate(text, max_len):
-    """Truncate text with ellipsis."""
-    text = text.replace("\n", "\\n")
-    if len(text) > max_len:
-        return text[:max_len] + "..."
-    return text
+def _tool_target(tool_name, tool_input):
+    """Return the primary file path a 

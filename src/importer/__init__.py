@@ -600,6 +600,18 @@ class WorkingStateDetector:
             'unmodified': 0
         }
 
+        # Snapshot currently-staged rows before the disk re-scan clobbers them.
+        # A staged row represents user intent to commit that exact content_hash
+        # (e.g. one written by `templedb file set` + auto-stage). Refresh must
+        # not replace it with a fresh disk-scan hash, or `vcs commit` will
+        # silently commit stale on-disk content instead of the intended DB blob.
+        staged_before = query_all("""
+            SELECT file_id, content_hash, state
+            FROM vcs_working_state
+            WHERE project_id = ? AND branch_id = ? AND staged = 1
+        """, (self.project_id, branch_id))
+        staged_map = {row['file_id']: row for row in staged_before}
+
         # Clear existing working state
         execute("""
             DELETE FROM vcs_working_state
@@ -669,13 +681,16 @@ class WorkingStateDetector:
                     # Ensure content_blobs entry exists (required by file_contents FK)
                     self._ensure_content_blob(file_content)
 
+                    # Preserve pre-existing staged intent for this file (rare
+                    # for a fresh 'added' path, but harmless if not present).
+                    preserved = staged_map.get(file_id)
                     records.append((
                         self.project_id,
                         branch_id,
                         file_id,
-                        state,
-                        0,  # staged
-                        file_content.hash_sha256
+                        preserved['state'] if preserved else state,
+                        1 if preserved else 0,
+                        preserved['content_hash'] if preserved else file_content.hash_sha256,
                     ))
             else:
                 # Check if modified
@@ -728,13 +743,18 @@ class WorkingStateDetector:
                     changes['modified'] += 1
                     self._ensure_content_blob(file_content)
 
+                # If the user already staged this file with a specific
+                # content_hash (typically via `templedb file set`), keep
+                # that hash and the staged flag. Otherwise emit the fresh
+                # disk-scan state.
+                preserved = staged_map.get(file_id)
                 records.append((
                     self.project_id,
                     branch_id,
                     file_id,
-                    state,
-                    0,  # staged
-                    file_content.hash_sha256
+                    preserved['state'] if preserved else state,
+                    1 if preserved else 0,
+                    preserved['content_hash'] if preserved else file_content.hash_sha256,
                 ))
 
         # Check for deleted files
@@ -742,6 +762,20 @@ class WorkingStateDetector:
             if file_path not in current_by_path:
                 state = 'deleted'
                 changes['deleted'] += 1
+
+                # Preserve staged intent (e.g. an explicit `vcs add` on a
+                # deleted path).
+                preserved = staged_map.get(file_id)
+                if preserved:
+                    records.append((
+                        self.project_id,
+                        branch_id,
+                        file_id,
+                        preserved['state'],
+                        1,
+                        preserved['content_hash'],
+                    ))
+                    continue
 
                 records.append((
                     self.project_id,
