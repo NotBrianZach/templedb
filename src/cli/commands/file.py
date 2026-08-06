@@ -220,6 +220,50 @@ class FileCommands(Command):
             logger.debug("Full error:", exc_info=True)
             return 1
 
+    def rm(self, args) -> int:
+        """Stage a file for deletion. On commit, project_files row is hard-deleted (history preserved in vcs_file_states)."""
+        try:
+            project = fuzzy_match_project(args.project, show_matched=False)
+            if not project:
+                logger.error(f"Project '{args.project}' not found")
+                return 1
+
+            file_record = self.file_repo.get_file_by_path(project['id'], args.file_path)
+            if not file_record:
+                logger.error(f"File '{args.file_path}' not found in project '{args.project}'")
+                return 1
+
+            file_id = file_record.get('id') or file_record.get('file_id')
+
+            from repositories.base import BaseRepository
+            base = BaseRepository()
+
+            branch = base.query_one(
+                "SELECT active_branch_id as id FROM projects WHERE id = ? AND active_branch_id IS NOT NULL",
+                (project['id'],))
+            if not branch:
+                branch = base.query_one(
+                    "SELECT id FROM vcs_branches WHERE project_id = ? AND is_default = 1 LIMIT 1",
+                    (project['id'],))
+            if not branch:
+                logger.error(f"No active branch found for project '{args.project}'")
+                return 1
+
+            base.execute("""
+                INSERT INTO vcs_working_state (project_id, branch_id, file_id, state, staged, last_modified)
+                VALUES (?, ?, ?, 'deleted', 1, datetime('now'))
+                ON CONFLICT (project_id, branch_id, file_id)
+                DO UPDATE SET state = 'deleted', staged = 1, last_modified = datetime('now')
+            """, (project['id'], branch['id'], file_id))
+
+            print(f"✓ Staged {args.file_path} for deletion")
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to remove file: {e}")
+            logger.debug("Full error:", exc_info=True)
+            return 1
+
     def ls(self, args) -> int:
         """List files in a project from the database"""
         try:
@@ -458,6 +502,15 @@ def register(cli):
                             help='After write, confirm file_contents.is_current holds the written hash. '
                                  'Exits 2 on mismatch. Guards against silent revert (see docs/known-bugs).')
     cli.commands['file.set'] = cmd.set
+
+    # file rm (stage a file for deletion)
+    rm_parser = file_subparsers.add_parser(
+        'rm',
+        help='Stage a file for deletion (hard-delete on commit; history preserved)'
+    )
+    rm_parser.add_argument('project', help='Project name or slug')
+    rm_parser.add_argument('file_path', help='Path to file within project')
+    cli.commands['file.rm'] = cmd.rm
 
     # file ls (list files)
     ls_parser = file_subparsers.add_parser(

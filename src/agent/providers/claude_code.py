@@ -83,6 +83,46 @@ class ClaudeCodeProvider(BaseProvider):
             return {"external_session_id": session_external_id}
         return {"external_session_id": None}
 
+    # System prompt tail that tells Claude to prefer our MCP tools over the
+    # built-ins that don't work in -p mode. Kept short — appended to the
+    # existing default system prompt.
+    _AGENT_SYSTEM_PROMPT = (
+        "You are running inside Emacs via TempleDB. "
+        "When you need to ask the user a multiple-choice question, use the "
+        "mcp__templedb__templedb_ask_user tool INSTEAD of AskUserQuestion. "
+        "AskUserQuestion has no UI in this environment and will be "
+        "auto-cancelled. "
+        "When you want to send a one-way informational message to the user "
+        "(e.g. a status update or observation that doesn't need a decision), "
+        "use mcp__templedb__templedb_message_user."
+    )
+
+    def _write_mcp_config(self, agent_session_id):
+        """Write a per-session mcp-config JSON that exposes the templedb MCP
+        server with our agent session id in env. Claude Code loads this via
+        --mcp-config. Returns the config file path (never cleaned up — small,
+        under /tmp, harmless if it leaks)."""
+        import tempfile
+        templedb_bin = shutil.which("templedb")
+        if not templedb_bin:
+            return None
+        cfg = {
+            "mcpServers": {
+                "templedb": {
+                    "command": templedb_bin,
+                    "args": ["ai", "mcp", "serve"],
+                    "env": {"TEMPLEDB_AGENT_SESSION_ID": str(agent_session_id)},
+                }
+            }
+        }
+        fd, path = tempfile.mkstemp(
+            prefix=f"templedb-agent-mcp-{agent_session_id}-",
+            suffix=".json",
+        )
+        with os.fdopen(fd, "w") as f:
+            json.dump(cfg, f)
+        return path
+
     def send(self, messages, context=None):
         self._cancelled = False
         self._active_tools = {}
@@ -105,20 +145,36 @@ class ClaudeCodeProvider(BaseProvider):
         if self._session_id:
             cmd.extend(["--resume", self._session_id])
         cmd.append("--dangerously-skip-permissions")
+
+        # If the service passed our agent session id, wire the MCP bridge so
+        # Claude can ask the user via templedb_ask_user / templedb_message_user
+        # instead of the auto-cancelled AskUserQuestion.
+        agent_session_id = (context or {}).get("agent_session_id")
+        if agent_session_id is not None:
+            mcp_config_path = self._write_mcp_config(agent_session_id)
+            if mcp_config_path:
+                cmd.extend(["--mcp-config", mcp_config_path])
+                cmd.extend(["--append-system-prompt", self._AGENT_SYSTEM_PROMPT])
+
         cmd.append(last_message)
 
         logger.info(f"Launching Claude: {' '.join(cmd[:6])}...")
         yield make_event(RUN_STARTED, summary="Sending to Claude Code")
 
         try:
+            # stdin=DEVNULL: our parent stdin is the Emacs↔serve JSON pipe; if
+            # Claude inherits it, `claude -p` waits 3s for prompt-on-stdin data
+            # and prints a warning that gets mistaken for the real error.
             self._process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cmd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1,
                 cwd=context.get("cwd") if context else None,
             )
 
             assistant_started = False
             accumulated_text = []
+            terminal_emitted = False
 
             for line in self._process.stdout:
                 if self._cancelled:
@@ -136,8 +192,11 @@ class ClaudeCodeProvider(BaseProvider):
 
                 for normalized in self._normalize_claude_event(
                         event, assistant_started, accumulated_text):
-                    if normalized.get("type") == ASSISTANT_STARTED:
+                    ntype = normalized.get("type")
+                    if ntype == ASSISTANT_STARTED:
                         assistant_started = True
+                    if ntype in (RUN_FAILED, PROVIDER_LOGIN_REQUIRED):
+                        terminal_emitted = True
                     yield normalized
 
             self._process.wait()
@@ -148,7 +207,7 @@ class ClaudeCodeProvider(BaseProvider):
                                      summary="Response complete",
                                      full_text="".join(accumulated_text))
                 yield make_event(RUN_COMPLETED, summary="Done")
-            else:
+            elif not terminal_emitted:
                 stderr = self._process.stderr.read() if self._process.stderr else ""
                 yield make_event(RUN_FAILED,
                                  summary=f"Claude exited with code {self._process.returncode}",
@@ -210,14 +269,12 @@ class ClaudeCodeProvider(BaseProvider):
 
                     summary = _tool_summary(tool_name, tool_input)
                     input_text = _tool_input_display(tool_name, tool_input)
-                    target = _tool_target(tool_name, tool_input)
 
                     yield make_event(TOOL_STARTED,
                                      summary=summary,
                                      tool_name=tool_name,
                                      tool_id=tool_id,
-                                     tool_input=input_text,
-                                     tool_target=target)
+                                     tool_input=input_text)
 
                 elif block_type == "tool_result":
                     tool_use_id = block.get("tool_use_id", "")
@@ -245,7 +302,6 @@ class ClaudeCodeProvider(BaseProvider):
                         duration = round(time.time() - tool_info["start_time"], 1)
 
                     summary = _tool_summary(tool_name, tool_info.get("input", {}))
-                    target = _tool_target(tool_name, tool_info.get("input", {}))
 
                     if is_error:
                         yield make_event(TOOL_FAILED,
@@ -253,16 +309,14 @@ class ClaudeCodeProvider(BaseProvider):
                                          tool_name=tool_name,
                                          tool_id=tool_use_id,
                                          tool_output=output_text[:2000],
-                                         duration=duration,
-                                         tool_target=target)
+                                         duration=duration)
                     else:
                         yield make_event(TOOL_COMPLETED,
                                          summary=summary,
                                          tool_name=tool_name,
                                          tool_id=tool_use_id,
                                          tool_output=output_text[:2000],
-                                         duration=duration,
-                                         tool_target=target)
+                                         duration=duration)
 
         elif event_type == "rate_limit_event":
             info = event.get("rate_limit_info", {})
@@ -372,5 +426,19 @@ def _tool_input_display(tool_name, tool_input):
         return json.dumps(tool_input, indent=2)[:500]
 
 
-def _tool_target(tool_name, tool_input):
-    """Return the primary file path a 
+def _short_path(path):
+    """Shorten a file path for display."""
+    if not path:
+        return ""
+    parts = path.split("/")
+    if len(parts) > 3:
+        return "/".join(["..."] + parts[-3:])
+    return path
+
+
+def _truncate(text, max_len):
+    """Truncate text with ellipsis."""
+    text = text.replace("\n", "\\n")
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text

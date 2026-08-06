@@ -27,7 +27,7 @@ logger = get_logger("AstBuildService")
 BUILDS_ROOT = Path.home() / ".config" / "templedb" / "ast-builds"
 LIVE_CHECKOUT = Path.home() / ".config" / "templedb" / "checkouts" / "system_config"
 SCOPES = ("system", "home", "flake")
-DEFAULT_SCOPES = ("system", "home")  # flake excluded: parser can't roundtrip outputs FnDef body yet
+DEFAULT_SCOPES = ("system", "home", "flake")
 SCOPE_FILENAME = {
     "system": "configuration.nix",
     "home": "home.nix",

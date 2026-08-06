@@ -534,3 +534,51 @@ def fork_session(source_session_id, new_provider_name=None):
                   scratch_org=source_notes.get("scratch_org"))
 
     return get_session(new_session["id"])
+
+
+# ── Pending asks (MCP bridge <→ Emacs round-trip) ─────────────────
+# Written by templedb_launcher MCP tool handlers (out-of-process from the
+# agent service), polled by the agent service which forwards new asks as
+# events to Emacs, updated by the protocol server when Emacs responds.
+
+def create_pending_ask(ask_id, session_id, kind, payload):
+    """Insert a new pending ask. `payload` is a JSON-serializable dict."""
+    execute(
+        """INSERT INTO agent_pending_asks
+           (ask_id, session_id, kind, payload, status, created_at)
+           VALUES (?, ?, ?, ?, 'pending', ?)""",
+        (ask_id, session_id, kind, json.dumps(payload), _now()),
+    )
+
+
+def get_pending_ask(ask_id):
+    return query_one(
+        "SELECT * FROM agent_pending_asks WHERE ask_id = ?", (ask_id,)
+    )
+
+
+def undispatched_asks_for_session(session_id):
+    """Rows the agent service hasn't yet forwarded as events."""
+    return query_all(
+        """SELECT * FROM agent_pending_asks
+           WHERE session_id = ? AND status = 'pending' AND dispatched_at IS NULL
+           ORDER BY created_at""",
+        (session_id,),
+    )
+
+
+def mark_ask_dispatched(ask_id):
+    execute(
+        "UPDATE agent_pending_asks SET dispatched_at = ? WHERE ask_id = ?",
+        (_now(), ask_id),
+    )
+
+
+def record_ask_response(ask_id, response):
+    """Emacs replied — MCP-side poller will see status='responded' and return."""
+    execute(
+        """UPDATE agent_pending_asks
+           SET status = 'responded', response = ?, responded_at = ?
+           WHERE ask_id = ? AND status = 'pending'""",
+        (json.dumps(response), _now(), ask_id),
+    )

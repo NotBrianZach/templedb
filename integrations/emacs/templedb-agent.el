@@ -232,7 +232,64 @@ list the user typed), which truncates section reads/writes.")
       ("provider.login_required"
        (templedb-agent--set-now "Login required. Run: claude auth login"))
       ("service.recovered"
-       (message "Temple Agent: %s" (or summary "Sessions recovered"))))))
+       (message "Temple Agent: %s" (or summary "Sessions recovered")))
+      ("agent.ask.question"
+       (templedb-agent--handle-ask-question data))
+      ("agent.message"
+       (templedb-agent--handle-agent-message data)))))
+
+;;;; Agent-to-user asks (mcp__templedb__templedb_ask_user)
+
+(defun templedb-agent--handle-ask-question (data)
+  "Prompt the user via completing-read for each question in DATA, then
+send the responses back to the agent via ask.respond so the MCP tool's
+tool_result can return to Claude."
+  (let ((ask-id (alist-get 'ask_id data))
+        (questions (alist-get 'questions data)))
+    (if (not (and ask-id questions))
+        (message "Temple Agent: malformed ask event, ignoring")
+      ;; Insert a marker into Conversation so the exchange history reflects
+      ;; that Claude asked, before we blocked on completing-read.
+      (templedb-agent--insert-conversation-entry
+       "ask"
+       (mapconcat (lambda (q)
+                    (format "Q: %s" (alist-get 'question q)))
+                  questions "\n"))
+      (let ((answers '()))
+        (dolist (q (append questions nil))
+          (let* ((question-text (alist-get 'question q))
+                 (options (append (alist-get 'options q) nil))
+                 (labels (mapcar (lambda (o) (alist-get 'label o)) options))
+                 (multi (alist-get 'multiSelect q))
+                 (prompt (format "%s " question-text))
+                 (choice (if multi
+                             (completing-read-multiple prompt labels nil t)
+                           (completing-read prompt labels nil t))))
+            (push (cons question-text choice) answers)))
+        (templedb-agent--send
+         "ask.respond"
+         `((ask_id . ,ask-id)
+           (response . ((answers . ,(nreverse answers))))))
+        (templedb-agent--insert-conversation-entry
+         "user"
+         (format "[answered] %s"
+                 (mapconcat (lambda (a)
+                              (format "%s → %s" (car a)
+                                      (if (listp (cdr a))
+                                          (mapconcat #'identity (cdr a) ", ")
+                                        (cdr a))))
+                            (reverse answers) "; ")))))))
+
+(defun templedb-agent--handle-agent-message (data)
+  "Render a one-way message from the agent as a *** Message entry."
+  (let ((header (or (alist-get 'header data) "Message"))
+        (body (or (alist-get 'body data) "")))
+    (save-excursion
+      (goto-char (templedb-agent--end-of-current-exchange))
+      (let ((inhibit-read-only t))
+        (insert (format "\n*** Message: %s\n\n%s\n" header body))))
+    (templedb-agent--auto-scroll)
+    (templedb-agent--notify-if-hidden (format "Agent: %s" header))))
 
 ;;;; Org buffer rendering
 
@@ -601,28 +658,41 @@ Uses TOOL_ID property for reliable matching when completing."
 
 (defun templedb-agent--complete-rich-tool (summary data new-status)
   "Update a `**** RUNNING' tool heading to NEW-STATUS and append output.
-Matches by TOOL_ID property for reliability, falls back to summary text."
+Matches by TOOL_ID property for reliability, falls back to summary text.
+
+Both searches are BOUNDED to the Conversation section so a stray
+`:TOOL_ID:' or `**** RUNNING ...' left in Next Prompt (user paste),
+Pinned (copied tool result), Notes, or Scratch can't be mistaken for
+the real tool heading and pull the output insert into the wrong
+section. Prior to this fix, an unbounded backward search from
+`point-max' was the leading cause of `tool completion ends up in
+Next Prompt' reports."
   (let ((tool-output (alist-get 'tool_output data))
         (tool-id (alist-get 'tool_id data))
         (duration (alist-get 'duration data))
-        (found nil))
+        (found nil)
+        (conv-start (templedb-agent--start-of-conversation))
+        (conv-end (templedb-agent--end-of-conversation)))
     (save-excursion
-      (goto-char (point-max))
-      ;; Try matching by TOOL_ID property first
+      ;; Try matching by TOOL_ID property first — searches within Conversation
+      ;; only. Start at conv-end and walk backward.
       (when tool-id
-        (goto-char (point-max))
+        (goto-char conv-end)
         (while (and (not found)
-                    (re-search-backward (format ":TOOL_ID: %s" (regexp-quote tool-id)) nil t))
-          ;; Found the property — go back to the tool heading (4 stars)
-          (when (re-search-backward "^\\*\\*\\*\\* RUNNING " nil t)
+                    (re-search-backward
+                     (format ":TOOL_ID: %s" (regexp-quote tool-id))
+                     conv-start t))
+          ;; Found the property — go back to the tool heading (4 stars).
+          ;; Bound to conv-start so we can't cross section boundaries.
+          (when (re-search-backward "^\\*\\*\\*\\* RUNNING " conv-start t)
             (setq found t))))
-      ;; Fallback: match by summary text
+      ;; Fallback: match by summary text, same bounding.
       (unless found
-        (goto-char (point-max))
+        (goto-char conv-end)
         (when (re-search-backward
                (format "^\\*\\*\\*\\* RUNNING %s$"
                        (regexp-quote (or summary "")))
-               nil t)
+               conv-start t)
           (setq found t)))
       (when found
         (let ((inhibit-read-only t))

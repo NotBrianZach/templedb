@@ -123,6 +123,7 @@ class ProtocolServer:
             "notes.set": self._handle_notes_set,
             "session.fork": self._handle_session_fork,
             "session.last": self._handle_session_last,
+            "ask.respond": self._handle_ask_respond,
         }
 
         handler = handlers.get(method)
@@ -301,3 +302,18 @@ class ProtocolServer:
             return
         new_session = self.service.fork_session(session_id)
         self._respond(request_id, result=new_session)
+
+    def _handle_ask_respond(self, request_id, params):
+        """Emacs → agent: user answered a pending ask from templedb_ask_user.
+
+        params: {ask_id: str, response: dict}
+        The response is forwarded via the DB rendezvous table to the MCP tool
+        handler polling on the other end (which then returns it to Claude as
+        the tool_result)."""
+        ask_id = params.get("ask_id")
+        response = params.get("response")
+        if not ask_id:
+            self._respond(request_id, error="ask_id required")
+            return
+        self.service.respond_to_ask(ask_id, response)
+        self._respond(request_id, result={"ok": True})

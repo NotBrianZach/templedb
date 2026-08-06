@@ -575,7 +575,18 @@ class ConfigCompilerService(BaseService):
         formals = payload.get("formals") or []
         ellipsis = payload.get("ellipsis")
         at = payload.get("at") or (at_bind_node.value if at_bind_node else None)
-        parts = list(formals)
+        # Each formal is either a bare string (identifier) or a dict
+        # {"name": "x", "default": "[]"} for the `x ? default` form.
+        # The default is raw source text — emit verbatim so nix sees exactly
+        # what the user wrote.
+        parts = []
+        for f in formals:
+            if isinstance(f, dict):
+                nm = f.get("name") or ""
+                dflt = f.get("default")
+                parts.append(f"{nm} ? {dflt}" if dflt is not None else nm)
+            else:
+                parts.append(str(f))
         if ellipsis:
             parts.append("...")
         inner = ", ".join(parts) if parts else ""
@@ -610,7 +621,23 @@ class ConfigCompilerService(BaseService):
             case 'List':
                 if not node.children:
                     return '[ ]'
-                items = [f"{ind1}{self.emit_nix(c, indent_level + 1)}" for c in node.children]
+                # List elements are whitespace-separated, so any element that
+                # emits as a non-atomic expression (e.g. `import x y`, `f x`,
+                # `if a then b else c`) must be parenthesized — otherwise its
+                # sub-tokens get parsed as separate list elements. Atomic
+                # forms (AttrSet, List, String, Path, Select, Identifier,
+                # Int, Float, Bool, Package, Interpolation, Null,
+                # MultilineString) don't need wrapping.
+                _NEEDS_LIST_PARENS = {
+                    'FnCall', 'FnDef', 'LetIn', 'Conditional', 'BinOp',
+                    'With', 'Assert', 'Import', 'HasAttr', 'UnaryOp',
+                }
+                items = []
+                for c in node.children:
+                    val = self.emit_nix(c, indent_level + 1)
+                    if c.node_type in _NEEDS_LIST_PARENS:
+                        val = f'({val})'
+                    items.append(f"{ind1}{val}")
                 return '[\n' + '\n'.join(items) + f'\n{ind}]'
 
             case 'Bool':

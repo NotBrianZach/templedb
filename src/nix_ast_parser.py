@@ -153,7 +153,9 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
         for child in ts_node.children:
             if child.type == 'binding_set':
                 _convert_binding_set(child, source, node)
-            elif child.type == 'inherit':
+            elif child.type in ('inherit', 'inherit_from'):
+                # Some grammar versions emit inherit at the attrset level
+                # instead of nested inside binding_set — handle both.
                 inh = _convert_inherit(child, source)
                 if inh:
                     node.add(inh)
@@ -362,7 +364,10 @@ def _convert_binding_set(ts_node, source: bytes, parent: ASTNode):
             binding = _convert_binding_as_attr(child, source)
             if binding:
                 parent.add(binding)
-        elif child.type == 'inherit':
+        elif child.type in ('inherit', 'inherit_from'):
+            # `inherit x y;` is emitted as 'inherit'; `inherit (src) x y;` is
+            # emitted as a separate 'inherit_from' top-level type. Both go
+            # through the same converter.
             inh = _convert_inherit(child, source)
             if inh:
                 parent.add(inh)
@@ -431,33 +436,80 @@ def _convert_binding(ts_node, source: bytes) -> Optional[ASTNode]:
 
 
 def _convert_inherit(ts_node, source: bytes) -> Optional[ASTNode]:
-    """Convert an inherit node."""
+    """Convert an `inherit` or `inherit_from` node.
+
+    Tree-sitter-nix emits two shapes:
+
+      { inherit x y; }
+        node.type == 'inherit'
+        children: [inherit, inherited_attrs, ;]
+          inherited_attrs.children: [identifier x, identifier y]
+
+      { inherit (src) x y; }
+        node.type == 'inherit_from'
+        children: [inherit, '(', <source_expr>, ')', inherited_attrs, ;]
+
+    Some grammar versions may wrap the source in a
+    `parenthesized_expression` node — support that too for
+    forward-compat.
+    """
     node = ASTNode('Inherit')
-    # Check for (source) in inherit
+    saw_open_paren = False
     for child in ts_node.children:
-        if child.type == 'parenthesized_expression':
-            # inherit (source) names...
+        if child.type == '(':
+            saw_open_paren = True
+        elif child.type == ')':
+            saw_open_paren = False
+        elif saw_open_paren:
+            # First expression between the parens is the source.
+            node.callee = _text(child, source)
+            saw_open_paren = False
+        elif child.type == 'inherited_attrs':
+            for a in child.children:
+                if a.type in ('identifier', 'attrpath'):
+                    node.add(ASTNode('Identifier', value=_text(a, source)))
+        elif child.type == 'parenthesized_expression':
             inner = [c for c in child.children if c.type not in ('(', ')')]
             if inner:
                 node.callee = _text(inner[0], source)
-        elif child.type == 'identifier':
-            node.add(ASTNode('Identifier', value=_text(child, source)))
-        elif child.type == 'attrpath':
+        elif child.type in ('identifier', 'attrpath'):
+            # Fallback for grammar variants that put names at the top level.
             node.add(ASTNode('Identifier', value=_text(child, source)))
     return node if node.children else None
 
 
 def _convert_formals(ts_node, source: bytes) -> ASTNode:
-    """Convert function formals { x, y, ... } into an ASTNode."""
+    """Convert function formals { x, y, ... } into an ASTNode.
+
+    Each `formal` child is either:
+      - `x`            → children [identifier]
+      - `x ? default`  → children [identifier, '?', <default_expr>]
+
+    The default expression is preserved as raw source text so the emit
+    side can round-trip it verbatim. Bare-identifier formals stay as
+    plain strings for back-compat with existing config_nodes rows.
+    """
     import json
     formals = []
     has_ellipsis = False
     at_name = None
     for child in ts_node.children:
         if child.type == 'formal':
+            name = None
+            default = None
+            seen_question = False
             for fc in child.children:
-                if fc.type == 'identifier':
-                    formals.append(_text(fc, source))
+                if fc.type == 'identifier' and name is None:
+                    name = _text(fc, source)
+                elif fc.type == '?':
+                    seen_question = True
+                elif seen_question and default is None:
+                    default = _text(fc, source)
+            if name is not None:
+                if default is not None:
+                    formals.append({'name': name, 'default': default})
+                else:
+                    formals.append(name)
         elif child.type == 'ellipses':
             has_ellipsis = True
         elif child.type == 'identifier':

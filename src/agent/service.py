@@ -84,6 +84,10 @@ class AgentService:
         self._cancel_flags = {}  # session_id -> threading.Event
         self._queued_messages = {}  # session_id -> list of queued content strings
         self._lock = threading.Lock()
+        # Poller for MCP-bridge-written pending asks (out-of-process producer).
+        self._ask_poll_thread = None
+        self._ask_poll_stop = threading.Event()
+        self._active_sessions = set()   # session_ids currently expecting asks
 
     def add_event_callback(self, callback):
         """Register a callback that receives every event as it happens.
@@ -211,6 +215,10 @@ class AgentService:
         # Update session status
         store.update_session_status(session_id, SESSION_RUNNING)
 
+        # Register session for the ask-poll thread so it forwards MCP-bridge
+        # asks (from templedb_ask_user / templedb_message_user) to Emacs.
+        self._register_ask_poll(session_id, run_id)
+
         # Set up cancel flag
         cancel_event = threading.Event()
         self._cancel_flags[session_id] = cancel_event
@@ -224,6 +232,12 @@ class AgentService:
         if cwd:
             context = dict(context) if context else {}
             context["cwd"] = cwd
+
+        # Give the provider our agent session id so it can wire the
+        # per-session MCP config env var (TEMPLEDB_AGENT_SESSION_ID) — the
+        # templedb_ask_user MCP tool reads that to route asks back here.
+        context = dict(context) if context else {}
+        context["agent_session_id"] = session_id
 
         # Create placeholder assistant message for streaming
         assistant_msg = store.add_message(session_id, ROLE_ASSISTANT, "", run_id=run_id)
@@ -432,3 +446,60 @@ class AgentService:
     def fork_session(self, session_id):
         """Fork a session - create a copy with all messages."""
         return store.fork_session(session_id)
+
+    # --- Pending asks (MCP bridge ↔ Emacs round-trip) ---
+
+    def _register_ask_poll(self, session_id, run_id):
+        """Ensure the ask-poll thread is running and knows about this session.
+        The MCP tool handlers (in a separate process) write into
+        agent_pending_asks; this thread polls and re-emits them as events
+        via the existing event callback pipeline."""
+        with self._lock:
+            self._active_sessions.add((session_id, run_id))
+            if self._ask_poll_thread is None or not self._ask_poll_thread.is_alive():
+                self._ask_poll_stop.clear()
+                self._ask_poll_thread = threading.Thread(
+                    target=self._ask_poll_loop, daemon=True, name="agent-ask-poll"
+                )
+                self._ask_poll_thread.start()
+
+    def _ask_poll_loop(self):
+        """Poll agent_pending_asks every 300ms and forward new asks as events."""
+        from agent import events as _events
+        while not self._ask_poll_stop.is_set():
+            try:
+                with self._lock:
+                    sessions = list(self._active_sessions)
+                for session_id, run_id in sessions:
+                    for row in store.undispatched_asks_for_session(session_id):
+                        try:
+                            payload = json.loads(row["payload"])
+                        except (ValueError, TypeError):
+                            payload = {}
+                        event_type = (_events.AGENT_ASK_QUESTION
+                                      if row["kind"] == "question"
+                                      else _events.AGENT_MESSAGE)
+                        summary = ("Waiting on user"
+                                   if row["kind"] == "question"
+                                   else "Message from agent")
+                        event = _events.make_event(
+                            event_type, summary=summary,
+                            ask_id=row["ask_id"], **payload,
+                        )
+                        self._emit_event(session_id, run_id, event)
+                        store.mark_ask_dispatched(row["ask_id"])
+            except Exception as e:
+                logger.error(f"Ask poll error: {e}")
+            self._ask_poll_stop.wait(0.3)
+
+    def respond_to_ask(self, ask_id, response):
+        """Emacs replied — write the answer back into the transport table.
+        The MCP tool handler polling on the other end will see it and return
+        the answer as its tool_result to Claude."""
+        store.record_ask_response(ask_id, response)
+
+    def shutdown(self):
+        """Cleanly stop background threads (for test/teardown)."""
+        self._ask_poll_stop.set()
+        if self._ask_poll_thread is not None:
+            self._ask_poll_thread.join(timeout=1)

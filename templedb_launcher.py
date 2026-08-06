@@ -435,6 +435,82 @@ try:
             except Exception as e:
                 return {"content": [{"type": "text", "text": f"error: {e}"}], "isError": True}
 
+        # ── Agent-to-user bridge tools ────────────────────────────────
+        # Used when Claude Code runs as a child of `templedb ai agent serve`
+        # under Emacs. The session_id (from agent_sessions.id) is passed via
+        # env TEMPLEDB_AGENT_SESSION_ID by the provider when it writes the
+        # per-session MCP config. Both tools rendezvous with Emacs through
+        # the agent_pending_asks table (migration 080): this handler writes
+        # the ask, the agent service polls the table and emits an event to
+        # Emacs, Emacs runs a picker and calls ask.respond, and this handler
+        # returns the response.
+        import uuid as _uuid, time as _time, os as _os, json as _json_asks
+
+        def _ask_session_id():
+            sid = _os.environ.get("TEMPLEDB_AGENT_SESSION_ID")
+            if not sid:
+                return None
+            try:
+                return int(sid)
+            except ValueError:
+                return None
+
+        def _wait_for_ask_response(ask_id, timeout_s=600, poll_s=0.2):
+            from agent import store as _agent_store
+            deadline = _time.time() + timeout_s
+            while _time.time() < deadline:
+                row = _agent_store.get_pending_ask(ask_id)
+                if row and row.get("status") == "responded":
+                    try:
+                        return _json_asks.loads(row["response"])
+                    except (ValueError, TypeError):
+                        return {"raw": row.get("response")}
+                _time.sleep(poll_s)
+            return None
+
+        def tool_ask_user(args):
+            session_id = _ask_session_id()
+            if session_id is None:
+                return {"content": [{"type": "text",
+                    "text": "templedb_ask_user requires TEMPLEDB_AGENT_SESSION_ID env "
+                            "(only available when Claude runs under `templedb ai agent`)"}],
+                    "isError": True}
+            questions = args.get("questions") or []
+            if not isinstance(questions, list) or not questions:
+                return {"content": [{"type": "text",
+                    "text": "questions must be a non-empty list"}], "isError": True}
+            ask_id = _uuid.uuid4().hex
+            from agent import store as _agent_store
+            _agent_store.create_pending_ask(
+                ask_id, session_id, "question",
+                {"questions": questions},
+            )
+            response = _wait_for_ask_response(ask_id)
+            if response is None:
+                return {"content": [{"type": "text",
+                    "text": "User did not respond in time. Try asking again or proceed "
+                            "with a reasonable default and note what you assumed."}],
+                    "isError": True}
+            return {"content": [{"type": "text",
+                "text": _json_asks.dumps(response)}]}
+
+        def tool_message_user(args):
+            session_id = _ask_session_id()
+            if session_id is None:
+                return {"content": [{"type": "text",
+                    "text": "templedb_message_user requires TEMPLEDB_AGENT_SESSION_ID env"}],
+                    "isError": True}
+            header = args.get("header") or "Message"
+            body = args.get("body") or ""
+            ask_id = _uuid.uuid4().hex
+            from agent import store as _agent_store
+            _agent_store.create_pending_ask(
+                ask_id, session_id, "message",
+                {"header": header, "body": body},
+            )
+            # One-way: don't block on a response, just mark as delivered.
+            return {"content": [{"type": "text", "text": "delivered"}]}
+
         self.tools.update({
             "templedb_var_set":          tool_var_set,
             "templedb_var_get":          tool_var_get,
@@ -449,6 +525,8 @@ try:
             "templedb_backup_gcs":       tool_backup_gcs,
             "templedb_ast_subtree":      tool_ast_subtree,
             "templedb_ast_apply":        tool_ast_apply,
+            "templedb_ask_user":         tool_ask_user,
+            "templedb_message_user":     tool_message_user,
         })
 
     _MCPServer.__init__ = _patched_mcp_init
@@ -567,6 +645,39 @@ try:
                  "operations": {"type": "array", "items": {"type": "object"},
                                 "description": "List of typed op objects"},
              }, "required": ["operations"]}},
+            {"name": "templedb_ask_user",
+             "description":
+                 "Ask the user a multiple-choice question and wait for the answer. "
+                 "Use this INSTEAD of AskUserQuestion when running under TempleDB / Emacs "
+                 "— AskUserQuestion has no working UI in this environment and gets "
+                 "auto-cancelled. Requires TEMPLEDB_AGENT_SESSION_ID env (set by the "
+                 "agent provider when it launches Claude). Blocks for up to 600s waiting "
+                 "for a response; if the user doesn't answer, returns an error and you "
+                 "should either ask again or proceed with a reasonable default and note "
+                 "what you assumed. Question shape mirrors AskUserQuestion: each has "
+                 "{question, header, options: [{label, description}], multiSelect}.",
+             "inputSchema": {"type": "object", "properties": {
+                 "questions": {"type": "array", "minItems": 1, "items": {
+                     "type": "object", "properties": {
+                         "question":    {"type": "string"},
+                         "header":      {"type": "string"},
+                         "multiSelect": {"type": "boolean", "default": False},
+                         "options": {"type": "array", "items": {
+                             "type": "object", "properties": {
+                                 "label":       {"type": "string"},
+                                 "description": {"type": "string"},
+                             }, "required": ["label"]}}}}}}, "required": ["questions"]}},
+            {"name": "templedb_message_user",
+             "description":
+                 "Send a one-way, informational message to the user without asking "
+                 "anything back. Renders as a distinct entry in the Emacs conversation "
+                 "buffer. Use for out-of-band status updates, quick notices, or "
+                 "surfacing findings that don't need a decision from the user. Requires "
+                 "TEMPLEDB_AGENT_SESSION_ID env. Returns 'delivered' immediately.",
+             "inputSchema": {"type": "object", "properties": {
+                 "header": {"type": "string", "description": "Short label (max ~12 chars)"},
+                 "body":   {"type": "string", "description": "Message body (markdown ok)"},
+             }, "required": ["body"]}},
         ]
 
     _MCPServer.get_tool_definitions = _patched_list_tools

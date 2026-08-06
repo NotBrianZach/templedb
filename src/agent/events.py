@@ -21,11 +21,17 @@ TOOL_FAILED = "tool.failed"
 PROVIDER_RATE_LIMITED = "provider.rate_limited"
 PROVIDER_LOGIN_REQUIRED = "provider.login_required"
 
+# Agent-to-user asks (fired by the MCP bridge on behalf of the model).
+# See migrations/080_agent_pending_asks.sql for the transport table.
+AGENT_ASK_QUESTION = "agent.ask.question"   # data: {ask_id, questions}
+AGENT_MESSAGE = "agent.message"             # data: {header, body}
+
 ALL_TYPES = {
     RUN_STARTED, RUN_INTERRUPTED, RUN_COMPLETED, RUN_FAILED,
     ASSISTANT_STARTED, ASSISTANT_DELTA, ASSISTANT_COMPLETED,
     TOOL_STARTED, TOOL_COMPLETED, TOOL_FAILED,
     PROVIDER_RATE_LIMITED, PROVIDER_LOGIN_REQUIRED,
+    AGENT_ASK_QUESTION, AGENT_MESSAGE,
 }
 
 # Session status constants
