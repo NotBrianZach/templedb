@@ -58,16 +58,17 @@
 
 <h2>TL;DR</h2>
 <div class="callout">
-  <p><strong>Recommendation:</strong> Self-host <a href="https://github.com/m1k1o/neko">Neko</a>
-  with a ~200-line session-management wrapper. ~3–5 days of work, one Hetzner CX32
-  ($6/mo) for 2–3 concurrent sessions, and persistent profiles come for free
-  (the pain point that spawned this question). The existing
-  <code>lib/browser/provider.ts</code> abstraction means we swap ONE file
-  (<code>NekoProvider</code> alongside <code>HyperbeamProvider</code>) and everything
-  else in aireadalong stays.</p>
+  <p><strong>Recommendation:</strong> Provision zHost (a new home/office box, or activate
+  the already-declared-but-not-provisioned <code>WilliamZacharyAbelTheZeroth</code>),
+  run <a href="https://github.com/m1k1o/neko">Neko</a> in Docker, expose via
+  <code>cloudflared</code> tunnel to <code>browser.aireadalong.com</code>. Total spend:
+  $0 marginal (electricity). Persistent profiles free. SitePanel does a health check on
+  Start and shows an explicit "Cloud browser is offline" error when the tunnel is down
+  — no automatic Hyperbeam fallback.</p>
 
-  <p><strong>Don't</strong> build WebRTC from scratch (2–3 weeks) or run MJPEG hacks (works
-  but ugly and would rot).</p>
+  <p><strong>Don't</strong> build WebRTC from scratch (2–3 weeks), run MJPEG hacks, or
+  upgrade vultr-woofs (mixing browser sessions onto woofs.com's nginx box invites
+  OOM incidents).</p>
 
   <p><strong>Actually first, though:</strong> email <code>founders@hyperbeam.com</code>
   and ask if they'll enable persistent profiles on our account. Solo devs often get
@@ -104,27 +105,34 @@ have capacity for a Neko container?</p>
 </thead>
 <tbody>
   <tr>
-    <td><strong>Upgrade vultr-woofs</strong></td>
+    <td><strong>zHost via cloudflared</strong> <span class="verdict">CHOSEN</span></td>
+    <td>New or repurposed hardware; activates <code>WilliamZacharyAbelTheZeroth</code> (currently placeholder in flake)</td>
+    <td>$0 marginal (electricity)</td>
+    <td>Depends on spec</td>
+    <td>Cloudflare Tunnel handles NAT + TLS. Uptime depends on the box staying on;
+        SitePanel throws explicit error when tunnel unreachable.</td>
+  </tr>
+  <tr>
+    <td>Upgrade vultr-woofs</td>
     <td>Vultr HF, 4 vCPU / 8 GB</td>
     <td>~$24/mo (up from ~$6)</td>
     <td>3–5</td>
-    <td>NixOS rebuild + re-provision; single-VM lifestyle preserved</td>
+    <td class="warn">Rejected: mixes browser sessions with woofs.com nginx — OOM risk.</td>
   </tr>
   <tr>
-    <td><strong>Sibling Vultr VPS</strong> (Neko-only)</td>
+    <td>Sibling Vultr VPS</td>
     <td>Vultr HF, 2 vCPU / 4 GB</td>
-    <td>~$12/mo (in addition to woofs)</td>
+    <td>~$12/mo</td>
     <td>1–2</td>
-    <td>Isolation: woofs.com untouched; new NixOS target</td>
+    <td>Rejected: costs $ vs zHost being free (unless zHost proves unreliable).</td>
   </tr>
   <tr>
-    <td><strong>Local mothership</strong> (zMothership2/3)</td>
-    <td>Existing hardware</td>
+    <td>zMothership2</td>
+    <td>Existing hw: 8c / 15G / Docker installed</td>
     <td>$0 marginal</td>
-    <td>Many</td>
-    <td class="warn">Only works if reachable from Cloudflare — desktop-class boxes
-        behind residential NAT need Cloudflare Tunnel or wireguard. Also uptime
-        depends on you not turning them off.</td>
+    <td>6–8</td>
+    <td class="warn">Rejected: main workstation — every session eats desktop CPU/RAM,
+        reboots kill tunnel mid-session.</td>
   </tr>
 </tbody>
 </table>
@@ -239,8 +247,8 @@ It's production-used by ~10k+ deployments, actively maintained, and MIT-licensed
 <h3>What actually needs writing</h3>
 
 <ol>
-  <li><strong>VPS setup</strong> (30 min): Hetzner CX32 (4 vCPU / 8 GB / $6/mo),
-      Ubuntu 24.04, install Docker, open ports 8080 + UDP range for WebRTC ICE.</li>
+  <li><strong>zHost setup</strong>: NixOS host with Docker + cloudflared. See the
+      "Cloudflared tunnel + graceful degradation" section for the full module.</li>
   <li><strong>neko-manager service</strong> (~200 LOC Node or Python):
     <ul>
       <li><code>POST /session</code> — accepts <code>{userId, startUrl}</code>, mounts
@@ -288,6 +296,50 @@ This is the exact behavior Hyperbeam wants to charge premium for.</p>
   Encrypt at rest with LUKS or restrict filesystem perms; document in the aireadalong
   privacy policy.</p>
 </div>
+
+<h2>Cloudflared tunnel + graceful degradation</h2>
+
+<p>Cloudflare Tunnel replaces ngrok cleanly: free, no session TTL, integrates with
+the existing Cloudflare DNS zone for aireadalong.com, and terminates TLS at the
+edge (no cert management on zHost).</p>
+
+<p>NixOS module sketch (add to zHost config):</p>
+
+<pre>
+services.cloudflared = {
+  enable = true;
+  tunnels."browser-aireadalong" = {
+    credentialsFile = "/var/lib/cloudflared/tunnel-creds.json";
+    default = "http_status:404";
+    ingress = {
+      "browser.aireadalong.com" = "http://localhost:8080";
+    };
+  };
+};
+
+virtualisation.docker.enable = true;
+</pre>
+
+<p><strong>Graceful-error UX in aireadalong</strong> (POST /api/browser-session):</p>
+
+<pre>
+if (process.env.BROWSER_PROVIDER === 'neko') {
+  try {
+    const health = await fetch(`${process.env.NEKO_MGR_URL}/health`,
+      { signal: AbortSignal.timeout(3000) })
+    if (!health.ok) throw new Error('unhealthy')
+  } catch {
+    return NextResponse.json({
+      error: 'Cloud browser is offline. It typically comes back within a few minutes.',
+      code: 'ZHOST_UNREACHABLE'
+    }, { status: 503 })
+  }
+}
+</pre>
+
+<p>SitePanel already surfaces server errors as a red banner via the existing
+<code>setError()</code> path — no client changes needed beyond checking for the
+specific error code if we want a nicer message.</p>
 
 <h2>Cost model</h2>
 
@@ -366,23 +418,30 @@ the 3–5 days of setup time. Rough labor-cost break-even:</p>
 <h2>What I'd do this week if we choose Neko</h2>
 
 <ol>
-  <li><strong>Day 0 (30 min)</strong>: Decide the infra target from the reality-check
-      table above (upgrade vultr-woofs, sibling VPS, or mothership). Provision it.</li>
-  <li><strong>Day 1</strong>: Enable Docker on the target (NixOS: add
-      <code>virtualisation.docker.enable = true</code>). Deploy Neko's stock
-      docker-compose. Verify video quality, latency, profile persistence via a
-      mounted per-user volume.</li>
-  <li><strong>Day 2</strong>: Write <code>neko-manager</code>. Test: <code>curl</code>
-      to POST /session, watch container spawn, get an embed URL, load it manually.</li>
+  <li><strong>Day 0 (2–4 hr)</strong>: Provision zHost. Either repurpose an existing box
+      (install NixOS, register in <code>fleet_machines</code>, replace the placeholder
+      <code>hardwareConfigs/WilliamZacharyAbelTheZeroth-hardware.nix</code> with real
+      <code>nixos-generate-config</code> output) or bootstrap a new box via
+      <code>templedb deploy bootstrap</code>. Add a <code>zHost</code> alias to
+      system_config that points to it.</li>
+  <li><strong>Day 1</strong>: Add to zHost NixOS config: <code>virtualisation.docker.enable</code>
+      plus <code>services.cloudflared</code> targeting
+      <code>browser.aireadalong.com → http://localhost:8080</code>. Rebuild. Point
+      Cloudflare DNS at the tunnel. Deploy Neko's stock <code>docker-compose.yaml</code>
+      and hit the tunnel URL from a laptop to confirm end-to-end streaming works.</li>
+  <li><strong>Day 2</strong>: Write <code>neko-manager</code> (Node/Python, ~200 LOC).
+      Package as a systemd service in system_config. Test: <code>curl</code> to POST
+      /session, watch container spawn, get embed URL, load it manually.</li>
   <li><strong>Day 3</strong>: Add <code>NekoProvider</code> to aireadalong. Feature-flag
       via env var (<code>BROWSER_PROVIDER=neko</code> vs <code>hyperbeam</code>) so we
-      can flip back instantly if issues.</li>
+      can flip back instantly if issues. Add health-check that pings
+      <code>browser.aireadalong.com/health</code> and surfaces the specific
+      "Cloud browser is offline" error in SitePanel on failure.</li>
   <li><strong>Day 4</strong>: Swap client SDK in <code>SitePanel.tsx</code>. Fix
-      Capture flow to read Neko's video element instead of Hyperbeam's shadow-DOM
-      one.</li>
-  <li><strong>Day 5</strong>: Manual E2E, cost telemetry hook (Hyperbeam quota
-      code still fires, just always calculates $0 for Neko sessions),
-      documentation.</li>
+      Capture flow to read Neko's video element.</li>
+  <li><strong>Day 5</strong>: Manual E2E, error-path testing (turn off zHost, verify
+      the graceful error), cost telemetry (Hyperbeam quota code still fires but
+      calculates $0 for Neko sessions), docs.</li>
 </ol>
 
 <h2>Related files in aireadalong</h2>
