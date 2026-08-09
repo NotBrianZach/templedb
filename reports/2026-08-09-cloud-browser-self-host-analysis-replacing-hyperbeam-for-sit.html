@@ -227,21 +227,28 @@ It's production-used by ~10k+ deployments, actively maintained, and MIT-licensed
 <h3>Concrete architecture</h3>
 
 <pre>
-┌─────────────────┐    aireadalong.com/api/browser-session
-│  aireadalong    │─────────────────────────────────────┐
-│  (Cloudflare    │                                     ▼
-│   Worker)       │            ┌──────────────────────────────┐
-└─────────────────┘            │  neko-manager (Node/Python)  │
-        │  embed_url +          │  - runs on the VPS           │
-        │  auth token           │  - REST: POST /session       │
-        ▼                       │           DELETE /session/id │
-┌─────────────────┐             │  - docker run neko:latest    │
-│  Browser        │             │    with user's volume mount  │
-│  SitePanel.tsx  │             │    → per-user profile dir    │
-│  (Neko client   │◄────────────│  - returns embed_url ──────┐ │
-│   SDK)          │  WebRTC     └──────────────────────────────┘
-└─────────────────┘  video +
-                     input
+┌─────────────────┐   POST /api/browser-session
+│  aireadalong    │────────────────────────┐
+│  (Cloudflare    │                        │
+│   Worker)       │                        ▼
+└─────────────────┘         ┌─────────────────────────────┐
+        │ embed_url +       │  browser.aireadalong.com    │
+        │ auth token        │  (Cloudflare Tunnel edge)   │
+        ▼                   └────────────┬────────────────┘
+┌─────────────────┐                      │  encrypted tunnel — no
+│  Browser        │                      │  public IP, no open ports
+│  SitePanel.tsx  │                      ▼
+│  (Neko client)  │◄─── WebRTC ─── ┌─────────────────────────────┐
+└─────────────────┘  (STUN + CF)    │  zHost (home/office box)    │
+                                    │  ┌─ cloudflared daemon ─┐   │
+                                    │  ├─ neko-manager (Node) ├──┐│
+                                    │  └─ docker: neko:latest ─┘ ││
+                                    │     /var/neko-profiles/    ││
+                                    │     per-user volumes       ││
+                                    └────────────────────────────┘
+
+If zHost is offline: /api/browser-session health-check fails → SitePanel shows
+"Cloud browser is offline — try again later" (no automatic Hyperbeam fallback).
 </pre>
 
 <h3>What actually needs writing</h3>
