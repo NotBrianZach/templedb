@@ -13,13 +13,43 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
+def _print_candidates(header: str, rows, cols, usage_hint: str) -> None:
+    """Pretty-print a ranked candidate list with a usage hint."""
+    if not rows:
+        print(f"\n{header}\n  (no candidates found)\n\n  {usage_hint}\n")
+        return
+    print(f"\n{header}\n")
+    widths = [max(len(c[0]), max((len(str(r.get(c[1], ''))) for r in rows), default=0))
+              for c in cols]
+    header_row = "  " + "  ".join(f"{c[0]:<{w}}" for c, w in zip(cols, widths))
+    print(header_row)
+    print("  " + "  ".join("-" * w for w in widths))
+    for r in rows:
+        print("  " + "  ".join(f"{str(r.get(c[1], '')):<{w}}"
+                                for c, w in zip(cols, widths)))
+    print(f"\n  {usage_hint}\n")
+
+
 class GraphCommands(Command):
     """Knowledge graph query handlers"""
 
     def search(self, args) -> int:
         """Fuzzy search across everything."""
         from knowledge_graph import search_everywhere
+        from graph_frecency import log_query, rank_candidates
 
+        if not args.query:
+            log_query("graph.search")
+            cands = rank_candidates("project", "graph.search", limit=10)
+            _print_candidates(
+                "graph search — enter any string to fuzzy-match projects, files, "
+                "env vars, secrets, config, commits, and symbols.\n"
+                "  Recently active projects (hint at what's searchable):",
+                cands, [("project", "name"), ("full name", "project_name")],
+                "Usage: templedb graph search <query>")
+            return 0
+
+        log_query("graph.search", args={"query": args.query})
         results = search_everywhere(args.query, limit=args.limit)
 
         if not results:
@@ -59,7 +89,27 @@ class GraphCommands(Command):
     def who_uses(self, args) -> int:
         """Find which projects use a secret, env var, or contain a string."""
         from knowledge_graph import who_uses
+        from graph_frecency import log_query, rank_candidates
 
+        if not args.name:
+            log_query("graph.who-uses")
+            env_vars = rank_candidates("env_var", "graph.who-uses", limit=10)
+            secrets = rank_candidates("secret", "graph.who-uses", limit=10)
+            _print_candidates(
+                "graph who-uses — pass an env var or secret name to see which "
+                "projects reference it.\n"
+                "  Top env vars by cross-project usage:",
+                env_vars, [("name", "name"), ("projects", "project_count")],
+                "Usage: templedb graph who-uses <NAME>")
+            if secrets:
+                _print_candidates(
+                    "Top secrets by cross-project usage:",
+                    secrets, [("name", "name"), ("projects", "project_count")],
+                    "Usage: templedb graph who-uses <NAME>")
+            return 0
+
+        log_query("graph.who-uses", target_kind="env_var", target_key=args.name,
+                  args={"name": args.name})
         results = who_uses(args.name)
 
         if args.json:
@@ -88,7 +138,20 @@ class GraphCommands(Command):
     def changes(self, args) -> int:
         """Show what changed since last deploy."""
         from knowledge_graph import changes_since_deploy
+        from graph_frecency import log_query, rank_candidates
 
+        if not args.project:
+            log_query("graph.changes")
+            cands = rank_candidates("project", "graph.changes", limit=12)
+            _print_candidates(
+                "graph changes — show commits & uncommitted files since last deploy.\n"
+                "  Recently updated projects:",
+                cands, [("project", "name"), ("full name", "project_name")],
+                "Usage: templedb graph changes <PROJECT>")
+            return 0
+
+        log_query("graph.changes", target_kind="project", target_key=args.project,
+                  args={"project": args.project})
         results = changes_since_deploy(args.project)
 
         if args.json:
@@ -123,7 +186,21 @@ class GraphCommands(Command):
     def deps(self, args) -> int:
         """Show project dependency graph."""
         from knowledge_graph import project_dependencies
+        from graph_frecency import log_query, rank_candidates
 
+        if not args.project:
+            log_query("graph.deps")
+            cands = rank_candidates("project", "graph.deps", limit=12)
+            _print_candidates(
+                "graph deps — show a project's file types, env vars, secrets, "
+                "flake inputs, and deploy history.\n"
+                "  Recently updated projects:",
+                cands, [("project", "name"), ("full name", "project_name")],
+                "Usage: templedb graph deps <PROJECT>")
+            return 0
+
+        log_query("graph.deps", target_kind="project", target_key=args.project,
+                  args={"project": args.project})
         results = project_dependencies(args.project)
 
         if args.json:
@@ -171,7 +248,20 @@ class GraphCommands(Command):
     def build_deps(self, args) -> int:
         """Build file dependency graph for a project."""
         from file_deps import build_file_deps_for_project
+        from graph_frecency import log_query, rank_candidates
 
+        if not args.project:
+            log_query("graph.build-deps")
+            cands = rank_candidates("project", "graph.build-deps", limit=12)
+            _print_candidates(
+                "graph build-deps — (re)build the file-import graph for a project.\n"
+                "  Recently updated projects:",
+                cands, [("project", "name"), ("full name", "project_name")],
+                "Usage: templedb graph build-deps <PROJECT>")
+            return 0
+
+        log_query("graph.build-deps", target_kind="project", target_key=args.project,
+                  args={"project": args.project})
         project = args.project
         print(f"Building file dependency graph for {project}...")
         result = build_file_deps_for_project(project)
@@ -189,7 +279,32 @@ class GraphCommands(Command):
     def importers(self, args) -> int:
         """Find what imports a given file."""
         from knowledge_graph import file_importers
+        from graph_frecency import log_query, rank_candidates
 
+        if not args.project:
+            log_query("graph.importers")
+            cands = rank_candidates("project_with_file_deps", "graph.importers", limit=12)
+            _print_candidates(
+                "graph importers — find files that import a given file.\n"
+                "  Projects with file-dependency data (most edges first):",
+                cands, [("project", "name"), ("dep edges", "dep_count")],
+                "Usage: templedb graph importers <PROJECT> <FILE>")
+            return 0
+
+        if not args.file:
+            log_query("graph.importers", target_kind="project",
+                      target_key=args.project, project_slug=args.project)
+            cands = rank_candidates("file", "graph.importers",
+                                    project_slug=args.project, limit=15)
+            _print_candidates(
+                f"graph importers {args.project} — top files by importer count:",
+                cands, [("file", "name"), ("importers", "importer_count")],
+                f"Usage: templedb graph importers {args.project} <FILE>")
+            return 0
+
+        log_query("graph.importers", target_kind="file", target_key=args.file,
+                  project_slug=args.project,
+                  args={"project": args.project, "file": args.file})
         results = file_importers(args.project, args.file)
         if not results:
             print(f"No files import {args.file}")
@@ -203,7 +318,33 @@ class GraphCommands(Command):
     def callers(self, args) -> int:
         """Find what calls a given symbol."""
         from knowledge_graph import symbol_callers
+        from graph_frecency import log_query, rank_candidates
 
+        if not args.project:
+            log_query("graph.callers")
+            cands = rank_candidates("project_with_symbols", "graph.callers", limit=12)
+            _print_candidates(
+                "graph callers — find symbols that call a given symbol.\n"
+                "  Projects with code-symbol data (most symbols first):",
+                cands, [("project", "name"), ("symbols", "symbol_count")],
+                "Usage: templedb graph callers <PROJECT> <SYMBOL>")
+            return 0
+
+        if not args.symbol:
+            log_query("graph.callers", target_kind="project",
+                      target_key=args.project, project_slug=args.project)
+            cands = rank_candidates("symbol", "graph.callers",
+                                    project_slug=args.project, limit=15)
+            _print_candidates(
+                f"graph callers {args.project} — top symbols by caller count:",
+                cands, [("symbol", "name"), ("kind", "symbol_type"),
+                        ("callers", "caller_count")],
+                f"Usage: templedb graph callers {args.project} <SYMBOL>")
+            return 0
+
+        log_query("graph.callers", target_kind="symbol", target_key=args.symbol,
+                  project_slug=args.project,
+                  args={"project": args.project, "symbol": args.symbol})
         results = symbol_callers(args.project, args.symbol)
         if not results:
             print(f"No callers found for {args.symbol}")
@@ -217,7 +358,9 @@ class GraphCommands(Command):
     def overview(self, args) -> int:
         """Cross-project analysis."""
         from knowledge_graph import cross_project_analysis
+        from graph_frecency import log_query
 
+        log_query("graph.overview")
         results = cross_project_analysis()
 
         if args.json:
@@ -260,28 +403,29 @@ def register(cli):
     )
     subparsers = graph_parser.add_subparsers(dest='graph_subcommand', required=True)
 
-    # graph search
+    # graph search — query optional so we can show hint when omitted
     s = subparsers.add_parser('search', help='Fuzzy search across everything')
-    s.add_argument('query', help='Search query')
+    s.add_argument('query', nargs='?', help='Search query (omit for a usage hint)')
     s.add_argument('--limit', type=int, default=50)
     s.add_argument('--json', action='store_true')
     cli.commands['graph.search'] = cmd.search
 
     # graph who-uses
     w = subparsers.add_parser('who-uses', help='Find which projects use a secret/var/string')
-    w.add_argument('name', help='Secret name, env var, or search string')
+    w.add_argument('name', nargs='?',
+                   help='Secret name, env var, or search string (omit for top candidates)')
     w.add_argument('--json', action='store_true')
     cli.commands['graph.who-uses'] = cmd.who_uses
 
     # graph changes
     c = subparsers.add_parser('changes', help='What changed since last deploy')
-    c.add_argument('project', help='Project slug')
+    c.add_argument('project', nargs='?', help='Project slug (omit for top candidates)')
     c.add_argument('--json', action='store_true')
     cli.commands['graph.changes'] = cmd.changes
 
     # graph deps
     d = subparsers.add_parser('deps', help='Project dependency graph')
-    d.add_argument('project', help='Project slug')
+    d.add_argument('project', nargs='?', help='Project slug (omit for top candidates)')
     d.add_argument('--json', action='store_true')
     cli.commands['graph.deps'] = cmd.deps
 
@@ -292,17 +436,17 @@ def register(cli):
 
     # graph build-deps
     bd = subparsers.add_parser('build-deps', help='Build file dependency graph')
-    bd.add_argument('project', help='Project slug')
+    bd.add_argument('project', nargs='?', help='Project slug (omit for top candidates)')
     cli.commands['graph.build-deps'] = cmd.build_deps
 
     # graph importers
     im = subparsers.add_parser('importers', help='Find what imports a file')
-    im.add_argument('project', help='Project slug')
-    im.add_argument('file', help='File path')
+    im.add_argument('project', nargs='?', help='Project slug (omit for top candidates)')
+    im.add_argument('file', nargs='?', help='File path (omit for top files in project)')
     cli.commands['graph.importers'] = cmd.importers
 
     # graph callers
     ca = subparsers.add_parser('callers', help='Find what calls a symbol')
-    ca.add_argument('project', help='Project slug')
-    ca.add_argument('symbol', help='Symbol name')
+    ca.add_argument('project', nargs='?', help='Project slug (omit for top candidates)')
+    ca.add_argument('symbol', nargs='?', help='Symbol name (omit for top symbols in project)')
     cli.commands['graph.callers'] = cmd.callers

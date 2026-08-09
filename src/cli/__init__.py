@@ -16,6 +16,7 @@ from cli.commands import (
     gui_launcher, config, ai, merge,
     domain, nixos, config_compiler, ast,
     file, tutorial, dev, deploy_history,
+    reports,
 )
 from cli.core import cli
 
@@ -160,6 +161,7 @@ def main():
     nixos.register(cli)
     config_compiler.register(cli)
     ast.register(cli)
+    reports.register(cli)
 
     # Lazy imports for optional modules
     try:

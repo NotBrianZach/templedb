@@ -740,4 +740,9 @@ try:
     app.include_router(vcs_router)
 except Exception as e:
     logger.warning(f'Failed to load GUI page vcs: {e}')
+try:
+    from gui_pages.reports import router as reports_router
+    app.include_router(reports_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page reports: {e}')
 

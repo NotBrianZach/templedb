@@ -2079,198 +2079,351 @@ let homeDir = "{home_dir}"; in
 # ── Register ──────────────────────────────────────────────────────────────────
 
 def register(cli):
-    """Register NixOS commands with CLI"""
+    """Register NixOS commands with CLI.
+
+    Two-level layout with backward-compatible flat aliases:
+
+        Groups (new, nested form):
+            nixos system   {rebuild, home-rebuild, test, switch, status, history, rollback}
+            nixos config   {get, set, list, update-input}
+            nixos packages {add, remove, list}
+            nixos dotfiles {apply, add, remove, list}
+            nixos host     {list, show, set, import, activate, clone}   (already nested)
+
+        Flat top-level (unchanged, still work — some also exposed under a group):
+            nixos generate | generate-all | export
+            nixos init-config | import-config
+            nixos detect | doctor | set-type | list-configs | status | edit-template
+            nixos system-rebuild | home-rebuild | system-test | system-switch
+            nixos system-status | system-history | system-rollback
+            nixos config-get | config-set | config-list | update-input
+            nixos add-package | remove-package | list-packages
+            nixos dotfiles-apply | dotfiles-add | dotfiles-remove | dotfiles-list
+
+    Every flat name registered before this reorg still works. Each shared handler
+    is bound under BOTH keys (e.g. cli.commands['nixos.config-get'] and
+    cli.commands['nixos.config.get']) so no dispatch code changes.
+
+    Note: `generate`, `generate-all`, and `export` are NOT nested under a
+    `generate` group because the group name would collide with the flat
+    `generate` command (argparse can't have both a leaf and a group parser
+    with the same name at the same level). They remain flat-only.
+
+    Note: `init-config` and `import-config` are also flat-only — the natural
+    nested form (`init config`, `init import`) reads awkwardly and no other
+    commands share the `init` prefix.
+    """
     cmd = NixOSCommand()
 
     nixos_parser = cli.register_command('nixos', None, help_text='NixOS integration and module generation')
     subparsers = nixos_parser.add_subparsers(dest='nixos_subcommand', required=True)
 
-    # detect
-    detect_parser = subparsers.add_parser('detect', help='Detect dependencies')
-    detect_parser.add_argument('slug', help='Project slug')
+    # ── Per-command argument definitions ──────────────────────────────────────
+    # Each helper takes a parser and installs that command's arguments.
+    # Called twice per command: once for the flat top-level parser, once for
+    # the nested group parser. No handler logic changes.
+
+    def _args_detect(p):
+        p.add_argument('slug', help='Project slug')
+
+    def _args_generate(p):
+        p.add_argument('slug', help='Project slug')
+        p.add_argument('-o', '--output', help='Output directory (default: auto)')
+        p.add_argument('--cathedral-path', help='Path to existing Cathedral package')
+        p.add_argument('--no-home-manager', action='store_true', help='Skip Home Manager module')
+        p.add_argument('--include-templedb', action='store_true', default=True)
+        p.add_argument('--no-templedb', dest='include_templedb', action='store_false')
+
+    def _args_export(p):
+        p.add_argument('slug', help='Project slug')
+        p.add_argument('-o', '--output', help='Output directory')
+
+    def _args_system_test(p):
+        p.add_argument('slug', help='Project slug')
+        p.add_argument('--dry-run', action='store_true')
+
+    def _args_update_input(p):
+        p.add_argument('slug', help='Project slug')
+        p.add_argument('input', help='Flake input name')
+
+    def _args_rebuild(p):
+        p.add_argument('slug', help='Project slug')
+        p.add_argument('--dry-run', action='store_true')
+        p.add_argument('--with-home-manager', action='store_true')
+        p.add_argument('--update-input', metavar='INPUT')
+        p.add_argument('--verbose', '-v', action='store_true')
+        p.add_argument('--show-trace', action='store_true')
+        p.add_argument('--yes', '-y', action='store_true')
+        p.add_argument('--no-update-lock-file', dest='no_update_lock_file', action='store_true')
+
+    def _args_home_rebuild(p):
+        p.add_argument('slug', help='Project slug')
+
+    def _args_system_switch(p):
+        p.add_argument('slug', help='Project slug')
+        p.add_argument('--dry-run', action='store_true')
+        p.add_argument('--with-home-manager', action='store_true')
+        p.add_argument('--verbose', '-v', action='store_true')
+        p.add_argument('--show-trace', action='store_true')
+        p.add_argument('--yes', '-y', action='store_true')
+        p.add_argument('--no-update-lock-file', dest='no_update_lock_file', action='store_true')
+
+    def _args_system_status(p):
+        pass
+
+    def _args_system_history(p):
+        p.add_argument('--project', help='Filter by project')
+        p.add_argument('--limit', type=int, default=10)
+
+    def _args_system_rollback(p):
+        p.add_argument('deployment_id', type=int, nargs='?')
+
+    def _args_set_type(p):
+        p.add_argument('slug', help='Project slug')
+        p.add_argument('type', choices=['regular', 'nixos-config', 'service', 'library'])
+
+    def _args_list_configs(p):
+        pass
+
+    def _args_doctor(p):
+        p.add_argument('slug', nargs='?', help='Limit checks to one project slug')
+
+    def _args_config_get(p):
+        p.add_argument('key')
+
+    def _args_config_set(p):
+        p.add_argument('key')
+        p.add_argument('value')
+        p.add_argument('--global', '-g', dest='glob', action='store_true',
+                       help='Write as global key (not scoped to active host)')
+        p.add_argument('--host', help='Scope to a specific host (default: active host from nixos.flake_output)')
+
+    def _args_config_list(p):
+        pass
+
+    def _args_add_package(p):
+        p.add_argument('slug')
+        p.add_argument('--scope', choices=['system', 'user'], default='user')
+        p.add_argument('--flake-uri')
+        p.add_argument('--name')
+        p.add_argument('--version')
+
+    def _args_remove_package(p):
+        p.add_argument('slug')
+
+    def _args_list_packages(p):
+        p.add_argument('--scope', choices=['system', 'user'])
+
+    def _args_pipeline_status(p):
+        p.add_argument('slug', nargs='?', help='NixOS config project slug (auto-detect)')
+
+    def _args_edit_template(p):
+        p.add_argument('slug', nargs='?', help='NixOS config project slug (auto-detect)')
+
+    def _args_dotfiles_apply(p):
+        p.add_argument('--force', '-f', action='store_true', help='Replace existing files')
+        p.add_argument('--verbose', '-v', action='store_true', help='Show already-OK links')
+
+    def _args_dotfiles_add(p):
+        p.add_argument('project', help='Project slug (e.g. system_config)')
+        p.add_argument('source', help='Relative path in checkout (e.g. .spacemacs)')
+        p.add_argument('target', help='Target path (e.g. ~/.spacemacs)')
+
+    def _args_dotfiles_remove(p):
+        p.add_argument('project', help='Project slug')
+        p.add_argument('source', help='Relative path in checkout')
+
+    def _args_dotfiles_list(p):
+        pass
+
+    def _args_init_config(p):
+        p.add_argument('-o', '--output', help='Output directory (default: /tmp/system_config_scaffold)')
+        p.add_argument('--username', help='Username (default: $USER)')
+        p.add_argument('--hostname', help='NixOS hostname (default: auto-detect)')
+        p.add_argument('--mount-path', help='FUSE mount path (default: ~/temple)')
+        p.add_argument('--timezone', help='Timezone (default: America/Chicago)')
+        p.add_argument('--state-version', help='NixOS stateVersion (default: 24.11)')
+        p.add_argument('--no-import', action='store_true', help='Do not import into templedb')
+        p.add_argument('--skip-hardware', action='store_true', help='Skip hardware config detection')
+
+    def _args_import_config(p):
+        p.add_argument('slug', nargs='?', help='NixOS config project slug')
+
+    def _args_generate_all(p):
+        p.add_argument('slug', nargs='?', help='NixOS config project slug')
+        p.add_argument('--host', help='Generate for specific host (default: active host from nixos.flake_output)')
+        p.add_argument('--dry-run', action='store_true', help='Show what would be generated')
+
+    # ── Flat top-level parsers (backward compat — unchanged behavior) ─────────
+
+    _args_detect(subparsers.add_parser('detect', help='Detect dependencies'))
     cli.commands['nixos.detect'] = cmd.detect
 
-    # generate
-    gen_parser = subparsers.add_parser('generate', help='Generate NixOS modules')
-    gen_parser.add_argument('slug', help='Project slug')
-    gen_parser.add_argument('-o', '--output', help='Output directory (default: auto)')
-    gen_parser.add_argument('--cathedral-path', help='Path to existing Cathedral package')
-    gen_parser.add_argument('--no-home-manager', action='store_true', help='Skip Home Manager module')
-    gen_parser.add_argument('--include-templedb', action='store_true', default=True)
-    gen_parser.add_argument('--no-templedb', dest='include_templedb', action='store_false')
+    _args_generate(subparsers.add_parser('generate', help='Generate NixOS modules'))
     cli.commands['nixos.generate'] = cmd.generate
 
-    # export
-    export_parser = subparsers.add_parser('export', help='Export Cathedral package with NixOS modules')
-    export_parser.add_argument('slug', help='Project slug')
-    export_parser.add_argument('-o', '--output', help='Output directory')
+    _args_export(subparsers.add_parser('export', help='Export Cathedral package with NixOS modules'))
     cli.commands['nixos.export'] = cmd.export
 
-    # system-test
-    test_parser = subparsers.add_parser('system-test', help='Test system configuration')
-    test_parser.add_argument('slug', help='Project slug')
-    test_parser.add_argument('--dry-run', action='store_true')
+    _args_system_test(subparsers.add_parser('system-test', help='Test system configuration (alias for `nixos system test`)'))
     cli.commands['nixos.system-test'] = cmd.system_test
 
-    # update-input
-    update_input_parser = subparsers.add_parser('update-input', help='Update a flake input')
-    update_input_parser.add_argument('slug', help='Project slug')
-    update_input_parser.add_argument('input', help='Flake input name')
+    _args_update_input(subparsers.add_parser('update-input', help='Update a flake input (alias for `nixos config update-input`)'))
     cli.commands['nixos.update-input'] = cmd.update_input
 
-    # rebuild
-    rebuild_parser = subparsers.add_parser('rebuild', help='Rebuild NixOS system')
-    rebuild_parser.add_argument('slug', help='Project slug')
-    rebuild_parser.add_argument('--dry-run', action='store_true')
-    rebuild_parser.add_argument('--with-home-manager', action='store_true')
-    rebuild_parser.add_argument('--update-input', metavar='INPUT')
-    rebuild_parser.add_argument('--verbose', '-v', action='store_true')
-    rebuild_parser.add_argument('--show-trace', action='store_true')
-    rebuild_parser.add_argument('--yes', '-y', action='store_true')
-    rebuild_parser.add_argument('--no-update-lock-file', dest='no_update_lock_file', action='store_true')
+    _args_rebuild(subparsers.add_parser('rebuild', help='Rebuild NixOS system (alias for `nixos system rebuild`)'))
     cli.commands['nixos.rebuild'] = cmd.rebuild
+    # 'rebuild' has never had a 'system-' prefix at top level, but expose one
+    # for symmetry with the other system-* aliases:
+    _args_rebuild(subparsers.add_parser('system-rebuild', help='Rebuild NixOS system (alias for `nixos system rebuild`)'))
+    cli.commands['nixos.system-rebuild'] = cmd.rebuild
 
-    # home-rebuild
-    home_rebuild_parser = subparsers.add_parser('home-rebuild', help='Rebuild home-manager only (no full NixOS rebuild)')
-    home_rebuild_parser.add_argument('slug', help='Project slug')
+    _args_home_rebuild(subparsers.add_parser('home-rebuild', help='Rebuild home-manager only (alias for `nixos system home-rebuild`)'))
     cli.commands['nixos.home-rebuild'] = cmd.home_rebuild
 
-    # system-switch
-    switch_parser = subparsers.add_parser('system-switch', help='Switch to system configuration')
-    switch_parser.add_argument('slug', help='Project slug')
-    switch_parser.add_argument('--dry-run', action='store_true')
-    switch_parser.add_argument('--with-home-manager', action='store_true')
-    switch_parser.add_argument('--verbose', '-v', action='store_true')
-    switch_parser.add_argument('--show-trace', action='store_true')
-    switch_parser.add_argument('--yes', '-y', action='store_true')
-    switch_parser.add_argument('--no-update-lock-file', dest='no_update_lock_file', action='store_true')
+    _args_system_switch(subparsers.add_parser('system-switch', help='Switch to system configuration (alias for `nixos system switch`)'))
     cli.commands['nixos.system-switch'] = cmd.system_switch
 
-    # system-status
-    subparsers.add_parser('system-status', help='Show system deployment status')
+    _args_system_status(subparsers.add_parser('system-status', help='Show system deployment status (alias for `nixos system status`)'))
     cli.commands['nixos.system-status'] = cmd.system_status
 
-    # system-history
-    history_parser = subparsers.add_parser('system-history', help='Show deployment history')
-    history_parser.add_argument('--project', help='Filter by project')
-    history_parser.add_argument('--limit', type=int, default=10)
+    _args_system_history(subparsers.add_parser('system-history', help='Show deployment history (alias for `nixos system history`)'))
     cli.commands['nixos.system-history'] = cmd.system_history
 
-    # system-rollback
-    rollback_parser = subparsers.add_parser('system-rollback', help='Rollback to previous deployment')
-    rollback_parser.add_argument('deployment_id', type=int, nargs='?')
+    _args_system_rollback(subparsers.add_parser('system-rollback', help='Rollback to previous deployment (alias for `nixos system rollback`)'))
     cli.commands['nixos.system-rollback'] = cmd.system_rollback
 
-    # set-type
-    set_type_parser = subparsers.add_parser('set-type', help='Set project type')
-    set_type_parser.add_argument('slug', help='Project slug')
-    set_type_parser.add_argument('type', choices=['regular', 'nixos-config', 'service', 'library'])
+    _args_set_type(subparsers.add_parser('set-type', help='Set project type'))
     cli.commands['nixos.set-type'] = cmd.set_type
 
-    # list-configs
-    subparsers.add_parser('list-configs', help='List all nixos-config projects')
+    _args_list_configs(subparsers.add_parser('list-configs', help='List all nixos-config projects'))
     cli.commands['nixos.list-configs'] = cmd.list_configs
 
-    # nixos doctor command
-    doctor_parser = subparsers.add_parser('doctor', help='Diagnose NixOS-config activation problems')
-    doctor_parser.add_argument('slug', nargs='?', help='Limit checks to one project slug')
+    _args_doctor(subparsers.add_parser('doctor', help='Diagnose NixOS-config activation problems'))
     cli.commands['nixos.doctor'] = cmd.doctor
 
-    # config-get / config-set / config-list
-    cg = subparsers.add_parser('config-get', help='Get system configuration value')
-    cg.add_argument('key')
+    _args_config_get(subparsers.add_parser('config-get', help='Get system configuration value (alias for `nixos config get`)'))
     cli.commands['nixos.config-get'] = cmd.config_get
 
-    cs = subparsers.add_parser('config-set', help='Set system configuration value (host-scoped by default)')
-    cs.add_argument('key')
-    cs.add_argument('value')
-    cs.add_argument('--global', '-g', dest='glob', action='store_true',
-                    help='Write as global key (not scoped to active host)')
-    cs.add_argument('--host', help='Scope to a specific host (default: active host from nixos.flake_output)')
+    _args_config_set(subparsers.add_parser('config-set', help='Set system configuration value (alias for `nixos config set`)'))
     cli.commands['nixos.config-set'] = cmd.config_set
 
-    subparsers.add_parser('config-list', help='List all system configuration')
+    _args_config_list(subparsers.add_parser('config-list', help='List all system configuration (alias for `nixos config list`)'))
     cli.commands['nixos.config-list'] = cmd.config_list
 
-    # add-package / remove-package / list-packages
-    ap = subparsers.add_parser('add-package', help='Add CLI tool to managed packages')
-    ap.add_argument('slug')
-    ap.add_argument('--scope', choices=['system', 'user'], default='user')
-    ap.add_argument('--flake-uri')
-    ap.add_argument('--name')
-    ap.add_argument('--version')
+    _args_add_package(subparsers.add_parser('add-package', help='Add CLI tool to managed packages (alias for `nixos packages add`)'))
     cli.commands['nixos.add-package'] = cmd.add_package
 
-    rp = subparsers.add_parser('remove-package', help='Remove CLI tool from managed packages')
-    rp.add_argument('slug')
+    _args_remove_package(subparsers.add_parser('remove-package', help='Remove CLI tool from managed packages (alias for `nixos packages remove`)'))
     cli.commands['nixos.remove-package'] = cmd.remove_package
 
-    lp = subparsers.add_parser('list-packages', help='List all managed packages')
-    lp.add_argument('--scope', choices=['system', 'user'])
+    _args_list_packages(subparsers.add_parser('list-packages', help='List all managed packages (alias for `nixos packages list`)'))
     cli.commands['nixos.list-packages'] = cmd.list_packages
 
-    # status (pipeline status)
-    status_p = subparsers.add_parser('status', help='Show full pipeline state')
-    status_p.add_argument('slug', nargs='?', help='NixOS config project slug (auto-detect)')
+    _args_pipeline_status(subparsers.add_parser('status', help='Show full pipeline state'))
     cli.commands['nixos.status'] = cmd.nixos_status
 
-    # edit-template
-    et = subparsers.add_parser('edit-template', help='Open .nix.template files in $EDITOR')
-    et.add_argument('slug', nargs='?', help='NixOS config project slug (auto-detect)')
+    _args_edit_template(subparsers.add_parser('edit-template', help='Open .nix.template files in $EDITOR'))
     cli.commands['nixos.edit-template'] = cmd.nixos_edit_template
 
-    # dotfiles-apply
-    da = subparsers.add_parser('dotfiles-apply', help='Apply dotfile symlinks from manifest')
-    da.add_argument('--force', '-f', action='store_true', help='Replace existing files')
-    da.add_argument('--verbose', '-v', action='store_true', help='Show already-OK links')
+    _args_dotfiles_apply(subparsers.add_parser('dotfiles-apply', help='Apply dotfile symlinks from manifest (alias for `nixos dotfiles apply`)'))
     cli.commands['nixos.dotfiles-apply'] = cmd.dotfiles_apply
 
-    # dotfiles-add
-    dadd = subparsers.add_parser('dotfiles-add', help='Add dotfile mapping')
-    dadd.add_argument('project', help='Project slug (e.g. system_config)')
-    dadd.add_argument('source', help='Relative path in checkout (e.g. .spacemacs)')
-    dadd.add_argument('target', help='Target path (e.g. ~/.spacemacs)')
+    _args_dotfiles_add(subparsers.add_parser('dotfiles-add', help='Add dotfile mapping (alias for `nixos dotfiles add`)'))
     cli.commands['nixos.dotfiles-add'] = cmd.dotfiles_add
 
-    # dotfiles-remove
-    drm = subparsers.add_parser('dotfiles-remove', help='Remove dotfile mapping')
-    drm.add_argument('project', help='Project slug')
-    drm.add_argument('source', help='Relative path in checkout')
+    _args_dotfiles_remove(subparsers.add_parser('dotfiles-remove', help='Remove dotfile mapping (alias for `nixos dotfiles remove`)'))
     cli.commands['nixos.dotfiles-remove'] = cmd.dotfiles_remove
 
-    # dotfiles-list
-    dl = subparsers.add_parser('dotfiles-list', help='List dotfile mappings and status')
+    _args_dotfiles_list(subparsers.add_parser('dotfiles-list', help='List dotfile mappings and status (alias for `nixos dotfiles list`)'))
     cli.commands['nixos.dotfiles-list'] = cmd.dotfiles_list
 
-    # init-config
-    init_parser = subparsers.add_parser('init-config', help='Scaffold a minimal system_config project with TempleDB integration')
-    init_parser.add_argument('-o', '--output', help='Output directory (default: /tmp/system_config_scaffold)')
-    init_parser.add_argument('--username', help='Username (default: $USER)')
-    init_parser.add_argument('--hostname', help='NixOS hostname (default: auto-detect)')
-    init_parser.add_argument('--mount-path', help='FUSE mount path (default: ~/temple)')
-    init_parser.add_argument('--timezone', help='Timezone (default: America/Chicago)')
-    init_parser.add_argument('--state-version', help='NixOS stateVersion (default: 24.11)')
-    init_parser.add_argument('--no-import', action='store_true', help='Do not import into templedb')
-    init_parser.add_argument('--skip-hardware', action='store_true', help='Skip hardware config detection')
+    _args_init_config(subparsers.add_parser('init-config', help='Scaffold a minimal system_config project with TempleDB integration'))
     cli.commands['nixos.init-config'] = cmd.init_config
 
-    # import-config
-    ic = subparsers.add_parser('import-config', help='Import existing NixOS config into DB')
-    ic.add_argument('slug', nargs='?', help='NixOS config project slug')
+    _args_import_config(subparsers.add_parser('import-config', help='Import existing NixOS config into DB'))
     cli.commands['nixos.import-config'] = cmd.import_config
 
-    # generate-all
-    ga = subparsers.add_parser('generate-all', help='Generate all NixOS config from DB (templates + modules + inputs)')
-    ga.add_argument('slug', nargs='?', help='NixOS config project slug')
-    ga.add_argument('--host', help='Generate for specific host (default: active host from nixos.flake_output)')
-    ga.add_argument('--dry-run', action='store_true', help='Show what would be generated')
+    _args_generate_all(subparsers.add_parser('generate-all', help='Generate all NixOS config from DB (templates + modules + inputs)'))
     cli.commands['nixos.generate-all'] = cmd.generate_all
 
-    # host subcommands
+    # ── Nested groups (new, preferred form) ───────────────────────────────────
+
+    # system: lifecycle (rebuild, switch, status, history, rollback, test)
+    system_p = subparsers.add_parser('system', help='System lifecycle (rebuild, switch, status, history, rollback, test)')
+    system_sub = system_p.add_subparsers(dest='system_command', required=True)
+
+    _args_rebuild(system_sub.add_parser('rebuild', help='Rebuild NixOS system'))
+    cli.commands['nixos.system.rebuild'] = cmd.rebuild
+
+    _args_home_rebuild(system_sub.add_parser('home-rebuild', help='Rebuild home-manager only (no full NixOS rebuild)'))
+    cli.commands['nixos.system.home-rebuild'] = cmd.home_rebuild
+
+    _args_system_test(system_sub.add_parser('test', help='Test system configuration'))
+    cli.commands['nixos.system.test'] = cmd.system_test
+
+    _args_system_switch(system_sub.add_parser('switch', help='Switch to system configuration'))
+    cli.commands['nixos.system.switch'] = cmd.system_switch
+
+    _args_system_status(system_sub.add_parser('status', help='Show system deployment status'))
+    cli.commands['nixos.system.status'] = cmd.system_status
+
+    _args_system_history(system_sub.add_parser('history', help='Show deployment history'))
+    cli.commands['nixos.system.history'] = cmd.system_history
+
+    _args_system_rollback(system_sub.add_parser('rollback', help='Rollback to previous deployment'))
+    cli.commands['nixos.system.rollback'] = cmd.system_rollback
+
+    # config: configuration keys + flake input updates
+    config_p = subparsers.add_parser('config', help='System configuration values and flake inputs (get, set, list, update-input)')
+    config_sub = config_p.add_subparsers(dest='config_command', required=True)
+
+    _args_config_get(config_sub.add_parser('get', help='Get system configuration value'))
+    cli.commands['nixos.config.get'] = cmd.config_get
+
+    _args_config_set(config_sub.add_parser('set', help='Set system configuration value (host-scoped by default)'))
+    cli.commands['nixos.config.set'] = cmd.config_set
+
+    _args_config_list(config_sub.add_parser('list', help='List all system configuration'))
+    cli.commands['nixos.config.list'] = cmd.config_list
+
+    _args_update_input(config_sub.add_parser('update-input', help='Update a flake input'))
+    cli.commands['nixos.config.update-input'] = cmd.update_input
+
+    # packages: managed CLI tools
+    packages_p = subparsers.add_parser('packages', help='Managed packages (add, remove, list)')
+    packages_sub = packages_p.add_subparsers(dest='packages_command', required=True)
+
+    _args_add_package(packages_sub.add_parser('add', help='Add CLI tool to managed packages'))
+    cli.commands['nixos.packages.add'] = cmd.add_package
+
+    _args_remove_package(packages_sub.add_parser('remove', help='Remove CLI tool from managed packages'))
+    cli.commands['nixos.packages.remove'] = cmd.remove_package
+
+    _args_list_packages(packages_sub.add_parser('list', help='List all managed packages'))
+    cli.commands['nixos.packages.list'] = cmd.list_packages
+
+    # dotfiles: symlink management
+    dotfiles_p = subparsers.add_parser('dotfiles', help='Dotfile symlink management (apply, add, remove, list)')
+    dotfiles_sub = dotfiles_p.add_subparsers(dest='dotfiles_command', required=True)
+
+    _args_dotfiles_apply(dotfiles_sub.add_parser('apply', help='Apply dotfile symlinks from manifest'))
+    cli.commands['nixos.dotfiles.apply'] = cmd.dotfiles_apply
+
+    _args_dotfiles_add(dotfiles_sub.add_parser('add', help='Add dotfile mapping'))
+    cli.commands['nixos.dotfiles.add'] = cmd.dotfiles_add
+
+    _args_dotfiles_remove(dotfiles_sub.add_parser('remove', help='Remove dotfile mapping'))
+    cli.commands['nixos.dotfiles.remove'] = cmd.dotfiles_remove
+
+    _args_dotfiles_list(dotfiles_sub.add_parser('list', help='List dotfile mappings and status'))
+    cli.commands['nixos.dotfiles.list'] = cmd.dotfiles_list
+
+    # host: hostname-scoped configuration (already nested pre-reorg — unchanged)
     hl = subparsers.add_parser('host', help='Manage NixOS host configurations')
     host_sub = hl.add_subparsers(dest='host_command', required=True)
 
-    hlist = host_sub.add_parser('list', help='List all hosts')
+    host_sub.add_parser('list', help='List all hosts')
     cli.commands['nixos.host.list'] = cmd.host_list
 
     hshow = host_sub.add_parser('show', help='Show host-specific config')

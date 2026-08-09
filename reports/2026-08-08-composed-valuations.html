@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Composed valuations, run against real templedb data</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --neg: #e97070;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 {
+    color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem;
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 {
+    color: #b0b0d0; font-size: 1rem; margin: 1.8rem 0 0.4rem;
+    display: flex; align-items: baseline; gap: 0.6rem;
+  }
+  h3 .num {
+    color: var(--accent); font-family: "JetBrains Mono", monospace;
+    font-size: 0.85em; opacity: 0.7;
+  }
+  h3 .tag {
+    color: var(--muted); font-size: 0.7rem; font-weight: 400;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-left: auto;
+  }
+  h3 .tag.hit { color: var(--pos); }
+  h3 .tag.miss { color: var(--muted); }
+  h3 .tag.neg { color: var(--neg); }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.84em; line-height: 1.5; margin: 0.9rem 0;
+  }
+  pre code { background: none; padding: 0; color: var(--text); }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  a:hover { color: #a0daff; }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.94em;
+  }
+  .callout.action { border-left-color: var(--pos); }
+  .callout.negative { border-left-color: var(--neg); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.action .label { color: var(--pos); }
+  .callout.negative .label { color: var(--neg); }
+  .data {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.83em;
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.7rem 1rem; border-radius: 5px; margin: 0.8rem 0;
+    line-height: 1.55;
+    overflow-x: auto; white-space: pre;
+  }
+  .close {
+    margin-top: 3rem; padding-top: 1.5rem;
+    border-top: 1px solid var(--border); color: var(--muted);
+    font-size: 0.9rem; font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<h1>Composed valuations, run against real TempleDB data</h1>
+<p class="lede">
+  Follow-up to <a href="templedb_ontology.html">the ontology-in-disguise doc</a>. That
+  ended with a claim: TempleDB already ships several distance functions
+  (<code>graph search / who-uses / callers / importers / build-deps</code>, plus
+  the ones latent in <code>vcs_commits</code>, <code>nix_closures</code>,
+  <code>config_nodes</code>, <code>ast_builds</code>), and the interesting move is
+  to <em>compose</em> them — ask "close under X <em>and</em> close under Y." This
+  doc runs eight such composed queries against the actual DB and reports what
+  fell out.
+</p>
+
+<h2>Eight queries, real results</h2>
+
+<h3><span class="num">1.</span> Co-modified × imports <span class="tag hit">HIT — 8 pairs in bza</span></h3>
+<p>
+  The essay's original example. For each file-dependency edge in
+  <code>bza</code>, count shared commits between endpoint files. Threshold at 7:
+</p>
+<div class="data">BookUpload.tsx     →  localStorage.ts       9 shared commits
+BookReader.tsx     →  localStorage.ts       8
+usePicturebook.ts  →  supabase-queries.ts   7
+BookReader.tsx     →  types/index.ts        7
+PageSidebar.tsx   ↔  QuizPanel.tsx          7  (mutual import)
+BookUpload.tsx     →  queries/images.ts     7
+BookCard.tsx       →  types/index.ts        7</div>
+<div class="callout action">
+  <span class="label">Actionable</span>
+  Every top pair is an extraction candidate. A tighter reading: pairs where the
+  import is <em>bidirectional</em> and co-commits are high (<code>PageSidebar</code>
+  ↔ <code>QuizPanel</code>) are almost certainly one logical component that got
+  split across files. Also a natural agent hint — <em>"you edited A; the DB says
+  you almost always edit B in the same commit."</em>
+</div>
+
+<h3><span class="num">2.</span> High importer count × recent churn <span class="tag hit">HIT — risk-weighted</span></h3>
+<p>
+  In-degree of the file-import graph times commits in the last 30 days. Bza
+  again, since it has the richest history:
+</p>
+<div class="data">frontend/lib/supabase.ts       42 importers × 3 commits =  126
+frontend/types/index.ts        30 × 4                   =  120
+frontend/lib/queries/index.ts  19 × 3                   =   57
+frontend/lib/queries/images.ts  6 × 9                   =   54
+frontend/lib/queries/types.ts  12 × 4                   =   48</div>
+<div class="callout action">
+  <span class="label">Actionable</span>
+  These are the files where a mistake propagates farthest AND is being touched
+  most. Natural gate for <em>"require review from two people"</em>, extra CI
+  weight, or an alert when they're touched by an auto-generated PR. The
+  formula generalizes: <code>importers × churn</code> is a blast-radius × probability
+  product — the expected damage from a bad change.
+</div>
+
+<h3><span class="num">3.</span> Small nix closure delta × single-commit source diff <span class="tag hit">HIT — real 1-package change</span></h3>
+<p>
+  From <code>nix_closure_diffs</code>, closure #2 (2026-07-29):
+</p>
+<div class="data">added_count:    1
+removed_count:  4
+changed_count:  0
+size_delta:    -996,968 bytes
+
+added:   templedb-spacemacs-layer
+removed: hm_templedb, zram-generator-1.2.1,
+         zram-generator.conf, unit-systemd-zram-setup-.service</div>
+<p>
+  That's a genuinely small, semantically coherent change (add spacemacs layer,
+  retire zram-generator). For contrast, closure diff #3 later that week: +145 /
+  −150 packages, −5.2 GB — a legitimate nixpkgs bump.
+</p>
+<div class="callout action">
+  <span class="label">Actionable</span>
+  In the deploy pipeline, flag closures where
+  <code>added_count + removed_count &le; 10</code> as <em>targeted rebuild
+  candidates</em>. The <em>composed</em> valuation here is
+  <code>closure-diff-small ∧ source-diff-small</code> — a truly minimal change
+  touches few store paths <em>and</em> few source files. If either side is big,
+  the change isn't actually minimal even if the other side looks that way.
+</div>
+
+<h3><span class="num">4.</span> AST build hash reuse across hosts <span class="tag neg">NEGATIVE HIT</span></h3>
+<p>
+  Ran across all 27 <code>ast_builds</code>: <strong>every</strong>
+  <code>output_hash</code> appears on exactly one host. Not one hash is shared
+  between hosts — not even between the two nearly-identical dev machines
+  <code>zMothership2</code> and <code>zMothership3</code>.
+</p>
+<div class="data">n_hosts | n_hashes
+--------+---------
+      1 |    27      ← every hash unique to one host
+      2 |     0
+     3+ |     0</div>
+<div class="callout negative">
+  <span class="label">Finding worth acting on</span>
+  Content-addressing gives you shared-subtree caching <em>for free</em> in
+  principle — if two hosts emit the same subtree, they get the same hash for
+  that piece. Right now the emit is holistic (one hash per host), so that free
+  win is unclaimed. The composed valuation to add: for pairs of AST builds on
+  different hosts, compute
+  <code>|shared config_nodes| / |total distinct nodes|</code>. Pairs with &gt;90%
+  overlap but different <code>output_hash</code> are exactly the "should be a
+  shared base module" refactor targets.
+</div>
+
+<h3><span class="num">5.</span> Same commit, different deploy outcome <span class="tag miss">MISS — data too concentrated</span></h3>
+<p>
+  Only one commit shows the pattern (<code>DCE5765A…</code>), and all 20+ attempts
+  are on target <code>staging</code>. That's an evolving deploy sequence on one
+  target, not a cross-target divergence.
+</p>
+<p>
+  The valuation is well-defined —
+  <code>same commit_hash ∧ (target A succeeded, target B failed)</code> — it
+  just needs more targets with real history. Worth revisiting once
+  <code>fleet_deployment_history</code> (currently 0 rows) is populated.
+</p>
+
+<h3><span class="num">6.</span> Symbol in-degree × declaring-file churn <span class="tag miss">MISS — code_symbols sparse</span></h3>
+<p>
+  Same shape as query 2 but at symbol granularity via
+  <code>code_symbol_dependencies.called_symbol_id</code>. Would surface individual
+  functions that are both hot and unstable — much sharper than file-level. But
+  <code>code_symbols</code> has only 12 rows total across the DB, and 12 of them are
+  test fixtures in <code>trig-navigator-godot</code>. Zero real hits.
+</p>
+<div class="callout">
+  <span class="label">Blocker, not a bug</span>
+  <code>templedb graph build-deps</code> populates <code>file_dependencies</code>
+  but the symbol-graph builder has never been run project-wide. The query is
+  ready; the ingest step is missing.
+</div>
+
+<h3><span class="num">7.</span> Graph-query co-occurrence in the query log <span class="tag miss">MISS — table brand new</span></h3>
+<p>
+  Yesterday's commit added <code>graph_query_log</code>. In a month there will be
+  enough data to mine pairs of <code>(command, target_key)</code> invocations
+  within N minutes of each other. Real usage patterns will emerge:
+  <em>"when a user runs <code>who-uses OPENAI_API_KEY</code>, what do they run
+  next?"</em>. Zero rows today, but the wiring is in place — the frecency
+  ranking is technically a degenerate 1-step version of this (frequency of a
+  single query, not co-occurrence of two).
+</p>
+<div class="callout action">
+  <span class="label">Interesting property</span>
+  The query log is the only distance function in the system that isn't
+  computable from static state — it captures <em>what the user actually cared
+  about</em>. Compose it with any of the others and you get "what the user
+  cared about that also has structural signal X." That's a much richer
+  ranking than either alone.
+</div>
+
+<h3><span class="num">8.</span> VCS ancestor depth × co-modification <span class="tag hit">HIT — natural extraction detector</span></h3>
+<p>
+  For each pair of files, distance = 1 / (commits since their most-recent shared
+  commit). Files whose last co-modification was recent <em>and</em> whose commit
+  ancestry converges tightly (small distance both ways) are practically siblings.
+  Composed with the import edge, you get high-precision extraction candidates:
+</p>
+<div class="data">templedb, top pairs where co-commit-recency AND import both hold:
+
+src/agent/service.py     ↔  src/agent/store.py
+src/cli/commands/graph.py →  src/graph_frecency.py  (yesterday's commit!)
+src/services/vcs_service.py ↔ src/temple_fuse.py</div>
+<p>
+  The <code>graph.py</code> ↔ <code>graph_frecency.py</code> pair is a nice
+  self-referential hit — I just extracted the second file <em>from</em> the
+  first, and the DB immediately reflects them as a sibling pair.
+</p>
+
+<h2>Meta-observations from running these</h2>
+
+<h3>What makes a valuation actually useful</h3>
+<p>
+  A distance function is only interesting if it produces enough variance to
+  <em>discriminate</em>. Two failure modes to avoid:
+</p>
+<ul>
+  <li><strong>Everything is close.</strong> If your metric puts most pairs at
+      similar distance, ranking by it tells you nothing. This is why
+      <code>d(file_A, file_B) = shared_commits</code> on its own is weak — most
+      pairs share few or many commits by project age, not by semantic
+      relatedness.</li>
+  <li><strong>Nothing is close.</strong> If your metric is so strict that most
+      pairs have infinite distance, you can't rank the survivors. This is why
+      <em>exact</em> AST build hash equality across hosts (query 4) tells you
+      nothing new — of course no two hosts produce byte-identical config.</li>
+</ul>
+<p>
+  <em>Composed</em> valuations dodge both failure modes because the intersection
+  of two weak-signal metrics is usually a strong signal. "Files that share
+  many commits" is common. "Files that import each other" is common. "Files
+  that do both" is rare and semantically meaningful.
+</p>
+
+<h3>Static valuations vs. usage valuations</h3>
+<p>
+  Seven of the eight queries use only structural data (imports, commits,
+  closures, symbols). The eighth uses the query log — user behavior. The
+  behavior signal is qualitatively different because it captures what the
+  <em>humans</em> (or agents) treated as related, not what the code says is
+  related. In principle they should agree; in practice they will diverge, and
+  the divergences are where the interesting bugs live:
+</p>
+<ul>
+  <li>Files always co-queried in the log but never co-imported → hidden
+      coupling.</li>
+  <li>Files always co-imported but never co-queried → dead or over-abstracted
+      dependency.</li>
+</ul>
+<p>
+  This composed valuation only becomes queryable once the log has a few weeks
+  of data. Worth building the query now so it's ready to fire when the data is.
+</p>
+
+<h3>The AST-build finding is the buried lede</h3>
+<p>
+  Zero cross-host hash reuse in AST builds means TempleDB's content-addressed
+  identity — which is the whole reason the ultrametric geometry works at
+  higher levels — is <em>not</em> being exploited at the AST layer. Every host
+  gets a fresh derivation even if 90% of its config is shared. That's a real
+  refactor: emit each config subtree separately, hash it, and let hosts
+  reference shared subtrees by hash rather than re-inlining. Nix's own store
+  works this way; templedb's AST emit doesn't yet.
+</p>
+<p>
+  This is the kind of finding a single query surfaces that a whole taxonomy
+  discussion won't. It came out of just asking one composed question against
+  real data.
+</p>
+
+<h2>An algebra of distance functions</h2>
+<p>
+  Once you commit to composed valuations, distances become first-class objects
+  with an algebra. A minimal set of operators:
+</p>
+<pre><code>d_and(a, b)  = min(d_a, d_b)      -- close iff close on BOTH
+d_or(a, b)   = max(d_a, d_b)      -- close iff close on EITHER (weaker)
+d_sum(a, b, w=0.5)                -- weighted composition
+d_ratio(a, b) = d_a / d_b         -- discrepancy: close on a but not on b
+d_flip(a)    = 1/d_a               -- promote to a "farness" score</code></pre>
+<p>
+  <code>d_ratio</code> is the interesting one — it's what surfaces the
+  "co-imported but never co-queried" cases. Divergence between two valuations
+  usually means there's a story to tell.
+</p>
+<p>
+  A concrete CLI shape:
+</p>
+<pre><code>templedb distance A B --via imports
+templedb distance A B --via commit-ancestry
+templedb distance A B --via and:imports,commit-ancestry
+templedb distance A B --via ratio:imports,query-log</code></pre>
+<p>
+  I wouldn't build this speculatively. But if two or three of the queries
+  above earn their keep as first-class commands, exposing distance as a
+  <code>--via</code> flag becomes the natural way to add the fourth without a
+  new subcommand for each.
+</p>
+
+<h2>Two small findings for the parking lot</h2>
+<div class="callout negative">
+  <span class="label">Schema inconsistency</span>
+  <code>file_dependencies.dependency_type</code> stores <code>'import'</code>
+  (singular) and <code>'from_import'</code>, not <code>'imports'</code> (plural)
+  as the schema comment and my own earlier writeup implied. Every composed
+  query touching imports has to spell it correctly or silently return zero
+  rows. Worth a canonical constant somewhere, or at least a schema comment
+  update.
+</div>
+<div class="callout negative">
+  <span class="label">Data sparsity blocks two queries</span>
+  <code>code_symbols</code> (12 rows) and <code>fleet_deployment_history</code>
+  (0 rows) prevent the symbol-level and cross-target-deploy queries from
+  producing signal. Both need an ingest run to be worth exposing as commands.
+</div>
+
+<h2>What to actually build from this</h2>
+<p>
+  Ranked by expected value per unit of effort:
+</p>
+<ol>
+  <li><strong>Query 1 as a real command.</strong> <code>templedb graph
+      sibling-pairs &lt;project&gt;</code> — top file pairs by
+      <code>co-commit × import-edge</code>. Direct extraction hints, works today
+      on any project with vcs + import data.</li>
+  <li><strong>Query 3 as a deploy-pipeline flag.</strong> Warn when a closure
+      diff is small (add+remove &le; 10) — those are the deploys where
+      something targeted could replace <code>nixos-rebuild switch</code>.
+      Cheap to add, catches the interesting cases.</li>
+  <li><strong>Query 4 as a config-refactor report.</strong>
+      <code>templedb ast overlap --across-hosts</code> — surface the largest
+      subtrees that are structurally shared but produce different hashes. This
+      is the AST-emit refactor's whole justification, in one command.</li>
+  <li><strong>Query 8's mechanism, always-on.</strong> Whenever
+      <code>vcs log</code> shows a commit that touched files &gt;95%
+      structurally co-modified, silently note it — over time you build a
+      "these files always move together" registry that can inform every other
+      query.</li>
+</ol>
+<p>
+  I'd skip building the general distance algebra until at least two of the
+  above are shipped and clearly worth composing. Design pressure from real
+  usage is a better guide than pretty API surface.
+</p>
+
+<div class="close">
+  Eight queries, five real hits, three misses that are useful diagnostics
+  about what data is sparse. The AST-build finding (zero cross-host hash
+  reuse) is the one that would be worth pursuing whether or not you build any
+  of the distance-composition commands.
+</div>
+
+</body>
+</html>

@@ -140,6 +140,7 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("fleet-sync", "/fleet-sync", "Fleet Sync", ", F"),
             ("nix-store", "/nix-store",  "Nix Store",  ", X"),
             ("tests", "/tests",        "Tests",      ", t"),
+            ("reports", "/reports",    "Reports",    ", r"),
         ]
     )
     page = f"""<!DOCTYPE html>
