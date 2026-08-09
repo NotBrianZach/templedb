@@ -74,6 +74,66 @@
   accommodated. If yes, this whole analysis parks itself for later.</p>
 </div>
 
+<h2>Existing infra reality check</h2>
+
+<p>We already have <strong>vultr-woofs</strong> (Vultr, 45.32.195.217, NixOS)
+tracked in <code>fleet_machines</code>. Before spinning up a new host, does it
+have capacity for a Neko container?</p>
+
+<p><strong>Live inspection (2026-08-09):</strong></p>
+<ul>
+  <li>1 vCPU, 1.9 GiB RAM, 47 GB free disk</li>
+  <li>NixOS running nginx on :80/:443 (woofs.com), sshd on :22, load 0.00</li>
+  <li>Docker not installed</li>
+  <li>Uptime 20 days, essentially idle CPU-wise but memory-constrained</li>
+</ul>
+
+<div class="callout">
+  <p><span class="warn">Verdict:</span> too small for Neko as-is. Chromium + GStreamer +
+  Xvfb + Pulse per session runs ~1.2–1.5 GB RAM. Plus nginx + OS overhead already
+  using ~200 MB → we could fit exactly one session and the OOM killer would show
+  up under real use. 1 vCPU is the harder blocker — WebRTC video encode from
+  1280×720@24fps needs ~1–2 cores; on 1 vCPU total, framerate collapses or nginx
+  starves.</p>
+</div>
+
+<h3>Real infra options</h3>
+<table>
+<thead>
+  <tr><th>Option</th><th>Spec</th><th>Cost/mo</th><th>Concurrent sessions</th><th>Notes</th></tr>
+</thead>
+<tbody>
+  <tr>
+    <td><strong>Upgrade vultr-woofs</strong></td>
+    <td>Vultr HF, 4 vCPU / 8 GB</td>
+    <td>~$24/mo (up from ~$6)</td>
+    <td>3–5</td>
+    <td>NixOS rebuild + re-provision; single-VM lifestyle preserved</td>
+  </tr>
+  <tr>
+    <td><strong>Sibling Vultr VPS</strong> (Neko-only)</td>
+    <td>Vultr HF, 2 vCPU / 4 GB</td>
+    <td>~$12/mo (in addition to woofs)</td>
+    <td>1–2</td>
+    <td>Isolation: woofs.com untouched; new NixOS target</td>
+  </tr>
+  <tr>
+    <td><strong>Local mothership</strong> (zMothership2/3)</td>
+    <td>Existing hardware</td>
+    <td>$0 marginal</td>
+    <td>Many</td>
+    <td class="warn">Only works if reachable from Cloudflare — desktop-class boxes
+        behind residential NAT need Cloudflare Tunnel or wireguard. Also uptime
+        depends on you not turning them off.</td>
+  </tr>
+</tbody>
+</table>
+
+<p>Local-mothership is worth checking: if <code>zMothership2</code> or <code>zMothership3</code>
+is always-on and has (or could have) a Cloudflare Tunnel, it's free. That's a
+5-min check via <code>templedb deploy fleet status</code> or asking whether
+those machines run 24/7. If yes, this is the cheapest path by a large margin.</p>
+
 <h2>What aireadalong actually uses from Hyperbeam</h2>
 
 <p>Grep of <code>components/SitePanel.tsx</code> + <code>app/api/browser-session/route.ts</code>
@@ -122,7 +182,7 @@
   <tr>
     <td><strong>Neko + wrapper</strong> <span class="verdict">RECOMMENDED</span></td>
     <td>3–5 days</td>
-    <td>$6/mo Hetzner CX32</td>
+    <td>$0–24/mo depending on infra choice above</td>
     <td>Yes, via mounted volume per user</td>
     <td>~Equal (same underlying WebRTC/GStreamer stack)</td>
   </tr>
@@ -136,14 +196,14 @@
   <tr>
     <td>Playwright + MJPEG DIY</td>
     <td>3–7 days</td>
-    <td>$6/mo VPS</td>
+    <td>$0–24/mo depending on infra</td>
     <td>Yes (userDataDir)</td>
     <td class="warn">Noticeably worse — ~200ms input latency, 8–15 FPS ceiling</td>
   </tr>
   <tr>
     <td>Full DIY WebRTC (pion/aiortc)</td>
     <td>2–3 weeks</td>
-    <td>$6/mo VPS + coturn</td>
+    <td>$0–24/mo depending on infra + coturn</td>
     <td>Yes</td>
     <td>Equal, but you own the entire pipeline</td>
   </tr>
@@ -239,12 +299,13 @@ This is the exact behavior Hyperbeam wants to charge premium for.</p>
   <li>Persistent profiles: paywalled (contact sales).</li>
 </ul>
 
-<h3>Neko on Hetzner CX32</h3>
+<h3>Neko on our infra</h3>
 <ul>
-  <li>$6.19/mo flat, regardless of usage.</li>
-  <li>Handles 2–3 concurrent 1080p sessions before CPU-bound.</li>
-  <li>Scale up to CX52 ($22/mo, 16 vCPU / 32 GB) for 8–12 concurrent sessions.</li>
-  <li>Free: profile persistence, no per-hour metering, unlimited session length.</li>
+  <li>Upgrading vultr-woofs to 4 vCPU / 8 GB: ~$24/mo (delta ~$18 vs current).
+      Handles 3–5 concurrent sessions.</li>
+  <li>Sibling Vultr HF 2 vCPU / 4 GB: ~$12/mo new spend. Handles 1–2 concurrent.</li>
+  <li>Local mothership (if 24/7 + reachable): $0 marginal.</li>
+  <li>All options: profile persistence free, no per-hour metering, unlimited session length.</li>
 </ul>
 
 <h3>Break-even</h3>
@@ -305,9 +366,12 @@ the 3–5 days of setup time. Rough labor-cost break-even:</p>
 <h2>What I'd do this week if we choose Neko</h2>
 
 <ol>
-  <li><strong>Day 1</strong>: Provision Hetzner CX32, deploy Neko's stock docker-compose,
-      verify it works in one browser tab. Confirm video quality, latency,
-      profile persistence via mounted volume.</li>
+  <li><strong>Day 0 (30 min)</strong>: Decide the infra target from the reality-check
+      table above (upgrade vultr-woofs, sibling VPS, or mothership). Provision it.</li>
+  <li><strong>Day 1</strong>: Enable Docker on the target (NixOS: add
+      <code>virtualisation.docker.enable = true</code>). Deploy Neko's stock
+      docker-compose. Verify video quality, latency, profile persistence via a
+      mounted per-user volume.</li>
   <li><strong>Day 2</strong>: Write <code>neko-manager</code>. Test: <code>curl</code>
       to POST /session, watch container spawn, get an embed URL, load it manually.</li>
   <li><strong>Day 3</strong>: Add <code>NekoProvider</code> to aireadalong. Feature-flag
