@@ -10,8 +10,28 @@ from typing import List, Tuple, Optional, Dict, Set
 from dataclasses import dataclass
 
 
+# File extensions that identify binary assets (skip text-based analysis for these)
+BINARY_ASSET_TYPES = {
+    'image_svg', 'image_png', 'image_jpg', 'image_gif', 'image_webp', 'image_ico',
+    'font', 'pdf', 'wasm', 'audio', 'video', 'archive', 'binary_asset',
+}
+
 # File type patterns (order matters - more specific patterns first)
 FILE_TYPE_PATTERNS = [
+    # Binary assets (SVG is technically text/xml but treat uniformly with other assets)
+    (r'\.svg$', 'image_svg', None),
+    (r'\.png$', 'image_png', None),
+    (r'\.jpe?g$', 'image_jpg', None),
+    (r'\.gif$', 'image_gif', None),
+    (r'\.webp$', 'image_webp', None),
+    (r'\.ico$', 'image_ico', None),
+    (r'\.(woff2?|ttf|otf|eot)$', 'font', None),
+    (r'\.pdf$', 'pdf', None),
+    (r'\.wasm$', 'wasm', None),
+    (r'\.(mp3|wav|ogg|flac)$', 'audio', None),
+    (r'\.(mp4|webm|mov|mkv)$', 'video', None),
+    (r'\.(zip|tar|tar\.gz|tgz|tar\.bz2|7z)$', 'archive', None),
+
     # SQL files
     (r'schema\.sql$', 'sql_schema', None),
     (r'\.sql$', 'sql_migration', lambda p: 'migration' in p.lower()),
@@ -352,16 +372,20 @@ class FileScanner:
                 if not file_type:
                     continue
 
-                # Read content for analysis
-                try:
-                    content = file_path.read_text(encoding='utf-8', errors='ignore')
-                except Exception:
-                    # Skip files that can't be read
-                    continue
-
-                # Extract metadata
-                component_name = self.extract_component_name(file_path, content)
-                lines_of_code = self.count_lines(content)
+                # For binary asset types, skip text analysis — ContentStore will
+                # read them as bytes and store to content_blob (or external file for large).
+                if file_type in BINARY_ASSET_TYPES:
+                    component_name = None
+                    lines_of_code = 0
+                else:
+                    # Read content for text-based analysis (component name, LOC)
+                    try:
+                        content = file_path.read_text(encoding='utf-8', errors='ignore')
+                    except Exception:
+                        # Skip files that can't be read
+                        continue
+                    component_name = self.extract_component_name(file_path, content)
+                    lines_of_code = self.count_lines(content)
 
                 scanned_files.append(ScannedFile(
                     absolute_path=str(file_path),
