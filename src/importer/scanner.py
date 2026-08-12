@@ -217,7 +217,7 @@ FILE_TYPE_PATTERNS = [
 # Directories to skip during scanning
 SKIP_DIRS = {
     'node_modules', '.git', 'venv', '__pycache__',
-    'dist', 'build', '.direnv', '.next', 'target',
+    'dist', 'build', '.direnv', '.next', '.open-next', '.wrangler', 'target',
     '.pytest_cache', 'coverage', '.venv', 'env',
     'bzaenv', 'library', 'usrlib'  # Project-specific build artifacts
 }
