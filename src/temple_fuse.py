@@ -341,7 +341,8 @@ class TempleFS(Operations):
     def _get_file(self, conn, project_id, file_path):
         return conn.execute(
             "SELECT pf.id, pf.file_path, fc.content_hash, cb.content_text, "
-            "cb.content_blob, cb.file_size_bytes, cb.content_type "
+            "cb.content_blob, cb.file_size_bytes, cb.content_type, "
+            "cb.storage_location, cb.external_path, cb.compression "
             "FROM project_files pf "
             "JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1 "
             "JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash "
@@ -354,6 +355,19 @@ class TempleFS(Operations):
         row = self._get_file(conn, project_id, file_path)
         if not row:
             return None
+        # External storage: read from filesystem via ContentStore
+        if row["storage_location"] == "external" and row["external_path"]:
+            try:
+                from importer.content import ContentStore
+                data = ContentStore().retrieve_content(
+                    row["content_hash"], "external",
+                    row["external_path"], row["compression"]
+                )
+                if data is not None:
+                    return data
+            except Exception:
+                pass
+            return b""
         if row["content_text"] is not None:
             ct = row["content_text"]
             return ct if isinstance(ct, bytes) else ct.encode("utf-8")

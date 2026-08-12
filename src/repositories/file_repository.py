@@ -119,6 +119,9 @@ class FileRepository(BaseRepository):
                 cb.content_type,
                 cb.encoding,
                 cb.file_size_bytes,
+                cb.storage_location,
+                cb.external_path,
+                cb.compression,
                 fc.version,
                 fc.line_count
             FROM file_contents fc

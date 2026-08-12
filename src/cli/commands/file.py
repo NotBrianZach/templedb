@@ -298,7 +298,11 @@ class FileCommands(Command):
             return 1
 
     def _read_content_from_db(self, file_record: dict) -> Optional[str]:
-        """Read file content directly from the TempleDB database (content_blobs)."""
+        """Read file content directly from the TempleDB database (content_blobs).
+
+        For externally-stored blobs (storage_location='external'), fetches from
+        the filesystem via ContentStore.retrieve_content, decompressing if needed.
+        """
         try:
             file_id = file_record.get('file_id') or file_record.get('id')
             if not file_id:
@@ -307,6 +311,27 @@ class FileCommands(Command):
             content_row = self.file_repo.get_file_content(file_id)
             if not content_row:
                 return None
+
+            # External storage — read from filesystem
+            if content_row.get('storage_location') == 'external' and content_row.get('external_path'):
+                try:
+                    from importer.content import ContentStore
+                    data = ContentStore().retrieve_content(
+                        content_row.get('content_hash') or content_row.get('hash_sha256'),
+                        'external',
+                        content_row['external_path'],
+                        content_row.get('compression'),
+                    )
+                    if data is None:
+                        return None
+                    try:
+                        return data.decode('utf-8')
+                    except UnicodeDecodeError:
+                        logger.error("File contains binary content, cannot display as text")
+                        return None
+                except Exception as e:
+                    logger.debug(f"External read failed: {e}")
+                    return None
 
             if content_row.get('content_text') is not None:
                 return content_row['content_text']

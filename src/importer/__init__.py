@@ -183,9 +183,11 @@ class ProjectImporter:
                 self.stats.files_skipped += 1
                 continue
 
-            # Read content
-            file_content = self.content_store.read_file_content(file_path)
-            if not file_content:
+            # Store content — modern path: BlobMetadata handles inline vs external
+            # (external for files > BLOB_INLINE_THRESHOLD, default 10MB, with optional zstd).
+            blob_meta = self.content_store.store_content(file_path)
+            if not blob_meta:
+                # File too large (> BLOB_MAX_SIZE) or unreadable
                 self.stats.files_skipped += 1
                 continue
 
@@ -194,50 +196,41 @@ class ProjectImporter:
                 "SELECT content_hash FROM file_contents WHERE file_id = ?",
                 (file['id'],)
             )
-
             if not self.content_store.content_changed(
                 existing['content_hash'] if existing else None,
-                file_content.hash_sha256
+                blob_meta.content_hash
             ):
                 continue
 
-            # First, store content blob (content-addressable storage)
-            # Use INSERT OR IGNORE to avoid duplicates
-            if file_content.content_type == 'text':
-                execute("""
-                    INSERT OR IGNORE INTO content_blobs
-                    (hash_sha256, content_text, content_blob, content_type, encoding, file_size_bytes)
-                    VALUES (?, ?, NULL, ?, ?, ?)
-                """, (
-                    file_content.hash_sha256,
-                    file_content.content_text,
-                    file_content.content_type,
-                    file_content.encoding,
-                    file_content.file_size
-                ), commit=False)
-            else:
-                execute("""
-                    INSERT OR IGNORE INTO content_blobs
-                    (hash_sha256, content_text, content_blob, content_type, encoding, file_size_bytes)
-                    VALUES (?, NULL, ?, ?, ?, ?)
-                """, (
-                    file_content.hash_sha256,
-                    file_content.content_blob,
-                    file_content.content_type,
-                    file_content.encoding,
-                    file_content.file_size
-                ), commit=False)
+            # Insert content_blobs row (dedup by hash). Populates the same columns for both
+            # inline (content_text/content_blob) and external (external_path, compression) modes.
+            execute("""
+                INSERT OR IGNORE INTO content_blobs
+                (hash_sha256, content_text, content_blob, content_type, encoding,
+                 file_size_bytes, storage_location, external_path, compression, chunk_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                blob_meta.content_hash,
+                blob_meta.content_text if blob_meta.storage_location == 'inline' and blob_meta.content_type == 'text' else None,
+                blob_meta.content_blob if blob_meta.storage_location == 'inline' and blob_meta.content_type == 'binary' else None,
+                blob_meta.content_type,
+                blob_meta.encoding,
+                blob_meta.file_size,
+                blob_meta.storage_location,
+                blob_meta.external_path,
+                blob_meta.compression,
+                blob_meta.chunk_count,
+            ), commit=False)
 
-            # Then, reference the blob in file_contents
             execute("""
                 INSERT OR REPLACE INTO file_contents
                 (file_id, content_hash, file_size_bytes, line_count, is_current)
                 VALUES (?, ?, ?, ?, 1)
             """, (
                 file['id'],
-                file_content.hash_sha256,
-                file_content.file_size,
-                file_content.line_count
+                blob_meta.content_hash,
+                blob_meta.file_size,
+                blob_meta.line_count
             ), commit=False)
 
             self.stats.content_stored += 1
