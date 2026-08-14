@@ -222,6 +222,75 @@ class SystemService:
             logger.error(f"Materialize failed: {e}")
             return None
 
+    def update_flake_input(self, project_slug: str, input_name: str) -> Dict[str, Any]:
+        """Run `nix flake update <input>` in the project's checkout and mirror
+        the updated flake.lock back to the DB.
+
+        Returns {success, stdout, stderr, db_synced} where db_synced is True
+        iff the updated lock file was successfully written back to the DB via
+        `templedb file set --verify`. If nix succeeded but the DB writeback
+        failed, success is still True but db_synced is False and stderr has
+        the writeback error.
+        """
+        checkout = self.materialize_from_db(project_slug, force=False)
+        if checkout is None:
+            return {"success": False, "stdout": "", "stderr":
+                    f"Failed to materialize {project_slug} — commit local "
+                    f"changes first, or use --force via a caller that "
+                    f"supports it.", "db_synced": False}
+        if not (checkout / "flake.nix").exists():
+            return {"success": False, "stdout": "", "stderr":
+                    f"No flake.nix in {checkout}", "db_synced": False}
+
+        try:
+            result = subprocess.run(
+                ["nix", "flake", "update", input_name],
+                cwd=str(checkout),
+                capture_output=True, text=True, timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            return {"success": False, "stdout": "",
+                    "stderr": "nix flake update timed out after 180s",
+                    "db_synced": False}
+        except FileNotFoundError:
+            return {"success": False, "stdout": "",
+                    "stderr": "nix not found in PATH",
+                    "db_synced": False}
+
+        out = {"success": result.returncode == 0,
+               "stdout": result.stdout,
+               "stderr": result.stderr,
+               "db_synced": False}
+
+        if not out["success"]:
+            return out
+
+        # Mirror flake.lock back to the DB via `file set --verify` so the
+        # source of truth doesn't drift.
+        lock_path = checkout / "flake.lock"
+        if not lock_path.exists():
+            out["stderr"] += "\n(warning: no flake.lock produced)"
+            return out
+
+        try:
+            with open(lock_path, "rb") as f:
+                writeback = subprocess.run(
+                    ["templedb", "file", "set", project_slug, "flake.lock",
+                     "--verify"],
+                    stdin=f, capture_output=True, text=True, timeout=30,
+                )
+            if writeback.returncode == 0:
+                out["db_synced"] = True
+            else:
+                out["stderr"] += (
+                    f"\n(warning: DB writeback of flake.lock failed: "
+                    f"{writeback.stderr.strip()})"
+                )
+        except Exception as e:
+            out["stderr"] += f"\n(warning: DB writeback error: {e})"
+
+        return out
+
     def lock_checkout(self, project_slug: str):
         """Make checkout files read-only after generate-all.
 
