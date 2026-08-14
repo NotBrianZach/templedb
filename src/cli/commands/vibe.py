@@ -219,7 +219,7 @@ What would you like to work on?
         import subprocess
         import tempfile
         from .claude import ClaudeCommands
-        from cli.tty_utils import is_tty, is_emacs_vterm
+        from cli.tty_utils import is_tty, is_emacs_vterm, tmux_wrap_available, wrap_in_tmux
 
         projects = getattr(args, 'projects', None) or []
         if not projects:
@@ -239,6 +239,7 @@ What would you like to work on?
                 template=None,
                 claude_args=claude_args,
                 dry_run=False,
+                tmux=getattr(args, 'tmux', False),
             )
             return ClaudeCommands().launch_claude(ns)
 
@@ -272,6 +273,11 @@ What would you like to work on?
             cmd.extend(claude_args)
 
             use_pty_wrapper = not is_tty()
+            if getattr(args, 'tmux', False) and tmux_wrap_available():
+                # tmux provides its own TTY, so skip the PTY wrapper.
+                cmd = wrap_in_tmux(cmd, session_name='vibe')
+                use_pty_wrapper = False
+
             if use_pty_wrapper:
                 wrapped_cmd = ['script', '-q', '-c',
                                ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in cmd),
@@ -307,4 +313,8 @@ def register(cli):
     start_parser = subparsers.add_parser('start', help='Start a vibe coding session')
     start_parser.add_argument('projects', nargs='*', help='One or more project names/slugs')
     start_parser.add_argument('--claude-args', nargs='*', default=[], help='Additional arguments for Claude')
+    start_parser.add_argument('--tmux', action='store_true',
+                              help='Wrap Claude Code in a fresh tmux session '
+                                   'using templedb/config/tmux.conf (fixes '
+                                   'Alacritty alt-screen scrollback)')
     cli.commands['vibe.start'] = cmd.start

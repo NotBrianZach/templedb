@@ -52,6 +52,10 @@ def register(cli):
     start_parser = vibe_sub.add_parser('start', help='Start a vibe coding session')
     start_parser.add_argument('projects', nargs='*', help='One or more project names/slugs')
     start_parser.add_argument('--claude-args', nargs='*', default=[], help='Additional arguments for Claude')
+    start_parser.add_argument('--tmux', action='store_true',
+                              help='Wrap Claude Code in a fresh tmux session '
+                                   'using templedb/config/tmux.conf (fixes '
+                                   'Alacritty alt-screen scrollback)')
     cli.commands['ai.vibe.start'] = vibe_cmd.start
 
     # --- ai prompt ---

@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>tmux, the TempleDB way — a user guide</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 {
+    color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem;
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  h4 { color: #a0a0c0; font-size: 0.9rem; margin: 1.2rem 0 0.4rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.84em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  pre code { background: none; padding: 0; color: var(--text); }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  a:hover { color: #a0daff; }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.94em;
+  }
+  .callout.pos { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.pos .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  kbd {
+    background: var(--code-bg); color: #e0e0f0;
+    padding: 2px 6px; border-radius: 3px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.85em; border: 1px solid var(--border);
+  }
+  table {
+    width: 100%; border-collapse: collapse; margin: 1rem 0;
+    font-size: 0.9em;
+  }
+  th, td {
+    text-align: left; padding: 0.55rem 0.7rem;
+    border-bottom: 1px solid var(--border); vertical-align: top;
+  }
+  th { color: var(--muted); font-weight: 600; font-size: 0.72rem;
+       text-transform: uppercase; letter-spacing: 0.06em; }
+  th code, td code { font-size: 0.87em; }
+  .close {
+    margin-top: 3rem; padding-top: 1.5rem;
+    border-top: 1px solid var(--border); color: var(--muted);
+    font-size: 0.9rem; font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<h1>tmux, the TempleDB way — a user guide</h1>
+<p class="lede">
+  How tmux is wired into TempleDB and what to do with it. Covers the shared
+  config that lives in the DB and deploys to every personal machine, the
+  <code>vibe start --tmux</code> on-demand wrap, and a handful of workflow
+  patterns that pay off once you're inside tmux. Written for someone who
+  installs the config once and wants to know what they can now do.
+</p>
+
+<h2>The setup, in one paragraph</h2>
+
+<p>
+  Canonical config lives in the templedb DB at <code>config/tmux.conf</code>.
+  On every <code>nixos-rebuild switch</code>, home-manager materializes it to
+  <code>~/.config/tmux/tmux.conf</code> on all personal machines
+  (<code>zMothership2</code>, <code>zMothership3</code>, <code>zStation</code>,
+  <code>zachMothership</code>, <code>WilliamZacharyAbelTheZeroth</code>). The
+  same file backs <code>templedb ai vibe start --tmux</code>, which wraps a
+  Claude Code launch in a fresh tmux session for users who want scrollback
+  without keeping tmux running around their normal shell. One source of
+  truth, three places it gets used.
+</p>
+
+<h2>The prefix and the two keys you actually need</h2>
+
+<p>
+  Prefix is <kbd>Ctrl</kbd>+<kbd>Space</kbd>. If you learn nothing else, learn
+  these two combinations:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Chord</th><th>Does</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><kbd>Ctrl</kbd>+<kbd>Space</kbd> <kbd>Esc</kbd></td>
+      <td>Enter copy mode — scroll through pane history with vi keys
+          (<kbd>k</kbd>/<kbd>j</kbd>, <kbd>Ctrl</kbd>+<kbd>u</kbd>/<kbd>d</kbd>,
+          <kbd>gg</kbd>/<kbd>G</kbd>, <kbd>/</kbd> to search). This is the
+          <em>whole reason</em> tmux is here for TUIs like Claude Code.</td>
+    </tr>
+    <tr>
+      <td>Wheel scroll up</td>
+      <td>Auto-enters copy mode, scrolls, exits when you type again. Same
+          result as above, no keyboard.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  Everything else (windows, panes, sessions) is icing. You can get real value
+  from tmux just using these two.
+</p>
+
+<h2>Using it with Claude Code</h2>
+
+<h3>The intended path</h3>
+<pre><code># Explicit wrap — one command, ephemeral session, exits with claude
+templedb ai vibe start --tmux templedb
+
+# Then to look back through what Claude has printed:
+#   • wheel-scroll up (mouse), OR
+#   • Ctrl-Space Esc, then vi navigation
+</code></pre>
+
+<h3>The <em>you keep tmux running anyway</em> path</h3>
+<pre><code># Start tmux once for the day, then use it as your shell environment:
+tmux                                     # or tmux new -s work
+
+# Inside, launch Claude Code normally:
+templedb ai vibe start templedb          # no --tmux; we're already in one
+
+# The --tmux flag detects $TMUX and skips wrapping, so it's safe either way.
+</code></pre>
+
+<h3>Attached vs detached</h3>
+<pre><code>Ctrl-Space d              # detach (session keeps running in background)
+tmux attach               # reattach to the last session
+tmux ls                   # list sessions
+tmux attach -t work       # attach to a named session
+tmux kill-session -t work # nuke a specific session
+</code></pre>
+
+<div class="callout pos">
+  <span class="label">Why this matters over SSH</span>
+  Detach + reattach means your Claude Code session survives an SSH drop,
+  laptop lid close, Wi-Fi hiccup, or terminal-emulator crash. Start Claude
+  Code in tmux on <code>zMothership2</code> once, and you can reach the
+  same running session from any subsequent SSH login. This is the workflow
+  advantage that alt-screen scrollback in a different terminal doesn't
+  give you.
+</div>
+
+<h2>Panes and windows — for when one shell isn't enough</h2>
+
+<h3>Split panes</h3>
+<pre><code>Ctrl-Space "        # split horizontally (stacked)
+Ctrl-Space %        # split vertically (side by side)
+Ctrl-Space o        # cycle to next pane
+Ctrl-Space arrow    # focus pane in a direction
+Ctrl-Space z        # zoom current pane to full-window (toggle)
+Ctrl-Space x        # kill current pane
+</code></pre>
+
+<h3>Windows (tabs)</h3>
+<pre><code>Ctrl-Space c        # create new window
+Ctrl-Space n / p    # next / previous window
+Ctrl-Space 1..9     # jump to window by index (base-index=1)
+Ctrl-Space ,        # rename current window
+Ctrl-Space &        # kill current window (confirms)
+</code></pre>
+
+<h2>Copy mode — the scrollback layer</h2>
+
+<p>
+  Once inside copy mode (<kbd>Ctrl</kbd>+<kbd>Space</kbd> <kbd>Esc</kbd> or
+  wheel-up), you have the pane's <em>own</em> history, independent of
+  whatever alt-screen TUI is running. Bindings are vi-flavored per the
+  config's <code>mode-keys vi</code>:
+</p>
+
+<table>
+  <thead><tr><th>Key</th><th>Does</th></tr></thead>
+  <tbody>
+    <tr><td><kbd>k</kbd>/<kbd>j</kbd></td><td>up/down one line</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>u</kbd>/<kbd>d</kbd></td><td>half-page up/down</td></tr>
+    <tr><td><kbd>gg</kbd>/<kbd>G</kbd></td><td>top/bottom</td></tr>
+    <tr><td><kbd>/</kbd>pattern <kbd>Enter</kbd></td><td>search backward for pattern</td></tr>
+    <tr><td><kbd>n</kbd>/<kbd>N</kbd></td><td>next / previous match</td></tr>
+    <tr><td><kbd>v</kbd></td><td>begin visual (character) selection</td></tr>
+    <tr><td><kbd>V</kbd></td><td>begin line selection</td></tr>
+    <tr><td><kbd>y</kbd></td><td>yank selection into the tmux paste buffer</td></tr>
+    <tr><td><kbd>Esc</kbd> or <kbd>q</kbd></td><td>exit copy mode</td></tr>
+  </tbody>
+</table>
+
+<pre><code>Ctrl-Space ]        # paste the last yanked text at the cursor
+Ctrl-Space =        # interactive paste-buffer chooser
+</code></pre>
+
+<h2>Workflow patterns worth learning</h2>
+
+<h3>Pattern 1: Long-running task + watch it</h3>
+<p>
+  You start a long build and want to keep working. Split a pane, run the
+  build in one, work in the other.
+</p>
+<pre><code># In your current window:
+Ctrl-Space "                              # split stacked
+templedb ast build --host zMothership2 --nix-build
+
+# Ctrl-Space o back to the top pane, do other stuff.
+# When the build finishes, glance at the bottom pane.
+</code></pre>
+
+<h3>Pattern 2: Claude Code on the left, live logs on the right</h3>
+<pre><code># Start tmux, launch Claude Code, split, tail logs on the right:
+tmux
+templedb ai vibe start templedb          # left pane, Claude Code
+Ctrl-Space %                             # split right
+journalctl -fu templedb-gui              # right pane, live GUI logs
+
+# Now you can ask Claude Code to change GUI code and watch the reload
+# in the same visual field.
+</code></pre>
+
+<h3>Pattern 3: Named sessions per context</h3>
+<pre><code>tmux new -s ai       # session named "ai" — Claude Code lives here
+tmux new -s ops      # separate session for deploys / systemd inspection
+tmux new -s notes    # yet another for browsing docs / reports
+
+# Switch between them without exiting:
+Ctrl-Space s         # session picker
+Ctrl-Space (         # previous session
+Ctrl-Space )         # next session
+</code></pre>
+<p>
+  Sessions survive tmux server restart via the <code>tmux-resurrect</code>
+  plugin (not shipped by default; opt-in per user).
+</p>
+
+<h3>Pattern 4: SSH into a machine, resume its shared tmux session</h3>
+<pre><code># On zMothership2, once, start a named session:
+tmux new -s home
+
+# From your laptop, over SSH:
+ssh zMothership2
+tmux attach -t home
+
+# Both keyboards feed the same session. Useful for pair-debug over SSH,
+# or just for "start a task at my desk, resume from the couch."
+</code></pre>
+
+<h3>Pattern 5: Pane synchronization for fleet operations</h3>
+<pre><code># Open one pane per host:
+Ctrl-Space c
+Ctrl-Space %      # a few times, one pane per zMothership etc.
+
+# In each pane: ssh &lt;hostname&gt;
+# Then turn on synchronize-panes:
+Ctrl-Space :setw synchronize-panes on
+
+# Type once, it runs on all hosts. Toggle off with the same command "off".
+# (Great for a quick `nixos-rebuild switch` sanity check across the fleet.)
+</code></pre>
+
+<h3>Pattern 6: Copy something out of Claude Code to your system clipboard</h3>
+<pre><code>Ctrl-Space Esc                           # copy mode
+/pattern Enter                           # find the thing
+v                                        # begin selection
+(vi movements to extend)
+y                                        # yank into tmux buffer
+
+# Now paste it out to X:
+Ctrl-Space :save-buffer /tmp/copied.txt
+xclip -selection clipboard &lt; /tmp/copied.txt
+
+# Or, better, add OSC 52 clipboard passthrough to your tmux config
+# (out of scope for the default bundle — add if you want it).
+</code></pre>
+
+<h2>Ideas that fit our particular setup</h2>
+
+<h3>tmux + Emacs — pick one, not both</h3>
+<p>
+  If you're inside Emacs vterm, tmux adds nothing — Emacs already gives you
+  scrollback, splits, and buffers. The <code>vibe start --tmux</code> flag
+  detects Emacs vterm (via <code>INSIDE_EMACS</code>) and skips wrapping in
+  that case, so it's safe to have both muscle memories.
+</p>
+
+<h3>Dashboard pane for the GUI</h3>
+<p>
+  Have a pane that runs <code>templedb gui</code> and another that
+  <code>xdotool</code> or <code>xdg-open</code>s
+  <code>http://127.0.0.1:8420/reports</code>. Every new report you write
+  shows up on refresh. Detach the session and it's still running next time
+  you attach.
+</p>
+
+<h3>Long agent runs</h3>
+<p>
+  Kick off a long agent session (say, a subagent doing a big reorg) in a
+  named tmux session, detach, and let it run. Come back and inspect the
+  copy-mode history to see what happened without staring at the terminal
+  for 40 minutes.
+</p>
+
+<h3>Session-per-project convention</h3>
+<p>
+  Match tmux session names to templedb project slugs:
+</p>
+<pre><code># Auto-create-or-attach a session named after the project:
+tmux new -A -s &lt;project&gt; -- templedb ai vibe start &lt;project&gt;
+
+# Or wrap it in a shell function:
+vibe() { tmux new -A -s "$1" -- templedb ai vibe start "$1"; }
+vibe bza
+</code></pre>
+<p>
+  Then <code>tmux ls</code> reads like a list of your active work threads,
+  one line per project.
+</p>
+
+<h3>Snapshot a Claude Code turn</h3>
+<pre><code># In copy mode, mark the start of the interesting turn:
+gg                       # or navigate to a searchable line
+:save-buffer /tmp/claude-turn-$(date +%s).log
+
+# Or capture the entire pane on demand:
+Ctrl-Space :capture-pane -pS - > /tmp/pane-dump.txt
+</code></pre>
+<p>
+  The <code>-S -</code> means "from the start of the pane's history to the
+  current view." Useful if you want to include a Claude Code conversation
+  verbatim in a report or bug write-up.
+</p>
+
+<h2>Cheatsheet — the whole binding surface at a glance</h2>
+
+<table>
+  <thead><tr><th>Category</th><th>Binding</th><th>Action</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="2">Prefix</td><td><code>C-Space</code></td><td>prefix (unbound: <code>C-b</code>)</td></tr>
+    <tr><td><code>C-Space C-Space</code></td><td>send literal C-Space</td></tr>
+    <tr><td rowspan="3">Copy mode</td><td><code>C-Space Esc</code></td><td>enter copy mode</td></tr>
+    <tr><td><code>v</code> / <code>y</code> / <code>Esc</code></td><td>select / yank / cancel</td></tr>
+    <tr><td>wheel</td><td>auto copy-mode + scroll, keystroke exits</td></tr>
+    <tr><td rowspan="4">Panes</td><td><code>C-Space "</code> / <code>%</code></td><td>split horizontal / vertical</td></tr>
+    <tr><td><code>C-Space o</code></td><td>next pane</td></tr>
+    <tr><td><code>C-Space z</code></td><td>zoom toggle</td></tr>
+    <tr><td><code>C-Space x</code></td><td>kill pane (confirms)</td></tr>
+    <tr><td rowspan="4">Windows</td><td><code>C-Space c</code></td><td>new window</td></tr>
+    <tr><td><code>C-Space n</code> / <code>p</code></td><td>next / previous</td></tr>
+    <tr><td><code>C-Space 1..9</code></td><td>jump by index (base-index=1)</td></tr>
+    <tr><td><code>C-Space ,</code></td><td>rename</td></tr>
+    <tr><td rowspan="3">Sessions</td><td><code>C-Space d</code></td><td>detach</td></tr>
+    <tr><td><code>C-Space s</code></td><td>session picker</td></tr>
+    <tr><td><code>C-Space (</code> / <code>)</code></td><td>prev / next session</td></tr>
+    <tr><td>Config</td><td><code>C-Space r</code></td><td>reload tmux.conf</td></tr>
+  </tbody>
+</table>
+
+<h2>Trouble</h2>
+
+<div class="callout warn">
+  <span class="label">Panes exit immediately with "sh: command not found"</span>
+  You have an older tmux.conf that doesn't set
+  <code>default-command "$SHELL"</code>. NixOS has no <code>/bin/sh</code>
+  and tmux's default fallback fails. The templedb-bundled config sets this
+  explicitly. If you're on a machine that hasn't rebuilt yet, edit
+  <code>~/.config/tmux/tmux.conf</code> to include
+  <code>set -g default-command "$SHELL"</code> and reload with
+  <code>Ctrl-Space r</code>.
+</div>
+
+<div class="callout warn">
+  <span class="label">Colors look wrong / Claude Code output looks dim</span>
+  Terminal probably isn't advertising true-color support. The bundled
+  config includes
+  <code>set -ga terminal-overrides ",alacritty:Tc"</code> which fixes
+  Alacritty specifically. If you're on a different terminal, add its
+  <code>TERM</code> string to the overrides.
+</div>
+
+<div class="callout warn">
+  <span class="label">Mouse selection copies to tmux buffer but not X clipboard</span>
+  Expected — <code>y</code> in copy mode goes to tmux's internal buffer, not
+  the X selection. Add
+  <code>set -g set-clipboard on</code> plus a terminal that supports OSC 52
+  (Alacritty does). Or use <code>tmux-yank</code> plugin. Left as an opt-in
+  since not everyone wants cross-app clipboard sharing.
+</div>
+
+<div class="callout warn">
+  <span class="label">Nested tmux warning "sessions should be nested with care"</span>
+  You launched tmux inside tmux. The <code>vibe start --tmux</code> flag
+  detects <code>$TMUX</code> and refuses to nest automatically, so this
+  only comes up if you run <code>tmux</code> by hand inside a session.
+  Usually harmless; if it bothers you, use tmux's <code>:kill-server</code>
+  in one shell to clear things up.
+</div>
+
+<h2>Where to change things</h2>
+
+<p>
+  Source of truth is <code>config/tmux.conf</code> in the templedb project.
+  To edit it (safely):
+</p>
+
+<pre><code># Read what's there:
+templedb file cat templedb config/tmux.conf
+
+# Edit interactively (uses $EDITOR, round-trips through DB):
+templedb file edit templedb config/tmux.conf
+
+# Or overwrite with a piped payload + hash-verify:
+cat &lt; new_tmux.conf | templedb file set templedb config/tmux.conf --verify
+
+# After editing, refresh the checkout so nix-build sees it and every
+# machine picks it up on the next rebuild:
+templedb file checkout templedb config/tmux.conf \
+  -o ~/.config/templedb/checkouts/templedb/config/tmux.conf
+
+# Reload the running tmux immediately:
+tmux source-file ~/.config/tmux/tmux.conf
+# ... or, inside tmux: Ctrl-Space r
+</code></pre>
+
+<p>
+  <strong>Do not</strong> hand-edit
+  <code>~/.config/tmux/tmux.conf</code> directly — home-manager owns that
+  path and will overwrite it on rebuild. If you're experimenting, iterate on
+  a copy and paste into the DB when it's right.
+</p>
+
+<div class="close">
+  Learn the prefix and the scroll-back binding, get the mouse turned on,
+  and everything else is discoverable at your own pace. The
+  <code>--tmux</code> flag exists for people who don't want to think about
+  tmux until scrollback breaks; the standalone <code>tmux</code> workflow is
+  there for people who eventually will.
+</div>
+
+</body>
+</html>

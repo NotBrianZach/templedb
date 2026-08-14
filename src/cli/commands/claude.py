@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
-from cli.tty_utils import is_tty, is_emacs_vterm
+from cli.tty_utils import is_tty, is_emacs_vterm, tmux_wrap_available, wrap_in_tmux
 from db_utils import DB_PATH, get_simple_connection
 from logger import get_logger
 
@@ -276,6 +276,12 @@ class ClaudeCommands(Command):
         # Pass through any additional arguments
         if hasattr(args, 'claude_args') and args.claude_args:
             cmd.extend(args.claude_args)
+
+        # Optional tmux wrap (fixes Alacritty alt-screen scrollback).
+        # tmux provides its own TTY, so if we wrap we also skip the PTY wrapper.
+        if getattr(args, 'tmux', False) and tmux_wrap_available():
+            cmd = wrap_in_tmux(cmd, session_name='vibe')
+            use_pty_wrapper = False
 
         # Dry run mode - just show what would be executed
         if hasattr(args, 'dry_run') and args.dry_run:

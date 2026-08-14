@@ -6,8 +6,11 @@ Provides detection for non-TTY environments (like Emacs vterm, pipes, etc.)
 and graceful fallback mechanisms for CLI tools that require interactive terminals.
 """
 import os
+import shlex
+import shutil
 import sys
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional
 
 
 def is_tty() -> bool:
@@ -183,3 +186,54 @@ def print_tty_warning(tool_name: str = "This tool") -> None:
         if is_emacs_vterm():
             print("  • Detected Emacs vterm - some features may not work correctly", file=sys.stderr)
         print("", file=sys.stderr)
+
+
+# --- tmux wrapping ---------------------------------------------------------
+
+def templedb_tmux_config_path() -> Optional[Path]:
+    """Return the path to templedb's bundled tmux.conf if the materialized
+    checkout has it, else None. Callers can then decide whether to pass -f
+    to tmux."""
+    p = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" / "config" / "tmux.conf"
+    return p if p.exists() else None
+
+
+def tmux_wrap_available() -> bool:
+    """True iff we can meaningfully wrap a command in a fresh tmux session.
+
+    False when:
+      - Already inside tmux ($TMUX is set) — would nest confusingly.
+      - `tmux` binary not on PATH.
+      - stdin is not a TTY — tmux needs a real terminal to attach to.
+      - We're inside Emacs vterm — the vterm pty already provides scrollback
+        and layering tmux on top just causes rendering weirdness.
+    """
+    if os.environ.get("TMUX"):
+        return False
+    if not shutil.which("tmux"):
+        return False
+    if not is_tty():
+        return False
+    if is_emacs_vterm():
+        return False
+    return True
+
+
+def wrap_in_tmux(cmd: List[str], session_name: Optional[str] = None) -> List[str]:
+    """Wrap `cmd` in a fresh tmux session using templedb's bundled config.
+
+    Uses shlex.join for the shell-command argument so quoting is preserved.
+    Callers should first check `tmux_wrap_available()`; this function will
+    still build a tmux command even if wrapping would fail (useful for
+    dry-run/testing), but at runtime the caller shouldn't invoke it in a
+    context where tmux can't attach."""
+    tmux_cmd = ["tmux"]
+    conf = templedb_tmux_config_path()
+    if conf is not None:
+        tmux_cmd += ["-f", str(conf)]
+    tmux_cmd += ["new-session"]
+    if session_name:
+        tmux_cmd += ["-s", session_name]
+    # `--` separator so tmux doesn't parse cmd's flags as its own
+    tmux_cmd += ["--", shlex.join(cmd)]
+    return tmux_cmd

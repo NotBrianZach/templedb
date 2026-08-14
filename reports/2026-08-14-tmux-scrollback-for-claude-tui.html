@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>tmux config for scrollback in Claude Code TUI under Alacritty + xmonad</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --neg: #e97070;
+    --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 {
+    color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem;
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.5rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.84em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  pre code { background: none; padding: 0; color: var(--text); }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  a:hover { color: #a0daff; }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.94em;
+  }
+  .callout.pos { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.pos .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table {
+    width: 100%; border-collapse: collapse; margin: 1rem 0;
+    font-size: 0.9em;
+  }
+  th, td {
+    text-align: left; padding: 0.55rem 0.7rem;
+    border-bottom: 1px solid var(--border); vertical-align: top;
+  }
+  th { color: var(--muted); font-weight: 600; font-size: 0.75rem;
+       text-transform: uppercase; letter-spacing: 0.06em; }
+  kbd {
+    background: var(--code-bg); color: #e0e0f0;
+    padding: 2px 6px; border-radius: 3px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.85em; border: 1px solid var(--border);
+  }
+  .close {
+    margin-top: 3rem; padding-top: 1.5rem;
+    border-top: 1px solid var(--border); color: var(--muted);
+    font-size: 0.9rem; font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<h1>tmux config for scrollback in Claude Code TUI under Alacritty + xmonad</h1>
+<p class="lede">
+  Working config for reading Claude Code's scrolled-off output when Alacritty
+  refuses to. Explains why the terminal's Vi mode can't help, why tmux is the
+  right layer for the fix, how to pick a prefix that stays out of xmonad's
+  way, and includes a minimal ready-to-use <code>~/.tmux.conf</code>. Also
+  sketches a <code>templedb ai vibe start --tmux</code> flag that would apply
+  this automatically.
+</p>
+
+<h2>The problem, precisely</h2>
+
+<p>
+  Interactive Claude Code (whether launched directly or via
+  <code>templedb ai vibe start</code>) is a full-screen TUI. Like
+  <code>vim</code>, <code>less</code>, <code>htop</code>, and
+  <code>emacs -nw</code>, it enters the <strong>alternate screen
+  buffer</strong> (<code>\e[?1049h</code>) on startup and leaves it
+  (<code>\e[?1049l</code>) on exit. That's how these programs guarantee a
+  clean terminal state when you quit — everything they drew disappears.
+</p>
+
+<p>
+  Alacritty <strong>by design</strong> does not maintain scrollback for the
+  alternate screen. The primary screen's scrollback
+  (<code>scrolling.history</code>, default 10 000 lines) is unaffected, but
+  while a TUI holds the alt screen, there's nothing above the current viewport
+  to scroll to. This is <a
+  href="https://github.com/alacritty/alacritty/issues/1006">Alacritty issue
+  #1006</a>, closed WONTFIX with the reasoning that alt-screen scrollback is
+  outside the terminal's contract and other tools (tmux, screen) handle it
+  better.
+</p>
+
+<div class="callout warn">
+  <span class="label">Consequence</span>
+  Alacritty's Vi mode (<kbd>Ctrl+Shift+Space</kbd>) also can't help — it
+  navigates the primary screen's scrollback, not the alt screen. The Vi mode
+  works fine everywhere <em>except</em> inside TUIs, which is precisely where
+  we wanted it.
+</div>
+
+<h2>Why tmux is the right layer</h2>
+
+<p>
+  tmux runs a pty per pane and maintains its own scrollback history for that
+  pty, independent of what the running program does with alt-screen escape
+  sequences. Even when Claude Code has taken over the alt screen inside the
+  pane, tmux's copy mode
+  (<kbd>Prefix</kbd> <kbd>[</kbd> by default) exposes the pty's full history
+  — everything Claude Code has printed to the pane, all still there,
+  navigable, searchable, copyable.
+</p>
+
+<p>
+  Better still, with <code>set -g mouse on</code>, wheel-scroll auto-enters
+  copy mode when you're in a TUI, shows the history, and exits back to normal
+  mode when you type. The scroll-back experience becomes almost identical to
+  a terminal that supports alt-screen scrollback natively — because tmux is
+  supplying that layer.
+</p>
+
+<h2>Picking a prefix that doesn't fight xmonad</h2>
+
+<p>
+  This part is easier than it sounds: xmonad's key bindings live on
+  <code>Mod</code> (typically Super/Windows or Alt), tmux's live on
+  <code>Ctrl</code>-based sequences. Different modifiers, zero overlap. The
+  choice of tmux prefix is really about ergonomics and bash conflicts, not
+  window-manager collisions.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Prefix</th><th>Trade-off</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>Ctrl-b</code> (default)</td>
+      <td>No conflicts anywhere; awkward finger stretch on QWERTY. Fine if
+          you're used to it.</td>
+    </tr>
+    <tr>
+      <td><code>Ctrl-a</code></td>
+      <td>The classic (GNU screen). Conflicts with bash/readline's
+          <em>go-to-start-of-line</em> — annoying if you use it often.</td>
+    </tr>
+    <tr>
+      <td><code>Ctrl-Space</code> (recommended)</td>
+      <td>No terminal conflicts, easy left-thumb hit, Alacritty passes it
+          through cleanly. Doesn't collide with any common vi/emacs binding
+          you'd use inside tmux either.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout pos">
+  <span class="label">Sanity check for xmonad users</span>
+  If your xmonad config uses <code>Mod4</code> (Super) — the default in most
+  xmonad templates — none of the above tmux prefixes intersect with any
+  xmonad binding. If you've remapped xmonad to <code>Mod1</code> (Alt), the
+  situation is the same: tmux and xmonad are still in disjoint modifier
+  spaces.
+</div>
+
+<h2>Minimal working config</h2>
+
+<pre><code># ~/.tmux.conf
+
+# --- Prefix: Ctrl-Space (no xmonad/bash conflict) ---
+unbind C-b
+set -g prefix C-Space
+bind C-Space send-prefix
+
+# --- Copy mode: the whole reason we're setting this up ---
+bind Escape copy-mode                    # Prefix Esc  → scroll history
+setw -g mode-keys vi                     # vi-style navigation in copy mode
+bind -T copy-mode-vi v send -X begin-selection
+bind -T copy-mode-vi y send -X copy-selection-and-cancel
+bind -T copy-mode-vi Escape send -X cancel
+
+# --- Mouse: killer feature for the Alacritty alt-screen problem ---
+set -g mouse on                          # wheel-up → auto copy-mode + scroll
+                                         # any keystroke → back to normal
+
+# --- Scrollback: don't let one Claude Code turn eat the buffer ---
+set -g history-limit 100000
+
+# --- Terminal: preserve Claude Code's true-color rendering ---
+set -g default-terminal "tmux-256color"
+set -ga terminal-overrides ",alacritty:Tc"
+
+# --- Small quality-of-life ---
+set -sg escape-time 10                   # faster vi-mode Escape
+set -g base-index 1                      # windows start at 1 (nearer 1 key)
+setw -g pane-base-index 1
+set -g allow-rename off                  # stop auto-renaming from PS1
+bind r source-file ~/.tmux.conf \; display "reloaded"
+</code></pre>
+
+<h3>How to use it</h3>
+<pre><code># One-shot session for a Claude Code run:
+tmux new "templedb ai vibe start"
+
+# Or start tmux, then launch inside:
+tmux
+templedb ai vibe start
+
+# Scroll history while Claude Code is running:
+#   - mouse wheel up  (auto-enters copy mode, scrolls, wheel-down exits)
+#   - Ctrl-Space Esc  (explicit vi-mode entry)
+# In copy mode:
+#   k / j / Ctrl-u / Ctrl-d / gg / G  — standard vi navigation
+#   /pattern &lt;Enter&gt;                  — search backward
+#   v  — start visual selection
+#   y  — copy selection to tmux buffer
+#   Esc — leave copy mode
+</code></pre>
+
+<h2>How the pieces fit together</h2>
+
+<table>
+  <thead>
+    <tr><th>Layer</th><th>Responsibility</th><th>Scrollback role</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Alacritty</td>
+      <td>Terminal emulator, renders characters, primary + alt screens</td>
+      <td>Only shows scrollback for primary screen</td>
+    </tr>
+    <tr>
+      <td>tmux</td>
+      <td>Multiplexer, owns the pty inside each pane</td>
+      <td>Owns pane history, exposes via copy mode regardless of alt-screen</td>
+    </tr>
+    <tr>
+      <td>Claude Code</td>
+      <td>TUI, draws to the pane via alt-screen</td>
+      <td>Doesn't care about scrollback — it repaints per turn</td>
+    </tr>
+    <tr>
+      <td>xmonad</td>
+      <td>Window manager, positions Alacritty windows</td>
+      <td>Not involved in scrollback at all</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Optional: bake it into <code>templedb ai vibe start</code></h2>
+
+<p>
+  Right now <code>templedb ai vibe start</code> calls
+  <code>subprocess.run(['claude', ...])</code> in <code>src/cli/commands/vibe.py:279</code>.
+  A <code>--tmux</code> flag could wrap that call in a fresh tmux session
+  using a bundled, minimal config so users don't have to touch
+  <code>~/.tmux.conf</code>:
+</p>
+
+<pre><code>if args.tmux:
+    conf = _write_bundled_tmux_conf()      # ships with templedb, ~30 lines
+    cmd = ['tmux', '-f', str(conf), 'new-session', '--', *cmd]
+result = subprocess.run(cmd, check=False)
+</code></pre>
+
+<p>
+  Trade-offs:
+</p>
+<ul>
+  <li><strong>Users without a tmux config get scrollback for free.</strong>
+      Bundled config uses <code>Ctrl-Space</code> and mouse-on.</li>
+  <li><strong>Users with their own tmux config get overridden</strong>
+      (via <code>-f</code>) for this session only, which may confuse someone
+      who has muscle memory for a different prefix. Behind the flag, so opt-in
+      only.</li>
+  <li><strong>Nested tmux is awkward</strong> — if the user is already
+      inside tmux and passes <code>--tmux</code>, they get tmux-in-tmux.
+      Detect via <code>$TMUX</code> and skip the wrap.</li>
+</ul>
+
+<div class="callout">
+  <span class="label">Rec</span>
+  Ship the flag, document it, don't make it default. Anyone who wants tmux
+  around <em>everything</em> will already have tmux set up their way. The
+  flag is for someone who just wants scrollback to work in a single Claude
+  Code run and doesn't want to learn tmux's config system for it.
+</div>
+
+<h2>What this doesn't fix</h2>
+
+<ul>
+  <li><strong>Alacritty's Vi mode inside a TUI</strong> — still limited to
+      the current viewport. tmux copy mode is the substitute; they don't
+      federate.</li>
+  <li><strong>Scrollback that predates the Claude Code launch</strong> — if
+      you were reading shell output before running <code>templedb ai vibe
+      start</code>, that output is in Alacritty's primary-screen scrollback,
+      unreachable while the alt screen is up. You'd see it again after Claude
+      Code exits.</li>
+  <li><strong>Copy/paste out of tmux</strong> without a clipboard integration
+      — <code>y</code> in copy mode goes to tmux's paste buffer, not the X
+      selection. Add <code>set -g set-clipboard on</code> plus a working
+      OSC 52 (Alacritty supports it) or install <code>xclip</code> and pipe
+      selections out. Out of scope for the immediate problem.</li>
+</ul>
+
+<h2>Alternatives considered</h2>
+
+<ul>
+  <li><strong>Switch terminals</strong> to kitty / wezterm / foot — these
+      support alt-screen scrollback via config
+      (kitty: <code>scrollback_lines</code> + alt-screen visibility). Real
+      option if the user is willing. Doesn't solve the "resilient session
+      across SSH drop" property tmux provides for free.</li>
+  <li><strong>Screen instead of tmux</strong> — same fundamental fix
+      (multiplexer owns the pty, has its own scrollback), older config
+      language, fewer people know it. If you already run screen, use it; if
+      not, tmux is the modern default.</li>
+  <li><strong>Log Claude Code output with <code>tee</code></strong> —
+      breaks the TUI. Not usable interactively.</li>
+  <li><strong>Ask Anthropic to make Claude Code TUI-optional</strong> — it
+      already has <code>-p</code> for print mode (non-interactive), but the
+      interactive experience is the point of vibe start.</li>
+</ul>
+
+<h2>Followups</h2>
+
+<ol>
+  <li><strong>Save the tmux config</strong> under
+      <code>templedb/reports/artifacts/tmux.conf</code> (or the closest
+      convention that project has for bundled sample configs) so it can be
+      referenced from CLAUDE.md and copied by hand.</li>
+  <li><strong>Add <code>--tmux</code> to <code>vibe start</code></strong>,
+      detecting nested-tmux via <code>$TMUX</code> and passing through if
+      already inside one. ~20 LOC in
+      <code>src/cli/commands/vibe.py</code>.</li>
+  <li><strong>Update the "Known bugs" section of CLAUDE.md</strong> with a
+      one-liner about Alacritty alt-screen scrollback and the tmux workaround
+      — future agents diagnosing the same complaint won't have to
+      re-derive it.</li>
+</ol>
+
+<div class="close">
+  Tmux is the right layer because scrollback is a multiplexer concern, not a
+  terminal one, once a TUI is in the alt screen. <code>Ctrl-Space</code>
+  prefix + <code>mouse on</code> + vi-mode copy-mode is enough config to
+  restore the scroll-back experience for Claude Code inside Alacritty.
+  Bundling this behind a <code>vibe start --tmux</code> flag would make it a
+  one-flag opt-in for users who don't want to learn tmux's config language.
+</div>
+
+</body>
+</html>
