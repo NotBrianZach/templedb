@@ -5,8 +5,40 @@ TempleDB Unified CLI
 Entry point for the consolidated command-line interface.
 Registers all commands and executes based on arguments.
 """
+import os
 import sys
 from pathlib import Path
+
+# ────────────────────────────────────────────────────────────────────
+# Dev mode: prefer the materialized checkout over the frozen nix pkg.
+#
+# When TEMPLEDB_DEV_MODE is set, the checkout at
+# ~/.config/templedb/checkouts/templedb/src wins over the nix-installed
+# code. Achieved by (a) prepending checkout src to sys.path so top-level
+# imports (db_utils, services.*, etc.) resolve there first, and
+# (b) rewriting THIS package's __path__ so subsequent
+# `from cli.commands import ...` finds submodules in the checkout even
+# though `cli` itself was already loaded from nix.
+#
+# If dev mode is set but no checkout exists, warn to stderr so it's
+# obvious you asked for something the environment can't deliver.
+# Design in reports/2026-08-16-nix-profile-staleness-design.html
+# ────────────────────────────────────────────────────────────────────
+_DEV_CHECKOUT = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" / "src"
+
+if os.environ.get("TEMPLEDB_DEV_MODE"):
+    if _DEV_CHECKOUT.exists() and (_DEV_CHECKOUT / "cli").exists():
+        _dev_src = str(_DEV_CHECKOUT)
+        if _dev_src not in sys.path:
+            sys.path.insert(0, _dev_src)
+        # Redirect submodule search for the cli package to the checkout.
+        __path__ = [str(_DEV_CHECKOUT / "cli")]
+    else:
+        print(
+            f"⚠  TEMPLEDB_DEV_MODE=1 but no checkout at {_DEV_CHECKOUT} — "
+            "run `templedb publish run templedb` to materialize",
+            file=sys.stderr,
+        )
 
 # Ensure parent directory is in path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -141,8 +173,59 @@ def _register_top_level_aliases():
     cli.commands['validate'] = validate_cmd
 
 
+def _dev_mode_staleness_banner():
+    """When TEMPLEDB_DEV_MODE=1, warn if the running checkout is behind DB.
+
+    Cheap check: hash cli/__init__.py on disk (i.e. what we're actually
+    running from) and compare to the DB's current content_hash for
+    src/cli/__init__.py in the templedb project. If they differ, the
+    checkout is stale relative to the DB — usually because someone did a
+    `file set` without `file checkout` to refresh the disk copy.
+
+    Silent on success. Prints one line to stderr on mismatch. Never raises.
+    """
+    if not os.environ.get("TEMPLEDB_DEV_MODE"):
+        return
+    if not _DEV_CHECKOUT.exists():
+        return  # Already warned at module load
+    try:
+        import hashlib
+        import sqlite3
+        marker = _DEV_CHECKOUT / "cli" / "__init__.py"
+        if not marker.exists():
+            return
+        disk_hash = hashlib.sha256(marker.read_bytes()).hexdigest()
+        db_path = Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite"
+        if not db_path.exists():
+            return
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                """SELECT fc.content_hash FROM file_contents fc
+                     JOIN project_files pf ON pf.id = fc.file_id
+                     JOIN projects p ON p.id = pf.project_id
+                    WHERE p.slug = 'templedb'
+                      AND pf.file_path = 'src/cli/__init__.py'
+                      AND fc.is_current = 1""",
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row[0] != disk_hash:
+            print(
+                f"⚠  templedb checkout is behind DB for src/cli/__init__.py "
+                f"(disk {disk_hash[:8]}, DB {row[0][:8]}). "
+                f"Run `templedb publish run templedb` to refresh.",
+                file=sys.stderr,
+            )
+    except Exception:
+        # Never let a diagnostic banner break the CLI itself.
+        pass
+
+
 def main():
     """Main CLI entry point"""
+    _dev_mode_staleness_banner()
+
     # Register all command modules — primary hierarchy
     dev.register(cli)
     project.register(cli)

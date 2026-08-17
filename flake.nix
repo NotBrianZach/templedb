@@ -79,9 +79,13 @@
               [ -f "$f" ] && cp "$f" "$SITE/" || true
             done
 
-            # templedb entry point: python -m cli
+            # templedb entry point: bundled _launcher.py (copied via *.py loop
+            # above). Runs `from cli import main; main()` after applying dev-mode
+            # sys.path preference when TEMPLEDB_DEV_MODE=1. Default behavior
+            # (env var unset) is equivalent to `python -m cli`.
+            # Design: reports/2026-08-16-nix-profile-staleness-design.html
             makeWrapper ${pythonEnv}/bin/python3 "$out/bin/templedb" \
-              --add-flags "-m cli" \
+              --add-flags "$SITE/_launcher.py" \
               --set PYTHONPATH "$SITE" \
               --prefix PATH : "${pkgs.swi-prolog}/bin"
 

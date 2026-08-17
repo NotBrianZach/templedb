@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-08-16-nix-profile-staleness-design.html">
+  <div class="row">
+    <span class="date">2026-08-16</span>
+    <span class="title">Nix-profile staleness: how to stop being surprised by which templedb ran</span>
+  </div>
+  <div class="summary">
+    Two consecutive session recaps flagged the same pattern: I edit templedb source, test it via templedb ..., see stale behavior, spend 10&nbsp;minutes tracing before realizing the running binary is from the last time I built the nix profile — not from what I just wrote to the DB. This report explores the design space for fixing that: nine options across three axes (awareness / freshness / packaging), a recommended phased path, and the smaller nuances that decided it.
+  </div>
+</a>
+
 <a class="report" href="2026-08-14-tmux-user-guide.html">
   <div class="row">
     <span class="date">2026-08-14</span>
@@ -61,6 +71,16 @@
   </div>
   <div class="summary">
     Working config for reading Claude Code's scrolled-off output when Alacritty refuses to. Explains why the terminal's Vi mode can't help, why tmux is the right layer for the fix, how to pick a prefix that stays out of xmonad's way, and includes a minimal ready-to-use ~/.tmux.conf. Also sketches a templedb ai vibe start --tmux flag that would apply this automatically.
+  </div>
+</a>
+
+<a class="report" href="2026-08-14-session-recap-tmux-deployed.html">
+  <div class="row">
+    <span class="date">2026-08-14</span>
+    <span class="title">Session recap — tmux bundled, deployed, and fixed along the way</span>
+  </div>
+  <div class="summary">
+    Second metacognition report under the standing convention. Started as a scrollback diagnostic, ended with a full deploy of the tmux config across templedb + system_config, plus a bonus fix for a latent CLI bug I only discovered because I was executing the pipeline for real. Structured per the previous recap.
   </div>
 </a>
 
