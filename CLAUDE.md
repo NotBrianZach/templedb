@@ -81,6 +81,36 @@ vim ~/temple/templedb/src/cli/commands/vcs.py
 **This path is only appropriate for interactive human editing.** Tool-driven
 changes and agent workflows must use the CLI — see known bugs.
 
+## Dev mode: `TEMPLEDB_DEV_MODE=1`
+
+When you're actively editing templedb source, set `TEMPLEDB_DEV_MODE=1`
+in your shell. The nix-installed `templedb` binary then prefers the
+materialized checkout at `~/.config/templedb/checkouts/templedb/src` over
+the frozen nix package — so `templedb file set …` followed by `templedb
+<subcommand>` picks up the edit immediately, no rebuild needed.
+
+```bash
+export TEMPLEDB_DEV_MODE=1
+templedb file set templedb src/cli/commands/foo.py --content "..."
+templedb foo bar    # runs the new code from the checkout
+```
+
+Bonus: if the checkout is behind the DB (e.g. you did `file set` without
+`file checkout`), you'll get a one-line stderr warning naming the disk
+and DB hashes plus the fix (`templedb publish run templedb`). Silent
+otherwise.
+
+Anyone with `direnv` can also `direnv allow` the templedb repo directory
+— an `.envrc` there auto-sets the env var when you `cd` in and unsets it
+when you leave.
+
+Default (env var unset): behavior unchanged. The frozen nix package
+wins, reproducibility preserved. Only enable if you're editing templedb
+itself.
+
+Design and options considered:
+`reports/2026-08-16-nix-profile-staleness-design.html`.
+
 ## Write-path history and remaining hazards
 
 **Recently fixed (2026-08-04, commits DBB417D8, 40BAE4CF, 189F33CA):**
