@@ -927,6 +927,34 @@ class TempleFS(Operations):
             conn.execute("ROLLBACK")
             raise
 
+    def _fuse_session_id(self, conn) -> int:
+        """Resolve (or create) a stable per-host FUSE auto-stage session.
+
+        FUSE runs long-lived and doesn't have a natural per-shell PPID
+        the way CLI invocations do. Instead we use a named session
+        'fuse-auto-<host>' that FUSE writes attribute to. Any CLI-side
+        vcs commit run from another session won't sweep those rows,
+        matching the isolation guarantees Phase 1 established.
+        """
+        cached = getattr(self, "_cached_fuse_session_id", None)
+        if cached is not None:
+            return cached
+        import socket
+        name = f"fuse-auto-{socket.gethostname()}"
+        row = conn.execute(
+            "SELECT id FROM vcs_sessions WHERE name = ? AND ended_at IS NULL",
+            (name,),
+        ).fetchone()
+        if row:
+            self._cached_fuse_session_id = row["id"]
+            return row["id"]
+        cur = conn.execute(
+            "INSERT INTO vcs_sessions (name, author, host, pid) VALUES (?, 'fuse', ?, ?)",
+            (name, socket.gethostname(), os.getpid()),
+        )
+        self._cached_fuse_session_id = cur.lastrowid
+        return cur.lastrowid
+
     def _auto_stage(self, conn, project_id, file_id, change_state):
         """Auto-stage a file change in vcs_working_state."""
         try:
@@ -943,13 +971,17 @@ class TempleFS(Operations):
             if not branch:
                 return
 
-            # Upsert working state
+            sid = self._fuse_session_id(conn)
             conn.execute("""
-                INSERT INTO vcs_working_state (project_id, branch_id, file_id, state, staged, last_modified)
-                VALUES (?, ?, ?, ?, 1, datetime('now'))
+                INSERT INTO vcs_working_state
+                    (project_id, branch_id, file_id, state,
+                     staged_by_session_id, last_modified)
+                VALUES (?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT (project_id, branch_id, file_id)
-                DO UPDATE SET state = excluded.state, staged = 1, last_modified = datetime('now')
-            """, (project_id, branch["id"], file_id, change_state))
+                DO UPDATE SET state = excluded.state,
+                              staged_by_session_id = ?,
+                              last_modified = datetime('now')
+            """, (project_id, branch["id"], file_id, change_state, sid, sid))
         except Exception as e:
             logger.debug(f"Auto-stage failed (non-fatal): {e}")
 

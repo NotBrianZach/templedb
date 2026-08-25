@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Phase 3 &mdash; live UI verification</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.4rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.2rem;
+  }
+  h3 { color: #b0b0d0; font-size: 0.95rem; margin: 1.5rem 0 0.4rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.94rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.7rem 1.05rem; margin: 1.1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix {
+    border-collapse: collapse; margin: 0.9rem 0; font-size: 0.87em;
+    width: 100%;
+  }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left;
+  }
+  table.matrix th {
+    color: var(--muted); font-weight: 500; background: var(--code-bg);
+    text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.06em;
+  }
+  table.matrix td.yes { color: var(--pos); }
+  table.matrix td.no { color: var(--neg); }
+</style>
+</head>
+<body>
+
+<h1>Phase 3 &mdash; live UI verification</h1>
+<p class="lede">
+  Followup carried across three prior recaps: actually eyeball session
+  attribution and isolation on the FUSE and GUI write paths, not just
+  the CLI + tests. Mounted templedb FUSE, launched the GUI on 8420,
+  and ran a three-way isolation drill on the <code>regr-test</code>
+  scratch project. All expected behaviors observed.
+</p>
+
+<h2>Test matrix</h2>
+
+<table class="matrix">
+  <thead>
+    <tr>
+      <th>Write path</th>
+      <th>File</th>
+      <th>Session attribution</th>
+      <th>Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>FUSE (<code>echo … &gt; ~/temple/regr-test/…</code>)</td>
+      <td><code>fuse2-…txt</code></td>
+      <td>#41 <code>fuse-auto-zMothership2</code> (author <code>fuse</code>)</td>
+      <td class="yes">PASS</td>
+    </tr>
+    <tr>
+      <td>GUI (<code>POST /vcs/regr-test/staging/stage/&lt;file_id&gt;</code>)</td>
+      <td><code>test.txt</code></td>
+      <td>#42 <code>gui-zMothership2</code> (author <code>gui</code>)</td>
+      <td class="yes">PASS</td>
+    </tr>
+    <tr>
+      <td>CLI (<code>templedb file set + vcs add</code>)</td>
+      <td><code>cli-…txt</code></td>
+      <td>#43 <code>zMothership2-…</code> (author <code>Zach Abel</code>)</td>
+      <td class="yes">PASS</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Isolation drill</h2>
+
+<p>
+  With three files staged under three distinct sessions,
+  <code>TEMPLEDB_SESSION_ID=43 templedb vcs commit</code> committed
+  exactly one file (the CLI one) and printed
+  <em>&ldquo;(2 file(s) staged in other sessions were not
+  included).&rdquo;</em> FUSE and GUI rows survived the commit with
+  their <code>staged_by_session_id</code> intact.
+</p>
+<p>
+  <code>vcs status --all</code> displayed the FUSE and GUI sessions
+  as separate grouped sections with their author badges:
+</p>
+
+<pre>Session #41 (fuse-auto-zMothership2) [active] &mdash; fuse:
+  staged    fuse2-1643862-5639.txt
+
+Session #42 (gui-zMothership2) [active] &mdash; gui:
+  staged    test.txt</pre>
+
+<p>
+  GUI unstage (<code>POST /vcs/regr-test/staging/unstage/&lt;file_id&gt;</code>)
+  cleared its own session&rsquo;s attribution on <code>test.txt</code>
+  without touching the FUSE row. That&rsquo;s the isolation guarantee
+  I most cared about since the previous recap noted this path had
+  never been eyeballed under load.
+</p>
+
+<div class="callout win">
+  <span class="label">Rule confirmed</span>
+  Followup #3&rsquo;s hypothesis (Phase 1 had a latent hole because
+  FUSE / GUI writers set the boolean without <code>staged_by_session_id</code>)
+  is now empirically closed: those writers correctly attribute to
+  their per-host named sessions, and CLI-side commits under a different
+  session don&rsquo;t sweep them.
+</div>
+
+<h2>Unrelated discovery: deployed 0.7.0 binary is broken against
+current DB</h2>
+
+<p>
+  Migration 083 dropped <code>vcs_working_state.staged</code>. The
+  currently-deployed <code>templedb 0.7.0</code> nix package still has
+  the pre-migration code that reads <code>ws.staged</code>. Running
+  <code>templedb vcs status regr-test</code> without
+  <code>TEMPLEDB_DEV_MODE=1</code> throws
+  <code>OperationalError: no such column: ws.staged</code>. Anything
+  that goes through the deployed binary hits this until the next
+  <code>nixos-rebuild</code> picks up my checkout&rsquo;s code (which
+  drops those references).
+</p>
+
+<div class="callout warn">
+  <span class="label">Next action</span>
+  Ship <code>templedb publish run templedb</code> then
+  <code>templedb nixos rebuild system_config --yes</code> on
+  zMothership2 to unblock the deployed binary. Every other machine
+  picks it up on its next natural rebuild. I did not do the rebuild
+  autonomously &mdash; user should decide the deploy timing.
+</div>
+
+<h2>Housekeeping</h2>
+
+<ul>
+  <li>
+    <strong>FUSE process needs dev mode to load new code.</strong>
+    First test attempt failed because the FUSE process was launched
+    from a bash-c without <code>TEMPLEDB_DEV_MODE=1</code>, so it was
+    running deployed 0.7.0 code without the session-attribution fix.
+    Unmounted + remounted with the env var. Worth noting in FUSE docs:
+    if you edit the FUSE code path, remount to pick it up.
+  </li>
+  <li>
+    <strong>Scratch artifacts cleaned up.</strong> Deleted the FUSE-
+    created and CLI-created temp files via <code>rm</code> on the
+    mount; unstaged the fuse-auto session; killed the port-8420 GUI
+    process. FUSE mount left up since it was there before.
+  </li>
+</ul>
+
+</body>
+</html>

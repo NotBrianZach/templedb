@@ -158,22 +158,17 @@ class ProtocolServer:
         messages = self.service.get_messages(session_id)
         notes = self.service.get_notes(session_id)
 
-        # Build events-by-run for Org rendering
         from agent import store as agent_store
         events_by_run = {}
         runs = agent_store.list_runs(session_id)
         for run in runs:
             events_by_run[run["id"]] = agent_store.get_all_run_events(run["id"])
 
-        # Pre-render Org document
-        from agent.org_renderer import render_session
-        org_text = render_session(session, messages, events_by_run, notes)
-
         self._respond(request_id, result={
             "session": session,
             "messages": messages,
             "notes": notes,
-            "org": org_text,
+            "events_by_run": events_by_run,
         })
 
     def _handle_session_list(self, request_id, params):

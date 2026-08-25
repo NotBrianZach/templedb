@@ -301,13 +301,16 @@ class VCSRepository(BaseRepository):
         self.commit()
 
     def get_dirty_files(self, project_id: int, branch_id: int) -> List[Dict[str, Any]]:
-        """Get uncommitted changes for a branch."""
+        """Get uncommitted changes for a branch (any session)."""
         return self.query_all("""
-            SELECT ws.state, ws.staged, pf.file_path
+            SELECT ws.state,
+                   (ws.staged_by_session_id IS NOT NULL) AS staged,
+                   ws.staged_by_session_id,
+                   pf.file_path
             FROM vcs_working_state ws
             JOIN project_files pf ON ws.file_id = pf.id
             WHERE ws.project_id = ? AND ws.branch_id = ?
-              AND (ws.state != 'unmodified' OR ws.staged = 1)
+              AND (ws.state != 'unmodified' OR ws.staged_by_session_id IS NOT NULL)
             ORDER BY pf.file_path
         """, (project_id, branch_id))
 

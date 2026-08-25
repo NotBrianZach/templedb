@@ -267,7 +267,8 @@ def changes_since_deploy(project_slug: str) -> Dict[str, Any]:
 
     # Get uncommitted changes
     working = conn.execute(
-        "SELECT pf.file_path, ws.state, ws.staged "
+        "SELECT pf.file_path, ws.state, "
+        "  (ws.staged_by_session_id IS NOT NULL) AS staged "
         "FROM vcs_working_state ws "
         "JOIN project_files pf ON ws.file_id = pf.id "
         "WHERE ws.project_id = ? AND ws.state != 'unmodified'",

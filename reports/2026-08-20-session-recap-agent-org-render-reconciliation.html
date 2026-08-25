@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap — agent Org render reconciliation</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --neg: #e97070;
+    --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.4rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.2rem;
+  }
+  h3 {
+    color: #b0b0d0; font-size: 0.95rem; margin: 1.5rem 0 0.4rem;
+    display: flex; align-items: baseline; gap: 0.6rem;
+  }
+  h3 .tag {
+    color: var(--muted); font-size: 0.7rem; font-weight: 400;
+    text-transform: uppercase; letter-spacing: 0.08em; margin-left: auto;
+  }
+  h3 .tag.win { color: var(--pos); }
+  h3 .tag.miss { color: var(--neg); }
+  h3 .tag.watch { color: var(--warn); }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.94rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.7rem 1.05rem; margin: 1.1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.miss { border-left-color: var(--neg); }
+  .callout.watch { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.miss .label { color: var(--neg); }
+  .callout.watch .label { color: var(--warn); }
+  table.matrix {
+    border-collapse: collapse; margin: 0.9rem 0; font-size: 0.87em;
+    width: 100%;
+  }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left;
+  }
+  table.matrix th {
+    color: var(--muted); font-weight: 500; background: var(--code-bg);
+    text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.06em;
+  }
+  table.matrix td.yes { color: var(--pos); }
+  table.matrix td.no { color: var(--neg); }
+</style>
+</head>
+<body>
+
+<h1>Session recap &mdash; agent Org render reconciliation</h1>
+<p class="lede">
+  Deleted the server-side <code>agent/org_renderer.py</code> and made the
+  Emacs client the single source of truth for session Org rendering.
+  Fixed two complementary latent bugs the drift was hiding: server-render
+  reopens overwrote the client's Guide/Pinned/Context scaffold, and
+  the &quot;fallback&quot; path called <code>--restore-messages</code>
+  which turned out to be dead code with zero callers. One commit
+  (<code>04856C82</code>), 44/44 <code>tests/agent</code> pass.
+</p>
+
+<h2>What happened</h2>
+
+<p>
+  Opened with a context sweep &mdash; <code>templedb file ls</code> + a few
+  <code>templedb file cat</code> reads to build a structural map of
+  <code>src/agent/</code> and <code>integrations/emacs/templedb-agent.el</code>
+  (1857 lines). Presented the map, asked the user to pick a focus area,
+  and got &quot;reconcile server vs client Org rendering.&quot;
+</p>
+
+<p>
+  The drift I found was worse than a superficial section mismatch:
+</p>
+
+<table class="matrix">
+  <thead>
+    <tr>
+      <th>Reopen path</th>
+      <th>Guide / Pinned scaffold</th>
+      <th>Context basket</th>
+      <th>Past text</th>
+      <th>Past tool events</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Server-rendered (<code>org</code> field present)</td>
+      <td class="no">lost</td>
+      <td class="no">flat bullets</td>
+      <td class="yes">kept</td>
+      <td class="yes">flat headings</td>
+    </tr>
+    <tr>
+      <td>Client fallback (<code>--render-buffer</code> only)</td>
+      <td class="yes">kept</td>
+      <td class="yes">kept</td>
+      <td class="no">lost</td>
+      <td class="no">lost</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  Neither path was correct end-to-end. And the &quot;client fallback&quot;
+  path never actually restored messages &mdash;
+  <code>--restore-messages</code> was defined at line 746 with zero
+  callers. My original drift analysis had assumed it was live because I
+  read the definition; catching that it wasn&rsquo;t called changed the
+  scope from &quot;pick a winner&quot; to &quot;pick a winner and
+  actually make it work.&quot;
+</p>
+
+<p>
+  Presented three options (delete server / expand server / hybrid split).
+  User picked &quot;delete server, client is sole renderer.&quot; The
+  hybrid was tempting because tool-event formatting could be shared, but
+  the client already owns exchange grouping, rich blocks, and progressive
+  collapse &mdash; splitting responsibility for a subset of the format
+  would have added a coupling surface without paying for itself.
+</p>
+
+<p>
+  Execution followed the plan cleanly. Four files touched, all via
+  <code>templedb file get</code> &rarr; <code>Edit</code> on <code>/tmp</code> &rarr;
+  <code>templedb file set --verify</code>, per the standing memory rule
+  that FUSE writes can silently truncate. The <code>--wait-and-open-session</code>
+  third caller of the same shape didn&rsquo;t appear in my initial plan
+  &mdash; caught by a post-edit <code>grep -n org-text</code>. Committed a
+  single scoped commit (<code>04856C82</code>).
+</p>
+
+<h2>What I noticed about my process</h2>
+
+<h3><span>Post-edit grep found a third callsite</span> <span class="tag win">keep doing</span></h3>
+<p>
+  Original plan named two callsites (<code>--do-open-session</code>,
+  <code>templedb-agent-refresh</code>). After editing both I ran
+  <code>grep -n 'org-text\|--restore-messages'</code> before pushing and
+  found <code>--wait-and-open-session</code> using the same pattern. Two
+  minutes to fix. Without the grep pass it would have been a latent bug
+  in the async retry path &mdash; the exact kind of path that gets hit
+  intermittently and is annoying to diagnose.
+</p>
+<div class="callout win">
+  <span class="label">Rule to keep</span>
+  When removing a code shape (a field, a helper, a pattern), grep for
+  <em>all</em> references after each edit, not just the ones the plan
+  named. Plans list what you thought about; grep lists what&rsquo;s there.
+</div>
+
+<h3><span>Caught dead code mid-implementation, updated the story</span> <span class="tag win">keep doing</span></h3>
+<p>
+  I&rsquo;d framed the client-fallback path as &quot;also broken but in
+  a different way.&quot; When I actually opened <code>--restore-messages</code>
+  to edit it, grep for callers returned zero. That reframes the bug:
+  fallback wasn&rsquo;t &quot;broken differently,&quot; it was
+  <em>silently no-op</em>. Corrected the situation description to the
+  user before continuing. Small thing but the honest framing shapes what
+  the fix needs to cover.
+</p>
+
+<h3><span>Paused on unfamiliar staged state</span> <span class="tag win">keep doing</span></h3>
+<p>
+  <code>templedb vcs status</code> before commit showed
+  <code>src/cli/commands/vibe.py</code> staged &mdash; I didn&rsquo;t
+  touch it. Also 21 unstaged modifications from prior work. Since
+  <code>templedb vcs commit</code> has no per-file scoping, hitting
+  commit would have swept vibe.py in. Surfaced instead of guessing;
+  user replied &quot;a different agent is staging that vibe.py.&quot; So:
+  reset it, commit only my 4 files. If I&rsquo;d assumed &quot;probably
+  a leftover from my session&quot; I&rsquo;d have committed another
+  agent&rsquo;s in-progress work under my message.
+</p>
+<div class="callout win">
+  <span class="label">Rule to keep</span>
+  In a shared repo where multiple agents may be staging, always diff
+  the staging area against what you actually edited before committing.
+  The safety cost of pausing is one AskUserQuestion; the cost of a
+  wrong sweep is that the other agent&rsquo;s work has your commit
+  message on it.
+</div>
+
+<h3><span>Search index tokenizer wasted a step</span> <span class="tag watch">notice</span></h3>
+<p>
+  <code>templedb search content 'render_session'</code> returned zero
+  results even though <code>render_session</code> exists in two files
+  I&rsquo;d just read. FTS5&rsquo;s default tokenizer splits on
+  underscores, so snake_case symbols are effectively unfindable via the
+  built-in search. I noticed after wasting a couple of queries, fell back
+  to <code>grep</code>, and moved on &mdash; but this is a real
+  usability gap in <code>templedb search</code> that will bite the next
+  agent (or me) doing symbol lookups.
+</p>
+
+<h3><span>Fired off a background scan I didn&rsquo;t need</span> <span class="tag miss">didn&rsquo;t</span></h3>
+<p>
+  Kicked off an <code>xargs | grep</code> scan across 672 files to
+  double-verify no consumer of <code>org_renderer</code> existed. I
+  already had the answer from directly reading protocol.py&rsquo;s
+  imports and had confirmed via a smaller <code>grep -c</code> inside
+  the module. The xargs job would have taken minutes; killed it after
+  the smaller checks came back conclusive. Should have skipped it from
+  the start &mdash; direct-read on 2 files beat background-scan on 672.
+</p>
+
+<h3><span>Went thicker on analysis than the user needed</span> <span class="tag watch">notice</span></h3>
+<p>
+  The 4-column comparison table of &quot;which path loses what&quot; was
+  useful to <em>me</em> for scoping the fix, but the user only needed a
+  directional answer. A one-liner (&quot;server render overwrites
+  scaffold; client fallback is silently no-op&quot;) plus the three
+  options would have been enough. Table added maybe 30 seconds of
+  reading with no directional payoff. Notice for next time: after I
+  finish an analysis, ask what fraction of it actually informs the
+  user&rsquo;s next decision.
+</p>
+
+<h3><span>Didn&rsquo;t verify live in Emacs</span> <span class="tag miss">didn&rsquo;t</span></h3>
+<p>
+  Tests are green (44/44) but no one opened a real session in Emacs
+  post-change to eyeball a reopen. This wasn&rsquo;t the user&rsquo;s
+  ask &mdash; they said &quot;make the edits,&quot; not &quot;verify
+  the UI&quot; &mdash; and the CLAUDE.md guidance about UI verification
+  applies to frontend work more than emacs elisp. Still worth naming:
+  the change touches how a reopen looks, and no eyeballs have hit that
+  yet. On followups.
+</p>
+
+<h2>Open threads</h2>
+<ul>
+  <li>
+    <strong>No live UI verification.</strong> Test-green &ne;
+    render-correct-in-Emacs. Next open should confirm Guide + Pinned
+    scaffold survive and past tool events appear as
+    <code>*** RUNNING/DONE/FAILED &lt;summary&gt;</code> under each
+    exchange.
+  </li>
+  <li>
+    <strong>Rich tool blocks not replayed on reload.</strong> Deliberate
+    scope cut &mdash; we don&rsquo;t persist enough arg-buffer state to
+    reconstruct them. Past runs get simple STATUS/summary headings; live
+    runs still get rich blocks. If someone opens a completed session
+    hoping to inspect prior tool args/output, they&rsquo;ll be surprised.
+    Fixing this needs a data-model change (capture tool.completed args
+    in the event row, not just summary).
+  </li>
+  <li>
+    <strong><code>templedb search content</code> FTS5 tokenizer</strong>
+    can&rsquo;t match snake_case symbols. Real gap; agents will keep
+    hitting it. Options: switch tokenizer to <code>trigram</code>, or
+    document &quot;use plain <code>grep</code> for code symbols&quot; in
+    the top-level CLAUDE.md.
+  </li>
+  <li>
+    <strong>21 unstaged modifications</strong> in the templedb project
+    from prior work &mdash; not mine, not touched, but they&rsquo;re
+    someone&rsquo;s in-flight state. If I&rsquo;d re-checked out any of
+    those files to sync my checkout for testing, I would have blown
+    their changes away. Didn&rsquo;t; used narrow <code>file checkout</code>
+    for just my 2 test-relevant files. Worth noting the pattern:
+    <em>always</em> use <code>file checkout &lt;path&gt; -o &lt;path&gt;</code>
+    for sync, never <code>project checkout --force</code>, when other
+    agents may have working changes.
+  </li>
+</ul>
+
+<h2>Concrete followups (in decreasing expected value)</h2>
+<ol>
+  <li>
+    <strong>Open a real Emacs session against a fake-provider run,
+    close it, reopen, verify.</strong> Should take under 5 minutes.
+    This is the missing verification step for this session&rsquo;s
+    change.
+  </li>
+  <li>
+    <strong>File the FTS5 tokenizer gap.</strong> Either as a templedb
+    issue or a note in CLAUDE.md. This affects every agent that tries
+    to grep for symbols via <code>templedb search</code>.
+  </li>
+  <li>
+    <strong>Persist tool.completed args in events</strong> so past-run
+    rendering can rebuild rich blocks. Needs a store.py change and a
+    migration. Not urgent but reopens will feel thin without it.
+  </li>
+</ol>
+
+<h2>Check against prior recap&rsquo;s followups</h2>
+<p>
+  Prior recap
+  (<a href="2026-08-16-session-recap-staleness-loop-closed.html">2026-08-16 staleness loop</a>)
+  had these open:
+</p>
+<ul>
+  <li>
+    <em>4 of 5 personal machines need rebuild</em> &mdash;
+    <span class="tag" style="color: var(--muted)">not addressed this session (not in scope)</span>
+  </li>
+  <li>
+    <em><code>TEMPLEDB_DEV_MODE</code> undocumented outside design report</em>
+    &mdash; <span class="tag" style="color: var(--pos)">appears to have been documented</span>
+    (CLAUDE.md now has a Dev mode section per memory; wasn&rsquo;t
+    verified this session but memory records it)
+  </li>
+  <li>
+    <em><code>direnv allow</code> not yet run</em> &mdash;
+    <span class="tag" style="color: var(--muted)">not addressed (user-manual step)</span>
+  </li>
+  <li>
+    <em><code>templedb deploy fleet &lt;group&gt; list</code> bug</em>
+    &mdash; <span class="tag" style="color: var(--muted)">still open, unrelated</span>
+  </li>
+</ul>
+
+</body>
+</html>

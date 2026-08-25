@@ -249,12 +249,17 @@ class FileCommands(Command):
                 logger.error(f"No active branch found for project '{args.project}'")
                 return 1
 
+            sid = self.ctx.get_vcs_service().get_current_session()['id']
             base.execute("""
-                INSERT INTO vcs_working_state (project_id, branch_id, file_id, state, staged, last_modified)
-                VALUES (?, ?, ?, 'deleted', 1, datetime('now'))
+                INSERT INTO vcs_working_state
+                    (project_id, branch_id, file_id, state,
+                     staged_by_session_id, last_modified)
+                VALUES (?, ?, ?, 'deleted', ?, datetime('now'))
                 ON CONFLICT (project_id, branch_id, file_id)
-                DO UPDATE SET state = 'deleted', staged = 1, last_modified = datetime('now')
-            """, (project['id'], branch['id'], file_id))
+                DO UPDATE SET state = 'deleted',
+                              staged_by_session_id = ?,
+                              last_modified = datetime('now')
+            """, (project['id'], branch['id'], file_id, sid, sid))
 
             print(f"✓ Staged {args.file_path} for deletion")
             return 0
@@ -422,15 +427,21 @@ class FileCommands(Command):
                     (project_id,))
             if branch:
                 change_state = "modified" if file_record else "added"
+                sid = self.ctx.get_vcs_service().get_current_session()['id']
                 # content_hash must be set here — vcs commit reads content via
                 # ws.content_hash, not file_contents. Without this, `file set`
                 # followed by `vcs commit` silently records the previous content.
                 base.execute("""
-                    INSERT INTO vcs_working_state (project_id, branch_id, file_id, content_hash, state, staged, last_modified)
-                    VALUES (?, ?, ?, ?, ?, 1, datetime('now'))
+                    INSERT INTO vcs_working_state
+                        (project_id, branch_id, file_id, content_hash, state,
+                         staged_by_session_id, last_modified)
+                    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
                     ON CONFLICT (project_id, branch_id, file_id)
-                    DO UPDATE SET content_hash = excluded.content_hash, state = excluded.state, staged = 1, last_modified = datetime('now')
-                """, (project_id, branch['id'], file_id, content_hash, change_state))
+                    DO UPDATE SET content_hash = excluded.content_hash,
+                                  state = excluded.state,
+                                  staged_by_session_id = ?,
+                                  last_modified = datetime('now')
+                """, (project_id, branch['id'], file_id, content_hash, change_state, sid, sid))
         except Exception as e:
             logger.debug(f"Auto-stage failed (non-fatal): {e}")
 

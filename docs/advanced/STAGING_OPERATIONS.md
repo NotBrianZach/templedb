@@ -6,6 +6,63 @@ Complete guide to TempleDB's enhanced staging area operations for version contro
 
 The staging area allows you to selectively choose which changes to include in your next commit. This is similar to Git's staging area but integrated directly into TempleDB's database-native VCS.
 
+Since migration 082 (August 2026), staging is **session-scoped** — every
+staged row is attributed to a `vcs_sessions` row, so parallel agents and
+scripts can stage into the same project without commit-time cross-sweeps.
+See "Sessions" below for details.
+
+## Sessions
+
+Every stage/unstage/commit operation runs in the context of a *session*.
+A session is a row in the `vcs_sessions` table with an `author`, `host`,
+`pid`, timestamps, and an optional human `name` label.
+
+**Rules:**
+- `vcs add` sets `staged_by_session_id` to the current session on each
+  row it touches. `vcs commit` reads only rows where
+  `staged_by_session_id = <current session>` — so isolated agents
+  cannot sweep each other's staged files into a commit.
+- `vcs reset` clears rows for the current session only.
+- `vcs status` shows the current session's staged rows plus a footer
+  listing any rows staged in other sessions.
+- `vcs status --all` groups the view by session across the project.
+
+**Resolution order for the current session:**
+1. `TEMPLEDB_SESSION_ID` env var (must reference a live session row)
+2. An existing active session with matching `(author, host, ppid)`
+   started in the last 24 hours — this is what makes
+   `vcs add X; vcs commit` in the same shell share one session
+3. A new implicit session named `<host>-<ppid>-<timestamp>`
+
+**Explicit session workflow:**
+
+```bash
+# Start a named session; capture the ID
+eval "$(templedb vcs session start --name my-work | grep '^  export')"
+
+templedb vcs add    -p myproject src/main.py
+templedb vcs commit -p myproject -m "..."
+
+# When done (optional — sessions can also be left open for audit)
+templedb vcs session end $TEMPLEDB_SESSION_ID
+```
+
+**Inspecting sessions:**
+
+```bash
+templedb vcs session list             # all sessions, newest first
+templedb vcs session list --active    # only sessions not yet ended
+templedb vcs session current          # what session this shell is in
+templedb vcs session show <id>        # details + staged files for a session
+```
+
+**Author resolution** (used for a session's author field): checks
+`TEMPLEDB_AUTHOR` env var → `git config user.name` → `"unknown"`.
+
+Ending a session **does not** unstage its rows. That's a deliberate
+safe default — inspecting an ended session (`vcs session show <id>`)
+will still list what it left staged.
+
 ## Commands
 
 ### 1. Stage Files (`vcs add`)

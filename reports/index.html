@@ -44,6 +44,66 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-08-25-phase-3-live-ui-verification.html">
+  <div class="row">
+    <span class="date">2026-08-25</span>
+    <span class="title">Phase 3 &mdash; live UI verification</span>
+  </div>
+  <div class="summary">
+    Followup carried across three prior recaps: actually eyeball session attribution and isolation on the FUSE and GUI write paths, not just the CLI + tests. Mounted templedb FUSE, launched the GUI on 8420, and ran a three-way isolation drill on the regr-test scratch project. All expected behaviors observed.
+  </div>
+</a>
+
+<a class="report" href="2026-08-24-session-recap-vcs-followups-five-for-five.html">
+  <div class="row">
+    <span class="date">2026-08-24</span>
+    <span class="title">Session recap &mdash; VCS followups, five for five</span>
+  </div>
+  <div class="summary">
+    User said &ldquo;let&rsquo;s do all that&rdquo; on the five followups I&rsquo;d called out at the end of the prior recap. Fixed all five, in five commits (plus one scratch cleanup commit), including reworking every reader and writer of vcs_working_state.staged across seven files so the column could actually be dropped. Two surprises along the way: the Migrator &ldquo;fix&rdquo; I originally planned turned out to be the wrong shape and the right fix was regenerating schema.sql; and the memory-noted &ldquo;vcs commit reverts file set writes&rdquo; regression still can&rsquo;t be reproduced, this time even on templedb itself with a non---verify write.
+  </div>
+</a>
+
+<a class="report" href="2026-08-21-vcs-commit-revert-regression-investigation.html">
+  <div class="row">
+    <span class="date">2026-08-21</span>
+    <span class="title">VCS commit revert regression &mdash; investigation</span>
+  </div>
+  <div class="summary">
+    A memory note dated 2026-08-20 says &ldquo;vcs commit -p again reverts file set writes in deployed 0.7.0 binary. Use templedb commit &lt;slug&gt; &lt;fresh-checkout&gt; workflow.&rdquo; I attempted four increasingly-adversarial repros against both my patched dev-mode code and the deployed 0.7.0 binary. None reverted. Content survived vcs commit in every scenario. This report characterizes the investigation, suggests possible reasons the note doesn&rsquo;t currently repro, and lists what would still be worth verifying.
+  </div>
+</a>
+
+<a class="report" href="2026-08-21-session-recap-vcs-session-isolation-fundamentals.html">
+  <div class="row">
+    <span class="date">2026-08-21</span>
+    <span class="title">Session recap &mdash; VCS session isolation, the fundamentals fix</span>
+  </div>
+  <div class="summary">
+    Second half of a two-request session. User asked &ldquo;wouldn&rsquo;t it be nice if different agents had different staging areas&rdquo; after I noted a near-miss where templedb vcs commit almost swept another agent&rsquo;s vibe.py stage into my org-render reconciliation commit. Answered by adding session-scoped staging to TempleDB&rsquo;s VCS in five phases (0 &rarr; 5), plus an investigation report for a related memory-noted regression I couldn&rsquo;t reproduce. Six commits, one design report, one investigation report, 11 new passing tests.
+  </div>
+</a>
+
+<a class="report" href="2026-08-20-session-scoped-vcs-staging-design.html">
+  <div class="row">
+    <span class="date">2026-08-20</span>
+    <span class="title">Session-scoped VCS staging &mdash; design</span>
+  </div>
+  <div class="summary">
+    TempleDB&rsquo;s VCS has one shared staging area per project/branch, so parallel agents sweep each other&rsquo;s in-progress work into their commits (or, worse, commit it under the wrong message). This document proposes replacing the boolean vcs_working_state.staged flag with session-scoped staging keyed off TEMPLEDB_SESSION_ID, drops the dead vcs_staging table on the way through, and outlines how the change ships in phases. Related but separate: the memory-noted &quot;vcs commit reverts file set writes&quot; regression is likely orthogonal and gets its own investigation.
+  </div>
+</a>
+
+<a class="report" href="2026-08-20-session-recap-agent-org-render-reconciliation.html">
+  <div class="row">
+    <span class="date">2026-08-20</span>
+    <span class="title">Session recap — agent Org render reconciliation</span>
+  </div>
+  <div class="summary">
+    Deleted the server-side agent/org_renderer.py and made the Emacs client the single source of truth for session Org rendering. Fixed two complementary latent bugs the drift was hiding: server-render reopens overwrote the client's Guide/Pinned/Context scaffold, and the &quot;fallback&quot; path called --restore-messages which turned out to be dead code with zero callers. One commit (04856C82), 44/44 tests/agent pass.
+  </div>
+</a>
+
 <a class="report" href="2026-08-17-remote-neko-host-deployment-session-vultr-nixos.html">
   <div class="row">
     <span class="date">2026-08-17</span>

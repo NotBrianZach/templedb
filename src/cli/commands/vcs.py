@@ -375,18 +375,33 @@ class VCSCommands(Command):
             logger.info(f"  Create one:    templedb vcs branch {project['slug']} main")
             return 1
 
-        # Get staged files with content info
-        # content_text lives in content_blobs (CAS), not file_contents
+        session = self.service.get_current_session()
+        sid = session['id']
+
+        # Get staged files for THIS session only. content_text lives in
+        # content_blobs (CAS), not file_contents.
         staged = self.vcs_repo.query_all("""
             SELECT ws.*, cb.content_text, fc.file_size_bytes, fc.line_count
             FROM vcs_working_state ws
             LEFT JOIN file_contents fc ON ws.file_id = fc.file_id AND fc.is_current = 1
             LEFT JOIN content_blobs cb ON fc.content_hash = cb.hash_sha256
-            WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged = 1
-        """, (project['id'], branch['id']))
+            WHERE ws.project_id = ? AND ws.branch_id = ?
+              AND ws.staged_by_session_id = ?
+        """, (project['id'], branch['id'], sid))
+
+        other_staged_count = self.vcs_repo.query_one("""
+            SELECT COUNT(*) AS c FROM vcs_working_state
+            WHERE project_id = ? AND branch_id = ?
+              AND staged_by_session_id IS NOT NULL
+              AND staged_by_session_id != ?
+        """, (project['id'], branch['id'], sid))['c']
 
         if not staged:
-            print("No changes staged for commit")
+            print("No changes staged for commit in this session")
+            print(f"  Session: #{sid} ({session.get('name') or 'unnamed'})")
+            if other_staged_count:
+                print(f"  ({other_staged_count} file(s) staged in other sessions; "
+                      f"see 'templedb vcs status --all')")
             print(f"  Check status:  templedb vcs status {project['slug']} --refresh")
             print(f"  Stage files:   templedb vcs add -p {project['slug']} --all")
             return 1
@@ -524,12 +539,14 @@ class VCSCommands(Command):
                     WHERE file_id = ? AND project_id = ? AND branch_id = ?
                 """, (file['file_id'], project['id'], branch['id']), commit=False)
 
-        # Clear staging for remaining files
+        # Clear staging for this session's files only. Other sessions'
+        # staged rows are preserved (that's the whole point of isolation).
         self.vcs_repo.execute("""
             UPDATE vcs_working_state
-            SET staged = 0, state = 'unmodified'
-            WHERE project_id = ? AND branch_id = ? AND staged = 1
-        """, (project['id'], branch['id']), commit=False)
+            SET state = 'unmodified', staged_by_session_id = NULL
+            WHERE project_id = ? AND branch_id = ?
+              AND staged_by_session_id = ?
+        """, (project['id'], branch['id'], sid), commit=False)
 
         # Commit the transaction
         self.vcs_repo.execute("COMMIT", commit=False)
@@ -572,6 +589,9 @@ class VCSCommands(Command):
             "branch": branch['branch_name'],
             "author": author,
             "files": len(staged),
+            "session_id": sid,
+            "session_name": session.get('name'),
+            "other_session_files_skipped": other_staged_count,
             "message": args.message,
             "readonly_updated": readonly_updated,
             "auto_deploys": deploy_results,
@@ -581,8 +601,11 @@ class VCSCommands(Command):
             print(f"  Project: {d['project']}"),
             print(f"  Branch: {d['branch']}"),
             print(f"  Author: {d['author']}"),
+            print(f"  Session: #{d['session_id']} ({d.get('session_name') or 'unnamed'})"),
             print(f"  Files: {d['files']}"),
             print(f"  Message: {d['message']}"),
+            print(f"  ({d['other_session_files_skipped']} file(s) staged in other sessions were not included)")
+                if d.get('other_session_files_skipped') else None,
             print(f"  Checkout is now read-only") if d['readonly_updated'] else None,
             [print(f"  Auto-deploy → {r['target']}: {'OK' if r['success'] else 'FAILED'}")
              for r in d.get('auto_deploys', [])],
@@ -630,22 +653,78 @@ class VCSCommands(Command):
                 return emit_error(args, "NO_BRANCH", "No VCS branch initialized",
                                   solution="templedb vcs init <project>")
 
+            show_all = bool(getattr(args, 'all', False))
+            grouped = None
+            if show_all:
+                rows = self.vcs_repo.query_all("""
+                    SELECT vs.id AS sid, vs.name AS sname, vs.author AS sauthor,
+                           vs.ended_at AS sended,
+                           pf.file_path
+                    FROM vcs_working_state ws
+                    JOIN project_files pf ON ws.file_id = pf.id
+                    JOIN vcs_sessions vs ON ws.staged_by_session_id = vs.id
+                    WHERE ws.project_id = ?
+                    ORDER BY vs.id, pf.file_path
+                """, (project['id'],))
+                grouped = {}
+                for r in rows:
+                    key = r['sid']
+                    if key not in grouped:
+                        grouped[key] = {
+                            'sid': key,
+                            'name': r['sname'],
+                            'author': r['sauthor'],
+                            'ended': r['sended'],
+                            'files': [],
+                        }
+                    grouped[key]['files'].append(r['file_path'])
+                grouped = list(grouped.values())
+
             data = {
                 "project": project['slug'],
                 "branch": status['branch'],
+                "session_id": status.get('session_id'),
+                "session_name": status.get('session_name'),
                 "staged": status.get('staged', []),
+                "staged_by_others": status.get('staged_by_others', []),
                 "modified": status.get('modified', []),
                 "untracked": status.get('untracked', []),
                 "clean": not (status.get('staged') or status.get('modified') or status.get('untracked')),
                 "checkout": checkout_info,
+                "all_sessions_view": grouped,
             }
 
             def _human(d):
                 print(f"On branch: {d['branch']}")
+                if d.get('session_id'):
+                    label = d.get('session_name') or 'unnamed'
+                    print(f"Session: #{d['session_id']} ({label})")
                 if d['checkout']:
                     c = d['checkout']
                     mode = "writable (edit mode)" if c['writable'] else "read-only"
                     print(f"Checkout: {c['path']}  [{mode}]")
+
+                if d.get('all_sessions_view') is not None:
+                    if not d['all_sessions_view']:
+                        print("\nNo staged files in any session.")
+                    for g in d['all_sessions_view']:
+                        state = 'ended' if g['ended'] else 'active'
+                        label = g['name'] or 'unnamed'
+                        print(f"\nSession #{g['sid']} ({label}) [{state}] — "
+                              f"{g['author']}:")
+                        for f in g['files']:
+                            print(f"  staged    {f}")
+                    if d['modified']:
+                        print("\nChanges not staged for commit:")
+                        for f in d['modified']:
+                            print(f"  modified  {f}")
+                    if d['untracked']:
+                        print("\nUntracked files:")
+                        for f in d['untracked']:
+                            print(f"  untracked {f}")
+                    print()
+                    return
+
                 if d['clean']:
                     print("No changes")
                     return
@@ -661,6 +740,10 @@ class VCSCommands(Command):
                     print("\nUntracked files:")
                     for f in d['untracked']:
                         print(f"  untracked {f}")
+                if d.get('staged_by_others'):
+                    print(f"\nStaged in other sessions (not included in your commit):")
+                    for f in d['staged_by_others']:
+                        print(f"  other     {f}")
                 print()
 
             return emit(args, data, human_fn=_human)
@@ -1061,7 +1144,8 @@ class VCSCommands(Command):
             FROM vcs_working_state ws
             JOIN project_files pf ON ws.file_id = pf.id
             LEFT JOIN file_contents fc ON fc.file_id = ws.file_id AND fc.is_current = 1
-            WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged = 1
+            WHERE ws.project_id = ? AND ws.branch_id = ?
+              AND ws.staged_by_session_id IS NOT NULL
             ORDER BY pf.file_path
         """, (project['id'], branch['id']))
 
@@ -1364,10 +1448,14 @@ class VCSCommands(Command):
                     (project['id'], conflict.file_path))
                 if file_row and conflict.conflict_markers:
                     self.vcs_repo.execute("""
-                        INSERT INTO vcs_working_state (project_id, branch_id, file_id, state, staged, content_text)
-                        VALUES (?, ?, ?, 'conflict', 0, ?)
+                        INSERT INTO vcs_working_state
+                            (project_id, branch_id, file_id, state,
+                             staged_by_session_id, content_text)
+                        VALUES (?, ?, ?, 'conflict', NULL, ?)
                         ON CONFLICT (project_id, branch_id, file_id)
-                        DO UPDATE SET state = 'conflict', staged = 0, content_text = excluded.content_text
+                        DO UPDATE SET state = 'conflict',
+                                      staged_by_session_id = NULL,
+                                      content_text = excluded.content_text
                     """, (project['id'], current['id'], file_row['id'], conflict.conflict_markers))
 
             print(f"Merge has conflicts ({len(conflicts)} files):")
@@ -1593,6 +1681,119 @@ class VCSCommands(Command):
             print(f"\n✗ Export failed: {e}", file=sys.stderr)
             return 1
 
+    # ------------------------------------------------------------------
+    # Session management (Phase 2)
+    # ------------------------------------------------------------------
+
+    def session_start(self, args) -> int:
+        session = self.service.start_session(
+            name=getattr(args, 'name', None),
+            author=getattr(args, 'author', None),
+        )
+        print(f"Started session #{session['id']} ({session['name'] or 'unnamed'})")
+        print(f"  Author: {session['author']}")
+        print(f"  Host:   {session['host']}  PID: {session['pid']}")
+        print()
+        print(f"  export TEMPLEDB_SESSION_ID={session['id']}")
+        return 0
+
+    def session_end(self, args) -> int:
+        try:
+            sid = int(args.id)
+        except (TypeError, ValueError):
+            print("session end requires an integer id (--id)", file=sys.stderr)
+            return 1
+        session = self.service.end_session(sid, reason='explicit-end')
+        if not session:
+            print(f"No session #{sid}", file=sys.stderr)
+            return 1
+        print(f"Ended session #{session['id']} ({session.get('name') or 'unnamed'})")
+        print(f"  Reason: {session.get('ended_reason')}")
+        return 0
+
+    def session_list(self, args) -> int:
+        sessions = self.service.list_sessions(active_only=bool(getattr(args, 'active', False)))
+        if not sessions:
+            print("No sessions.")
+            return 0
+        print(f"{'ID':>4}  {'STATE':<8}  {'AUTHOR':<20}  NAME")
+        for s in sessions:
+            state = 'active' if not s.get('ended_at') else 'ended'
+            print(f"{s['id']:>4}  {state:<8}  {(s.get('author') or ''):<20}  {s.get('name') or ''}")
+        return 0
+
+    def session_current(self, args) -> int:
+        session = self.service.get_current_session()
+        print(f"Session #{session['id']} ({session.get('name') or 'unnamed'})")
+        print(f"  Author: {session.get('author')}")
+        print(f"  Host:   {session.get('host')}  PID: {session.get('pid')}")
+        print(f"  Started: {session.get('started_at')}")
+        if session.get('ended_at'):
+            print(f"  Ended:  {session['ended_at']} ({session.get('ended_reason')})")
+        return 0
+
+    def session_show(self, args) -> int:
+        try:
+            sid = int(args.id)
+        except (TypeError, ValueError):
+            print("session show requires an integer id", file=sys.stderr)
+            return 1
+        session = self.vcs_repo.query_one(
+            "SELECT * FROM vcs_sessions WHERE id = ?", (sid,)
+        )
+        if not session:
+            print(f"No session #{sid}", file=sys.stderr)
+            return 1
+        print(f"Session #{session['id']} ({session.get('name') or 'unnamed'})")
+        print(f"  Author:  {session.get('author')}")
+        print(f"  Host:    {session.get('host')}  PID: {session.get('pid')}")
+        print(f"  Started: {session.get('started_at')}")
+        if session.get('ended_at'):
+            print(f"  Ended:   {session['ended_at']} ({session.get('ended_reason')})")
+        rows = self.vcs_repo.query_all("""
+            SELECT p.slug, pf.file_path
+            FROM vcs_working_state ws
+            JOIN projects p ON ws.project_id = p.id
+            JOIN project_files pf ON ws.file_id = pf.id
+            WHERE ws.staged_by_session_id = ?
+            ORDER BY p.slug, pf.file_path
+        """, (sid,))
+        if rows:
+            print(f"\nStaged files ({len(rows)}):")
+            for r in rows:
+                print(f"  {r['slug']:<20} {r['file_path']}")
+        else:
+            print("\nNo staged files.")
+        return 0
+
+    def session_prune(self, args) -> int:
+        days = getattr(args, 'older_than', None)
+        if days is None:
+            days = 30
+        dry_run = bool(getattr(args, 'dry_run', False))
+        result = self.service.prune_sessions(older_than_days=days, dry_run=dry_run)
+
+        pruned = result['pruned']
+        kept = result['kept_with_staged_rows']
+
+        if not pruned and not kept:
+            print(f"No sessions ended more than {days} days ago.")
+            return 0
+
+        if pruned:
+            verb = "Would delete" if dry_run else "Deleted"
+            print(f"{verb} {len(pruned)} session(s):")
+            for s in pruned:
+                print(f"  #{s['id']:<5} {(s.get('name') or 'unnamed'):<40} "
+                      f"ended {s['ended_at']} ({s.get('ended_reason')})")
+        if kept:
+            print(f"\nKept {len(kept)} session(s) with lingering staged rows "
+                  f"(review with `vcs session show <id>`):")
+            for s in kept:
+                print(f"  #{s['id']:<5} {(s.get('name') or 'unnamed'):<40} "
+                      f"{s['lingering']} row(s)")
+        return 0
+
 
 def register(cli):
     """Register VCS commands"""
@@ -1639,7 +1840,40 @@ def register(cli):
     status_parser = subparsers.add_parser('status', help='Show working directory status')
     status_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
     status_parser.add_argument('--refresh', '-r', action='store_true', help='Refresh working state')
+    status_parser.add_argument('--all', action='store_true',
+                               help='Show staged files from all sessions, grouped by session')
     cli.commands['vcs.status'] = cmd.status
+
+    # vcs session {start,end,list,current,show}
+    session_parser = subparsers.add_parser('session', help='Manage VCS staging sessions')
+    session_sub = session_parser.add_subparsers(dest='session_subcommand', required=True)
+
+    ss_start = session_sub.add_parser('start', help='Start a new staging session')
+    ss_start.add_argument('--name', help='Optional human label for the session')
+    ss_start.add_argument('--author', help='Override the resolved author')
+    cli.commands['vcs.session.start'] = cmd.session_start
+
+    ss_end = session_sub.add_parser('end', help='End a staging session')
+    ss_end.add_argument('id', help='Session ID to end')
+    cli.commands['vcs.session.end'] = cmd.session_end
+
+    ss_list = session_sub.add_parser('list', help='List sessions')
+    ss_list.add_argument('--active', action='store_true', help='Only show active (not ended) sessions')
+    cli.commands['vcs.session.list'] = cmd.session_list
+
+    ss_current = session_sub.add_parser('current', help='Show the current session for this shell')
+    cli.commands['vcs.session.current'] = cmd.session_current
+
+    ss_show = session_sub.add_parser('show', help='Show details of a session and its staged files')
+    ss_show.add_argument('id', help='Session ID to show')
+    cli.commands['vcs.session.show'] = cmd.session_show
+
+    ss_prune = session_sub.add_parser('prune', help='Delete old ended sessions with no lingering staged rows')
+    ss_prune.add_argument('--older-than', type=int, default=30,
+                          help='Age threshold in days (default: 30)')
+    ss_prune.add_argument('--dry-run', action='store_true',
+                          help='Show what would be pruned without deleting')
+    cli.commands['vcs.session.prune'] = cmd.session_prune
 
     # vcs log
     log_parser = subparsers.add_parser('log', help='Show commit history')

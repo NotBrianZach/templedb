@@ -2,6 +2,7 @@
 import html
 import json
 import os
+import socket
 import subprocess
 from pathlib import Path
 
@@ -10,6 +11,32 @@ from fastapi.responses import HTMLResponse
 
 from db_utils import execute, query_all, query_one
 from gui_helpers import _base, _table, _search_bar, _file_link, _msg, _status_badge, _run, _colorize_diff, CSS
+
+
+def _gui_session_id() -> int:
+    """Resolve (or create) a stable per-host GUI staging session.
+
+    GUI stage/unstage actions come in as unauthenticated HTTP requests
+    with no natural per-shell PPID. All GUI writes share one named
+    session 'gui-<host>' so CLI commit paths don't accidentally sweep
+    them in.
+    """
+    name = f"gui-{socket.gethostname()}"
+    row = query_one(
+        "SELECT id FROM vcs_sessions WHERE name = ? AND ended_at IS NULL",
+        (name,),
+    )
+    if row:
+        return row["id"]
+    execute(
+        "INSERT INTO vcs_sessions (name, author, host, pid) VALUES (?, 'gui', ?, ?)",
+        (name, socket.gethostname(), os.getpid()),
+    )
+    row = query_one(
+        "SELECT id FROM vcs_sessions WHERE name = ? AND ended_at IS NULL",
+        (name,),
+    )
+    return row["id"]
 
 router = APIRouter()
 
@@ -271,7 +298,7 @@ def _staging_area(slug: str) -> str:
         SELECT pf.file_path, ws.state, ws.file_id
         FROM vcs_working_state ws
         JOIN project_files pf ON ws.file_id = pf.id
-        WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged = 1
+        WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged_by_session_id IS NOT NULL
         ORDER BY pf.file_path
     """, (proj["id"], branch["id"]))
 
@@ -279,7 +306,7 @@ def _staging_area(slug: str) -> str:
         SELECT pf.file_path, ws.state, ws.file_id
         FROM vcs_working_state ws
         JOIN project_files pf ON ws.file_id = pf.id
-        WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged = 0 AND ws.state != 'unmodified'
+        WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged_by_session_id IS NULL AND ws.state != 'unmodified'
         ORDER BY pf.file_path
     """, (proj["id"], branch["id"]))
 
@@ -324,8 +351,9 @@ def vcs_stage_file(slug: str, file_id: int):
     proj = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
     branch = query_one("SELECT COALESCE(p.active_branch_id, vb.id) as id FROM projects p LEFT JOIN vcs_branches vb ON vb.project_id = p.id AND vb.is_default = 1 WHERE p.id = ?", (proj["id"],))
     from db_utils import execute
-    execute("UPDATE vcs_working_state SET staged = 1 WHERE file_id = ? AND project_id = ? AND branch_id = ?",
-            (file_id, proj["id"], branch["id"]))
+    sid = _gui_session_id()
+    execute("UPDATE vcs_working_state SET staged_by_session_id = ? WHERE file_id = ? AND project_id = ? AND branch_id = ?",
+            (sid, file_id, proj["id"], branch["id"]))
     return HTMLResponse(_staging_area(slug))
 
 
@@ -335,7 +363,7 @@ def vcs_unstage_file(slug: str, file_id: int):
     proj = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
     branch = query_one("SELECT COALESCE(p.active_branch_id, vb.id) as id FROM projects p LEFT JOIN vcs_branches vb ON vb.project_id = p.id AND vb.is_default = 1 WHERE p.id = ?", (proj["id"],))
     from db_utils import execute
-    execute("UPDATE vcs_working_state SET staged = 0 WHERE file_id = ? AND project_id = ? AND branch_id = ?",
+    execute("UPDATE vcs_working_state SET staged_by_session_id = NULL WHERE file_id = ? AND project_id = ? AND branch_id = ?",
             (file_id, proj["id"], branch["id"]))
     return HTMLResponse(_staging_area(slug))
 
@@ -631,7 +659,7 @@ def _staging_area(slug: str) -> str:
         SELECT pf.file_path, ws.state, ws.file_id
         FROM vcs_working_state ws
         JOIN project_files pf ON ws.file_id = pf.id
-        WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged = 1
+        WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged_by_session_id IS NOT NULL
         ORDER BY pf.file_path
     """, (proj["id"], branch["id"]))
 
@@ -639,7 +667,7 @@ def _staging_area(slug: str) -> str:
         SELECT pf.file_path, ws.state, ws.file_id
         FROM vcs_working_state ws
         JOIN project_files pf ON ws.file_id = pf.id
-        WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged = 0 AND ws.state != 'unmodified'
+        WHERE ws.project_id = ? AND ws.branch_id = ? AND ws.staged_by_session_id IS NULL AND ws.state != 'unmodified'
         ORDER BY pf.file_path
     """, (proj["id"], branch["id"]))
 
@@ -684,8 +712,9 @@ def vcs_stage_file(slug: str, file_id: int):
     proj = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
     branch = query_one("SELECT COALESCE(p.active_branch_id, vb.id) as id FROM projects p LEFT JOIN vcs_branches vb ON vb.project_id = p.id AND vb.is_default = 1 WHERE p.id = ?", (proj["id"],))
     from db_utils import execute
-    execute("UPDATE vcs_working_state SET staged = 1 WHERE file_id = ? AND project_id = ? AND branch_id = ?",
-            (file_id, proj["id"], branch["id"]))
+    sid = _gui_session_id()
+    execute("UPDATE vcs_working_state SET staged_by_session_id = ? WHERE file_id = ? AND project_id = ? AND branch_id = ?",
+            (sid, file_id, proj["id"], branch["id"]))
     return HTMLResponse(_staging_area(slug))
 
 
@@ -695,7 +724,7 @@ def vcs_unstage_file(slug: str, file_id: int):
     proj = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
     branch = query_one("SELECT COALESCE(p.active_branch_id, vb.id) as id FROM projects p LEFT JOIN vcs_branches vb ON vb.project_id = p.id AND vb.is_default = 1 WHERE p.id = ?", (proj["id"],))
     from db_utils import execute
-    execute("UPDATE vcs_working_state SET staged = 0 WHERE file_id = ? AND project_id = ? AND branch_id = ?",
+    execute("UPDATE vcs_working_state SET staged_by_session_id = NULL WHERE file_id = ? AND project_id = ? AND branch_id = ?",
             (file_id, proj["id"], branch["id"]))
     return HTMLResponse(_staging_area(slug))
 

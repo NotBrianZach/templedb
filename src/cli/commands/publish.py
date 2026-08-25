@@ -52,7 +52,8 @@ class PublishCommands(Command):
             if branch:
                 staged = conn.execute(
                     "SELECT COUNT(*) as n FROM vcs_working_state "
-                    "WHERE project_id = ? AND branch_id = ? AND staged = 1",
+                    "WHERE project_id = ? AND branch_id = ? "
+                    "AND staged_by_session_id IS NOT NULL",
                     (proj["id"], branch["id"])
                 ).fetchone()
 

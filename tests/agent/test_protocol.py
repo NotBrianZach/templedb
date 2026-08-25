@@ -51,7 +51,7 @@ class TestProtocol(unittest.TestCase):
         result = next(r for r in responses if r.get('id') == 2)
         self.assertIsInstance(result['result'], list)
 
-    def test_open_session_has_org(self):
+    def test_open_session_has_expected_fields(self):
         r1 = self._run_protocol([
             {"id": 1, "method": "session.create", "params": {"provider": "fake"}}
         ])
@@ -59,9 +59,12 @@ class TestProtocol(unittest.TestCase):
         r2 = self._run_protocol([
             {"id": 2, "method": "session.open", "params": {"session_id": sid}}
         ])
-        result = next(r for r in r2 if r.get('id') == 2)
-        self.assertIn('org', result['result'])
-        self.assertIn('#+TITLE: Temple Agent', result['result']['org'])
+        result = next(r for r in r2 if r.get('id') == 2)['result']
+        self.assertEqual(result['session']['id'], sid)
+        self.assertIn('messages', result)
+        self.assertIn('notes', result)
+        self.assertIn('events_by_run', result)
+        self.assertNotIn('org', result)
 
     def test_unknown_method(self):
         responses = self._run_protocol([

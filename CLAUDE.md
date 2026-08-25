@@ -111,6 +111,44 @@ itself.
 Design and options considered:
 `reports/2026-08-16-nix-profile-staleness-design.html`.
 
+## Sessions: `TEMPLEDB_SESSION_ID`
+
+`vcs add` / `vcs commit` are scoped to a **session** — a row in
+`vcs_sessions` that identifies who staged a file. Parallel agents can
+stage into the same project without sweeping each other's work into a
+commit, because `vcs commit` only reads rows staged by the current
+session.
+
+For a single interactive user in one shell, sessions are invisible:
+sequential `templedb` invocations from the same shell auto-share an
+implicit session (matched on `author`, `host`, `ppid`), so
+`vcs add X; vcs commit -m …` works exactly like it always did.
+
+For multi-agent or auditable workflows, be explicit:
+
+```bash
+# Start a named session, export the ID
+eval "$(templedb vcs session start --name my-refactor | grep '^  export')"
+
+# All subsequent templedb calls in this shell use session $TEMPLEDB_SESSION_ID
+templedb vcs add -p templedb src/foo.py
+templedb vcs commit -p templedb -m "refactor foo"
+
+# Or list / inspect
+templedb vcs session list --active
+templedb vcs session show <id>
+templedb vcs status templedb --all    # grouped view of every session's stage
+```
+
+`vcs status` displays the current session badge and, when other sessions
+have rows staged, prints a `Staged in other sessions` footer so surprise
+sweeps aren't possible.
+
+Design and semantics:
+`reports/2026-08-20-session-scoped-vcs-staging-design.html`.
+Investigation of the related revert regression:
+`reports/2026-08-21-vcs-commit-revert-regression-investigation.html`.
+
 ## Write-path history and remaining hazards
 
 **Recently fixed (2026-08-04, commits DBB417D8, 40BAE4CF, 189F33CA):**

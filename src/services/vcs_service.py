@@ -5,6 +5,9 @@ VCS Service - Business logic for version control operations
 Handles staging, committing, branching, and diff operations for
 database-native version control.
 """
+import os
+import socket
+import subprocess
 from typing import List, Dict, Any, Optional
 
 from services.base import BaseService
@@ -50,6 +53,190 @@ class VCSService(BaseService):
             branch = self.get_default_branch(project_id)
         return branch
 
+    # ------------------------------------------------------------------
+    # Session-scoped staging (Phase 1)
+    # See reports/2026-08-20-session-scoped-vcs-staging-design.html
+    # ------------------------------------------------------------------
+
+    def _resolve_author(self) -> str:
+        """TEMPLEDB_AUTHOR env → git config user.name → 'unknown'."""
+        author = os.environ.get("TEMPLEDB_AUTHOR", "").strip()
+        if author:
+            return author
+        try:
+            result = subprocess.run(
+                ["git", "config", "user.name"],
+                capture_output=True, text=True, timeout=5,
+            )
+            name = result.stdout.strip()
+            if name:
+                return name
+        except Exception:
+            pass
+        return "unknown"
+
+    def get_current_session(self) -> Dict[str, Any]:
+        """Resolve the current VCS session, reusing or creating as needed.
+
+        Resolution order:
+          1. TEMPLEDB_SESSION_ID env var (must reference a live session row)
+          2. Implicit session cached on this service instance
+          3. Existing active session for (author, host, ppid=shell PID)
+             started within the last 24 hours — so sequential shell
+             invocations (`vcs add X; vcs commit`) share one session
+          4. New implicit session named '<host>-<ppid>-<short-ts>'
+        """
+        cached = getattr(self, "_current_session", None)
+        if cached:
+            return cached
+
+        env_id = os.environ.get("TEMPLEDB_SESSION_ID", "").strip()
+        if env_id:
+            try:
+                sid = int(env_id)
+            except ValueError:
+                raise ValidationError(
+                    f"TEMPLEDB_SESSION_ID must be an integer, got {env_id!r}"
+                )
+            row = self.vcs_repo.query_one(
+                "SELECT * FROM vcs_sessions WHERE id = ?", (sid,)
+            )
+            if not row:
+                raise ResourceNotFoundError(
+                    f"TEMPLEDB_SESSION_ID={sid} references no live session",
+                    solution="Run 'templedb vcs session start' to create one, or unset the env var",
+                )
+            self._current_session = dict(row)
+            return self._current_session
+
+        # PPID = the shell that ran templedb. Stable across separate
+        # `templedb ...` invocations within the same shell, which is what
+        # makes `vcs add X; vcs commit` naturally see the same session.
+        author = self._resolve_author()
+        host = socket.gethostname()
+        ppid = os.getppid()
+        existing = self.vcs_repo.query_one(
+            """
+            SELECT * FROM vcs_sessions
+            WHERE ended_at IS NULL
+              AND author = ? AND host = ? AND pid = ?
+              AND started_at > datetime('now', '-1 day')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (author, host, ppid),
+        )
+        if existing:
+            self._current_session = dict(existing)
+            return self._current_session
+
+        session = self._create_session(name=self._implicit_session_name(ppid))
+        self._current_session = session
+        return session
+
+    def _implicit_session_name(self, ppid: Optional[int] = None) -> str:
+        host = socket.gethostname()
+        if ppid is None:
+            ppid = os.getppid()
+        ts = self.vcs_repo.query_one(
+            "SELECT strftime('%Y%m%d-%H%M%S', 'now') AS ts"
+        )["ts"]
+        return f"{host}-{ppid}-{ts}"
+
+    def _create_session(
+        self, name: Optional[str] = None, author: Optional[str] = None
+    ) -> Dict[str, Any]:
+        author = author or self._resolve_author()
+        # pid column stores PPID (shell / spawning process), which is
+        # what enables sequential shell invocations to share a session.
+        # See get_current_session for the reuse lookup.
+        self.vcs_repo.execute(
+            """
+            INSERT INTO vcs_sessions (name, author, host, pid)
+            VALUES (?, ?, ?, ?)
+            """,
+            (name, author, socket.gethostname(), os.getppid()),
+        )
+        row = self.vcs_repo.query_one(
+            "SELECT * FROM vcs_sessions WHERE id = last_insert_rowid()"
+        )
+        return dict(row)
+
+    def start_session(
+        self, name: Optional[str] = None, author: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Explicitly start a session (for CLI 'vcs session start')."""
+        session = self._create_session(name=name, author=author)
+        self._current_session = session
+        return session
+
+    def end_session(
+        self, session_id: int, reason: str = "explicit-end"
+    ) -> Dict[str, Any]:
+        """Mark a session ended. Does not unstage the session's rows."""
+        self.vcs_repo.execute(
+            """
+            UPDATE vcs_sessions
+            SET ended_at = datetime('now'), ended_reason = ?
+            WHERE id = ? AND ended_at IS NULL
+            """,
+            (reason, session_id),
+        )
+        row = self.vcs_repo.query_one(
+            "SELECT * FROM vcs_sessions WHERE id = ?", (session_id,)
+        )
+        return dict(row) if row else {}
+
+    def list_sessions(self, active_only: bool = False) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM vcs_sessions"
+        if active_only:
+            sql += " WHERE ended_at IS NULL"
+        sql += " ORDER BY id DESC"
+        return [dict(r) for r in self.vcs_repo.query_all(sql)]
+
+    def prune_sessions(
+        self, older_than_days: int = 30, dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """Delete ended sessions older than a threshold, provided nothing
+        references them anymore.
+
+        A session is prunable when:
+          - ended_at IS NOT NULL (session is ended)
+          - ended_at is older than older_than_days ago
+          - no vcs_working_state row still has staged_by_session_id = its id
+            (all its staged rows have been committed or unstaged)
+
+        Sessions with lingering staged rows are kept — those rows would
+        become orphans if we dropped the session, and losing the audit
+        trail there matters more than reclaiming the row.
+        """
+        candidates = self.vcs_repo.query_all(
+            """
+            SELECT vs.id, vs.name, vs.ended_at, vs.ended_reason,
+                   (SELECT COUNT(*) FROM vcs_working_state ws
+                    WHERE ws.staged_by_session_id = vs.id) AS lingering
+            FROM vcs_sessions vs
+            WHERE vs.ended_at IS NOT NULL
+              AND vs.ended_at < datetime('now', ?)
+            ORDER BY vs.id
+            """,
+            (f'-{int(older_than_days)} days',),
+        )
+        prunable = [dict(r) for r in candidates if r['lingering'] == 0]
+        kept = [dict(r) for r in candidates if r['lingering'] > 0]
+
+        if not dry_run and prunable:
+            ids = [str(s['id']) for s in prunable]
+            self.vcs_repo.execute(
+                f"DELETE FROM vcs_sessions WHERE id IN ({','.join('?' for _ in ids)})",
+                tuple(int(i) for i in ids),
+            )
+
+        return {
+            'pruned': prunable,
+            'kept_with_staged_rows': kept,
+            'dry_run': dry_run,
+        }
+
     def stage_files(
         self,
         project_slug: str,
@@ -80,23 +267,24 @@ class VCSService(BaseService):
                 solution="Create a branch first"
             )
 
+        session = self.get_current_session()
+        sid = session['id']
+
         if stage_all:
-            # Stage all modified files
             self.vcs_repo.execute("""
                 UPDATE vcs_working_state
-                SET staged = 1
+                SET staged_by_session_id = ?
                 WHERE project_id = ? AND branch_id = ? AND state != 'unmodified'
-            """, (project['id'], branch['id']))
+            """, (sid, project['id'], branch['id']))
 
             result = self.vcs_repo.query_one("""
                 SELECT COUNT(*) as count FROM vcs_working_state
-                WHERE project_id = ? AND branch_id = ? AND staged = 1
-            """, (project['id'], branch['id']))
+                WHERE project_id = ? AND branch_id = ? AND staged_by_session_id = ?
+            """, (project['id'], branch['id'], sid))
 
             return result['count'] if result else 0
 
         elif file_patterns:
-            # Stage specific files
             count = 0
             for pattern in file_patterns:
                 files = self.vcs_repo.query_all("""
@@ -110,9 +298,9 @@ class VCSService(BaseService):
                 for file in files:
                     self.vcs_repo.execute("""
                         UPDATE vcs_working_state
-                        SET staged = 1
+                        SET staged_by_session_id = ?
                         WHERE id = ?
-                    """, (file['id'],))
+                    """, (sid, file['id']))
                     count += 1
 
             return count
@@ -202,12 +390,13 @@ class VCSService(BaseService):
         if not file_record:
             return False
 
-        # Create working state record
+        session = self.get_current_session()
         self.vcs_repo.execute("""
             INSERT OR REPLACE INTO vcs_working_state
-                (project_id, branch_id, file_id, content_text, state, staged)
-            VALUES (?, ?, ?, ?, 'added', 1)
-        """, (project['id'], branch['id'], file_record['id'], content))
+                (project_id, branch_id, file_id, content_text, state,
+                 staged_by_session_id)
+            VALUES (?, ?, ?, ?, 'added', ?)
+        """, (project['id'], branch['id'], file_record['id'], content, session['id']))
 
         return True
 
@@ -234,19 +423,25 @@ class VCSService(BaseService):
         if not branch:
             raise ResourceNotFoundError("No branch found")
 
+        session = self.get_current_session()
+        sid = session['id']
+
         if unstage_all:
+            pre = self.vcs_repo.query_one("""
+                SELECT COUNT(*) AS count FROM vcs_working_state
+                WHERE project_id = ? AND branch_id = ?
+                  AND staged_by_session_id = ?
+            """, (project['id'], branch['id'], sid))
+            count = pre['count'] if pre else 0
+
             self.vcs_repo.execute("""
                 UPDATE vcs_working_state
-                SET staged = 0
-                WHERE project_id = ? AND branch_id = ? AND staged = 1
-            """, (project['id'], branch['id']))
+                SET staged_by_session_id = NULL
+                WHERE project_id = ? AND branch_id = ?
+                  AND staged_by_session_id = ?
+            """, (project['id'], branch['id'], sid))
 
-            result = self.vcs_repo.query_one("""
-                SELECT COUNT(*) as count FROM vcs_working_state
-                WHERE project_id = ? AND branch_id = ? AND state != 'unmodified'
-            """, (project['id'], branch['id']))
-
-            return result['count'] if result else 0
+            return count
 
         elif file_patterns:
             count = 0
@@ -256,13 +451,14 @@ class VCSService(BaseService):
                     FROM vcs_working_state ws
                     JOIN project_files pf ON ws.file_id = pf.id
                     WHERE ws.project_id = ? AND ws.branch_id = ?
-                    AND ws.staged = 1 AND pf.file_path LIKE ?
-                """, (project['id'], branch['id'], f"%{pattern}%"))
+                      AND ws.staged_by_session_id = ?
+                      AND pf.file_path LIKE ?
+                """, (project['id'], branch['id'], sid, f"%{pattern}%"))
 
                 for file in files:
                     self.vcs_repo.execute("""
                         UPDATE vcs_working_state
-                        SET staged = 0
+                        SET staged_by_session_id = NULL
                         WHERE id = ?
                     """, (file['id'],))
                     count += 1
@@ -290,24 +486,34 @@ class VCSService(BaseService):
                 'untracked': []
             }
 
-        # Get working state
+        session = self.get_current_session()
+        sid = session['id']
+
         working_state = self.vcs_repo.query_all("""
-            SELECT ws.state, ws.staged, pf.file_path
+            SELECT ws.state, ws.staged_by_session_id, pf.file_path
             FROM vcs_working_state ws
             JOIN project_files pf ON ws.file_id = pf.id
             WHERE ws.project_id = ? AND ws.branch_id = ?
             ORDER BY pf.file_path
         """, (project['id'], branch['id']))
 
-        staged = [f['file_path'] for f in working_state if f['staged']]
+        staged = [f['file_path'] for f in working_state
+                  if f['staged_by_session_id'] == sid]
+        staged_by_others = [f['file_path'] for f in working_state
+                            if f['staged_by_session_id'] is not None
+                            and f['staged_by_session_id'] != sid]
         modified = [f['file_path'] for f in working_state
-                   if not f['staged'] and f['state'] == 'modified']
+                    if f['staged_by_session_id'] is None
+                    and f['state'] == 'modified']
         untracked = [f['file_path'] for f in working_state if f['state'] == 'added']
 
         return {
             'has_branch': True,
             'branch': branch['branch_name'],
+            'session_id': sid,
+            'session_name': session.get('name'),
             'staged': staged,
+            'staged_by_others': staged_by_others,
             'modified': modified,
             'untracked': untracked
         }

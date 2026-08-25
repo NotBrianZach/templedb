@@ -64,6 +64,8 @@ MIGRATION_SEQUENCE = [
     "079_ast_builds.sql",
     "080_agent_pending_asks.sql",
     "081_graph_query_log.sql",
+    "082_vcs_sessions.sql",
+    "083_drop_staged_boolean.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",
@@ -146,6 +148,41 @@ class Migrator:
             conn.rollback()
             return False
 
+    # Tables introduced by migrations *after* schema.sql's frozen point.
+    # If any are missing after a fresh install, the corresponding migration
+    # failed for a real reason (not a "schema.sql already has it" reason)
+    # and someone needs to look.
+    _POST_SCHEMA_TABLES = (
+        "nix_store_paths",      # 075
+        "agent_work_log",       # 076
+        "config_nodes",         # 077
+        "ast_builds",           # 079
+        "agent_pending_asks",   # 080
+        "graph_query_log",      # 081
+        "vcs_sessions",         # 082
+    )
+
+    def _verify_critical_tables(self, conn: sqlite3.Connection) -> None:
+        """After fresh install: assert every post-schema.sql migration's
+        key table exists. Missing tables mean the migration was silently
+        swallowed by our error tolerance."""
+        missing = []
+        for tbl in self._POST_SCHEMA_TABLES:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (tbl,),
+            ).fetchone()
+            if not row:
+                missing.append(tbl)
+        if missing:
+            logger.error(
+                f"Post-schema.sql tables missing after fresh install: {missing}. "
+                "This means a migration failed and its errors were swallowed. "
+                "Run `templedb admin db status` and inspect the marker hashes."
+            )
+            raise RuntimeError(f"Fresh install left tables missing: {missing}")
+
+
     def migrate(self, dry_run: bool = False) -> Tuple[int, int]:
         """
         Apply all pending migrations.
@@ -167,7 +204,16 @@ class Migrator:
         skipped_count = 0
 
         if fresh:
-            # Fresh install — apply schema.sql (the full canonical schema)
+            # Fresh install: schema.sql is the canonical superset. Mark
+            # all numbered migrations as applied via 'via-schema.sql' so
+            # subsequent non-fresh runs won't try to re-apply them.
+            #
+            # Correctness depends on schema.sql actually reflecting every
+            # migration's endpoint state. If schema.sql drifts (as
+            # happened Aug 2026 with migrations 075-082 missing), fresh
+            # installs get a broken shape. `_verify_critical_tables`
+            # catches that at install time; long-term fix is to
+            # regenerate schema.sql after every new migration lands.
             schema_file = "schema.sql"
             if schema_file not in applied:
                 if dry_run:
@@ -181,8 +227,6 @@ class Migrator:
                         conn.close()
                         return (0, 0)
 
-                # Mark all numbered migrations as applied since schema.sql
-                # is the consolidated superset
                 for i, filename in enumerate(MIGRATION_SEQUENCE, start=1):
                     if filename not in applied:
                         if not dry_run:
@@ -195,7 +239,8 @@ class Migrator:
 
                 if not dry_run:
                     conn.commit()
-                print(f"  Marked {skipped_count} numbered migrations as applied (included in schema.sql)")
+                    print(f"  Marked {skipped_count} numbered migrations as applied (schema.sql superset)")
+                    self._verify_critical_tables(conn)
         else:
             # Existing DB — apply only missing numbered migrations
             for i, filename in enumerate(MIGRATION_SEQUENCE, start=1):

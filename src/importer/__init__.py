@@ -599,9 +599,10 @@ class WorkingStateDetector:
         # not replace it with a fresh disk-scan hash, or `vcs commit` will
         # silently commit stale on-disk content instead of the intended DB blob.
         staged_before = query_all("""
-            SELECT file_id, content_hash, state
+            SELECT file_id, content_hash, state, staged_by_session_id
             FROM vcs_working_state
-            WHERE project_id = ? AND branch_id = ? AND staged = 1
+            WHERE project_id = ? AND branch_id = ?
+              AND staged_by_session_id IS NOT NULL
         """, (self.project_id, branch_id))
         staged_map = {row['file_id']: row for row in staged_before}
 
@@ -682,8 +683,8 @@ class WorkingStateDetector:
                         branch_id,
                         file_id,
                         preserved['state'] if preserved else state,
-                        1 if preserved else 0,
                         preserved['content_hash'] if preserved else file_content.hash_sha256,
+                        preserved['staged_by_session_id'] if preserved else None,
                     ))
             else:
                 # Check if modified
@@ -738,16 +739,16 @@ class WorkingStateDetector:
 
                 # If the user already staged this file with a specific
                 # content_hash (typically via `templedb file set`), keep
-                # that hash and the staged flag. Otherwise emit the fresh
-                # disk-scan state.
+                # that hash and the session attribution. Otherwise emit
+                # the fresh disk-scan state.
                 preserved = staged_map.get(file_id)
                 records.append((
                     self.project_id,
                     branch_id,
                     file_id,
                     preserved['state'] if preserved else state,
-                    1 if preserved else 0,
                     preserved['content_hash'] if preserved else file_content.hash_sha256,
+                    preserved['staged_by_session_id'] if preserved else None,
                 ))
 
         # Check for deleted files
@@ -765,8 +766,8 @@ class WorkingStateDetector:
                         branch_id,
                         file_id,
                         preserved['state'],
-                        1,
                         preserved['content_hash'],
+                        preserved['staged_by_session_id'],
                     ))
                     continue
 
@@ -775,15 +776,16 @@ class WorkingStateDetector:
                     branch_id,
                     file_id,
                     state,
-                    0,  # staged
-                    None  # No hash for deleted files
+                    None,  # No hash for deleted files
+                    None,  # staged_by_session_id
                 ))
 
         # Insert working state
         if records:
             executemany("""
                 INSERT INTO vcs_working_state
-                (project_id, branch_id, file_id, state, staged, content_hash)
+                (project_id, branch_id, file_id, state, content_hash,
+                 staged_by_session_id)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, records, commit=True)
 
