@@ -413,7 +413,7 @@ section marker and pull inserts to the wrong spot."
   (save-excursion
     (goto-char (point-min))
     (if (re-search-forward "^\\* Next Prompt\\(?:\n\\|$\\)" nil t)
-        (progn (beginning-of-line) (point))
+        (match-beginning 0)
       (point-max))))
 
 (defun templedb-agent--end-of-current-exchange ()
@@ -743,13 +743,38 @@ Full detail already lives in the file bucket; this is just a cross-index."
            (shown-lines (length (split-string truncated "\n"))))
       (format "%s\n... +%d lines" truncated (- total-lines shown-lines)))))
 
-(defun templedb-agent--restore-messages (messages)
-  "Restore conversation from saved MESSAGES."
-  (dolist (msg messages)
+(defun templedb-agent--insert-past-tool-event (event)
+  "Insert a past tool.* EVENT as a level-3 heading in the current exchange.
+Live runs use rich blocks (see `--insert-rich-tool'); reload only replays
+STATUS/summary because we don't persist enough state to rebuild the blocks."
+  (let ((event-type (alist-get 'event_type event))
+        (summary (or (alist-get 'summary event) "")))
+    (when (and event-type (string-prefix-p "tool." event-type))
+      (let ((status (pcase event-type
+                      ("tool.started"   "RUNNING")
+                      ("tool.completed" "DONE")
+                      ("tool.failed"    "FAILED"))))
+        (when status
+          (save-excursion
+            (goto-char (templedb-agent--end-of-current-exchange))
+            (let ((inhibit-read-only t))
+              (insert (format "\n*** %s %s\n" status summary)))))))))
+
+(defun templedb-agent--restore-conversation (messages events-by-run)
+  "Restore conversation from saved MESSAGES with tool events from EVENTS-BY-RUN.
+For each assistant message with a run_id, append past tool.* events as
+level-3 headings under the current exchange."
+  (dolist (msg (append messages nil))
     (let ((role (alist-get 'role msg))
-          (text (alist-get 'content_text msg)))
+          (text (alist-get 'content_text msg))
+          (run-id (alist-get 'run_id msg)))
       (when (and role text (not (string-empty-p text)))
-        (templedb-agent--insert-conversation-entry role text)))))
+        (templedb-agent--insert-conversation-entry role text))
+      (when (and (equal role "assistant") run-id events-by-run)
+        (let* ((run-key (intern (format "%s" run-id)))
+               (events (alist-get run-key events-by-run)))
+          (dolist (event (append events nil))
+            (templedb-agent--insert-past-tool-event event)))))))
 
 ;;;; User commands
 
@@ -928,17 +953,26 @@ and gets a `PINNED: <ISO timestamp>' property."
    `((session_id . ,templedb-agent--session-id))
    (lambda (result)
      (let ((session (alist-get 'session result))
-           (org-text (alist-get 'org result)))
+           (messages (alist-get 'messages result))
+           (events-by-run (alist-get 'events_by_run result))
+           (notes (alist-get 'notes result))
+           (pos (point)))
        (setq templedb-agent--status (alist-get 'status session))
        (setq templedb-agent--project
              (or (alist-get 'project_slug session) templedb-agent--project))
        (setq templedb-agent--provider
              (or (alist-get 'provider_name session) templedb-agent--provider))
-       (when org-text
-         (let ((inhibit-read-only t) (pos (point)))
-           (erase-buffer)
-           (insert org-text)
-           (goto-char (min pos (point-max)))))))))
+       (templedb-agent--render-buffer)
+       (when messages
+         (templedb-agent--restore-conversation messages events-by-run))
+       (when notes
+         (when-let ((g (alist-get 'goal_org notes)))
+           (templedb-agent--set-section-text "Goal" g))
+         (when-let ((n (alist-get 'notes_org notes)))
+           (templedb-agent--set-section-text "Notes" n))
+         (when-let ((s (alist-get 'scratch_org notes)))
+           (templedb-agent--set-section-text "Scratch" s)))
+       (goto-char (min pos (point-max)))))))
 
 ;;;; Session management
 
@@ -1013,16 +1047,16 @@ and gets a `PINNED: <ISO timestamp>' property."
      (when (buffer-live-p buf)
        (with-current-buffer buf
          (let ((session (alist-get 'session result))
-               (org-text (alist-get 'org result))
+               (messages (alist-get 'messages result))
+               (events-by-run (alist-get 'events_by_run result))
                (notes (alist-get 'notes result)))
            (setq templedb-agent--project
                  (or (alist-get 'project_slug session) templedb-agent--project))
            (setq templedb-agent--provider (alist-get 'provider_name session))
            (setq templedb-agent--status (alist-get 'status session))
-           (if org-text
-               (let ((inhibit-read-only t))
-                 (erase-buffer) (insert org-text))
-             (templedb-agent--render-buffer))
+           (templedb-agent--render-buffer)
+           (when messages
+             (templedb-agent--restore-conversation messages events-by-run))
            (when notes
              (when-let ((g (alist-get 'goal_org notes)))
                (templedb-agent--set-section-text "Goal" g))
@@ -1109,18 +1143,25 @@ If PROJECT has a recent session, offers to resume it."
              (when (buffer-live-p buf)
                (with-current-buffer buf
                  (let ((session (alist-get 'session result))
-                       (org-text (alist-get 'org result)))
+                       (messages (alist-get 'messages result))
+                       (events-by-run (alist-get 'events_by_run result))
+                       (notes (alist-get 'notes result)))
                    (setq templedb-agent--project
                          (or (alist-get 'project_slug session) ""))
                    (setq templedb-agent--provider
                          (alist-get 'provider_name session))
                    (setq templedb-agent--status
                          (alist-get 'status session))
-                   (if org-text
-                       (let ((inhibit-read-only t))
-                         (erase-buffer)
-                         (insert org-text))
-                     (templedb-agent--render-buffer))
+                   (templedb-agent--render-buffer)
+                   (when messages
+                     (templedb-agent--restore-conversation messages events-by-run))
+                   (when notes
+                     (when-let ((g (alist-get 'goal_org notes)))
+                       (templedb-agent--set-section-text "Goal" g))
+                     (when-let ((n (alist-get 'notes_org notes)))
+                       (templedb-agent--set-section-text "Notes" n))
+                     (when-let ((s (alist-get 'scratch_org notes)))
+                       (templedb-agent--set-section-text "Scratch" s)))
                    (message "Temple Agent session %d opened (%s)"
                             session-id (alist-get 'status session))))))))
       (if (< n 10)
