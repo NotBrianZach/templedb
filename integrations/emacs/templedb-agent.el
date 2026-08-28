@@ -550,14 +550,29 @@ Ends at the next `***'/`**'/`* ' heading, or end of conversation."
           (progn (beginning-of-line) (point))
         conv-end))))
 
+(defun templedb-agent--assert-in-conversation (pos where)
+  "Warn if POS is past end-of-conversation. WHERE is a context string.
+Returns t when out-of-range so callers can substitute a safe value."
+  (let ((eoc (templedb-agent--end-of-conversation)))
+    (when (> pos eoc)
+      (message "[templedb-agent WARN] %s tried to insert at %d, past end-of-conv %d (delta %d). Backtrace: %S"
+               where pos eoc (- pos eoc)
+               (mapcar (lambda (frame) (nth 1 frame))
+                       (nthcdr 2 (backtrace-frames))))
+      t)))
+
 (defun templedb-agent--find-or-create-bucket (name)
   "Return point at start of bucket NAME in the current exchange.
-Creates the bucket if missing. `Errors' always sorts last."
+Creates the bucket if missing. `Errors' always sorts last.
+Refuses to create past `--end-of-conversation' (defense in depth)."
   (or (templedb-agent--find-bucket name)
       (let* ((exchange-end (templedb-agent--end-of-conversation))
              (errors-point (unless (string= name "Errors")
                              (templedb-agent--find-bucket "Errors")))
              (insert-at (or errors-point exchange-end)))
+        (when (templedb-agent--assert-in-conversation
+               insert-at (format "find-or-create-bucket %s" name))
+          (setq insert-at exchange-end))
         (save-excursion
           (goto-char insert-at)
           (let ((inhibit-read-only t)
