@@ -1792,12 +1792,31 @@ Optionally filter by PROJECT slug."
            ((string-empty-p text) nil)
            (t text)))))))
 
+(defun templedb-agent--scratch-is-polluted-p (text)
+  "Return non-nil if scratch TEXT contains tool-bucket markers.
+Real user scratch content shouldn't include :TOOL_ID: property drawers
+or `**** RUNNING/DONE/FAILED' tool headings. If we find those, the
+buffer got polluted by a rendering bug and we should NOT persist it."
+  (and text
+       (or (string-match-p ":TOOL_ID:" text)
+           (string-match-p "^\\*\\*\\*\\* \\(RUNNING\\|DONE\\|FAILED\\) " text))))
+
 (defun templedb-agent--save-notes-to-db ()
-  "Save Goal, Notes, and Scratch sections to the database."
+  "Save Goal, Notes, and Scratch sections to the database.
+Refuses to persist Scratch when it contains tool-bucket markers,
+which indicate the section was polluted by a rendering bug rather
+than typed by the user. Logs to *Messages* when this happens so the
+underlying bug can be traced."
   (when templedb-agent--session-id
-    (let ((goal (templedb-agent--get-section-text "Goal"))
-          (notes (templedb-agent--get-section-text "Notes"))
-          (scratch (templedb-agent--get-section-text "Scratch")))
+    (let* ((goal (templedb-agent--get-section-text "Goal"))
+           (notes (templedb-agent--get-section-text "Notes"))
+           (raw-scratch (templedb-agent--get-section-text "Scratch"))
+           (scratch (if (templedb-agent--scratch-is-polluted-p raw-scratch)
+                        (progn
+                          (message "[templedb-agent WARN] Scratch contains tool-bucket markers (%d chars); refusing to persist. Buffer got polluted by a render bug."
+                                   (length raw-scratch))
+                          nil)
+                      raw-scratch)))
       (when (or goal notes scratch)
         (templedb-agent--send
          "notes.set"
