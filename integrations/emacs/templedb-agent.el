@@ -14,6 +14,8 @@
 
 (require 'json)
 (require 'org)
+(require 'ewoc)
+(require 'cl-lib)
 
 ;;;; Configuration
 
@@ -124,6 +126,208 @@ inherit the anchor. Intended for use inside `--render-buffer' only."
     (add-text-properties start (1+ start)
                          `(templedb-section ,id
                            rear-nonsticky (templedb-section)))))
+
+;;; Conversation model (Phase C: ewoc-driven rendering)
+;;
+;; The Conversation region between the `conversation' and `next-prompt'
+;; anchors is exclusively managed by an ewoc. Each node's data is one
+;; exchange plist; the pretty-printer renders it to org text. Event
+;; handlers mutate the plist and call `ewoc-invalidate' on the node.
+;;
+;; Exchange plist shape:
+;;   (:id INTEGER
+;;    :user-text STRING-OR-NIL     — the user prompt
+;;    :assistant-text STRING       — accumulating; "" until first delta
+;;    :assistant-done BOOL         — true after run.completed
+;;    :buckets ALIST               — ((\"bucket-name\" . (TOOL TOOL ...)) ...)
+;;    :messages LIST               — of (:header S :body S)
+;;    :stats PLIST)                — (:tools N :failed N :started FLOAT :duration F-OR-NIL)
+;;
+;; Tool plist shape:
+;;   (:id STRING :name STRING :input STRING :bucket STRING
+;;    :status (running | done | failed)
+;;    :summary STRING :output STRING-OR-NIL :duration NUM-OR-NIL)
+;;
+;; Rendering rule: within an exchange we always emit in a fixed order —
+;; User, Buckets (in insertion order), Messages, Assistant. This gives
+;; up the strict "insertion-order" interleaving of the old imperative
+;; renderer, but matches how humans read the log and eliminates the
+;; whole class of "insert into the wrong region" bugs by construction.
+
+(defvar-local templedb-agent--conv-ewoc nil
+  "Ewoc that owns the Conversation region.")
+
+(defun templedb-agent--make-exchange (&rest kws)
+  "Return a fresh exchange plist. Accepts :user-text keyword."
+  (list :id (if templedb-agent--conv-ewoc
+                (or (cl-loop for node = (ewoc-nth templedb-agent--conv-ewoc 0)
+                             then (ewoc-next templedb-agent--conv-ewoc node)
+                             while node
+                             count 1) 0)
+              0)
+        :user-text (plist-get kws :user-text)
+        :assistant-text ""
+        :assistant-done nil
+        :buckets nil
+        :messages nil
+        :stats (list :tools 0 :failed 0 :started (float-time) :duration nil)))
+
+(defun templedb-agent--last-exchange-node ()
+  "Return the ewoc node of the last exchange, or nil."
+  (when templedb-agent--conv-ewoc
+    (ewoc-nth templedb-agent--conv-ewoc -1)))
+
+(defun templedb-agent--mutate-last-exchange (fn)
+  "Apply FN to the last exchange plist, then re-render its node.
+FN is called with the plist and should mutate it in place (via
+`plist-put' returning a new list, then setting it back with
+`setf' on the node data)."
+  (when-let ((node (templedb-agent--last-exchange-node)))
+    (let ((ex (ewoc-data node)))
+      (funcall fn ex)
+      (setf (ewoc-data node) ex)
+      (ewoc-invalidate templedb-agent--conv-ewoc node))))
+
+;;;; Rendering helpers
+
+(defun templedb-agent--pp-stats-badge (stats)
+  "Format the ` [Nt · Xs]' badge for STATS. Empty string if 0 tools and no duration."
+  (let ((tools (or (plist-get stats :tools) 0))
+        (failed (or (plist-get stats :failed) 0))
+        (dur (plist-get stats :duration)))
+    (cond
+     ((and (zerop tools) (null dur)) "")
+     (dur (if (> failed 0)
+              (format " [%dt/%df · %.1fs]" tools failed dur)
+            (format " [%dt · %.1fs]" tools dur)))
+     (t (if (> failed 0)
+            (format " [%dt/%df]" tools failed)
+          (format " [%dt]" tools))))))
+
+(defun templedb-agent--pp-tool (tool)
+  "Render one TOOL plist to org text at point."
+  (let* ((status (plist-get tool :status))
+         (status-str (upcase (symbol-name status)))
+         (summary (or (plist-get tool :summary) (plist-get tool :name) "tool"))
+         (dur (plist-get tool :duration))
+         (heading (if dur
+                      (format "**** %s %s (%.1fs)\n" status-str summary dur)
+                    (format "**** %s %s\n" status-str summary))))
+    (insert heading)
+    (insert (format ":PROPERTIES:\n:TOOL_ID: %s\n:END:\n" (plist-get tool :id)))
+    (let ((input (plist-get tool :input))
+          (name (plist-get tool :name)))
+      (when (and input (not (string-empty-p input)))
+        (let ((lang (cond
+                     ((member name '("Bash" "bash")) "shell")
+                     ((member name '("Edit" "edit")) "diff")
+                     (t ""))))
+          (insert (format "#+begin_src %s\n%s\n#+end_src\n"
+                          lang
+                          (templedb-agent--truncate-output input 500))))))
+    (when-let ((output (plist-get tool :output)))
+      (when (not (string-empty-p output))
+        (insert (format "#+begin_example\n%s\n#+end_example\n"
+                        (templedb-agent--truncate-output output 1000)))))))
+
+(defun templedb-agent--pp-exchange (ex)
+  "Pretty-print exchange EX at point. Called by ewoc on invalidate."
+  (let ((user-text (plist-get ex :user-text))
+        (buckets (plist-get ex :buckets))
+        (messages (plist-get ex :messages))
+        (assistant-text (plist-get ex :assistant-text))
+        (assistant-done (plist-get ex :assistant-done))
+        (stats (plist-get ex :stats)))
+    ;; Exchange heading
+    (insert (format "** %s%s\n"
+                    (templedb-agent--exchange-title (or user-text ""))
+                    (templedb-agent--pp-stats-badge stats)))
+    (when (and user-text (not (string-empty-p user-text)))
+      (insert (format "*** User\n\n%s\n" user-text)))
+    ;; Buckets (insertion order preserved in the alist)
+    (dolist (bucket-pair buckets)
+      (let ((name (car bucket-pair))
+            (tools (cdr bucket-pair)))
+        (insert (format "*** %s\n" name))
+        (dolist (tool tools)
+          (templedb-agent--pp-tool tool))))
+    ;; Agent-side messages (mcp__templedb__templedb_ask_user etc.)
+    (dolist (msg messages)
+      (insert (format "*** Message: %s\n\n%s\n"
+                      (plist-get msg :header)
+                      (plist-get msg :body))))
+    ;; Assistant text (accumulating during streaming)
+    (when (or assistant-done (not (string-empty-p assistant-text)))
+      (insert (format "*** Assistant\n\n%s%s\n"
+                      assistant-text
+                      (if assistant-done "" ""))))))
+
+;;;; Ewoc mutations (called from event handlers)
+
+(defun templedb-agent--enter-exchange (user-text)
+  "Push a new exchange (with USER-TEXT) as the last ewoc node."
+  (when templedb-agent--conv-ewoc
+    (ewoc-enter-last templedb-agent--conv-ewoc
+                     (templedb-agent--make-exchange :user-text user-text))))
+
+(defun templedb-agent--append-assistant-delta (text)
+  "Append TEXT to the last exchange's assistant-text and re-render."
+  (templedb-agent--mutate-last-exchange
+   (lambda (ex)
+     (plist-put ex :assistant-text
+                (concat (plist-get ex :assistant-text) text)))))
+
+(defun templedb-agent--mark-assistant-done ()
+  "Mark the last exchange's assistant as done."
+  (templedb-agent--mutate-last-exchange
+   (lambda (ex) (plist-put ex :assistant-done t))))
+
+(defun templedb-agent--add-tool (bucket-name tool)
+  "Append TOOL to BUCKET-NAME in the last exchange, creating bucket if needed."
+  (templedb-agent--mutate-last-exchange
+   (lambda (ex)
+     (let* ((buckets (plist-get ex :buckets))
+            (pair (assoc bucket-name buckets)))
+       (if pair
+           (setcdr pair (append (cdr pair) (list tool)))
+         (plist-put ex :buckets
+                    (append buckets (list (cons bucket-name (list tool)))))))
+     ;; Bump stats
+     (let ((stats (plist-get ex :stats)))
+       (plist-put stats :tools (1+ (or (plist-get stats :tools) 0)))))))
+
+(defun templedb-agent--update-tool (tool-id updater)
+  "Find TOOL-ID in the last exchange's buckets, mutate via UPDATER, re-render.
+UPDATER is called with the tool plist and should mutate it in place."
+  (templedb-agent--mutate-last-exchange
+   (lambda (ex)
+     (cl-loop for bucket in (plist-get ex :buckets)
+              do (cl-loop for tool in (cdr bucket)
+                          when (equal (plist-get tool :id) tool-id)
+                          do (funcall updater tool))))))
+
+(defun templedb-agent--add-message (header body)
+  "Append an agent message to the last exchange."
+  (templedb-agent--mutate-last-exchange
+   (lambda (ex)
+     (plist-put ex :messages
+                (append (plist-get ex :messages)
+                        (list (list :header header :body body)))))))
+
+(defun templedb-agent--finalize-stats ()
+  "Compute :duration on the last exchange's stats and re-render."
+  (templedb-agent--mutate-last-exchange
+   (lambda (ex)
+     (let ((stats (plist-get ex :stats)))
+       (plist-put stats :duration
+                  (- (float-time) (or (plist-get stats :started) (float-time))))))))
+
+(defun templedb-agent--bump-failed ()
+  "Increment :failed on the last exchange's stats."
+  (templedb-agent--mutate-last-exchange
+   (lambda (ex)
+     (let ((stats (plist-get ex :stats)))
+       (plist-put stats :failed (1+ (or (plist-get stats :failed) 0)))))))
 
 ;;;; State
 
@@ -255,44 +459,65 @@ inherit the anchor. Intended for use inside `--render-buffer' only."
        (templedb-agent--stop-timer)
        (templedb-agent--set-now (or summary "Ready"))
        (templedb-agent--set-status "waiting")
-       (templedb-agent--finalize-streaming)
-       (templedb-agent--finalize-exchange-stats)
-       ;; NOTE: user sections (Goal/Notes/Scratch) are NOT saved here.
-       ;; See `templedb-agent-save-user-sections' — persistence is now
-       ;; driven by user edits (idle timer / kill-buffer), not by run
-       ;; completion, so a buggy render can't pollute the DB.
+       (templedb-agent--mark-assistant-done)
+       (templedb-agent--finalize-stats)
        (templedb-agent--notify-if-hidden "Run completed"))
       ("run.failed"
        (templedb-agent--stop-timer)
        (templedb-agent--set-now (format "Failed: %s" (or summary "unknown error")))
        (templedb-agent--set-status "failed")
-       (templedb-agent--finalize-streaming)
-       (templedb-agent--finalize-exchange-stats)
+       (templedb-agent--mark-assistant-done)
+       (templedb-agent--finalize-stats)
        (templedb-agent--notify-if-hidden "Run failed"))
       ("run.interrupted"
        (templedb-agent--stop-timer)
        (templedb-agent--set-now "Interrupted")
        (templedb-agent--set-status "interrupted")
-       (templedb-agent--finalize-streaming)
-       (templedb-agent--finalize-exchange-stats))
+       (templedb-agent--mark-assistant-done)
+       (templedb-agent--finalize-stats))
       ("assistant.started"
-       (templedb-agent--set-now "Generating response...")
-       (templedb-agent--start-streaming))
+       (templedb-agent--set-now "Generating response..."))
       ("assistant.delta"
        (when-let ((text (alist-get 'text data)))
-         (templedb-agent--append-streaming text)))
+         (templedb-agent--append-assistant-delta text)
+         (templedb-agent--auto-scroll)))
       ("assistant.completed"
        (templedb-agent--set-now "Response complete"))
       ("tool.started"
        (templedb-agent--set-now (or summary "Running tool..."))
-       (templedb-agent--bump-stat :tools)
-       (templedb-agent--insert-rich-tool summary data "RUNNING"))
+       (let* ((tool-name (alist-get 'tool_name data))
+              (tool-id (or (alist-get 'tool_id data) (format "t%d" (random 100000))))
+              (tool-input (alist-get 'tool_input data))
+              (bucket (templedb-agent--tool-bucket-name data))
+              (tool (list :id tool-id :name tool-name :input (or tool-input "")
+                          :bucket bucket :status 'running
+                          :summary (or summary tool-name "tool")
+                          :output nil :duration nil)))
+         (templedb-agent--add-tool bucket tool)
+         (templedb-agent--auto-scroll)))
       ("tool.completed"
-       (templedb-agent--complete-rich-tool summary data "DONE"))
+       (let ((tool-id (alist-get 'tool_id data))
+             (output (alist-get 'tool_output data))
+             (duration (alist-get 'duration data)))
+         (templedb-agent--update-tool
+          tool-id
+          (lambda (tool)
+            (plist-put tool :status 'done)
+            (plist-put tool :output output)
+            (plist-put tool :duration duration)
+            (when summary (plist-put tool :summary summary))))))
       ("tool.failed"
-       (templedb-agent--bump-stat :failed)
-       (templedb-agent--complete-rich-tool summary data "FAILED")
-       (templedb-agent--insert-error-entry summary data (alist-get 'duration data)))
+       (templedb-agent--bump-failed)
+       (let ((tool-id (alist-get 'tool_id data))
+             (output (alist-get 'tool_output data))
+             (duration (alist-get 'duration data)))
+         (templedb-agent--update-tool
+          tool-id
+          (lambda (tool)
+            (plist-put tool :status 'failed)
+            (plist-put tool :output output)
+            (plist-put tool :duration duration)
+            (when summary (plist-put tool :summary summary))))))
       ("provider.rate_limited"
        (templedb-agent--set-now "Rate limited. Waiting..."))
       ("provider.login_required"
@@ -314,10 +539,10 @@ tool_result can return to Claude."
         (questions (alist-get 'questions data)))
     (if (not (and ask-id questions))
         (message "Temple Agent: malformed ask event, ignoring")
-      ;; Insert a marker into Conversation so the exchange history reflects
-      ;; that Claude asked, before we blocked on completing-read.
-      (templedb-agent--insert-conversation-entry
-       "ask"
+      ;; Post a marker on the current exchange so the log shows Claude asked,
+      ;; before we block on completing-read for the answers.
+      (templedb-agent--add-message
+       "Ask"
        (mapconcat (lambda (q)
                     (format "Q: %s" (alist-get 'question q)))
                   questions "\n"))
@@ -336,24 +561,20 @@ tool_result can return to Claude."
          "ask.respond"
          `((ask_id . ,ask-id)
            (response . ((answers . ,(nreverse answers))))))
-        (templedb-agent--insert-conversation-entry
-         "user"
-         (format "[answered] %s"
-                 (mapconcat (lambda (a)
-                              (format "%s → %s" (car a)
-                                      (if (listp (cdr a))
-                                          (mapconcat #'identity (cdr a) ", ")
-                                        (cdr a))))
-                            (reverse answers) "; ")))))))
+        (templedb-agent--add-message
+         "Answered"
+         (mapconcat (lambda (a)
+                      (format "%s → %s" (car a)
+                              (if (listp (cdr a))
+                                  (mapconcat #'identity (cdr a) ", ")
+                                (cdr a))))
+                    (reverse answers) "; "))))))
 
 (defun templedb-agent--handle-agent-message (data)
-  "Render a one-way message from the agent as a *** Message entry."
+  "Render a one-way message from the agent as an ewoc message entry."
   (let ((header (or (alist-get 'header data) "Message"))
         (body (or (alist-get 'body data) "")))
-    (save-excursion
-      (goto-char (templedb-agent--end-of-current-exchange))
-      (let ((inhibit-read-only t))
-        (insert (format "\n*** Message: %s\n\n%s\n" header body))))
+    (templedb-agent--add-message header body)
     (templedb-agent--auto-scroll)
     (templedb-agent--notify-if-hidden (format "Agent: %s" header))))
 
@@ -425,6 +646,11 @@ tool_result can return to Claude."
     (insert "\n")
     (templedb-agent--insert-section 'conversation "Conversation")
     (insert "\n")
+    ;; The Conversation body is exclusively owned by the ewoc from here down.
+    ;; Nothing else may `insert' into the region between here and the next
+    ;; section anchor (Next Prompt) — all edits go through ewoc mutations.
+    (setq templedb-agent--conv-ewoc
+          (ewoc-create #'templedb-agent--pp-exchange nil nil t))
     (templedb-agent--insert-section 'next-prompt "Next Prompt")
     (insert "\n\n")
     (templedb-agent--insert-section 'pinned "Pinned")
@@ -847,19 +1073,62 @@ STATUS/summary because we don't persist enough state to rebuild the blocks."
 
 (defun templedb-agent--restore-conversation (messages events-by-run)
   "Restore conversation from saved MESSAGES with tool events from EVENTS-BY-RUN.
-For each assistant message with a run_id, append past tool.* events as
-level-3 headings under the current exchange."
-  (dolist (msg (append messages nil))
-    (let ((role (alist-get 'role msg))
-          (text (alist-get 'content_text msg))
-          (run-id (alist-get 'run_id msg)))
-      (when (and role text (not (string-empty-p text)))
-        (templedb-agent--insert-conversation-entry role text))
-      (when (and (equal role "assistant") run-id events-by-run)
-        (let* ((run-key (intern (format "%s" run-id)))
-               (events (alist-get run-key events-by-run)))
-          (dolist (event (append events nil))
-            (templedb-agent--insert-past-tool-event event)))))))
+Builds one exchange plist per user message and pushes it into the ewoc.
+Assistant text and per-run tool events are folded into the matching
+exchange so the reload looks identical to a live session."
+  (when templedb-agent--conv-ewoc
+    (let (current-ex)
+      (dolist (msg (append messages nil))
+        (let ((role (alist-get 'role msg))
+              (text (alist-get 'content_text msg))
+              (run-id (alist-get 'run_id msg)))
+          (cond
+           ((and (equal role "user") text (not (string-empty-p text)))
+            ;; Push a new exchange with the user text.
+            (setq current-ex (templedb-agent--make-exchange :user-text text))
+            (ewoc-enter-last templedb-agent--conv-ewoc current-ex))
+           ((and (equal role "assistant") current-ex)
+            ;; Stamp assistant text onto the current exchange.
+            (when (and text (not (string-empty-p text)))
+              (plist-put current-ex :assistant-text text))
+            (plist-put current-ex :assistant-done t)
+            ;; Attach persisted tool events from this assistant's run.
+            (when (and run-id events-by-run)
+              (let* ((run-key (intern (format "%s" run-id)))
+                     (events (alist-get run-key events-by-run)))
+                (dolist (event (append events nil))
+                  (templedb-agent--restore-tool-event current-ex event))))
+            ;; Node was mutated in place; re-render it.
+            (ewoc-invalidate templedb-agent--conv-ewoc
+                             (templedb-agent--last-exchange-node)))))))))
+
+(defun templedb-agent--restore-tool-event (ex event)
+  "Fold one persisted tool.* EVENT into exchange plist EX (in place).
+Only enough state is reconstructed to show status + summary; full input/
+output blobs are not persisted per event, so we can't reproduce them."
+  (let ((event-type (alist-get 'event_type event))
+        (summary (or (alist-get 'summary event) "")))
+    (when (and event-type (string-prefix-p "tool." event-type))
+      (let* ((status (pcase event-type
+                       ("tool.started"   'running)
+                       ("tool.completed" 'done)
+                       ("tool.failed"    'failed)))
+             (tool-id (or (alist-get 'tool_id event) (format "restored-%d" (random 1000000))))
+             (bucket "Other")
+             (tool (list :id tool-id :name summary :input ""
+                         :bucket bucket :status status
+                         :summary summary :output nil :duration nil))
+             (buckets (plist-get ex :buckets))
+             (pair (assoc bucket buckets)))
+        (if pair
+            (setcdr pair (append (cdr pair) (list tool)))
+          (plist-put ex :buckets
+                     (append buckets (list (cons bucket (list tool))))))
+        (when (eq status 'failed)
+          (let ((stats (plist-get ex :stats)))
+            (plist-put stats :failed (1+ (or (plist-get stats :failed) 0)))))
+        (let ((stats (plist-get ex :stats)))
+          (plist-put stats :tools (1+ (or (plist-get stats :tools) 0))))))))
 
 ;;;; User commands
 
@@ -894,11 +1163,9 @@ level-3 headings under the current exchange."
     (templedb-agent--auto-goal-from-message text)
     ;; Fold prior exchanges before appending the new one (gated on eob).
     (templedb-agent--collapse-old-exchanges)
-    (templedb-agent--insert-conversation-entry "user" text)
+    ;; Push a new exchange node into the ewoc for this turn.
+    (templedb-agent--enter-exchange text)
     (templedb-agent--clear-prompt)
-    ;; Start stats for this exchange, anchored to the new ** heading.
-    (templedb-agent--reset-exchange-stats)
-    (templedb-agent--record-exchange-heading)
     (if (equal templedb-agent--status "running")
         (templedb-agent--send
          "message.queue"
@@ -980,7 +1247,7 @@ and gets a `PINNED: <ISO timestamp>' property."
 (defun templedb-agent-guide (guidance)
   "Send GUIDANCE to influence the current run."
   (interactive "sGuidance: ")
-  (templedb-agent--insert-conversation-entry "user" (format "[Guidance] %s" guidance))
+  (templedb-agent--add-message "Guidance" guidance)
   (templedb-agent--send
    "message.send"
    `((session_id . ,templedb-agent--session-id)
@@ -991,7 +1258,7 @@ and gets a `PINNED: <ISO timestamp>' property."
   "Send a slash COMMAND to Claude (e.g. /compact, /review, /cost)."
   (interactive "sSlash command: ")
   (let ((cmd (if (string-prefix-p "/" command) command (concat "/" command))))
-    (templedb-agent--insert-conversation-entry "user" cmd)
+    (templedb-agent--enter-exchange cmd)
     (templedb-agent--send
      "message.send"
      `((session_id . ,templedb-agent--session-id)
@@ -1692,8 +1959,7 @@ Includes goal text and per-project context items."
   (interactive)
   (let ((file (buffer-file-name)))
     (if file
-        (templedb-agent--insert-conversation-entry
-         "templedb" (format "[Context] File: %s" file))
+        (templedb-agent--add-message "Context" (format "File: %s" file))
       (user-error "Buffer has no file"))))
 
 (defun templedb-agent-add-region (start end)
@@ -1701,9 +1967,9 @@ Includes goal text and per-project context items."
   (interactive "r")
   (let ((text (buffer-substring-no-properties start end))
         (file (or (buffer-file-name) (buffer-name))))
-    (templedb-agent--insert-conversation-entry
-     "templedb"
-     (format "[Context] Selection from %s:\n#+begin_src\n%s\n#+end_src" file text))))
+    (templedb-agent--add-message
+     "Context"
+     (format "Selection from %s:\n#+begin_src\n%s\n#+end_src" file text))))
 
 (defun templedb-agent-ask-about-point ()
   "Ask the agent about the thing at point."
@@ -1719,13 +1985,13 @@ Includes goal text and per-project context items."
     (unless agent-buf (user-error "No active Temple Agent session"))
     (unless sym (user-error "No symbol at point"))
     (with-current-buffer agent-buf
-      (templedb-agent--insert-conversation-entry
-       "user" (format "What is `%s` at %s:%d?" sym file line))
-      (templedb-agent--send
-       "message.send"
-       `((session_id . ,templedb-agent--session-id)
-         (content . ,(format "What is `%s` at %s:%d?" sym file line)))
-       (lambda (_result) nil)))
+      (let ((q (format "What is `%s` at %s:%d?" sym file line)))
+        (templedb-agent--enter-exchange q)
+        (templedb-agent--send
+         "message.send"
+         `((session_id . ,templedb-agent--session-id)
+           (content . ,q))
+         (lambda (_result) nil))))
     (switch-to-buffer-other-window agent-buf)))
 
 ;;;; Work log viewer
