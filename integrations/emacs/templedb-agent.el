@@ -72,27 +72,57 @@ robust to user-typed content that looks like a heading.")
 ;; inside a section, to renaming, and to reordering.
 
 (defconst templedb-agent--section-order
-  '(guide now goal context conversation next-prompt pinned notes scratch)
-  "Order of top-level sections. Used by `--next-section-after' to walk
-the anchor chain when we need the position of the FIRST anchored section
-strictly after a given point.")
+  '(guide now goal context conversation next-prompt
+    findings todo open-questions
+    pinned notes scratch)
+  "Fixed top-level sections in display order.
+Dynamic sections (agent-created at runtime) are appended after this
+list at runtime via `--dynamic-section-order'; use
+`templedb-agent--all-section-ids' when you need the full live order.
+
+The three agent-writable sections (findings, todo, open-questions)
+sit directly after the user's Next Prompt so their content is visible
+when writing the next message but out of the way of the user's own
+Pinned/Notes/Scratch scratch space.")
+
+(defvar-local templedb-agent--dynamic-section-order nil
+  "Ordered list of dynamic-section anchor symbols (agent-created).
+Each symbol has the form `dynamic:NAME' (interned per session).
+Sections are appended in creation order and rendered after `scratch'.")
+
+(defun templedb-agent--all-section-ids ()
+  "Return the live section order: fixed then dynamic."
+  (append templedb-agent--section-order
+          templedb-agent--dynamic-section-order))
 
 (defconst templedb-agent--section-titles
-  '((guide        . "Guide")
-    (now          . "Now")
-    (goal         . "Goal")
-    (context      . "Context")
-    (conversation . "Conversation")
-    (next-prompt  . "Next Prompt")
-    (pinned       . "Pinned")
-    (notes        . "Notes")
-    (scratch      . "Scratch"))
-  "Symbol → heading title mapping.")
+  '((guide          . "Guide")
+    (now            . "Now")
+    (goal           . "Goal")
+    (context        . "Context")
+    (conversation   . "Conversation")
+    (next-prompt    . "Next Prompt")
+    (findings       . "Findings")
+    (todo           . "Todo")
+    (open-questions . "Open Questions")
+    (pinned         . "Pinned")
+    (notes          . "Notes")
+    (scratch        . "Scratch"))
+  "Symbol → heading title mapping for FIXED sections. Dynamic
+sections' titles are derived from the anchor symbol name.")
 
 (defun templedb-agent--section-title (id)
-  "Return the visible heading title for section ID."
+  "Return the visible heading title for section ID.
+For dynamic sections (`dynamic:NAME'), extracts NAME from the symbol."
   (or (alist-get id templedb-agent--section-titles)
-      (error "Unknown templedb-agent section id: %s" id)))
+      (let ((name (symbol-name id)))
+        (if (string-prefix-p "dynamic:" name)
+            (substring name (length "dynamic:"))
+          (error "Unknown templedb-agent section id: %s" id)))))
+
+(defun templedb-agent--dynamic-section-id (name)
+  "Return the anchor symbol for dynamic section NAME (e.g. \"Blockers\")."
+  (intern (concat "dynamic:" name)))
 
 (defun templedb-agent--find-section (id)
   "Return the buffer position of the anchored section heading for ID, or nil."
@@ -100,8 +130,9 @@ strictly after a given point.")
 
 (defun templedb-agent--next-section-after (pos)
   "Return the buffer position of the first anchored section heading
-strictly after POS, or `point-max' if none."
-  (or (cl-loop for id in templedb-agent--section-order
+strictly after POS, or `point-max' if none. Walks both fixed and
+dynamic sections in the live order."
+  (or (cl-loop for id in (templedb-agent--all-section-ids)
                for spos = (templedb-agent--find-section id)
                when (and spos (> spos pos)) return spos)
       (point-max)))
@@ -109,9 +140,10 @@ strictly after POS, or `point-max' if none."
 (defun templedb-agent--section-end (id)
   "Return the buffer position just before the section that follows ID,
 or `point-max' if ID is the last section (or missing)."
-  (let ((idx (cl-position id templedb-agent--section-order)))
+  (let* ((all (templedb-agent--all-section-ids))
+         (idx (cl-position id all)))
     (or (and idx
-             (cl-loop for next in (nthcdr (1+ idx) templedb-agent--section-order)
+             (cl-loop for next in (nthcdr (1+ idx) all)
                       for pos = (templedb-agent--find-section next)
                       when pos return pos))
         (point-max))))
@@ -329,6 +361,180 @@ UPDATER is called with the tool plist and should mutate it in place."
      (let ((stats (plist-get ex :stats)))
        (plist-put stats :failed (1+ (or (plist-get stats :failed) 0)))))))
 
+;;; Agent-writable sections (Phase D: Findings / Todo / Open Questions +
+;;; dynamic sections created by the agent at runtime).
+;;
+;; Each agent-writable section is owned by the agent: only the agent
+;; can add/remove entries, via events. The user can pin/copy/delete via
+;; commands. Data lives in buffer-local lists; renderers rewrite the
+;; section body in place, bounded by the section anchors. Persistence
+;; TODO: wire to DB via the same firewall as user sections
+;; (`templedb-agent-save-user-sections') — for now the state lives only
+;; in the running Emacs and rebuilds on session-open from event replay.
+;;
+;; Entry plists:
+;;   Finding: (:id :text :refs :timestamp)     — refs is optional list of strings
+;;   Todo:    (:id :text :priority :done :timestamp)   — priority: nil|'low|'medium|'high
+;;   Question:(:id :text :answered :answer :timestamp)
+;;   Dynamic: (:id :text :timestamp)           — free-form
+;;
+;; New events dispatched via `--handle-event' (Python MCP-tool side is
+;; a follow-up; for now user or tests trigger these via emacsclient):
+;;   agent.section.finding.add    {id, text, refs}
+;;   agent.section.finding.remove {id}
+;;   agent.section.todo.add       {id, text, priority}
+;;   agent.section.todo.done      {id}
+;;   agent.section.todo.remove    {id}
+;;   agent.section.question.add   {id, text}
+;;   agent.section.question.answered {id, answer}
+;;   agent.section.question.remove {id}
+;;   agent.section.dynamic.write  {section, id, text, mode?}
+;;                                mode: 'append (default) | 'replace
+;;   agent.section.dynamic.remove {section, id?}
+
+(defvar-local templedb-agent--findings nil "List of finding plists (newest last).")
+(defvar-local templedb-agent--todos nil "List of todo plists (newest last).")
+(defvar-local templedb-agent--open-questions nil "List of question plists (newest last).")
+(defvar-local templedb-agent--dynamic-sections nil
+  "Alist of (SECTION-NAME . LIST-OF-ENTRIES) for agent-created sections.
+SECTION-NAME is a string; entries are plists with :id :text :timestamp.")
+
+;;;; Renderers for the fixed agent sections
+
+(defun templedb-agent--pp-finding (f)
+  "Render one finding entry F at point."
+  (insert (format "- %s%s\n"
+                  (plist-get f :text)
+                  (if-let ((refs (plist-get f :refs)))
+                      (format " (refs: %s)" (mapconcat #'identity refs ", "))
+                    ""))))
+
+(defun templedb-agent--pp-todo (todo)
+  "Render one todo entry TODO at point."
+  (let ((done (plist-get todo :done))
+        (prio (plist-get todo :priority)))
+    (insert (format "- [%s] %s%s\n"
+                    (if done "X" " ")
+                    (plist-get todo :text)
+                    (if prio (format " ~%s~" prio) "")))))
+
+(defun templedb-agent--pp-question (q)
+  "Render one open-question entry Q at point."
+  (let ((answered (plist-get q :answered))
+        (answer (plist-get q :answer)))
+    (insert (format "- %s %s%s\n"
+                    (if answered "[✓]" "[?]")
+                    (plist-get q :text)
+                    (if (and answered answer) (format " → %s" answer) "")))))
+
+(defun templedb-agent--pp-dynamic-entry (e)
+  "Render one dynamic-section entry E at point."
+  (insert (format "- %s\n" (plist-get e :text))))
+
+(defun templedb-agent--rerender-section (id renderer entries)
+  "Rewrite the body of section ID by running RENDERER on each of ENTRIES.
+The heading line itself is preserved. Everything from the line after
+the heading up to (but not including) the next section anchor is
+replaced. RENDERER is called at point for each entry."
+  (when-let ((start (templedb-agent--find-section id)))
+    (save-excursion
+      (goto-char start)
+      (forward-line 1)                  ; past heading
+      (let ((body-start (point))
+            (body-end (templedb-agent--section-end id))
+            (inhibit-read-only t))
+        (delete-region body-start body-end)
+        (goto-char body-start)
+        (insert "\n")                   ; blank line under heading
+        (if entries
+            (dolist (e entries) (funcall renderer e))
+          (insert "(none)\n"))
+        (insert "\n")))))
+
+(defun templedb-agent--rerender-findings ()
+  (templedb-agent--rerender-section
+   'findings #'templedb-agent--pp-finding templedb-agent--findings))
+
+(defun templedb-agent--rerender-todos ()
+  (templedb-agent--rerender-section
+   'todo #'templedb-agent--pp-todo templedb-agent--todos))
+
+(defun templedb-agent--rerender-questions ()
+  (templedb-agent--rerender-section
+   'open-questions #'templedb-agent--pp-question
+   templedb-agent--open-questions))
+
+(defun templedb-agent--rerender-dynamic (name)
+  "Rerender the dynamic section NAME (a string)."
+  (let ((id (templedb-agent--dynamic-section-id name)))
+    (templedb-agent--rerender-section
+     id #'templedb-agent--pp-dynamic-entry
+     (cdr (assoc name templedb-agent--dynamic-sections)))))
+
+;;;; Mutations on agent-writable sections
+
+(defun templedb-agent--section-add-entry (place-symbol entry rerender-fn)
+  "Append ENTRY to the list held in the buffer-local PLACE-SYMBOL,
+then invoke RERENDER-FN."
+  (set place-symbol (append (symbol-value place-symbol) (list entry)))
+  (funcall rerender-fn))
+
+(defun templedb-agent--section-remove-entry (place-symbol id rerender-fn)
+  "Drop the first entry with matching :id from PLACE-SYMBOL, then rerender."
+  (set place-symbol
+       (cl-remove-if (lambda (e) (equal id (plist-get e :id)))
+                     (symbol-value place-symbol)))
+  (funcall rerender-fn))
+
+(defun templedb-agent--section-update-entry (place-symbol id updater rerender-fn)
+  "Find entry with :id = ID in PLACE-SYMBOL, mutate via UPDATER, rerender."
+  (dolist (e (symbol-value place-symbol))
+    (when (equal id (plist-get e :id))
+      (funcall updater e)))
+  (funcall rerender-fn))
+
+;;;; Dynamic sections
+
+(defun templedb-agent--ensure-dynamic-section (name)
+  "Create the dynamic section NAME if it doesn't exist. Idempotent.
+Appends the section to the buffer after all other sections."
+  (let ((id (templedb-agent--dynamic-section-id name)))
+    (unless (templedb-agent--find-section id)
+      (save-excursion
+        (goto-char (point-max))
+        ;; Ensure exactly two blank lines from previous section content.
+        (unless (bolp) (insert "\n"))
+        (let ((inhibit-read-only t))
+          (templedb-agent--insert-section id name)
+          (insert "\n")))
+      (setq templedb-agent--dynamic-section-order
+            (append templedb-agent--dynamic-section-order (list id)))
+      (unless (assoc name templedb-agent--dynamic-sections)
+        (setq templedb-agent--dynamic-sections
+              (append templedb-agent--dynamic-sections
+                      (list (cons name nil))))))))
+
+(defun templedb-agent--dynamic-add-entry (name entry)
+  "Append ENTRY to dynamic section NAME (creates if missing)."
+  (templedb-agent--ensure-dynamic-section name)
+  (let ((pair (assoc name templedb-agent--dynamic-sections)))
+    (setcdr pair (append (cdr pair) (list entry))))
+  (templedb-agent--rerender-dynamic name))
+
+(defun templedb-agent--dynamic-replace (name entries)
+  "Replace all entries in dynamic section NAME."
+  (templedb-agent--ensure-dynamic-section name)
+  (let ((pair (assoc name templedb-agent--dynamic-sections)))
+    (setcdr pair entries))
+  (templedb-agent--rerender-dynamic name))
+
+(defun templedb-agent--dynamic-remove-entry (name id)
+  "Remove entry with :id = ID from dynamic section NAME."
+  (when-let ((pair (assoc name templedb-agent--dynamic-sections)))
+    (setcdr pair (cl-remove-if (lambda (e) (equal id (plist-get e :id)))
+                               (cdr pair)))
+    (templedb-agent--rerender-dynamic name)))
+
 ;;;; State
 
 (defvar-local templedb-agent--session-id nil "Current session ID.")
@@ -527,7 +733,77 @@ UPDATER is called with the tool plist and should mutate it in place."
       ("agent.ask.question"
        (templedb-agent--handle-ask-question data))
       ("agent.message"
-       (templedb-agent--handle-agent-message data)))))
+       (templedb-agent--handle-agent-message data))
+      ;; Agent-writable sections (Phase D)
+      ("agent.section.finding.add"
+       (templedb-agent--section-add-entry
+        'templedb-agent--findings
+        (list :id (alist-get 'id data)
+              :text (alist-get 'text data)
+              :refs (append (alist-get 'refs data) nil)
+              :timestamp (format-time-string "%FT%T"))
+        #'templedb-agent--rerender-findings))
+      ("agent.section.finding.remove"
+       (templedb-agent--section-remove-entry
+        'templedb-agent--findings (alist-get 'id data)
+        #'templedb-agent--rerender-findings))
+      ("agent.section.todo.add"
+       (templedb-agent--section-add-entry
+        'templedb-agent--todos
+        (list :id (alist-get 'id data)
+              :text (alist-get 'text data)
+              :priority (when-let ((p (alist-get 'priority data)))
+                          (intern (if (symbolp p) (symbol-name p) p)))
+              :done nil
+              :timestamp (format-time-string "%FT%T"))
+        #'templedb-agent--rerender-todos))
+      ("agent.section.todo.done"
+       (templedb-agent--section-update-entry
+        'templedb-agent--todos (alist-get 'id data)
+        (lambda (todo) (plist-put todo :done t))
+        #'templedb-agent--rerender-todos))
+      ("agent.section.todo.remove"
+       (templedb-agent--section-remove-entry
+        'templedb-agent--todos (alist-get 'id data)
+        #'templedb-agent--rerender-todos))
+      ("agent.section.question.add"
+       (templedb-agent--section-add-entry
+        'templedb-agent--open-questions
+        (list :id (alist-get 'id data)
+              :text (alist-get 'text data)
+              :answered nil
+              :answer nil
+              :timestamp (format-time-string "%FT%T"))
+        #'templedb-agent--rerender-questions))
+      ("agent.section.question.answered"
+       (templedb-agent--section-update-entry
+        'templedb-agent--open-questions (alist-get 'id data)
+        (lambda (q)
+          (plist-put q :answered t)
+          (plist-put q :answer (alist-get 'answer data)))
+        #'templedb-agent--rerender-questions))
+      ("agent.section.question.remove"
+       (templedb-agent--section-remove-entry
+        'templedb-agent--open-questions (alist-get 'id data)
+        #'templedb-agent--rerender-questions))
+      ("agent.section.dynamic.write"
+       (let ((section-name (alist-get 'section data))
+             (mode (or (alist-get 'mode data) "append"))
+             (entry (list :id (alist-get 'id data)
+                          :text (alist-get 'text data)
+                          :timestamp (format-time-string "%FT%T"))))
+         (cond
+          ((or (equal mode "replace") (eq mode 'replace))
+           (templedb-agent--dynamic-replace section-name (list entry)))
+          (t
+           (templedb-agent--dynamic-add-entry section-name entry)))))
+      ("agent.section.dynamic.remove"
+       (let ((section-name (alist-get 'section data))
+             (id (alist-get 'id data)))
+         (if id
+             (templedb-agent--dynamic-remove-entry section-name id)
+           ;; No id → clear the whole section.
+           (templedb-agent--dynamic-replace section-name nil)))))))
 
 ;;;; Agent-to-user asks (mcp__templedb__templedb_ask_user)
 
@@ -653,12 +929,28 @@ tool_result can return to Claude."
           (ewoc-create #'templedb-agent--pp-exchange nil nil t))
     (templedb-agent--insert-section 'next-prompt "Next Prompt")
     (insert "\n\n")
+    ;; Agent-writable fixed sections (owned by the agent, not the user).
+    ;; Empty on fresh render; populated via `agent.section.*' events.
+    (templedb-agent--insert-section 'findings "Findings")
+    (insert "\n\n")
+    (templedb-agent--insert-section 'todo "Todo")
+    (insert "\n\n")
+    (templedb-agent--insert-section 'open-questions "Open Questions")
+    (insert "\n\n")
     (templedb-agent--insert-section 'pinned "Pinned")
     (insert "\n\n")
     (templedb-agent--insert-section 'notes "Notes")
     (insert "\n\n")
     (templedb-agent--insert-section 'scratch "Scratch")
     (insert "\n\n")
+    ;; Dynamic-section state reset on every full render; sections and
+    ;; entries will re-materialize from event replay during
+    ;; `--restore-conversation'.
+    (setq templedb-agent--dynamic-section-order nil)
+    (setq templedb-agent--dynamic-sections nil)
+    (setq templedb-agent--findings nil)
+    (setq templedb-agent--todos nil)
+    (setq templedb-agent--open-questions nil)
 
     ;; Collapse the Guide section by default
     (goto-char (point-min))
