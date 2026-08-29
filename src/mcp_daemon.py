@@ -179,16 +179,27 @@ class HookEngine:
                 slug = self._project_cache.get(prefix)
                 rel_path = rest
 
-            fuse_mount = self._fuse_mount or os.path.join(str(Path.home()), "temple")
-            fuse_path = os.path.join(fuse_mount, slug, rel_path) if slug and rel_path else fuse_mount
+            if slug:
+                hint = (
+                    f"Open a writable workspace instead:\n"
+                    f"    templedb edit {slug}\n"
+                    f"then edit files under ~/.config/templedb/edit-workspaces/{slug}/ "
+                    f"and commit with:\n"
+                    f"    templedb commit {slug} ~/.config/templedb/edit-workspaces/{slug} -m \"...\"\n"
+                )
+            else:
+                hint = (
+                    "Use `templedb edit <slug>` to open a writable workspace, "
+                    "or `templedb file set <slug> <path>` for a single-file edit.\n"
+                )
 
             return {
                 "decision": "block",
                 "reason": (
-                    f"Edit files through the FUSE mount, not the checkout/repo directly.\n"
+                    f"Direct edits to the checkout/repo are read-only "
+                    f"(materialized state — will be overwritten by publish).\n"
                     f"  Blocked: {file_path}\n"
-                    f"  Use:     {fuse_path}\n"
-                    f"FUSE writes go to the DB (source of truth) and auto-stage for VCS."
+                    f"{hint}"
                 )
             }
 

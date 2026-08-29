@@ -405,7 +405,6 @@ class ClaudeCommands(Command):
         # Fallback: direct DB queries
         file_path = os.path.expanduser(file_path)
         home = str(Path.home())
-        fuse_mount = _get_fuse_mount()
 
         blocked_prefixes = [
             os.path.join(home, ".config", "templedb", "checkouts"),
@@ -452,14 +451,26 @@ class ClaudeCommands(Command):
                                 pass
                         break
 
-                fuse_path = os.path.join(fuse_mount, slug, rel_path) if slug and rel_path else fuse_mount
+                if slug:
+                    hint = (
+                        f"Open a writable workspace instead:\n"
+                        f"    templedb edit {slug}\n"
+                        f"then edit files under ~/.config/templedb/edit-workspaces/{slug}/ "
+                        f"and commit with:\n"
+                        f"    templedb commit {slug} ~/.config/templedb/edit-workspaces/{slug} -m \"...\"\n"
+                    )
+                else:
+                    hint = (
+                        "Use `templedb edit <slug>` to open a writable workspace, "
+                        "or `templedb file set <slug> <path>` for a single-file edit.\n"
+                    )
                 print(json.dumps({
                     "decision": "block",
                     "reason": (
-                        f"Edit files through the FUSE mount, not the checkout/repo directly.\n"
+                        f"Direct edits to the checkout/repo are read-only "
+                        f"(materialized state — will be overwritten by publish).\n"
                         f"  Blocked: {file_path}\n"
-                        f"  Use:     {fuse_path}\n"
-                        f"FUSE writes go to the DB (source of truth) and auto-stage for VCS."
+                        f"{hint}"
                     )
                 }))
                 return 0
