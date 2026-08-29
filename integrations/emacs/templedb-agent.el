@@ -57,10 +57,73 @@
 
 (defconst templedb-agent--section-heading-regex
   "^\\* \\(Guide\\|Now\\|Goal\\|Context\\|Conversation\\|Next Prompt\\|Pinned\\|Notes\\|Scratch\\)\\(?:\n\\|$\\)"
-  "Regex matching a real top-level Org section heading in the agent buffer.
-Used as a section-end boundary. A bare `^\\* ' would also match lines
-inside a section's content that happen to start with `* ' (e.g. a bullet
-list the user typed), which truncates section reads/writes.")
+  "DEPRECATED. Regex for a top-level heading. Kept only for legacy callers
+that haven't been migrated to text-property anchors. Prefer
+`templedb-agent--find-section' / `--next-section-after' — they are
+robust to user-typed content that looks like a heading.")
+
+;;; Section anchors (Phase B: text-property-based section boundaries)
+;;
+;; Each top-level section heading gets a `templedb-section' text property
+;; on its first character at render time. Callers look up sections by
+;; property, never by regex. This is robust to user-typed `* Foo' lines
+;; inside a section, to renaming, and to reordering.
+
+(defconst templedb-agent--section-order
+  '(guide now goal context conversation next-prompt pinned notes scratch)
+  "Order of top-level sections. Used by `--next-section-after' to walk
+the anchor chain when we need the position of the FIRST anchored section
+strictly after a given point.")
+
+(defconst templedb-agent--section-titles
+  '((guide        . "Guide")
+    (now          . "Now")
+    (goal         . "Goal")
+    (context      . "Context")
+    (conversation . "Conversation")
+    (next-prompt  . "Next Prompt")
+    (pinned       . "Pinned")
+    (notes        . "Notes")
+    (scratch      . "Scratch"))
+  "Symbol → heading title mapping.")
+
+(defun templedb-agent--section-title (id)
+  "Return the visible heading title for section ID."
+  (or (alist-get id templedb-agent--section-titles)
+      (error "Unknown templedb-agent section id: %s" id)))
+
+(defun templedb-agent--find-section (id)
+  "Return the buffer position of the anchored section heading for ID, or nil."
+  (text-property-any (point-min) (point-max) 'templedb-section id))
+
+(defun templedb-agent--next-section-after (pos)
+  "Return the buffer position of the first anchored section heading
+strictly after POS, or `point-max' if none."
+  (or (cl-loop for id in templedb-agent--section-order
+               for spos = (templedb-agent--find-section id)
+               when (and spos (> spos pos)) return spos)
+      (point-max)))
+
+(defun templedb-agent--section-end (id)
+  "Return the buffer position just before the section that follows ID,
+or `point-max' if ID is the last section (or missing)."
+  (let ((idx (cl-position id templedb-agent--section-order)))
+    (or (and idx
+             (cl-loop for next in (nthcdr (1+ idx) templedb-agent--section-order)
+                      for pos = (templedb-agent--find-section next)
+                      when pos return pos))
+        (point-max))))
+
+(defun templedb-agent--insert-section (id title)
+  "Insert `* TITLE\\n' at point, tagged with `templedb-section' = ID.
+The property is placed only on the first character of the heading line
+and is `rear-nonsticky' so user-typed content afterwards does not
+inherit the anchor. Intended for use inside `--render-buffer' only."
+  (let ((start (point)))
+    (insert (format "* %s\n" title))
+    (add-text-properties start (1+ start)
+                         `(templedb-section ,id
+                           rear-nonsticky (templedb-section)))))
 
 ;;;; State
 
@@ -194,7 +257,10 @@ list the user typed), which truncates section reads/writes.")
        (templedb-agent--set-status "waiting")
        (templedb-agent--finalize-streaming)
        (templedb-agent--finalize-exchange-stats)
-       (templedb-agent--save-notes-to-db)
+       ;; NOTE: user sections (Goal/Notes/Scratch) are NOT saved here.
+       ;; See `templedb-agent-save-user-sections' — persistence is now
+       ;; driven by user edits (idle timer / kill-buffer), not by run
+       ;; completion, so a buggy render can't pollute the DB.
        (templedb-agent--notify-if-hidden "Run completed"))
       ("run.failed"
        (templedb-agent--stop-timer)
@@ -303,7 +369,7 @@ tool_result can return to Claude."
     (insert (format "#+TDB_STATUS: %s\n\n" templedb-agent--status))
 
     ;; Guide (starts collapsed)
-    (insert "* Guide\n")
+    (templedb-agent--insert-section 'guide "Guide")
     (insert "Temple Agent -- Claude Code inside Emacs.\n")
     (insert "Type your message under *Next Prompt*, then press =C-c C-c= to send.\n\n")
     (insert "| Section        | Purpose                                    | Editable |\n")
@@ -343,22 +409,30 @@ tool_result can return to Claude."
     (insert "| =TAB=          | Fold/unfold section                        |\n\n")
 
     ;; Now
-    (insert "* Now\n\n")
+    (templedb-agent--insert-section 'now "Now")
+    (insert "\n")
     (insert (or templedb-agent--now-text "Ready") "\n\n")
 
     ;; Goal (editable, sent to Claude)
-    (insert "* Goal\n\n")
+    (templedb-agent--insert-section 'goal "Goal")
+    (insert "\n")
     (insert "Set your goal here. It is sent to Claude with every message to keep the conversation focused.\n\n")
 
     ;; Context basket
-    (insert "* Context\n\n")
+    (templedb-agent--insert-section 'context "Context")
+    (insert "\n")
     (templedb-agent--insert-context-basket)
     (insert "\n")
-    (insert "* Conversation\n\n")
-    (insert "* Next Prompt\n\n\n")
-    (insert "* Pinned\n\n\n")
-    (insert "* Notes\n\n\n")
-    (insert "* Scratch\n\n\n")
+    (templedb-agent--insert-section 'conversation "Conversation")
+    (insert "\n")
+    (templedb-agent--insert-section 'next-prompt "Next Prompt")
+    (insert "\n\n")
+    (templedb-agent--insert-section 'pinned "Pinned")
+    (insert "\n\n")
+    (templedb-agent--insert-section 'notes "Notes")
+    (insert "\n\n")
+    (templedb-agent--insert-section 'scratch "Scratch")
+    (insert "\n\n")
 
     ;; Collapse the Guide section by default
     (goto-char (point-min))
@@ -369,11 +443,12 @@ tool_result can return to Claude."
   "Update the Now section."
   (setq templedb-agent--now-text text)
   (save-excursion
-    (goto-char (point-min))
-    (when (re-search-forward "^\\* Now\n\n" nil t)
+    (when-let ((now (templedb-agent--find-section 'now)))
+      (goto-char now)
+      (forward-line 1)                ; past heading
+      (when (looking-at "\n") (forward-char 1))  ; past blank
       (let ((start (point))
-            (end (if (re-search-forward templedb-agent--section-heading-regex nil t)
-                     (match-beginning 0) (point-max))))
+            (end (templedb-agent--section-end 'now)))
         (let ((inhibit-read-only t))
           (delete-region start end)
           (goto-char start)
@@ -397,24 +472,19 @@ tool_result can return to Claude."
 
 (defun templedb-agent--start-of-conversation ()
   "Return point at start of `* Conversation' heading, or `point-min'.
-Used to bound backward searches so a `**' inside * Guide or another
-top-level section can't be misread as an exchange heading."
-  (save-excursion
-    (goto-char (point-min))
-    (if (re-search-forward "^\\* Conversation\\(?:\n\\|$\\)" nil t)
-        (match-beginning 0)
-      (point-min))))
+Uses the `templedb-section' text-property anchor set at render time,
+so user-typed `* Conversation ...' lines inside another section can't
+be mistaken for the real heading."
+  (or (templedb-agent--find-section 'conversation) (point-min)))
 
 (defun templedb-agent--end-of-conversation ()
-  "Return point just before * Next Prompt (for new exchange headings).
-Uses an end-of-line anchor so a user-typed line like `* Next Prompt
-foo bar' inside the Conversation section can't be misread as the
-section marker and pull inserts to the wrong spot."
-  (save-excursion
-    (goto-char (point-min))
-    (if (re-search-forward "^\\* Next Prompt\\(?:\n\\|$\\)" nil t)
-        (match-beginning 0)
-      (point-max))))
+  "Return point just before `* Next Prompt' (for new exchange headings).
+Uses the anchor system so this is robust to any user-typed content
+that pattern-matches a heading."
+  (or (templedb-agent--find-section 'next-prompt)
+      ;; Fall back to walking anchor chain if Next Prompt is missing
+      ;; (defensive; should never happen with the current template).
+      (templedb-agent--section-end 'conversation)))
 
 (defun templedb-agent--end-of-current-exchange ()
   "Return point at end of current exchange (last ** heading).
@@ -538,16 +608,16 @@ as an exchange heading and pull tool inserts into the wrong region."
 
 (defun templedb-agent--bucket-content-end (bucket-point)
   "Return point at the end of the bucket starting at BUCKET-POINT.
-Ends at the next `***'/`**'/`* ' heading, or end of conversation."
+Ends at the next `***' or `**' heading within the Conversation region,
+or at end of Conversation. The `* Section' boundary is enforced by
+`--end-of-conversation' (anchor-based), so we don't need the fragile
+section-heading-regex here."
   (save-excursion
     (goto-char bucket-point)
     (forward-line 1)
     (let ((conv-end (templedb-agent--end-of-conversation)))
-      (if (re-search-forward
-           (concat "^\\*\\*\\* \\|^\\*\\* \\|"
-                   templedb-agent--section-heading-regex)
-           conv-end t)
-          (progn (beginning-of-line) (point))
+      (if (re-search-forward "^\\*\\*\\* \\|^\\*\\* " conv-end t)
+          (match-beginning 0)
         conv-end))))
 
 (defun templedb-agent--assert-in-conversation (pos where)
@@ -799,8 +869,7 @@ level-3 headings under the current exchange."
     (goto-char (point-min))
     (when (re-search-forward "^\\* Next Prompt\n\n" nil t)
       (let ((start (point))
-            (end (if (re-search-forward templedb-agent--section-heading-regex nil t)
-                     (match-beginning 0) (point-max))))
+            (end (templedb-agent--next-section-after (point))))
         (string-trim (buffer-substring-no-properties start end))))))
 
 (defun templedb-agent--clear-prompt ()
@@ -809,8 +878,7 @@ level-3 headings under the current exchange."
     (goto-char (point-min))
     (when (re-search-forward "^\\* Next Prompt\n\n" nil t)
       (let ((start (point))
-            (end (if (re-search-forward templedb-agent--section-heading-regex nil t)
-                     (match-beginning 0) (point-max))))
+            (end (templedb-agent--next-section-after (point))))
         (let ((inhibit-read-only t))
           (delete-region start end)
           (goto-char start)
@@ -868,10 +936,7 @@ and gets a `PINNED: <ISO timestamp>' property."
         (unless (re-search-forward "^\\* Pinned\n" nil t)
           (user-error "No Pinned section in buffer"))
         (let* ((section-start (point))
-               (section-end (if (re-search-forward
-                                 templedb-agent--section-heading-regex nil t)
-                                (match-beginning 0)
-                              (point-max)))
+               (section-end (templedb-agent--next-section-after (point)))
                (inhibit-read-only t))
           (goto-char section-end)
           ;; Promote the tool subtree so it sits at `** ' under `* Pinned'
@@ -1087,8 +1152,7 @@ and gets a `PINNED: <ISO timestamp>' property."
     (goto-char (point-min))
     (when (re-search-forward (format "^\\* %s\n\n" (regexp-quote heading)) nil t)
       (let ((start (point))
-            (end (if (re-search-forward templedb-agent--section-heading-regex nil t)
-                     (match-beginning 0) (point-max))))
+            (end (templedb-agent--next-section-after (point))))
         (let ((inhibit-read-only t))
           (delete-region start end)
           (goto-char start)
@@ -1508,8 +1572,7 @@ Uses sqlite3 directly for speed (no process startup)."
     (goto-char (point-min))
     (when (re-search-forward "^\\* Context\n\n" nil t)
       (let ((start (point))
-            (end (if (re-search-forward templedb-agent--section-heading-regex nil t)
-                     (match-beginning 0) (point-max))))
+            (end (templedb-agent--next-section-after (point))))
         (let ((inhibit-read-only t))
           (delete-region start end)
           (goto-char start)
@@ -1522,8 +1585,7 @@ Uses sqlite3 directly for speed (no process startup)."
     (goto-char (point-min))
     (when (re-search-forward "^\\* Goal\n\n" nil t)
       (let ((start (point))
-            (end (if (re-search-forward templedb-agent--section-heading-regex nil t)
-                     (match-beginning 0) (point-max))))
+            (end (templedb-agent--next-section-after (point))))
         (let ((text (string-trim (buffer-substring-no-properties start end))))
           ;; Filter out the placeholder text
           (if (string-match-p "^Set your goal here" text)
@@ -1536,8 +1598,7 @@ Uses sqlite3 directly for speed (no process startup)."
     (goto-char (point-min))
     (when (re-search-forward "^\\* Goal\n\n" nil t)
       (let ((start (point))
-            (end (if (re-search-forward templedb-agent--section-heading-regex nil t)
-                     (match-beginning 0) (point-max))))
+            (end (templedb-agent--next-section-after (point))))
         (let ((inhibit-read-only t))
           (delete-region start end)
           (goto-char start)
@@ -1718,6 +1779,7 @@ Optionally filter by PROJECT slug."
     (define-key map (kbd "C-c C-c") #'templedb-agent-send)
     (define-key map (kbd "C-c C-k") #'templedb-agent-cancel)
     (define-key map (kbd "C-c C-r") #'templedb-agent-resume)
+    (define-key map (kbd "C-c C-s") #'templedb-agent-save-user-sections)
     map)
   "Keymap for `templedb-agent-mode'.")
 
@@ -1735,7 +1797,9 @@ Optionally filter by PROJECT slug."
                         (or templedb-agent--project "")
                         (or templedb-agent--status "?"))))
   (use-local-map (make-composed-keymap
-                  templedb-agent-mode-map org-mode-map)))
+                  templedb-agent-mode-map org-mode-map))
+  ;; User sections auto-save on idle + kill-buffer, never on run events.
+  (templedb-agent--install-autosave))
 
 ;;;; Timer
 
@@ -1801,12 +1865,31 @@ buffer got polluted by a rendering bug and we should NOT persist it."
        (or (string-match-p ":TOOL_ID:" text)
            (string-match-p "^\\*\\*\\*\\* \\(RUNNING\\|DONE\\|FAILED\\) " text))))
 
-(defun templedb-agent--save-notes-to-db ()
-  "Save Goal, Notes, and Scratch sections to the database.
-Refuses to persist Scratch when it contains tool-bucket markers,
-which indicate the section was polluted by a rendering bug rather
-than typed by the user. Logs to *Messages* when this happens so the
-underlying bug can be traced."
+(defcustom templedb-agent-autosave-idle-seconds 3
+  "Idle seconds before user-editable sections auto-save to the DB.
+Set to nil to disable idle auto-save (Goal/Notes/Scratch will then
+only save on explicit `C-c C-s' or on kill-buffer)."
+  :type '(choice (const :tag "Disabled" nil) (number :tag "Seconds"))
+  :group 'templedb-agent)
+
+(defvar-local templedb-agent--autosave-timer nil
+  "Buffer-local idle timer for user-section auto-save.")
+
+(defun templedb-agent-save-user-sections ()
+  "Persist Goal, Notes, and Scratch sections to the database.
+
+This is the ONLY code path that writes user-editable sections back to
+the DB. It is invoked (a) explicitly by the user via `C-c C-s',
+(b) after `templedb-agent-autosave-idle-seconds' of Emacs idle time
+when the buffer has been modified, and (c) on `kill-buffer-hook' as a
+safety net. Notably, it is NOT called from run-completion event
+handlers — that historical coupling let a buggy render silently pollute
+the DB (see Scratch pollution incident, 2026-08-28).
+
+Refuses to persist Scratch content that contains tool-bucket markers
+\(`:TOOL_ID:' or `**** RUNNING/DONE/FAILED') and logs a warning; that
+class of content is always a symptom of a render bug, never user input."
+  (interactive)
   (when templedb-agent--session-id
     (let* ((goal (templedb-agent--get-section-text "Goal"))
            (notes (templedb-agent--get-section-text "Notes"))
@@ -1824,7 +1907,35 @@ underlying bug can be traced."
            ,@(when goal `((goal . ,goal)))
            ,@(when notes `((notes . ,notes)))
            ,@(when scratch `((scratch . ,scratch))))
-         (lambda (_result) nil))))))
+         (lambda (_result)
+           (when (called-interactively-p 'any)
+             (message "Temple Agent: user sections saved."))))))))
+
+;; Keep the old private name as an alias for callers still on the old
+;; API. Nothing internal should be calling it anymore, but leave it
+;; wired so a stale flake input doesn't crash on a symbol miss.
+(defalias 'templedb-agent--save-notes-to-db 'templedb-agent-save-user-sections)
+
+(defun templedb-agent--maybe-autosave (buf)
+  "Autosave user sections in BUF if it's a live, modified agent buffer."
+  (when (and (buffer-live-p buf)
+             (with-current-buffer buf
+               (and (buffer-modified-p) templedb-agent--session-id)))
+    (with-current-buffer buf
+      (templedb-agent-save-user-sections))))
+
+(defun templedb-agent--install-autosave ()
+  "Install the buffer-local autosave: idle timer + kill-buffer hook.
+Called from `templedb-agent-mode' at buffer setup."
+  (when templedb-agent--autosave-timer
+    (cancel-timer templedb-agent--autosave-timer)
+    (setq templedb-agent--autosave-timer nil))
+  (when templedb-agent-autosave-idle-seconds
+    (setq templedb-agent--autosave-timer
+          (run-with-idle-timer templedb-agent-autosave-idle-seconds t
+                               #'templedb-agent--maybe-autosave
+                               (current-buffer))))
+  (add-hook 'kill-buffer-hook #'templedb-agent-save-user-sections nil t))
 
 ;;;; Selected files
 
