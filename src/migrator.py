@@ -66,6 +66,7 @@ MIGRATION_SEQUENCE = [
     "081_graph_query_log.sql",
     "082_vcs_sessions.sql",
     "083_drop_staged_boolean.sql",
+    "084_agent_sections.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",
