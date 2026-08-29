@@ -67,7 +67,13 @@ pkgs.python3Packages.buildPythonApplication rec {
   # Don't run tests during build (for now)
   doCheck = false;
 
-  # Install the tdb wrapper script
+  # Install the tdb wrapper script + bundle SQL migrations.
+  #
+  # setuptools' package-data only picks up files INSIDE packages;
+  # `migrations/` lives at the project root, so it isn't installed by
+  # default. Copy them into the site-packages tree so `migrator.py`
+  # can find them at runtime without needing TEMPLEDB_DEV_MODE=1.
+  # See `_find_migrations_dir` in src/migrator.py.
   postInstall = ''
     # Copy tdb wrapper (templedb entry point is created automatically by setuptools)
     cp ${./tdb} $out/bin/tdb
@@ -76,6 +82,15 @@ pkgs.python3Packages.buildPythonApplication rec {
     # Fix tdb to use installed templedb instead of relative path
     substituteInPlace $out/bin/tdb \
       --replace './templedb' 'templedb'
+
+    # Bundle SQL migrations next to migrator.py so the Migrator can
+    # find them in a stock nix install. --- Nix builds are hermetic;
+    # the layout under site-packages is: migrator.py + migrations/.
+    site_packages=$(find $out/lib -maxdepth 3 -name site-packages -type d | head -n 1)
+    if [ -n "$site_packages" ]; then
+      mkdir -p "$site_packages/migrations"
+      cp migrations/*.sql "$site_packages/migrations/"
+    fi
   '';
 
   nativeBuildInputs = [ pkgs.makeWrapper ];

@@ -5,6 +5,7 @@ Pytest configuration and shared fixtures for TempleDB tests
 Provides common test utilities, fixtures, and helper functions.
 """
 
+import atexit
 import os
 import sys
 import shutil
@@ -15,6 +16,33 @@ from pathlib import Path
 from typing import Generator, Dict, Any
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# CRITICAL: point db_utils at a per-session temp DB BEFORE importing it.
+#
+# `src/config.py` computes `DB_PATH = _get_db_path()` at module load, and
+# `db_utils` uses that DB_PATH for all connections. If we import db_utils
+# without TEMPLEDB_PATH set, DB_PATH resolves to the user's real
+# production database (~/.local/share/templedb/templedb.sqlite), which
+# is populated with real project slugs — every test that INSERTs into
+# `projects` then collides with UNIQUE(slug).
+#
+# Setting the env var here — before any `from db_utils import ...` —
+# is the safe pattern. Each subsequent test file's conftest can wipe
+# the temp DB's rowsets to give itself a clean slate.
+# ---------------------------------------------------------------------------
+if not os.environ.get("TEMPLEDB_PATH"):
+    _fd, _test_db_bootstrap = tempfile.mkstemp(suffix=".sqlite",
+                                               prefix="templedb-pytest-")
+    os.close(_fd)
+    os.environ["TEMPLEDB_PATH"] = _test_db_bootstrap
+
+    def _cleanup_test_db_bootstrap():
+        try:
+            os.unlink(_test_db_bootstrap)
+        except OSError:
+            pass
+    atexit.register(_cleanup_test_db_bootstrap)
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))

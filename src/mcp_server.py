@@ -128,6 +128,10 @@ class MCPServer:
             "templedb_deploy": self.tool_deploy,
             # Secret/key management
             "templedb_secret": self.tool_secret,
+            # Agent bridge: user round-trip (ask) + one-way (message).
+            # See migration 080. Only useful under `templedb ai agent`.
+            "templedb_ask_user":                self.tool_ask_user,
+            "templedb_message_user":            self.tool_message_user,
             # Agent-writable sections (only useful when Claude runs under
             # `templedb ai agent`; each tool no-ops with a clear error
             # message when TEMPLEDB_AGENT_SESSION_ID isn't set).
@@ -408,6 +412,46 @@ class MCPServer:
                     },
                     "required": ["action"]
                 }
+            },
+            # ── Agent bridge: user round-trip + one-way message ──────────
+            # Requires TEMPLEDB_AGENT_SESSION_ID; routes through
+            # agent_pending_asks (migration 080).
+            {
+                "name": "templedb_ask_user",
+                "description":
+                    "Ask the user a multiple-choice question and wait for the answer. "
+                    "Use this INSTEAD of AskUserQuestion when running under TempleDB / Emacs "
+                    "— AskUserQuestion has no working UI in this environment and gets "
+                    "auto-cancelled. Requires TEMPLEDB_AGENT_SESSION_ID env (set by the "
+                    "agent provider when it launches Claude). Blocks for up to 600s waiting "
+                    "for a response; if the user doesn't answer, returns an error and you "
+                    "should either ask again or proceed with a reasonable default and note "
+                    "what you assumed. Question shape mirrors AskUserQuestion: each has "
+                    "{question, header, options: [{label, description}], multiSelect}.",
+                "inputSchema": {"type": "object", "properties": {
+                    "questions": {"type": "array", "minItems": 1, "items": {
+                        "type": "object", "properties": {
+                            "question":    {"type": "string"},
+                            "header":      {"type": "string"},
+                            "multiSelect": {"type": "boolean", "default": False},
+                            "options": {"type": "array", "items": {
+                                "type": "object", "properties": {
+                                    "label":       {"type": "string"},
+                                    "description": {"type": "string"},
+                                }, "required": ["label"]}}}}}}, "required": ["questions"]}
+            },
+            {
+                "name": "templedb_message_user",
+                "description":
+                    "Send a one-way, informational message to the user without asking "
+                    "anything back. Renders as a distinct entry in the Emacs conversation "
+                    "buffer. Use for out-of-band status updates, quick notices, or "
+                    "surfacing findings that don't need a decision from the user. Requires "
+                    "TEMPLEDB_AGENT_SESSION_ID env. Returns 'delivered' immediately.",
+                "inputSchema": {"type": "object", "properties": {
+                    "header": {"type": "string", "description": "Short label (max ~12 chars)"},
+                    "body":   {"type": "string", "description": "Message body (markdown ok)"},
+                }, "required": ["body"]}
             },
             # ── Agent-writable sections (Phase D) ────────────────────────
             # Each of these writes a structured entry into a dedicated
@@ -1197,6 +1241,54 @@ class MCPServer:
 
         except Exception as e:
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    # ── Agent bridge tools (ask / message) ──────────────────────────────
+    # Round-trip through agent_pending_asks (migration 080). The MCP tool
+    # inserts, the agent service polls, Emacs prompts / renders, Emacs
+    # writes the response back into the row, and the tool returns.
+    # Broken before this commit because it lived only in the dead
+    # templedb_launcher.py; fixed by moving into MCPServer alongside
+    # the Phase D section tools.
+
+    def tool_ask_user(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        sid = self._agent_session_id("templedb_ask_user")
+        if isinstance(sid, dict): return sid
+        questions = args.get("questions") or []
+        if not isinstance(questions, list) or not questions:
+            return {"content": [{"type": "text",
+                "text": "questions must be a non-empty list"}], "isError": True}
+        import uuid, time
+        from agent import store as _store
+        ask_id = uuid.uuid4().hex
+        _store.create_pending_ask(ask_id, sid, "question", {"questions": questions})
+        # Poll for the user's response; give up after 600s.
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            row = _store.get_pending_ask(ask_id)
+            if row and row.get("status") == "responded":
+                try:
+                    resp = json.loads(row["response"])
+                except (ValueError, TypeError):
+                    resp = {"raw": row.get("response")}
+                return {"content": [{"type": "text", "text": json.dumps(resp)}]}
+            time.sleep(0.2)
+        return {"content": [{"type": "text",
+            "text": "User did not respond in time. Try asking again or proceed "
+                    "with a reasonable default and note what you assumed."}],
+            "isError": True}
+
+    def tool_message_user(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        sid = self._agent_session_id("templedb_message_user")
+        if isinstance(sid, dict): return sid
+        header = args.get("header") or "Message"
+        body = args.get("body") or ""
+        import uuid
+        from agent import store as _store
+        ask_id = uuid.uuid4().hex
+        _store.create_pending_ask(ask_id, sid, "message",
+                                  {"header": header, "body": body})
+        # One-way — don't wait for a response.
+        return {"content": [{"type": "text", "text": "delivered"}]}
 
     # ── Agent-writable section tools (Phase D) ──────────────────────────
     # Each of these writes to agent_session_sections (persistence) AND

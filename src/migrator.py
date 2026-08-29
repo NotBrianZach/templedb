@@ -24,8 +24,34 @@ from typing import List, Tuple, Optional, Dict
 
 logger = logging.getLogger(__name__)
 
-# Migration files live here
-MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+# Migration files live here.
+#
+# Two candidate layouts:
+#   - Dev tree / materialised checkout:
+#       src/migrator.py + migrations/*.sql at project root
+#     → Path(__file__).parent.parent / "migrations"
+#
+#   - Nix install: templedb.nix's postInstall copies migrations/ into
+#     site-packages/ next to migrator.py:
+#       site-packages/migrator.py + site-packages/migrations/*.sql
+#     → Path(__file__).parent / "migrations"
+#
+# Pick the first candidate that actually contains migrations. Falls
+# back to the dev-tree location so error messages remain intuitive
+# when nothing is found.
+
+def _find_migrations_dir():
+    module_dir = Path(__file__).parent
+    for candidate in (
+        module_dir / "migrations",           # nix install (sibling)
+        module_dir.parent / "migrations",    # dev tree (project root)
+    ):
+        if candidate.exists() and any(candidate.glob("*.sql")):
+            return candidate
+    return module_dir.parent / "migrations"
+
+
+MIGRATIONS_DIR = _find_migrations_dir()
 
 # Ordered list of numbered migrations to apply AFTER schema.sql
 # This is the canonical sequence — add new migrations at the end.
