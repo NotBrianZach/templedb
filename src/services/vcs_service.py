@@ -81,10 +81,21 @@ class VCSService(BaseService):
         Resolution order:
           1. TEMPLEDB_SESSION_ID env var (must reference a live session row)
           2. Implicit session cached on this service instance
-          3. Existing active session for (author, host, ppid=shell PID)
+          3. Existing active session for (author, host, sid=session-leader PID)
              started within the last 24 hours — so sequential shell
-             invocations (`vcs add X; vcs commit`) share one session
-          4. New implicit session named '<host>-<ppid>-<short-ts>'
+             invocations (`vcs add X; vcs commit`) share one session, AND
+             so bash command substitution `$(templedb ...)` inside a loop
+             doesn't fan out into one session per subshell fork
+          4. Fallback: same lookup keyed on PPID (backwards compat with
+             sessions created before the SID switch)
+          5. New implicit session named '<host>-<sid>-<short-ts>'
+
+        Why SID and not PPID: `os.getppid()` returns the immediate parent,
+        which for `x=$(templedb ...)` is a bash-forked subshell with a
+        fresh PID. Session leader (`os.getsid(0)`) is inherited from the
+        controlling terminal's shell and stable across `$(...)` /
+        pipeline / nested-subshell invocations within one terminal — the
+        actual notion of "same interactive session" we want.
         """
         cached = getattr(self, "_current_session", None)
         if cached:
@@ -109,12 +120,13 @@ class VCSService(BaseService):
             self._current_session = dict(row)
             return self._current_session
 
-        # PPID = the shell that ran templedb. Stable across separate
-        # `templedb ...` invocations within the same shell, which is what
-        # makes `vcs add X; vcs commit` naturally see the same session.
         author = self._resolve_author()
         host = socket.gethostname()
-        ppid = os.getppid()
+        try:
+            sid = os.getsid(0)  # session-leader PID (stable across subshells)
+        except (AttributeError, OSError):
+            sid = os.getppid()  # non-POSIX fallback (Windows, etc.)
+
         existing = self.vcs_repo.query_one(
             """
             SELECT * FROM vcs_sessions
@@ -123,38 +135,64 @@ class VCSService(BaseService):
               AND started_at > datetime('now', '-1 day')
             ORDER BY id DESC LIMIT 1
             """,
-            (author, host, ppid),
+            (author, host, sid),
         )
         if existing:
             self._current_session = dict(existing)
             return self._current_session
 
-        session = self._create_session(name=self._implicit_session_name(ppid))
+        # Backwards-compat fallback: look for a session keyed on PPID
+        # (from before the SID switch). Prevents duplicate session
+        # creation for shells that already have an active PPID-keyed row.
+        ppid = os.getppid()
+        if ppid != sid:
+            existing = self.vcs_repo.query_one(
+                """
+                SELECT * FROM vcs_sessions
+                WHERE ended_at IS NULL
+                  AND author = ? AND host = ? AND pid = ?
+                  AND started_at > datetime('now', '-1 day')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (author, host, ppid),
+            )
+            if existing:
+                self._current_session = dict(existing)
+                return self._current_session
+
+        session = self._create_session(name=self._implicit_session_name(sid))
         self._current_session = session
         return session
 
-    def _implicit_session_name(self, ppid: Optional[int] = None) -> str:
+    def _implicit_session_name(self, key_pid: Optional[int] = None) -> str:
         host = socket.gethostname()
-        if ppid is None:
-            ppid = os.getppid()
+        if key_pid is None:
+            try:
+                key_pid = os.getsid(0)
+            except (AttributeError, OSError):
+                key_pid = os.getppid()
         ts = self.vcs_repo.query_one(
             "SELECT strftime('%Y%m%d-%H%M%S', 'now') AS ts"
         )["ts"]
-        return f"{host}-{ppid}-{ts}"
+        return f"{host}-{key_pid}-{ts}"
 
     def _create_session(
         self, name: Optional[str] = None, author: Optional[str] = None
     ) -> Dict[str, Any]:
         author = author or self._resolve_author()
-        # pid column stores PPID (shell / spawning process), which is
-        # what enables sequential shell invocations to share a session.
+        # pid column stores session-leader PID (os.getsid), which is
+        # stable across bash subshell forks and command substitution.
         # See get_current_session for the reuse lookup.
+        try:
+            key_pid = os.getsid(0)
+        except (AttributeError, OSError):
+            key_pid = os.getppid()
         self.vcs_repo.execute(
             """
             INSERT INTO vcs_sessions (name, author, host, pid)
             VALUES (?, ?, ?, ?)
             """,
-            (name, author, socket.gethostname(), os.getppid()),
+            (name, author, socket.gethostname(), key_pid),
         )
         row = self.vcs_repo.query_one(
             "SELECT * FROM vcs_sessions WHERE id = last_insert_rowid()"
