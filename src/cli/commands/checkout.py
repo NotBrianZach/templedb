@@ -297,7 +297,7 @@ class CheckoutCommand:
             print()
 
             # Get snapshot versions
-            snapshots = self.checkout_repo.execute("""
+            snapshots = self.checkout_repo.query_all("""
                 SELECT COUNT(*) as count
                 FROM checkout_snapshots
                 WHERE checkout_id = ?
@@ -320,7 +320,7 @@ class CheckoutCommand:
 
             # Get snapshots for comparison
             snapshots_dict = {}
-            snapshot_rows = self.checkout_repo.execute("""
+            snapshot_rows = self.checkout_repo.query_all("""
                 SELECT
                     cs.file_id,
                     cs.content_hash,
@@ -447,7 +447,7 @@ class CheckoutCommand:
 
             # Get checkout snapshots
             snapshots = {}
-            snapshot_rows = self.checkout_repo.execute("""
+            snapshot_rows = self.checkout_repo.query_all("""
                 SELECT
                     cs.file_id,
                     cs.content_hash,
@@ -560,7 +560,7 @@ class CheckoutCommand:
 
             # Get checkout snapshots
             snapshots = {}
-            snapshot_rows = self.checkout_repo.execute("""
+            snapshot_rows = self.checkout_repo.query_all("""
                 SELECT
                     cs.file_id,
                     cs.content_hash,
