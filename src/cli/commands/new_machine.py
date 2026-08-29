@@ -347,43 +347,8 @@ class BootstrapCommand(Command):
             _fail(f"NixOS generation failed: {e}")
             errors += 1
 
-        # ── Step 8: FUSE Mount ────────────────────────────────────────
-        _step(8, "FUSE mount")
-
-        from config import FUSE_MOUNT_PATH
-        temple_dir = Path(FUSE_MOUNT_PATH)
-        try:
-            # Check if already mounted
-            mounted = False
-            try:
-                with open("/proc/mounts") as fm:
-                    mounted = any("fuse" in l.lower() and "temple" in l.lower() for l in fm)
-            except Exception:
-                pass
-
-            if mounted:
-                _ok(f"Already mounted at {temple_dir}")
-            else:
-                # Start FUSE mount in background
-                temple_dir.mkdir(parents=True, exist_ok=True)
-                import threading
-                def _bg():
-                    try:
-                        from temple_fuse import mount as fuse_mount
-                        fuse_mount(str(temple_dir), foreground=True)
-                    except Exception:
-                        pass
-                t = threading.Thread(target=_bg, daemon=True)
-                t.start()
-                import time; time.sleep(2)
-                _ok(f"Mounted at {temple_dir}")
-                print(f"       Edit files at {temple_dir}/<project>/")
-        except Exception as e:
-            _skip(f"FUSE mount failed: {e}")
-            print(f"       Mount manually: templedb mount {temple_dir}")
-
-        # ── Step 9: Claude Code hooks ────────────────────────────────
-        _step(9, "Claude Code integration")
+        # ── Step 8: Claude Code hooks ────────────────────────────────
+        _step(8, "Claude Code integration")
         try:
             claude_settings = Path.home() / ".claude" / "settings.json"
             if claude_settings.exists():
@@ -401,8 +366,8 @@ class BootstrapCommand(Command):
             _skip(f"Claude Code setup skipped: {e}")
             print("       Install later: templedb ai claude setup")
 
-        # ── Step 10: Verify ───────────────────────────────────────────
-        _step(10, "Verification")
+        # ── Step 9: Verify ───────────────────────────────────────────
+        _step(9, "Verification")
 
         from db_utils import check_integrity
         if check_integrity():

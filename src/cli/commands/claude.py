@@ -109,50 +109,6 @@ SYSTEM_REDIRECTS = {
 }
 
 
-def _get_fuse_mount() -> str:
-    """Get the configured FUSE mount path from the DB and verify it's mounted.
-
-    Reads fuse.mount_path from system_config. If the mount is not active,
-    logs a warning suggesting how to fix it.
-    """
-    mount_path = None
-    try:
-        conn = get_simple_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT value FROM system_config WHERE key LIKE '%fuse.mount_path' "
-            "ORDER BY key DESC"
-        )
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            mount_path = row[0]
-    except Exception:
-        pass
-
-    if not mount_path:
-        mount_path = os.path.join(str(Path.home()), "temple")
-
-    # Verify mount is actually active
-    mounted = False
-    try:
-        with open("/proc/mounts") as f:
-            for line in f:
-                if mount_path in line and "fuse" in line.lower():
-                    mounted = True
-                    break
-    except Exception:
-        pass
-
-    if not mounted:
-        logger.warning(
-            f"FUSE mount not active at {mount_path}. "
-            f"Run: templedb mount {mount_path}"
-        )
-
-    return mount_path
-
-
 def _is_templedb_project(cwd: str) -> bool:
     """Check if the current directory is a TempleDB-managed project."""
     try:

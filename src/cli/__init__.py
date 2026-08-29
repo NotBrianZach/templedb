@@ -254,7 +254,7 @@ def main():
     except ImportError:
         pass
 
-    from cli.commands import publish, system, mount, new_machine
+    from cli.commands import publish, system, new_machine
     publish.register(cli)
     tutorial.register(cli)
     domain.register(cli)
@@ -262,7 +262,6 @@ def main():
 
     # Top-level aliases for convenience
     system.register(cli)
-    mount.register(cli)
     new_machine.register(cli)
 
     # Simplified top-level commands

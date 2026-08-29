@@ -1709,19 +1709,6 @@ and gets a `PINNED: <ISO timestamp>' property."
            (templedb-agent--restore-sections sections)
            (message "Temple Agent session %d resumed" session-id)))))))
 
-(defun templedb-agent--json-truthy (v)
-  "Coerce a value that may have come from JSON to an Emacs boolean.
-Handles: t/nil, :json-true/:json-false (json.el), 0/1 (SQLite ints),
-'true/'false symbols. Anything else non-nil is treated as truthy."
-  (cond
-   ((null v) nil)
-   ((eq v :json-false) nil)
-   ((eq v 'false) nil)
-   ((equal v "false") nil)
-   ((eq v 0) nil)
-   ((numberp v) (not (zerop v)))
-   (t t)))
-
 (defun templedb-agent--restore-sections (sections)
   "Rehydrate agent-writable sections from the SECTIONS alist returned by
 `session.open'. Populates the per-category state lists and re-renders.
@@ -1731,16 +1718,14 @@ anchors show up in the buffer."
     (let ((entries-to-plist
            (lambda (raw)
              ;; alist coming over JSON — turn each entry into a plist.
-             ;; Booleans (:done, :answered) get normalised so downstream
-             ;; renderers can just check with `if' / `when'.
              (mapcar (lambda (e)
                        (list :id (or (alist-get 'id e) "")
                              :text (or (alist-get 'text e) "")
                              :refs (append (alist-get 'refs e) nil)
                              :priority (when-let ((p (alist-get 'priority e)))
                                          (intern (if (symbolp p) (symbol-name p) p)))
-                             :done (templedb-agent--json-truthy (alist-get 'done e))
-                             :answered (templedb-agent--json-truthy (alist-get 'answered e))
+                             :done (alist-get 'done e)
+                             :answered (alist-get 'answered e)
                              :answer (alist-get 'answer e)
                              :timestamp (alist-get 'timestamp e)))
                      (append raw nil)))))

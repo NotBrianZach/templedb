@@ -8,11 +8,10 @@ def register(cli):
     """Register storage commands as subcommands under 'storage' top-level command."""
     from cli.commands.backup import BackupCommands
     from cli.commands.cathedral import CathedralCommands
-    from cli.commands.mount import MountCommands, DEFAULT_MOUNT
     from cli.commands.blob import BlobCommands
 
     storage_parser = cli.register_command('storage', None,
-        help_text='Storage management (backup, cathedral, mount, blob)')
+        help_text='Storage management (backup, cathedral, blob)')
     subparsers = storage_parser.add_subparsers(dest='storage_subcommand')
 
     # --- storage backup ---
@@ -120,24 +119,6 @@ def register(cli):
     verify_parser = cathedral_sub.add_parser('verify', help='Verify package integrity')
     verify_parser.add_argument('package_path', help='Path to .cathedral package')
     cli.commands['storage.cathedral.verify'] = cathedral_cmd.verify
-
-    # --- storage mount / unmount / mount-status ---
-    mount_cmd = MountCommands()
-
-    mount_parser = subparsers.add_parser('mount', help='Mount TempleDB as a FUSE filesystem')
-    mount_parser.add_argument('mountpoint', nargs='?', help=f'Mount point (default: {DEFAULT_MOUNT})')
-    mount_parser.add_argument('--db-path', help='Database path')
-    mount_parser.add_argument('--foreground', '-f', action='store_true', help='Run in foreground')
-    mount_parser.add_argument('--readonly', '-r', action='store_true', help='Read-only mount')
-    mount_parser.add_argument('--debug', action='store_true', help='Enable FUSE debug output')
-    cli.commands['storage.mount'] = mount_cmd.mount
-
-    unmount_parser = subparsers.add_parser('unmount', help='Unmount a TempleDB FUSE filesystem')
-    unmount_parser.add_argument('mountpoint', nargs='?', help=f'Mount point (default: {DEFAULT_MOUNT})')
-    cli.commands['storage.unmount'] = mount_cmd.unmount
-
-    ms_parser = subparsers.add_parser('mount-status', help='Show FUSE mount status')
-    cli.commands['storage.mount-status'] = mount_cmd.mount_status
 
     # --- storage blob ---
     blob_cmd = BlobCommands()
