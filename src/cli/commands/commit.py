@@ -568,6 +568,22 @@ class CommitCommand:
             DELETE FROM file_contents WHERE file_id = ?
         """, (change.file_id,), commit=False)
 
+        # Flip project_files.status so future scans don't re-detect the
+        # file as still-present. Without this, ghost records with no
+        # content blob keep getting flagged as "Deleted" on every commit
+        # yet never actually leave the active file set.
+        self.file_repo.execute("""
+            UPDATE project_files
+               SET status = 'deleted', updated_at = datetime('now')
+             WHERE id = ?
+        """, (change.file_id,), commit=False)
+
+        # Clear any lingering vcs_working_state row for this file — the
+        # deletion just committed subsumes any prior staged edit/delete.
+        self.file_repo.execute("""
+            DELETE FROM vcs_working_state WHERE file_id = ?
+        """, (change.file_id,), commit=False)
+
         # Record in commit_files (legacy metadata)
         self.vcs_repo.record_file_change(
             commit_id=commit_id,
