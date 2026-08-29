@@ -91,10 +91,9 @@ command groups:
     config             Manage configuration symlinks (link, unlink, verify)
 
   Storage & Sync
-    storage            Backup, cathedral, mount, blob management
+    storage            Backup, cathedral, blob management
                          storage backup local|restore|cloud|gcs
                          storage cathedral export|import|inspect|verify
-                         storage mount|unmount|mount-status
                          storage blob status|verify|list|migrate
                          sync network setup|status|connect|sync-all
 
@@ -116,7 +115,7 @@ command groups:
     dev                Local development server
     merge              Merge changes from external sources
 
-  Top-level aliases: status, mount, unmount, bootstrap
+  Top-level aliases: status, edit, commit, publish, build, push, bootstrap
 
 Use 'templedb <command> --help' for details on any command.
 """,

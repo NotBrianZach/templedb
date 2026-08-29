@@ -96,28 +96,11 @@ def dotfiles_remove(project: str = Form(...), source: str = Form(...)):
 
 @router.post("/mount/toggle", response_class=HTMLResponse)
 def mount_toggle():
-    # Check if mounted
-    try:
-        with open("/proc/mounts") as f:
-            mounted = any("fuse" in l.lower() and "temple" in l.lower() for l in f)
-    except Exception:
-        mounted = False
-
-    if mounted:
-        rc, out, err = _run("unmount")
-        return HTMLResponse(_msg("Unmounted" if rc == 0 else err, ok=rc == 0))
-    else:
-        # Mount in background (FUSE blocks)
-        import subprocess, threading
-        def _bg_mount():
-            subprocess.run(
-                [TEMPLEDB, "mount", str(Path.home() / "temple"), "--foreground"],
-                capture_output=True
-            )
-        t = threading.Thread(target=_bg_mount, daemon=True)
-        t.start()
-        import time; time.sleep(1)
-        return HTMLResponse(_msg("Mounting at {FUSE_MOUNT_PATH}...", ok=True))
+    # FUSE mount was removed in 2026-08; use `templedb edit <slug>` instead.
+    return HTMLResponse(_msg(
+        "FUSE mount removed. Use `templedb edit <slug>` for interactive editing.",
+        ok=False,
+    ))
 
 
 
@@ -193,28 +176,11 @@ def dotfiles_remove(project: str = Form(...), source: str = Form(...)):
 
 @router.post("/mount/toggle", response_class=HTMLResponse)
 def mount_toggle():
-    # Check if mounted
-    try:
-        with open("/proc/mounts") as f:
-            mounted = any("fuse" in l.lower() and "temple" in l.lower() for l in f)
-    except Exception:
-        mounted = False
-
-    if mounted:
-        rc, out, err = _run("unmount")
-        return HTMLResponse(_msg("Unmounted" if rc == 0 else err, ok=rc == 0))
-    else:
-        # Mount in background (FUSE blocks)
-        import subprocess, threading
-        def _bg_mount():
-            subprocess.run(
-                [TEMPLEDB, "mount", str(Path.home() / "temple"), "--foreground"],
-                capture_output=True
-            )
-        t = threading.Thread(target=_bg_mount, daemon=True)
-        t.start()
-        import time; time.sleep(1)
-        return HTMLResponse(_msg("Mounting at {FUSE_MOUNT_PATH}...", ok=True))
+    # FUSE mount was removed in 2026-08; use `templedb edit <slug>` instead.
+    return HTMLResponse(_msg(
+        "FUSE mount removed. Use `templedb edit <slug>` for interactive editing.",
+        ok=False,
+    ))
 
 
 
