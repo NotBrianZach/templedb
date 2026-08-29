@@ -31,6 +31,7 @@ class ImportStats:
     sql_objects_found: int = 0
     dependencies_found: int = 0
     metadata_entries: int = 0
+    ghosts_purged: int = 0
 
 
 class ProjectImporter:
@@ -237,6 +238,30 @@ class ProjectImporter:
 
             # Note: Versions are now managed by VCS system (vcs_commits + vcs_file_states)
             # Not creating file_versions entries during import - they'll be created on commit
+
+        # Reconcile: _import_file_metadata inserted a project_files row for
+        # every scanned file, but this method skips any file that doesn't
+        # exist, exceeds BLOB_MAX_SIZE, or is unreadable. Without this pass,
+        # those metadata rows linger forever as "ghost records"
+        # (project_files.status='active' with no file_contents blob), showing
+        # up in listings and confusing every downstream tool. Historically
+        # this accumulated 50%+ ghost ratios in some projects (see
+        # 2026-08-29 investigation, task #9).
+        purged = query_all("""
+            SELECT id, file_path FROM project_files
+             WHERE project_id = ?
+               AND status = 'active'
+               AND id NOT IN (SELECT file_id FROM file_contents WHERE is_current = 1)
+        """, (self.project_id,))
+        if purged:
+            execute("""
+                UPDATE project_files
+                   SET status = 'deleted', updated_at = datetime('now')
+                 WHERE project_id = ?
+                   AND status = 'active'
+                   AND id NOT IN (SELECT file_id FROM file_contents WHERE is_current = 1)
+            """, (self.project_id,), commit=False)
+            self.stats.ghosts_purged = len(purged)
 
     def _analyze_sql_files(self, sql_files: List[ScannedFile]):
         """Analyze SQL files and extract database objects (stored for metadata)"""
@@ -484,6 +509,8 @@ def main():
         print(f"   Total files scanned: {stats.total_files_scanned}")
         print(f"   Files imported: {stats.files_imported}")
         print(f"   Files skipped: {stats.files_skipped}")
+        if stats.ghosts_purged:
+            print(f"   Ghost records purged: {stats.ghosts_purged}")
         print(f"   Content stored: {stats.content_stored}")
         print(f"   Versions created: {stats.versions_created}")
         print(f"   SQL objects found: {stats.sql_objects_found}")
