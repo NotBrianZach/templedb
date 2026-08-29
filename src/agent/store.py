@@ -370,11 +370,17 @@ def get_sections(session_id):
 def upsert_section_entry(session_id, section, entry_id, entry_dict):
     """Insert or replace the entry (session, section, entry_id).
     entry_dict is stored as JSON; :id is kept in the entry_id column
-    for indexing but also mirrored inside the JSON payload for convenience."""
+    for indexing but also mirrored inside the JSON payload for convenience.
+
+    Wrapped in `_retry_on_lock` because MCP tools invoke this from
+    subprocess writers that race against the agent service, FUSE mount,
+    GUI, and any parallel templedb activity. Without retry, four
+    rapid-fire `templedb_agent_*` calls from Claude reliably lose the
+    lock race and return `database is locked` to the model."""
     payload = dict(entry_dict)
     payload["id"] = entry_id
     now = _now()
-    execute(
+    _retry_on_lock(lambda: execute(
         """INSERT INTO agent_session_sections
                (session_id, section, entry_id, entry_json, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?)
@@ -382,7 +388,7 @@ def upsert_section_entry(session_id, section, entry_id, entry_dict):
                entry_json = excluded.entry_json,
                updated_at = excluded.updated_at""",
         (session_id, section, entry_id, json.dumps(payload), now, now),
-    )
+    ))
     return payload
 
 
@@ -402,25 +408,26 @@ def merge_section_entry(session_id, section, entry_id, updates):
     else:
         existing = {}
     existing.update(updates)
+    # upsert_section_entry already retries.
     return upsert_section_entry(session_id, section, entry_id, existing)
 
 
 def remove_section_entry(session_id, section, entry_id):
     """Delete a single entry. Returns rows affected."""
-    return execute(
+    return _retry_on_lock(lambda: execute(
         """DELETE FROM agent_session_sections
             WHERE session_id = ? AND section = ? AND entry_id = ?""",
         (session_id, section, entry_id),
-    )
+    ))
 
 
 def remove_section(session_id, section):
     """Delete every entry in SECTION. Used for dynamic-section clear."""
-    return execute(
+    return _retry_on_lock(lambda: execute(
         """DELETE FROM agent_session_sections
             WHERE session_id = ? AND section = ?""",
         (session_id, section),
-    )
+    ))
 
 
 # --- Pending events (MCP tool → agent-service poll → Emacs) ---
@@ -429,13 +436,17 @@ def remove_section(session_id, section):
 # stamps dispatched_at. See migration 084 for the schema.
 
 def create_pending_event(session_id, event_type, payload, summary=None):
-    """Enqueue an outbound event for the agent's Emacs stdio."""
-    execute(
+    """Enqueue an outbound event for the agent's Emacs stdio.
+
+    Wrapped in `_retry_on_lock` — see `upsert_section_entry` for
+    rationale (MCP tools call these back-to-back from subprocess
+    writers)."""
+    _retry_on_lock(lambda: execute(
         """INSERT INTO agent_pending_events
                (session_id, event_type, payload_json, summary)
              VALUES (?, ?, ?, ?)""",
         (session_id, event_type, json.dumps(payload or {}), summary),
-    )
+    ))
 
 
 def undispatched_pending_events_for_session(session_id):
@@ -450,11 +461,14 @@ def undispatched_pending_events_for_session(session_id):
 
 
 def mark_pending_event_dispatched(event_id):
-    execute(
+    """Called from the agent service poll loop after successful emit.
+    Retry-wrapped because the poll loop runs continuously and would
+    otherwise choke on a transient lock and re-emit the same event."""
+    _retry_on_lock(lambda: execute(
         """UPDATE agent_pending_events SET dispatched_at = ?
             WHERE id = ?""",
         (_now(), event_id),
-    )
+    ))
 
 
 # --- Work Log ---
