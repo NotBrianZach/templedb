@@ -75,7 +75,6 @@ class HookEngine:
         self._lock = threading.Lock()
         self._project_cache = {}  # repo_url -> slug
         self._slug_set = set()
-        self._fuse_mount = None
         self._checkout_prefix = os.path.join(str(Path.home()), ".config", "templedb", "checkouts")
         self._refresh_cache()
 
@@ -92,12 +91,6 @@ class HookEngine:
                     self._slug_set.add(slug)
                     if repo_url:
                         self._project_cache[repo_url] = slug
-                cur.execute(
-                    "SELECT value FROM system_config WHERE key LIKE '%fuse.mount_path' "
-                    "ORDER BY key DESC LIMIT 1"
-                )
-                row = cur.fetchone()
-                self._fuse_mount = row[0] if row else os.path.join(str(Path.home()), "temple")
                 logger.info(f"Hook cache refreshed: {len(self._project_cache)} projects")
             except Exception as e:
                 logger.error(f"Cache refresh failed: {e}")

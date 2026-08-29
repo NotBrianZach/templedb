@@ -7,7 +7,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
-from config import FUSE_MOUNT_PATH
 from db_utils import get_simple_connection
 
 
@@ -49,8 +48,13 @@ class VibeCommands(Command):
 
         return 1
 
-    def _ensure_project_prompt(self, project: str):
-        """Ensure project has a prompt in DB, auto-generate one if not"""
+    def _ensure_project_prompt(self, project: str, regenerate: bool = False):
+        """Ensure project has a prompt in DB, auto-generate one if not.
+
+        If `regenerate` is True, deactivate any existing autogen prompt for
+        this project first, forcing a fresh generation from the current
+        template.
+        """
         conn = get_simple_connection()
         cursor = conn.cursor()
 
@@ -62,6 +66,13 @@ class VibeCommands(Command):
                 return
 
             project_id, slug, name = proj
+
+            if regenerate:
+                cursor.execute("""
+                    UPDATE project_prompts SET is_active = 0
+                     WHERE project_id = ? AND name LIKE '%autogen'
+                """, (project_id,))
+                conn.commit()
 
             cursor.execute("""
                 SELECT COUNT(*) FROM active_project_prompts_view WHERE project_id = ?
@@ -87,9 +98,9 @@ class VibeCommands(Command):
             checkout_dir = Path.home() / ".config" / "templedb" / "checkouts" / slug
             checkout_exists = checkout_dir.exists()
 
-            # Check for FUSE mount
-            fuse_path = Path.home() / "temple" / slug
-            fuse_mounted = fuse_path.exists()
+            # Compute editing workspace path (`templedb edit <slug>` on-ramp)
+            edit_workspace = Path.home() / ".config" / "templedb" / "edit-workspaces" / slug
+            edit_workspace_exists = edit_workspace.exists()
 
             # Check for project-scoped MCP servers
             project_mcp_tools = ""
@@ -113,8 +124,8 @@ class VibeCommands(Command):
 
 ## Rules
 
-1. **Read files** from FUSE mount at `{FUSE_MOUNT_PATH}/{slug}/` or use Claude's Read/Grep/Glob tools on that path
-2. **Write files** via FUSE mount (`{FUSE_MOUNT_PATH}/{slug}/`) — writes go to DB and auto-stage in VCS
+1. **Read files**: use `templedb_cli` MCP tool with `file cat` / `file ls`, or use Claude's Read/Grep/Glob on the edit workspace at `{edit_workspace}/` (create it with `templedb edit {slug}`)
+2. **Write files**: use `templedb file set <path>` for single-file edits, or edit inside a workspace (`templedb edit {slug}`) and commit with `templedb commit {slug} {edit_workspace} -m "..."`
 3. **TempleDB operations**: use `templedb_cli` MCP tool (e.g. `templedb_cli({{command: "vcs status {slug}"}})`)
 4. **SQL queries**: use `templedb_query` MCP tool
 5. **DO NOT** use `git` commands — use `templedb publish` and `templedb vcs` instead
@@ -145,21 +156,27 @@ These are faster and more accurate than shell commands.
 - Slug: `{slug}`
 - Files: {file_count}
 - Types: {', '.join(sorted(extensions)[:10]) if extensions else 'Unknown'}
-{f'- FUSE: `{fuse_path}/`' if fuse_mounted else '- FUSE: not mounted (run: templedb mount {FUSE_MOUNT_PATH})'}
+- Edit workspace: `{edit_workspace}/`{' (exists)' if edit_workspace_exists else ' (create with: templedb edit ' + slug + ')'}
 
 ## Workflow
 
 ```bash
-# Edit via FUSE (auto-stages)
-vim {FUSE_MOUNT_PATH}/{slug}/src/file.py
+# Single-file edit (fastest)
+echo 'new content' | templedb file set {slug} src/foo.py --verify
 
-# Or commit + push in one step
+# Multi-file session — opens $EDITOR in a writable workspace
+templedb edit {slug}
+# ...make edits at {edit_workspace}/...
+templedb commit {slug} {edit_workspace} -m "description"
+
+# Publish (materializes checkout + pushes to git mirrors)
+templedb publish run {slug}
+
+# Or one-shot commit+publish from an existing workspace
 templedb publish run {slug} -m "description"
 
-# Individual steps if needed
+# VCS status
 templedb vcs status {slug} --refresh
-templedb vcs add -p {slug} --all
-templedb vcs commit -p {slug} -m "msg"
 
 # Build with nix
 templedb publish build {slug}
@@ -226,8 +243,9 @@ What would you like to work on?
             return self._show_available_projects()
 
         # Ensure all projects have prompts
+        regenerate = bool(getattr(args, 'regenerate', False))
         for project in projects:
-            self._ensure_project_prompt(project)
+            self._ensure_project_prompt(project, regenerate=regenerate)
 
         # Single project: use existing launch_claude path
         if len(projects) == 1:
@@ -311,4 +329,6 @@ def register(cli):
     start_parser = subparsers.add_parser('start', help='Start a vibe coding session')
     start_parser.add_argument('projects', nargs='*', help='One or more project names/slugs')
     start_parser.add_argument('--claude-args', nargs='*', default=[], help='Additional arguments for Claude')
+    start_parser.add_argument('--regenerate', action='store_true',
+                              help='Deactivate any existing autogen prompt and regenerate from the current template')
     cli.commands['vibe.start'] = cmd.start

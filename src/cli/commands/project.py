@@ -16,7 +16,6 @@ from cli.commands.commit import CommitCommand
 from repositories import ProjectRepository, FileRepository
 from project_context import ProjectContext, get_project_context
 from logger import get_logger
-from config import FUSE_MOUNT_PATH
 
 logger = get_logger(__name__)
 
@@ -58,16 +57,15 @@ class ProjectCommands(Command):
                 (project_id,)
             )
 
-            # Check FUSE mount
-            fuse_path = Path(FUSE_MOUNT_PATH) / slug
-            fuse_note = f"   FUSE: {FUSE_MOUNT_PATH}/{slug}/" if fuse_path.exists() else f"   FUSE: {FUSE_MOUNT_PATH}/{slug}/ (mount with: templedb mount {FUSE_MOUNT_PATH})"
+            edit_workspace = Path.home() / ".config" / "templedb" / "edit-workspaces" / slug
 
             print(f"Created project: {slug} (ID {project_id})")
-            print(fuse_note)
+            print(f"   Edit workspace: {edit_workspace}/ (create with: templedb edit {slug})")
             print()
             print("Start working:")
-            print(f"   echo 'hello' > {FUSE_MOUNT_PATH}/{slug}/README.md")
-            print(f"   templedb vcs commit -p {slug} -m 'initial commit'")
+            print(f"   templedb edit {slug}                       # opens $EDITOR in a writable workspace")
+            print(f"   templedb file set {slug} README.md < /path/to/content  # or a single-file edit")
+            print(f"   templedb commit {slug} {edit_workspace} -m 'initial commit'")
 
             return 0
 
@@ -472,7 +470,7 @@ def register(cli):
     subparsers = project_parser.add_subparsers(dest='project_subcommand', required=True)
 
     # project create
-    create_parser = subparsers.add_parser('create', help='Create project in DB (no directory needed, use FUSE)')
+    create_parser = subparsers.add_parser('create', help='Create project in DB (no directory needed; use `templedb edit` to work on it)')
     create_parser.add_argument('slug', help='Project slug')
     create_parser.add_argument('--name', help='Project name (default: slug)')
     cli.commands['project.create'] = cmd.create_project

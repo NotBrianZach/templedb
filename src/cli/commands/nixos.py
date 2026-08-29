@@ -2066,8 +2066,7 @@ let homeDir = "{home_dir}"; in
                 svc = SystemService()
                 locked = svc.lock_checkout(slug)
                 print(f"\n  Committed and locked {locked} files read-only")
-                from config import FUSE_MOUNT_PATH
-                print(f"  (Edit via {FUSE_MOUNT_PATH}/ FUSE mount or GUI, not the checkout)")
+                print(f"  (Edit via `templedb edit {slug}` or the GUI, not the checkout)")
             except Exception:
                 print(f"\n  Staged all generated files for nix evaluation")
 
