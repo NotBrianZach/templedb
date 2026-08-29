@@ -340,6 +340,123 @@ def set_notes(session_id, goal_org=None, notes_org=None, scratch_org=None):
     return get_notes(session_id)
 
 
+# --- Session Sections (Phase D: agent-writable sections) ---
+# Entries are stored one row per (session, section, entry_id) with the
+# entry body as a JSON blob. get_sections rehydrates the whole graph
+# into a dict keyed by section name → list of entry dicts, ordered by
+# creation time. This matches the shape Emacs expects on session.open.
+
+def get_sections(session_id):
+    """Return sections state as {section_name: [entry_dict, ...]}.
+    Entries are ordered by insertion time (created_at, then id)."""
+    rows = query_all(
+        """SELECT section, entry_id, entry_json, created_at
+             FROM agent_session_sections
+            WHERE session_id = ?
+            ORDER BY created_at, id""",
+        (session_id,),
+    )
+    out = {}
+    for row in rows:
+        try:
+            entry = json.loads(row["entry_json"])
+        except (ValueError, TypeError):
+            entry = {}
+        entry.setdefault("id", row["entry_id"])
+        out.setdefault(row["section"], []).append(entry)
+    return out
+
+
+def upsert_section_entry(session_id, section, entry_id, entry_dict):
+    """Insert or replace the entry (session, section, entry_id).
+    entry_dict is stored as JSON; :id is kept in the entry_id column
+    for indexing but also mirrored inside the JSON payload for convenience."""
+    payload = dict(entry_dict)
+    payload["id"] = entry_id
+    now = _now()
+    execute(
+        """INSERT INTO agent_session_sections
+               (session_id, section, entry_id, entry_json, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(session_id, section, entry_id) DO UPDATE SET
+               entry_json = excluded.entry_json,
+               updated_at = excluded.updated_at""",
+        (session_id, section, entry_id, json.dumps(payload), now, now),
+    )
+    return payload
+
+
+def merge_section_entry(session_id, section, entry_id, updates):
+    """Merge UPDATES (a dict) into the existing entry's JSON body.
+    Creates the row if missing (with just the updates)."""
+    row = query_one(
+        """SELECT entry_json FROM agent_session_sections
+            WHERE session_id = ? AND section = ? AND entry_id = ?""",
+        (session_id, section, entry_id),
+    )
+    if row:
+        try:
+            existing = json.loads(row["entry_json"])
+        except (ValueError, TypeError):
+            existing = {}
+    else:
+        existing = {}
+    existing.update(updates)
+    return upsert_section_entry(session_id, section, entry_id, existing)
+
+
+def remove_section_entry(session_id, section, entry_id):
+    """Delete a single entry. Returns rows affected."""
+    return execute(
+        """DELETE FROM agent_session_sections
+            WHERE session_id = ? AND section = ? AND entry_id = ?""",
+        (session_id, section, entry_id),
+    )
+
+
+def remove_section(session_id, section):
+    """Delete every entry in SECTION. Used for dynamic-section clear."""
+    return execute(
+        """DELETE FROM agent_session_sections
+            WHERE session_id = ? AND section = ?""",
+        (session_id, section),
+    )
+
+
+# --- Pending events (MCP tool → agent-service poll → Emacs) ---
+# Same transport idea as agent_pending_asks, but one-way. MCP tool
+# inserts a row; the service's poll loop forwards it to Emacs and
+# stamps dispatched_at. See migration 084 for the schema.
+
+def create_pending_event(session_id, event_type, payload, summary=None):
+    """Enqueue an outbound event for the agent's Emacs stdio."""
+    execute(
+        """INSERT INTO agent_pending_events
+               (session_id, event_type, payload_json, summary)
+             VALUES (?, ?, ?, ?)""",
+        (session_id, event_type, json.dumps(payload or {}), summary),
+    )
+
+
+def undispatched_pending_events_for_session(session_id):
+    """Return not-yet-forwarded events for SESSION_ID, oldest first."""
+    return query_all(
+        """SELECT id, event_type, payload_json, summary, created_at
+             FROM agent_pending_events
+            WHERE session_id = ? AND dispatched_at IS NULL
+            ORDER BY id""",
+        (session_id,),
+    )
+
+
+def mark_pending_event_dispatched(event_id):
+    execute(
+        """UPDATE agent_pending_events SET dispatched_at = ?
+            WHERE id = ?""",
+        (_now(), event_id),
+    )
+
+
 # --- Work Log ---
 
 def create_work_log_entry(session_id, run_id, status="completed", stats=None):

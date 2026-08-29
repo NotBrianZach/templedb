@@ -33,10 +33,17 @@ def setup_test_db():
         )
     """)
 
-    # Read agent migration
-    migration_path = os.path.join(os.path.dirname(__file__), '..', '..', 'migrations', '073_add_temple_agent.sql')
-    with open(migration_path) as f:
-        conn.executescript(f.read())
+    # Read agent migrations in order. Each subsequent migration builds on
+    # the previous — 073 creates core agent tables, 080 adds pending asks
+    # transport, 084 adds sections + pending events transport.
+    mig_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'migrations')
+    for fname in ('073_add_temple_agent.sql',
+                  '080_agent_pending_asks.sql',
+                  '084_agent_sections.sql'):
+        p = os.path.join(mig_dir, fname)
+        if os.path.exists(p):
+            with open(p) as f:
+                conn.executescript(f.read())
     conn.close()
 
     # Force reimport of db_utils with new path

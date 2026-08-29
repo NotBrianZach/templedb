@@ -26,12 +26,31 @@ PROVIDER_LOGIN_REQUIRED = "provider.login_required"
 AGENT_ASK_QUESTION = "agent.ask.question"   # data: {ask_id, questions}
 AGENT_MESSAGE = "agent.message"             # data: {header, body}
 
+# Agent-writable sections (Findings / Todo / Open Questions / dynamic).
+# Emitted by MCP tools via agent_pending_events; consumed by Emacs to
+# populate the corresponding agent-owned section. Migration 084.
+AGENT_SECTION_FINDING_ADD       = "agent.section.finding.add"     # {id, text, refs?}
+AGENT_SECTION_FINDING_REMOVE    = "agent.section.finding.remove"  # {id}
+AGENT_SECTION_TODO_ADD          = "agent.section.todo.add"        # {id, text, priority?}
+AGENT_SECTION_TODO_DONE         = "agent.section.todo.done"       # {id}
+AGENT_SECTION_TODO_REMOVE       = "agent.section.todo.remove"     # {id}
+AGENT_SECTION_QUESTION_ADD      = "agent.section.question.add"    # {id, text}
+AGENT_SECTION_QUESTION_ANSWERED = "agent.section.question.answered" # {id, answer}
+AGENT_SECTION_QUESTION_REMOVE   = "agent.section.question.remove" # {id}
+AGENT_SECTION_DYNAMIC_WRITE     = "agent.section.dynamic.write"   # {section, id, text, mode?}
+AGENT_SECTION_DYNAMIC_REMOVE    = "agent.section.dynamic.remove"  # {section, id?}
+
 ALL_TYPES = {
     RUN_STARTED, RUN_INTERRUPTED, RUN_COMPLETED, RUN_FAILED,
     ASSISTANT_STARTED, ASSISTANT_DELTA, ASSISTANT_COMPLETED,
     TOOL_STARTED, TOOL_COMPLETED, TOOL_FAILED,
     PROVIDER_RATE_LIMITED, PROVIDER_LOGIN_REQUIRED,
     AGENT_ASK_QUESTION, AGENT_MESSAGE,
+    AGENT_SECTION_FINDING_ADD, AGENT_SECTION_FINDING_REMOVE,
+    AGENT_SECTION_TODO_ADD, AGENT_SECTION_TODO_DONE, AGENT_SECTION_TODO_REMOVE,
+    AGENT_SECTION_QUESTION_ADD, AGENT_SECTION_QUESTION_ANSWERED,
+    AGENT_SECTION_QUESTION_REMOVE,
+    AGENT_SECTION_DYNAMIC_WRITE, AGENT_SECTION_DYNAMIC_REMOVE,
 }
 
 # Session status constants

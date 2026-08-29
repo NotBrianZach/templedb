@@ -121,6 +121,9 @@ class ProtocolServer:
             "events.since": self._handle_events_since,
             "notes.get": self._handle_notes_get,
             "notes.set": self._handle_notes_set,
+            "sections.get": self._handle_sections_get,
+            "sections.set": self._handle_sections_set,
+            "sections.remove": self._handle_sections_remove,
             "session.fork": self._handle_session_fork,
             "session.last": self._handle_session_last,
             "ask.respond": self._handle_ask_respond,
@@ -157,6 +160,7 @@ class ProtocolServer:
         session = self.service.open_session(session_id)
         messages = self.service.get_messages(session_id)
         notes = self.service.get_notes(session_id)
+        sections = self.service.get_sections(session_id)
 
         from agent import store as agent_store
         events_by_run = {}
@@ -168,6 +172,7 @@ class ProtocolServer:
             "session": session,
             "messages": messages,
             "notes": notes,
+            "sections": sections,
             "events_by_run": events_by_run,
         })
 
@@ -289,6 +294,43 @@ class ProtocolServer:
             scratch_org=params.get("scratch"),
         )
         self._respond(request_id, result=notes)
+
+    def _handle_sections_get(self, request_id, params):
+        session_id = params.get("session_id")
+        if not session_id:
+            self._respond(request_id, error="session_id required")
+            return
+        self._respond(request_id, result=self.service.get_sections(session_id))
+
+    def _handle_sections_set(self, request_id, params):
+        """Upsert one section entry. Params: session_id, section, entry_id, entry.
+        Used by Emacs for user actions (e.g. marking a todo done from a keybinding)
+        AND by tests. Agent-driven writes normally go through pending events."""
+        session_id = params.get("session_id")
+        section = params.get("section")
+        entry_id = params.get("entry_id")
+        entry = params.get("entry") or {}
+        if not (session_id and section and entry_id):
+            self._respond(request_id,
+                          error="session_id, section, entry_id required")
+            return
+        result = self.service.set_section_entry(
+            session_id, section, entry_id, entry
+        )
+        self._respond(request_id, result=result)
+
+    def _handle_sections_remove(self, request_id, params):
+        session_id = params.get("session_id")
+        section = params.get("section")
+        entry_id = params.get("entry_id")
+        if not (session_id and section):
+            self._respond(request_id, error="session_id, section required")
+            return
+        if entry_id:
+            self.service.remove_section_entry(session_id, section, entry_id)
+        else:
+            self.service.remove_section(session_id, section)
+        self._respond(request_id, result={"ok": True})
 
     def _handle_session_fork(self, request_id, params):
         session_id = params.get("session_id")

@@ -441,6 +441,26 @@ class AgentService:
         """Update session notes."""
         return store.set_notes(session_id, **kwargs)
 
+    # --- Agent-writable sections (Phase D) ---
+
+    def get_sections(self, session_id):
+        """Return persisted sections as {section: [entry, ...]}."""
+        return store.get_sections(session_id)
+
+    def set_section_entry(self, session_id, section, entry_id, entry):
+        """Upsert a single entry into SECTION for SESSION_ID."""
+        return store.upsert_section_entry(session_id, section, entry_id, entry)
+
+    def merge_section_entry(self, session_id, section, entry_id, updates):
+        """Merge UPDATES into an existing section entry (or create it)."""
+        return store.merge_section_entry(session_id, section, entry_id, updates)
+
+    def remove_section_entry(self, session_id, section, entry_id):
+        return store.remove_section_entry(session_id, section, entry_id)
+
+    def remove_section(self, session_id, section):
+        return store.remove_section(session_id, section)
+
     # --- Fork ---
 
     def fork_session(self, session_id):
@@ -464,13 +484,16 @@ class AgentService:
                 self._ask_poll_thread.start()
 
     def _ask_poll_loop(self):
-        """Poll agent_pending_asks every 300ms and forward new asks as events."""
+        """Poll agent_pending_asks + agent_pending_events every 300ms and
+        forward new rows to Emacs as events. One loop handles both
+        transports so we don't spin two threads per session."""
         from agent import events as _events
         while not self._ask_poll_stop.is_set():
             try:
                 with self._lock:
                     sessions = list(self._active_sessions)
                 for session_id, run_id in sessions:
+                    # Legacy: agent_pending_asks (round-trip; needs response)
                     for row in store.undispatched_asks_for_session(session_id):
                         try:
                             payload = json.loads(row["payload"])
@@ -488,8 +511,23 @@ class AgentService:
                         )
                         self._emit_event(session_id, run_id, event)
                         store.mark_ask_dispatched(row["ask_id"])
+                    # New (Phase D): generic outbound events, one-way. Used by
+                    # agent-section MCP tools and anything else that needs to
+                    # push a JSON event to Emacs from a subprocess.
+                    for row in store.undispatched_pending_events_for_session(session_id):
+                        try:
+                            payload = json.loads(row["payload_json"])
+                        except (ValueError, TypeError):
+                            payload = {}
+                        event = _events.make_event(
+                            row["event_type"],
+                            summary=row["summary"],
+                            **payload,
+                        )
+                        self._emit_event(session_id, run_id, event)
+                        store.mark_pending_event_dispatched(row["id"])
             except Exception as e:
-                logger.error(f"Ask poll error: {e}")
+                logger.error(f"Ask/pending-event poll error: {e}")
             self._ask_poll_stop.wait(0.3)
 
     def respond_to_ask(self, ask_id, response):

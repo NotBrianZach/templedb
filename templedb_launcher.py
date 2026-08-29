@@ -511,6 +511,125 @@ try:
             # One-way: don't block on a response, just mark as delivered.
             return {"content": [{"type": "text", "text": "delivered"}]}
 
+        # --- Agent-writable sections (Phase D) ---
+        # Each of these tools:
+        #  1. persists the entry to agent_session_sections
+        #  2. enqueues a JSON-line event on agent_pending_events
+        # The agent service's poll loop forwards the event to Emacs,
+        # which mutates the corresponding section in the buffer.
+
+        def _sections_session_id_or_error(tool_name):
+            sid = _ask_session_id()
+            if sid is None:
+                return None, {"content": [{"type": "text",
+                    "text": f"{tool_name} requires TEMPLEDB_AGENT_SESSION_ID env "
+                            "(only available when Claude runs under `templedb ai agent`)"}],
+                    "isError": True}
+            return sid, None
+
+        def _emit_section_event(session_id, event_type, payload, summary=None):
+            from agent import store as _agent_store
+            _agent_store.create_pending_event(session_id, event_type, payload, summary)
+
+        def tool_agent_note_finding(args):
+            session_id, err = _sections_session_id_or_error("templedb_agent_note_finding")
+            if err: return err
+            text = (args.get("text") or "").strip()
+            if not text:
+                return {"content": [{"type": "text", "text": "text is required"}], "isError": True}
+            refs = args.get("refs") or []
+            entry_id = _uuid.uuid4().hex[:12]
+            from agent import store as _agent_store
+            _agent_store.upsert_section_entry(session_id, "findings", entry_id,
+                                              {"text": text, "refs": refs})
+            _emit_section_event(session_id, "agent.section.finding.add",
+                                {"id": entry_id, "text": text, "refs": refs},
+                                summary="Finding recorded")
+            return {"content": [{"type": "text", "text": f"finding {entry_id} recorded"}]}
+
+        def tool_agent_todo_add(args):
+            session_id, err = _sections_session_id_or_error("templedb_agent_todo_add")
+            if err: return err
+            text = (args.get("text") or "").strip()
+            if not text:
+                return {"content": [{"type": "text", "text": "text is required"}], "isError": True}
+            priority = args.get("priority")
+            entry_id = _uuid.uuid4().hex[:12]
+            from agent import store as _agent_store
+            _agent_store.upsert_section_entry(session_id, "todo", entry_id,
+                                              {"text": text, "priority": priority, "done": False})
+            payload = {"id": entry_id, "text": text}
+            if priority:
+                payload["priority"] = priority
+            _emit_section_event(session_id, "agent.section.todo.add", payload,
+                                summary="Todo added")
+            return {"content": [{"type": "text", "text": f"todo {entry_id} added"}]}
+
+        def tool_agent_todo_done(args):
+            session_id, err = _sections_session_id_or_error("templedb_agent_todo_done")
+            if err: return err
+            entry_id = args.get("id")
+            if not entry_id:
+                return {"content": [{"type": "text", "text": "id is required"}], "isError": True}
+            from agent import store as _agent_store
+            _agent_store.merge_section_entry(session_id, "todo", entry_id, {"done": True})
+            _emit_section_event(session_id, "agent.section.todo.done", {"id": entry_id})
+            return {"content": [{"type": "text", "text": f"todo {entry_id} marked done"}]}
+
+        def tool_agent_question_add(args):
+            session_id, err = _sections_session_id_or_error("templedb_agent_question_add")
+            if err: return err
+            text = (args.get("text") or "").strip()
+            if not text:
+                return {"content": [{"type": "text", "text": "text is required"}], "isError": True}
+            entry_id = _uuid.uuid4().hex[:12]
+            from agent import store as _agent_store
+            _agent_store.upsert_section_entry(session_id, "open-questions", entry_id,
+                                              {"text": text, "answered": False})
+            _emit_section_event(session_id, "agent.section.question.add",
+                                {"id": entry_id, "text": text},
+                                summary="Question flagged")
+            return {"content": [{"type": "text", "text": f"question {entry_id} added"}]}
+
+        def tool_agent_question_answered(args):
+            session_id, err = _sections_session_id_or_error("templedb_agent_question_answered")
+            if err: return err
+            entry_id = args.get("id")
+            answer = args.get("answer")
+            if not entry_id:
+                return {"content": [{"type": "text", "text": "id is required"}], "isError": True}
+            from agent import store as _agent_store
+            _agent_store.merge_section_entry(session_id, "open-questions", entry_id,
+                                             {"answered": True, "answer": answer})
+            _emit_section_event(session_id, "agent.section.question.answered",
+                                {"id": entry_id, "answer": answer})
+            return {"content": [{"type": "text", "text": f"question {entry_id} answered"}]}
+
+        def tool_agent_section_write(args):
+            """Write to (create if missing) an agent-invented dynamic section.
+            Distinct from the three fixed sections above; use this when the
+            desired category doesn't fit Findings/Todo/Open Questions."""
+            session_id, err = _sections_session_id_or_error("templedb_agent_section_write")
+            if err: return err
+            section_name = (args.get("section") or "").strip()
+            text = (args.get("text") or "").strip()
+            mode = args.get("mode") or "append"
+            if not section_name or not text:
+                return {"content": [{"type": "text",
+                    "text": "section and text are required"}], "isError": True}
+            entry_id = _uuid.uuid4().hex[:12]
+            db_section = f"dynamic:{section_name}"
+            from agent import store as _agent_store
+            if mode == "replace":
+                _agent_store.remove_section(session_id, db_section)
+            _agent_store.upsert_section_entry(session_id, db_section, entry_id,
+                                              {"text": text})
+            _emit_section_event(session_id, "agent.section.dynamic.write",
+                                {"section": section_name, "id": entry_id,
+                                 "text": text, "mode": mode})
+            return {"content": [{"type": "text",
+                "text": f"wrote to '{section_name}' ({mode})"}]}
+
         self.tools.update({
             "templedb_var_set":          tool_var_set,
             "templedb_var_get":          tool_var_get,
@@ -527,6 +646,12 @@ try:
             "templedb_ast_apply":        tool_ast_apply,
             "templedb_ask_user":         tool_ask_user,
             "templedb_message_user":     tool_message_user,
+            "templedb_agent_note_finding":       tool_agent_note_finding,
+            "templedb_agent_todo_add":           tool_agent_todo_add,
+            "templedb_agent_todo_done":          tool_agent_todo_done,
+            "templedb_agent_question_add":       tool_agent_question_add,
+            "templedb_agent_question_answered":  tool_agent_question_answered,
+            "templedb_agent_section_write":      tool_agent_section_write,
         })
 
     _MCPServer.__init__ = _patched_mcp_init
@@ -678,6 +803,70 @@ try:
                  "header": {"type": "string", "description": "Short label (max ~12 chars)"},
                  "body":   {"type": "string", "description": "Message body (markdown ok)"},
              }, "required": ["body"]}},
+            # Agent-writable sections (Phase D).
+            # Each of these writes to a dedicated Emacs section that the user
+            # can read at a glance without scrolling the conversation. Use
+            # these to externalise state that would otherwise clutter your
+            # reply text. All require TEMPLEDB_AGENT_SESSION_ID; state is
+            # persisted to agent_session_sections and survives session
+            # close/reopen.
+            {"name": "templedb_agent_note_finding",
+             "description":
+                 "Record a discovery you made during this session into the "
+                 "* Findings section of the Emacs agent buffer. Use for concrete, "
+                 "non-obvious facts worth surfacing (e.g. 'the auth cookie sets "
+                 "SameSite=None only in prod'). Prefer this over inlining findings "
+                 "in your reply when the user is likely to want to scan them later. "
+                 "refs is optional — pass file paths or tool_ids that back up the claim.",
+             "inputSchema": {"type": "object", "properties": {
+                 "text": {"type": "string", "description": "One-line finding summary"},
+                 "refs": {"type": "array", "items": {"type": "string"},
+                          "description": "Optional file paths or tool_ids"},
+             }, "required": ["text"]}},
+            {"name": "templedb_agent_todo_add",
+             "description":
+                 "Add a todo item to the * Todo section. Use for actions the user "
+                 "should take (or that you should take later) that don't fit in the "
+                 "current run. Priority: 'low' | 'medium' | 'high' (optional).",
+             "inputSchema": {"type": "object", "properties": {
+                 "text":     {"type": "string"},
+                 "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+             }, "required": ["text"]}},
+            {"name": "templedb_agent_todo_done",
+             "description":
+                 "Mark a todo item as done by its id. Use when you completed a "
+                 "previously-added todo in a later turn.",
+             "inputSchema": {"type": "object", "properties": {
+                 "id": {"type": "string"},
+             }, "required": ["id"]}},
+            {"name": "templedb_agent_question_add",
+             "description":
+                 "Flag an open question in the * Open Questions section. Use when "
+                 "you identified something you (or the user) will need to answer "
+                 "later but not right now — don't clutter the reply text with them.",
+             "inputSchema": {"type": "object", "properties": {
+                 "text": {"type": "string"},
+             }, "required": ["text"]}},
+            {"name": "templedb_agent_question_answered",
+             "description":
+                 "Mark an open question as answered by its id. Optionally include "
+                 "the answer text so it appears next to the question.",
+             "inputSchema": {"type": "object", "properties": {
+                 "id":     {"type": "string"},
+                 "answer": {"type": "string"},
+             }, "required": ["id"]}},
+            {"name": "templedb_agent_section_write",
+             "description":
+                 "Write to a dynamic, agent-invented section. Use this when the "
+                 "content doesn't fit Findings/Todo/Open Questions and would be "
+                 "useful as its own section in the Emacs buffer (e.g. 'Blockers', "
+                 "'Decisions', 'Session Recap'). Section is created on first write. "
+                 "mode: 'append' (default) or 'replace' (clear the section first).",
+             "inputSchema": {"type": "object", "properties": {
+                 "section": {"type": "string", "description": "Section name (e.g. 'Blockers')"},
+                 "text":    {"type": "string", "description": "Entry text"},
+                 "mode":    {"type": "string", "enum": ["append", "replace"], "default": "append"},
+             }, "required": ["section", "text"]}},
         ]
 
     _MCPServer.get_tool_definitions = _patched_list_tools

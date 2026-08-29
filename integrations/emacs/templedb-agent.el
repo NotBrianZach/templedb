@@ -1595,6 +1595,7 @@ and gets a `PINNED: <ISO timestamp>' property."
            (messages (alist-get 'messages result))
            (events-by-run (alist-get 'events_by_run result))
            (notes (alist-get 'notes result))
+           (sections (alist-get 'sections result))
            (pos (point)))
        (setq templedb-agent--status (alist-get 'status session))
        (setq templedb-agent--project
@@ -1611,6 +1612,7 @@ and gets a `PINNED: <ISO timestamp>' property."
            (templedb-agent--set-section-text "Notes" n))
          (when-let ((s (alist-get 'scratch_org notes)))
            (templedb-agent--set-section-text "Scratch" s)))
+       (templedb-agent--restore-sections sections)
        (goto-char (min pos (point-max)))))))
 
 ;;;; Session management
@@ -1688,7 +1690,8 @@ and gets a `PINNED: <ISO timestamp>' property."
          (let ((session (alist-get 'session result))
                (messages (alist-get 'messages result))
                (events-by-run (alist-get 'events_by_run result))
-               (notes (alist-get 'notes result)))
+               (notes (alist-get 'notes result))
+               (sections (alist-get 'sections result)))
            (setq templedb-agent--project
                  (or (alist-get 'project_slug session) templedb-agent--project))
            (setq templedb-agent--provider (alist-get 'provider_name session))
@@ -1703,7 +1706,50 @@ and gets a `PINNED: <ISO timestamp>' property."
                (templedb-agent--set-section-text "Notes" n))
              (when-let ((s (alist-get 'scratch_org notes)))
                (templedb-agent--set-section-text "Scratch" s)))
+           (templedb-agent--restore-sections sections)
            (message "Temple Agent session %d resumed" session-id)))))))
+
+(defun templedb-agent--restore-sections (sections)
+  "Rehydrate agent-writable sections from the SECTIONS alist returned by
+`session.open'. Populates the per-category state lists and re-renders.
+Dynamic sections are re-created via `--ensure-dynamic-section' so their
+anchors show up in the buffer."
+  (when sections
+    (let ((entries-to-plist
+           (lambda (raw)
+             ;; alist coming over JSON — turn each entry into a plist.
+             (mapcar (lambda (e)
+                       (list :id (or (alist-get 'id e) "")
+                             :text (or (alist-get 'text e) "")
+                             :refs (append (alist-get 'refs e) nil)
+                             :priority (when-let ((p (alist-get 'priority e)))
+                                         (intern (if (symbolp p) (symbol-name p) p)))
+                             :done (alist-get 'done e)
+                             :answered (alist-get 'answered e)
+                             :answer (alist-get 'answer e)
+                             :timestamp (alist-get 'timestamp e)))
+                     (append raw nil)))))
+      (when-let ((f (alist-get 'findings sections)))
+        (setq templedb-agent--findings (funcall entries-to-plist f))
+        (templedb-agent--rerender-findings))
+      (when-let ((tds (alist-get 'todo sections)))
+        (setq templedb-agent--todos (funcall entries-to-plist tds))
+        (templedb-agent--rerender-todos))
+      (when-let ((qs (alist-get 'open-questions sections)))
+        (setq templedb-agent--open-questions (funcall entries-to-plist qs))
+        (templedb-agent--rerender-questions))
+      ;; Dynamic sections: keys look like `dynamic:NAME'. Emacs receives
+      ;; them as symbols/strings depending on JSON decoding; handle both.
+      (dolist (pair sections)
+        (let* ((key (car pair))
+               (key-str (if (symbolp key) (symbol-name key) key)))
+          (when (and (stringp key-str) (string-prefix-p "dynamic:" key-str))
+            (let ((name (substring key-str (length "dynamic:")))
+                  (entries (funcall entries-to-plist (cdr pair))))
+              (templedb-agent--ensure-dynamic-section name)
+              (let ((p (assoc name templedb-agent--dynamic-sections)))
+                (setcdr p entries))
+              (templedb-agent--rerender-dynamic name))))))))
 
 (defun templedb-agent--set-section-text (heading text)
   "Set the text content of an Org section by HEADING name."
@@ -1783,7 +1829,8 @@ If PROJECT has a recent session, offers to resume it."
                  (let ((session (alist-get 'session result))
                        (messages (alist-get 'messages result))
                        (events-by-run (alist-get 'events_by_run result))
-                       (notes (alist-get 'notes result)))
+                       (notes (alist-get 'notes result))
+                       (sections (alist-get 'sections result)))
                    (setq templedb-agent--project
                          (or (alist-get 'project_slug session) ""))
                    (setq templedb-agent--provider
@@ -1800,6 +1847,7 @@ If PROJECT has a recent session, offers to resume it."
                        (templedb-agent--set-section-text "Notes" n))
                      (when-let ((s (alist-get 'scratch_org notes)))
                        (templedb-agent--set-section-text "Scratch" s)))
+                   (templedb-agent--restore-sections sections)
                    (message "Temple Agent session %d opened (%s)"
                             session-id (alist-get 'status session))))))))
       (if (< n 10)
