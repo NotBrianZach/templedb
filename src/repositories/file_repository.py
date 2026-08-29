@@ -53,6 +53,7 @@ class FileRepository(BaseRepository):
                 JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
                 JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
                 WHERE pf.project_id = ?
+                  AND pf.status = 'active'
                 ORDER BY pf.file_path
             """, (project_id,))
         else:
@@ -67,6 +68,7 @@ class FileRepository(BaseRepository):
                 FROM project_files pf
                 LEFT JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
                 WHERE pf.project_id = ?
+                  AND pf.status = 'active'
                 ORDER BY pf.file_path
             """, (project_id,))
 
