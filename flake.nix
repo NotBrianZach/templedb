@@ -79,6 +79,16 @@
               [ -f "$f" ] && cp "$f" "$SITE/" || true
             done
 
+            # Bundle SQL migrations alongside the Python modules so
+            # `templedb admin db migrate` works out of a stock nix
+            # install without needing TEMPLEDB_DEV_MODE=1 to fall back
+            # to the checkout. src/migrator.py's `_find_migrations_dir`
+            # looks for `migrations/` as a sibling of migrator.py.
+            if [ -d migrations ]; then
+              mkdir -p "$SITE/migrations"
+              cp migrations/*.sql "$SITE/migrations/" 2>/dev/null || true
+            fi
+
             # templedb entry point: bundled _launcher.py (copied via *.py loop
             # above). Runs `from cli import main; main()` after applying dev-mode
             # sys.path preference when TEMPLEDB_DEV_MODE=1. Default behavior
