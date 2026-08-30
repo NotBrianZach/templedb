@@ -367,6 +367,69 @@ def get_sections(session_id):
     return out
 
 
+def search_sections_across_sessions(query, section=None,
+                                    project_slug=None, limit=50):
+    """Substring-search across every session's agent_session_sections.
+    Returns a list of {session_id, project_slug, section, entry_id,
+    entry, created_at, session_created_at}, oldest-first.
+
+    QUERY: substring matched against the entry's JSON text
+        (case-insensitive). Empty QUERY returns most-recent entries.
+    SECTION: if provided, restricts to that section id
+        (findings/todo/open-questions/dynamic:NAME).
+    PROJECT_SLUG: if provided, restricts to sessions whose project
+        matches this slug. When None, includes every session.
+    LIMIT: cap on rows returned.
+
+    Backs `templedb_agent_search_findings` and friends. Read-only;
+    no retry-on-lock needed."""
+    where = ["1=1"]
+    params = []
+    if section:
+        where.append("s.section = ?")
+        params.append(section)
+    if query:
+        where.append("LOWER(s.entry_json) LIKE ?")
+        params.append("%" + query.lower() + "%")
+    if project_slug:
+        where.append("p.slug = ?")
+        params.append(project_slug)
+    params.append(int(limit))
+    rows = query_all(
+        f"""SELECT s.session_id       AS session_id,
+                   p.slug             AS project_slug,
+                   s.section          AS section,
+                   s.entry_id         AS entry_id,
+                   s.entry_json       AS entry_json,
+                   s.created_at       AS created_at,
+                   sess.created_at    AS session_created_at
+              FROM agent_session_sections s
+              JOIN agent_sessions sess ON sess.id = s.session_id
+              LEFT JOIN projects p ON p.id = sess.project_id
+             WHERE {' AND '.join(where)}
+             ORDER BY s.created_at DESC
+             LIMIT ?""",
+        tuple(params),
+    )
+    out = []
+    for r in rows:
+        try:
+            entry = json.loads(r["entry_json"])
+        except (ValueError, TypeError):
+            entry = {}
+        entry.setdefault("id", r["entry_id"])
+        out.append({
+            "session_id": r["session_id"],
+            "project_slug": r["project_slug"],
+            "section": r["section"],
+            "entry_id": r["entry_id"],
+            "entry": entry,
+            "created_at": r["created_at"],
+            "session_created_at": r["session_created_at"],
+        })
+    return out
+
+
 def upsert_section_entry(session_id, section, entry_id, entry_dict):
     """Insert or replace the entry (session, section, entry_id).
     entry_dict is stored as JSON; :id is kept in the entry_id column

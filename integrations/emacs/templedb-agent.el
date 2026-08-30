@@ -399,6 +399,23 @@ UPDATER is called with the tool plist and should mutate it in place."
   "Alist of (SECTION-NAME . LIST-OF-ENTRIES) for agent-created sections.
 SECTION-NAME is a string; entries are plists with :id :text :timestamp.")
 
+(defun templedb-agent--modeline-section-badge ()
+  "Return a compact ` [F:n T:n Q:n D:n]' badge for the modeline.
+Empty categories are elided; if every category is empty the whole
+badge is dropped so the modeline stays short in fresh sessions."
+  (let* ((findings (length templedb-agent--findings))
+         (todos-open (cl-count-if-not (lambda (t) (plist-get t :done))
+                                      templedb-agent--todos))
+         (qs-open (cl-count-if-not (lambda (q) (plist-get q :answered))
+                                   templedb-agent--open-questions))
+         (dyns (length templedb-agent--dynamic-section-order))
+         (parts (delq nil
+                      (list (when (> findings 0)   (format "F:%d" findings))
+                            (when (> todos-open 0) (format "T:%d" todos-open))
+                            (when (> qs-open 0)    (format "Q:%d" qs-open))
+                            (when (> dyns 0)       (format "D:%d" dyns))))))
+    (if parts (concat " [" (mapconcat #'identity parts " ") "]") "")))
+
 ;;;; Renderers for the fixed agent sections
 ;;
 ;; Each --pp-* renderer stamps `templedb-entry-id' and
@@ -406,6 +423,25 @@ SECTION-NAME is a string; entries are plists with :id :text :timestamp.")
 ;; entry it renders, so `templedb-agent-entry-at-point' can identify
 ;; which entry the user is on without regex-matching text (which would
 ;; be brittle to text-property font-lock and org-fold decorations).
+;;
+;; Entries also carry an :author slot (defaults to `agent'). The
+;; renderer prepends a compact marker before the bullet so the reader
+;; can tell agent-authored vs user-authored content at a glance.
+;; Currently every entry is agent-authored (there's no user-write path
+;; into Findings/Todo/Open Questions yet); the marker plumbing is here
+;; so the eventual promote-to-user command (see reflection report)
+;; Just Works.
+
+(defface templedb-agent--author-badge
+  '((t :foreground "#7080a0" :height 0.85))
+  "Face for the [a] / [u] author marker on agent-writable entries."
+  :group 'templedb-agent)
+
+(defun templedb-agent--author-marker (entry)
+  "Return a propertized `[a]' / `[u]' marker string for ENTRY."
+  (let ((author (or (plist-get entry :author) 'agent)))
+    (propertize (if (eq author 'user) "[u] " "[a] ")
+                'face 'templedb-agent--author-badge)))
 
 (defun templedb-agent--pp-stamped (section entry-id line)
   "Insert LINE at point with templedb-entry-{id,section} text props."
@@ -417,69 +453,150 @@ SECTION-NAME is a string; entries are plists with :id :text :timestamp.")
 
 (defun templedb-agent--pp-finding (f)
   "Render one finding entry F at point."
-  (templedb-agent--pp-stamped
-   "findings" (plist-get f :id)
-   (format "- %s%s\n"
-           (plist-get f :text)
-           (if-let ((refs (plist-get f :refs)))
-               (format " (refs: %s)" (mapconcat #'identity refs ", "))
-             ""))))
+  (let ((start (point)))
+    (insert (templedb-agent--author-marker f))
+    (templedb-agent--pp-stamped
+     "findings" (plist-get f :id)
+     (format "- %s%s\n"
+             (plist-get f :text)
+             (if-let ((refs (plist-get f :refs)))
+                 (format " (refs: %s)" (mapconcat #'identity refs ", "))
+               "")))
+    (add-text-properties start (point)
+                         `(templedb-entry-id ,(plist-get f :id)
+                           templedb-entry-section "findings"))))
 
 (defun templedb-agent--pp-todo (todo)
   "Render one todo entry TODO at point."
   (let ((done (plist-get todo :done))
-        (prio (plist-get todo :priority)))
+        (prio (plist-get todo :priority))
+        (start (point)))
+    (insert (templedb-agent--author-marker todo))
     (templedb-agent--pp-stamped
      "todo" (plist-get todo :id)
      (format "- [%s] %s%s\n"
              (if done "X" " ")
              (plist-get todo :text)
-             (if prio (format " ~%s~" prio) "")))))
+             (if prio (format " ~%s~" prio) "")))
+    (add-text-properties start (point)
+                         `(templedb-entry-id ,(plist-get todo :id)
+                           templedb-entry-section "todo"))))
 
 (defun templedb-agent--pp-question (q)
   "Render one open-question entry Q at point."
   (let ((answered (plist-get q :answered))
-        (answer (plist-get q :answer)))
+        (answer (plist-get q :answer))
+        (start (point)))
+    (insert (templedb-agent--author-marker q))
     (templedb-agent--pp-stamped
      "open-questions" (plist-get q :id)
      (format "- %s %s%s\n"
              (if answered "[✓]" "[?]")
              (plist-get q :text)
-             (if (and answered answer) (format " → %s" answer) "")))))
+             (if (and answered answer) (format " → %s" answer) "")))
+    (add-text-properties start (point)
+                         `(templedb-entry-id ,(plist-get q :id)
+                           templedb-entry-section "open-questions"))))
 
 (defun templedb-agent--pp-dynamic-entry-for (section-name)
   "Return a renderer closure that stamps entries with SECTION-NAME."
-  (lambda (e)
-    (templedb-agent--pp-stamped
-     (format "dynamic:%s" section-name) (plist-get e :id)
-     (format "- %s\n" (plist-get e :text)))))
+  (let ((full-section (format "dynamic:%s" section-name)))
+    (lambda (e)
+      (let ((start (point)))
+        (insert (templedb-agent--author-marker e))
+        (templedb-agent--pp-stamped
+         full-section (plist-get e :id)
+         (format "- %s\n" (plist-get e :text)))
+        (add-text-properties start (point)
+                             `(templedb-entry-id ,(plist-get e :id)
+                               templedb-entry-section ,full-section))))))
 
 (defun templedb-agent--pp-dynamic-entry (e)
   "Fallback renderer if no section-name is threaded through — stamps
 without a section id. Prefer `--pp-dynamic-entry-for'."
-  (templedb-agent--pp-stamped
-   nil (plist-get e :id)
-   (format "- %s\n" (plist-get e :text))))
+  (let ((start (point)))
+    (insert (templedb-agent--author-marker e))
+    (templedb-agent--pp-stamped
+     nil (plist-get e :id)
+     (format "- %s\n" (plist-get e :text)))
+    (add-text-properties start (point)
+                         `(templedb-entry-id ,(plist-get e :id)
+                           templedb-entry-section nil))))
+
+(defface templedb-agent--fresh-write
+  '((((background dark))  :background "#2a3550")
+    (((background light)) :background "#e0eaff"))
+  "Face for the fade overlay on newly-written entries."
+  :group 'templedb-agent)
+
+(defvar-local templedb-agent--previous-entry-ids nil
+  "Alist of (section-id . (id id ...)) tracking which entries were
+rendered on the previous --rerender-section call. Used to detect
+which entries are newly-written and deserve a fade overlay.")
+
+(defcustom templedb-agent-fresh-write-duration 3.0
+  "Seconds a highlight-on-write overlay stays visible before removal."
+  :type 'number
+  :group 'templedb-agent)
+
+(defun templedb-agent--highlight-fresh (section-id fresh-ids)
+  "Overlay newly-written entries in SECTION-ID with a temporary face.
+FRESH-IDS is the list of entry-ids that were not present in the
+previous render of this section. Overlays auto-remove after
+`templedb-agent-fresh-write-duration' seconds."
+  (when (and fresh-ids
+             (templedb-agent--find-section section-id))
+    (save-excursion
+      (goto-char (templedb-agent--find-section section-id))
+      (let ((section-end (templedb-agent--section-end section-id)))
+        (dolist (eid fresh-ids)
+          (let ((pos (text-property-any (point) section-end
+                                        'templedb-entry-id eid)))
+            (when pos
+              (let* ((line-start pos)
+                     (line-end (save-excursion
+                                 (goto-char pos)
+                                 (line-end-position)))
+                     (ov (make-overlay line-start (1+ line-end))))
+                (overlay-put ov 'face 'templedb-agent--fresh-write)
+                (overlay-put ov 'templedb-fresh-write t)
+                (run-at-time templedb-agent-fresh-write-duration nil
+                             (lambda () (when (overlay-buffer ov)
+                                          (delete-overlay ov))))))))))))
 
 (defun templedb-agent--rerender-section (id renderer entries)
   "Rewrite the body of section ID by running RENDERER on each of ENTRIES.
 The heading line itself is preserved. Everything from the line after
 the heading up to (but not including) the next section anchor is
-replaced. RENDERER is called at point for each entry."
+replaced. RENDERER is called at point for each entry.
+
+Also detects which entries are newly-added (weren't in the previous
+render) and applies a fading highlight overlay so the user notices
+when the agent has written new state into the section."
   (when-let ((start (templedb-agent--find-section id)))
-    (save-excursion
-      (goto-char start)
-      (forward-line 1)                  ; past heading
-      (let ((body-start (point))
-            (body-end (templedb-agent--section-end id))
-            (inhibit-read-only t))
-        (delete-region body-start body-end)
-        (goto-char body-start)
-        (insert "\n")                   ; blank line under heading
-        (if entries
-            (dolist (e entries) (funcall renderer e))
-          (insert "(none)\n"))
-        (insert "\n")))))
+    (let* ((current-ids (mapcar (lambda (e) (plist-get e :id)) entries))
+           (prev-pair (assoc id templedb-agent--previous-entry-ids))
+           (prev-ids (cdr prev-pair))
+           (fresh-ids (cl-set-difference current-ids prev-ids :test #'equal)))
+      (save-excursion
+        (goto-char start)
+        (forward-line 1)                  ; past heading
+        (let ((body-start (point))
+              (body-end (templedb-agent--section-end id))
+              (inhibit-read-only t))
+          (delete-region body-start body-end)
+          (goto-char body-start)
+          (insert "\n")                   ; blank line under heading
+          (if entries
+              (dolist (e entries) (funcall renderer e))
+            (insert "(none)\n"))
+          (insert "\n")))
+      ;; Highlight-on-write for entries that weren't there last time.
+      (templedb-agent--highlight-fresh id fresh-ids)
+      ;; Remember what we just rendered so the NEXT rerender can diff.
+      (if prev-pair
+          (setcdr prev-pair current-ids)
+        (push (cons id current-ids) templedb-agent--previous-entry-ids)))))
 
 (defun templedb-agent--rerender-findings ()
   (templedb-agent--rerender-section
@@ -2520,12 +2637,19 @@ Optionally filter by PROJECT slug."
   (visual-line-mode 1)
   (setq-local word-wrap t)
   (setq-local truncate-lines nil)
-  ;; Mode-line shows session info
+  ;; Mode-line shows session info + a compact section-state badge.
+  ;; The badge tallies open agent-owned entries so the user knows at a
+  ;; glance whether state has accumulated they should look at.
+  ;;   F:n  findings   T:n  open (not-done) todos
+  ;;   Q:n  unanswered questions   D:n  dynamic sections
+  ;; Zero-count categories are omitted to keep the line tight; if
+  ;; every category is empty, the badge disappears entirely.
   (setq mode-line-buffer-identification
-        '(:eval (format "TAgent #%s %s [%s]"
+        '(:eval (format "TAgent #%s %s [%s]%s"
                         (or templedb-agent--session-id "?")
                         (or templedb-agent--project "")
-                        (or templedb-agent--status "?"))))
+                        (or templedb-agent--status "?")
+                        (templedb-agent--modeline-section-badge))))
   (use-local-map (make-composed-keymap
                   templedb-agent-mode-map org-mode-map))
   ;; User sections auto-save on idle + kill-buffer, never on run events.

@@ -141,6 +141,8 @@ class MCPServer:
             "templedb_agent_question_add":      self.tool_agent_question_add,
             "templedb_agent_question_answered": self.tool_agent_question_answered,
             "templedb_agent_section_write":     self.tool_agent_section_write,
+            # Read-only cross-session search over agent-owned state.
+            "templedb_agent_search_sections":   self.tool_agent_search_sections,
         }
 
     def _get_db_connection(self):
@@ -528,6 +530,27 @@ class MCPServer:
                         "mode":    {"type": "string", "enum": ["append", "replace"], "default": "append"}
                     },
                     "required": ["section", "text"]
+                }
+            },
+            {
+                "name": "templedb_agent_search_sections",
+                "description":
+                    "Substring-search across every session's agent-owned sections "
+                    "(Findings, Todo, Open Questions, dynamic:*). Use when the user "
+                    "asks about something you might have flagged in a past session "
+                    "— e.g. 'did we ever record anything about the auth cookie?'. "
+                    "Cheap and read-only. Case-insensitive. Empty query returns "
+                    "most-recent entries. Restrict by section or project when you "
+                    "know which bucket to look in.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query":   {"type": "string", "description": "Substring (case-insensitive). Empty for recency-only."},
+                        "section": {"type": "string", "description": "Optional: 'findings' | 'todo' | 'open-questions' | 'dynamic:NAME'"},
+                        "project": {"type": "string", "description": "Optional: restrict to this project slug"},
+                        "limit":   {"type": "integer", "description": "Max rows (default 50)", "default": 50}
+                    },
+                    "required": []
                 }
             },
         ]
@@ -1421,6 +1444,42 @@ class MCPServer:
             {"section": section_name, "id": entry_id, "text": text, "mode": mode})
         return {"content": [{"type": "text",
             "text": f"wrote to '{section_name}' ({mode})"}]}
+
+    def tool_agent_search_sections(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Cross-session read-only search over agent-owned sections.
+        Does NOT require TEMPLEDB_AGENT_SESSION_ID — usable outside
+        the agent context (e.g. from the CLI wrapper for humans)."""
+        query = args.get("query") or ""
+        section = args.get("section")
+        project = args.get("project")
+        try:
+            limit = int(args.get("limit") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        from agent import store as _store
+        rows = _store.search_sections_across_sessions(
+            query=query, section=section, project_slug=project, limit=limit)
+        # Format for the model: JSON is the most token-efficient shape.
+        # Include enough per-hit context to be useful without the model
+        # having to make a follow-up query.
+        payload = {
+            "match_count": len(rows),
+            "hits": [
+                {
+                    "session_id": r["session_id"],
+                    "project": r["project_slug"],
+                    "section": r["section"],
+                    "entry_id": r["entry_id"],
+                    "text": r["entry"].get("text"),
+                    "created_at": r["created_at"],
+                    **({k: r["entry"][k] for k in
+                        ("refs", "priority", "done", "answered", "answer")
+                        if k in r["entry"]}),
+                }
+                for r in rows
+            ],
+        }
+        return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
     def tool_cli(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Run any TempleDB CLI command."""
