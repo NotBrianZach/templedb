@@ -55,7 +55,8 @@ def _init_test_db():
     mig_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'migrations')
     for fname in ('073_add_temple_agent.sql',
                   '080_agent_pending_asks.sql',
-                  '084_agent_sections.sql'):
+                  '084_agent_sections.sql',
+                  '085_agent_user_edits.sql'):
         p = os.path.join(mig_dir, fname)
         if os.path.exists(p):
             with open(p) as f:
@@ -94,7 +95,8 @@ def setup_test_db():
     staleness where the cached connection was mid-txn when we wiped)."""
     conn = sqlite3.connect(_test_db_path)
     conn.execute("PRAGMA foreign_keys=ON")
-    for table in ("agent_session_sections",
+    for table in ("agent_user_edits",
+                  "agent_session_sections",
                   "agent_pending_events",
                   "agent_pending_asks",
                   "agent_session_notes",

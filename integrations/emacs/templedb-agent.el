@@ -400,36 +400,66 @@ UPDATER is called with the tool plist and should mutate it in place."
 SECTION-NAME is a string; entries are plists with :id :text :timestamp.")
 
 ;;;; Renderers for the fixed agent sections
+;;
+;; Each --pp-* renderer stamps `templedb-entry-id' and
+;; `templedb-entry-section' text properties on the whole line for the
+;; entry it renders, so `templedb-agent-entry-at-point' can identify
+;; which entry the user is on without regex-matching text (which would
+;; be brittle to text-property font-lock and org-fold decorations).
+
+(defun templedb-agent--pp-stamped (section entry-id line)
+  "Insert LINE at point with templedb-entry-{id,section} text props."
+  (let ((start (point)))
+    (insert line)
+    (add-text-properties start (point)
+                         `(templedb-entry-id ,entry-id
+                           templedb-entry-section ,section))))
 
 (defun templedb-agent--pp-finding (f)
   "Render one finding entry F at point."
-  (insert (format "- %s%s\n"
-                  (plist-get f :text)
-                  (if-let ((refs (plist-get f :refs)))
-                      (format " (refs: %s)" (mapconcat #'identity refs ", "))
-                    ""))))
+  (templedb-agent--pp-stamped
+   "findings" (plist-get f :id)
+   (format "- %s%s\n"
+           (plist-get f :text)
+           (if-let ((refs (plist-get f :refs)))
+               (format " (refs: %s)" (mapconcat #'identity refs ", "))
+             ""))))
 
 (defun templedb-agent--pp-todo (todo)
   "Render one todo entry TODO at point."
   (let ((done (plist-get todo :done))
         (prio (plist-get todo :priority)))
-    (insert (format "- [%s] %s%s\n"
-                    (if done "X" " ")
-                    (plist-get todo :text)
-                    (if prio (format " ~%s~" prio) "")))))
+    (templedb-agent--pp-stamped
+     "todo" (plist-get todo :id)
+     (format "- [%s] %s%s\n"
+             (if done "X" " ")
+             (plist-get todo :text)
+             (if prio (format " ~%s~" prio) "")))))
 
 (defun templedb-agent--pp-question (q)
   "Render one open-question entry Q at point."
   (let ((answered (plist-get q :answered))
         (answer (plist-get q :answer)))
-    (insert (format "- %s %s%s\n"
-                    (if answered "[✓]" "[?]")
-                    (plist-get q :text)
-                    (if (and answered answer) (format " → %s" answer) "")))))
+    (templedb-agent--pp-stamped
+     "open-questions" (plist-get q :id)
+     (format "- %s %s%s\n"
+             (if answered "[✓]" "[?]")
+             (plist-get q :text)
+             (if (and answered answer) (format " → %s" answer) "")))))
+
+(defun templedb-agent--pp-dynamic-entry-for (section-name)
+  "Return a renderer closure that stamps entries with SECTION-NAME."
+  (lambda (e)
+    (templedb-agent--pp-stamped
+     (format "dynamic:%s" section-name) (plist-get e :id)
+     (format "- %s\n" (plist-get e :text)))))
 
 (defun templedb-agent--pp-dynamic-entry (e)
-  "Render one dynamic-section entry E at point."
-  (insert (format "- %s\n" (plist-get e :text))))
+  "Fallback renderer if no section-name is threaded through — stamps
+without a section id. Prefer `--pp-dynamic-entry-for'."
+  (templedb-agent--pp-stamped
+   nil (plist-get e :id)
+   (format "- %s\n" (plist-get e :text))))
 
 (defun templedb-agent--rerender-section (id renderer entries)
   "Rewrite the body of section ID by running RENDERER on each of ENTRIES.
@@ -468,7 +498,7 @@ replaced. RENDERER is called at point for each entry."
   "Rerender the dynamic section NAME (a string)."
   (let ((id (templedb-agent--dynamic-section-id name)))
     (templedb-agent--rerender-section
-     id #'templedb-agent--pp-dynamic-entry
+     id (templedb-agent--pp-dynamic-entry-for name)
      (cdr (assoc name templedb-agent--dynamic-sections)))))
 
 ;;;; Mutations on agent-writable sections
@@ -534,6 +564,99 @@ Appends the section to the buffer after all other sections."
     (setcdr pair (cl-remove-if (lambda (e) (equal id (plist-get e :id)))
                                (cdr pair)))
     (templedb-agent--rerender-dynamic name)))
+
+;;;; Reverse channel — user edits to agent-owned state
+;;
+;; Every agent-written entry in Findings / Todo / Open Questions /
+;; dynamic:* has `templedb-entry-id' and `templedb-entry-section' text
+;; properties stamped on its line by the --pp-* renderers. The user
+;; can invoke `templedb-agent-remove-entry-at-point' (bound to `C-c u'
+;; in `templedb-agent-mode-map') to delete the entry AND notify the
+;; agent via a `user.section_edited' JSON-RPC call. The Python side
+;; logs the edit to `agent_user_edits' and prepends a compact digest
+;; to the next `message.send' content so the model sees what changed.
+
+(defun templedb-agent-entry-at-point ()
+  "Return (SECTION ENTRY-ID ENTRY-PLIST) for the agent-owned entry at
+point, or nil if not on one. SECTION is the string used by the DB
+side (e.g. \"findings\", \"todo\", \"dynamic:Blockers\")."
+  (when-let* ((section (get-text-property (point) 'templedb-entry-section))
+              (entry-id (get-text-property (point) 'templedb-entry-id)))
+    (let* ((list-var (pcase section
+                       ("findings" templedb-agent--findings)
+                       ("todo" templedb-agent--todos)
+                       ("open-questions" templedb-agent--open-questions)
+                       (_ (when (string-prefix-p "dynamic:" section)
+                            (cdr (assoc (substring section 8)
+                                        templedb-agent--dynamic-sections))))))
+           (entry (cl-find-if
+                   (lambda (e) (equal entry-id (plist-get e :id)))
+                   list-var)))
+      (list section entry-id entry))))
+
+(defun templedb-agent--remove-entry-from-state (section entry-id)
+  "Drop the entry from its local list (buffer-local state only —
+does NOT notify the agent or persist to DB; callers do that)."
+  (pcase section
+    ("findings"
+     (setq templedb-agent--findings
+           (cl-remove-if (lambda (e) (equal entry-id (plist-get e :id)))
+                         templedb-agent--findings))
+     (templedb-agent--rerender-findings))
+    ("todo"
+     (setq templedb-agent--todos
+           (cl-remove-if (lambda (e) (equal entry-id (plist-get e :id)))
+                         templedb-agent--todos))
+     (templedb-agent--rerender-todos))
+    ("open-questions"
+     (setq templedb-agent--open-questions
+           (cl-remove-if (lambda (e) (equal entry-id (plist-get e :id)))
+                         templedb-agent--open-questions))
+     (templedb-agent--rerender-questions))
+    (_
+     (when (string-prefix-p "dynamic:" section)
+       (let ((name (substring section 8)))
+         (templedb-agent--dynamic-remove-entry name entry-id))))))
+
+(defun templedb-agent-remove-entry-at-point ()
+  "Remove the agent-owned entry the cursor is on and notify the agent.
+
+Works on any entry in the fixed agent sections (Findings, Todo,
+Open Questions) or any dynamic:* section. The removal is:
+  1. dropped from buffer-local state and re-rendered,
+  2. sent to the agent service as `user.section_edited', which
+  3. persists the removal to `agent_session_sections' and
+  4. logs an audit row to `agent_user_edits'.
+
+On the agent's next turn, `message.send' prepends a system note:
+`user removed findings[f123] — was: \"...\"' so the model knows
+its state was mutated."
+  (interactive)
+  (let ((info (templedb-agent-entry-at-point)))
+    (unless info
+      (user-error "Point is not on an agent-owned entry"))
+    (let* ((section (nth 0 info))
+           (entry-id (nth 1 info))
+           (entry (nth 2 info))
+           (before (when entry
+                     `((text     . ,(or (plist-get entry :text) ""))
+                       (priority . ,(when-let ((p (plist-get entry :priority)))
+                                      (symbol-name p)))
+                       (answered . ,(plist-get entry :answered))
+                       (answer   . ,(plist-get entry :answer))
+                       (refs     . ,(or (plist-get entry :refs) []))))))
+      (templedb-agent--remove-entry-from-state section entry-id)
+      (when templedb-agent--session-id
+        (templedb-agent--send
+         "user.section_edited"
+         `((session_id . ,templedb-agent--session-id)
+           (section    . ,section)
+           (entry_id   . ,entry-id)
+           (action     . "removed")
+           (before     . ,before))
+         (lambda (_result) nil)))
+      (message "Removed %s[%s]; agent will be notified next turn."
+               section entry-id))))
 
 ;;;; State
 
@@ -2386,6 +2509,7 @@ Optionally filter by PROJECT slug."
     (define-key map (kbd "C-c C-k") #'templedb-agent-cancel)
     (define-key map (kbd "C-c C-r") #'templedb-agent-resume)
     (define-key map (kbd "C-c C-s") #'templedb-agent-save-user-sections)
+    (define-key map (kbd "C-c u")   #'templedb-agent-remove-entry-at-point)
     map)
   "Keymap for `templedb-agent-mode'.")
 

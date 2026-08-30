@@ -471,6 +471,46 @@ def mark_pending_event_dispatched(event_id):
     ))
 
 
+# --- User edits to agent state (reverse channel, migration 085) ---
+# Logged when Emacs tells us the user removed / edited / promoted an
+# agent-owned entry. Consumed on the next message.send so the agent
+# sees a compact system note about what changed since its last turn.
+
+def log_user_edit(session_id, section, entry_id, action, before=None):
+    """Record one user edit to agent-owned state.
+    action: 'removed' | 'marked_done' | 'edited' | 'promoted' | 'section_cleared'
+    before: optional dict — snapshot of entry pre-edit, stored as JSON."""
+    _retry_on_lock(lambda: execute(
+        """INSERT INTO agent_user_edits
+               (session_id, section, entry_id, action, before_json)
+             VALUES (?, ?, ?, ?, ?)""",
+        (session_id, section, entry_id, action,
+         json.dumps(before) if before is not None else None),
+    ))
+
+
+def unconsumed_user_edits(session_id):
+    """Return user edits for SESSION_ID that haven't been surfaced to
+    the agent yet, oldest first."""
+    return query_all(
+        """SELECT id, section, entry_id, action, before_json, created_at
+             FROM agent_user_edits
+            WHERE session_id = ? AND consumed_at IS NULL
+            ORDER BY id""",
+        (session_id,),
+    )
+
+
+def mark_user_edits_consumed(session_id):
+    """Stamp every unconsumed edit for SESSION_ID as consumed. Called
+    right after we prepend the digest to a message.send content."""
+    _retry_on_lock(lambda: execute(
+        """UPDATE agent_user_edits SET consumed_at = ?
+            WHERE session_id = ? AND consumed_at IS NULL""",
+        (_now(), session_id),
+    ))
+
+
 # --- Work Log ---
 
 def create_work_log_entry(session_id, run_id, status="completed", stats=None):

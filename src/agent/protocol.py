@@ -124,6 +124,7 @@ class ProtocolServer:
             "sections.get": self._handle_sections_get,
             "sections.set": self._handle_sections_set,
             "sections.remove": self._handle_sections_remove,
+            "user.section_edited": self._handle_user_section_edited,
             "session.fork": self._handle_session_fork,
             "session.last": self._handle_session_last,
             "ask.respond": self._handle_ask_respond,
@@ -212,6 +213,12 @@ class ProtocolServer:
             self._respond(request_id, error="content required")
             return
 
+        # Reverse channel: if the user has edited any agent-owned state
+        # since the last message.send, prepend a compact digest so the
+        # model knows its state was mutated. Consumed digests are stamped
+        # so we don't repeat them on the next turn.
+        content = self._prepend_user_edits_digest(session_id, content)
+
         # Run in a thread so we don't block the main read loop
         def run_send():
             try:
@@ -224,6 +231,32 @@ class ProtocolServer:
 
         thread = threading.Thread(target=run_send, daemon=True)
         thread.start()
+
+    def _prepend_user_edits_digest(self, session_id, content):
+        """Return CONTENT with a `[user edits since your last turn]`
+        note prepended, if any user-side edits are unconsumed. Marks
+        them consumed atomically so the next send doesn't repeat."""
+        from agent import store as _store
+        edits = _store.unconsumed_user_edits(session_id)
+        if not edits:
+            return content
+        lines = ["[System note: user edits to your state since your last turn]"]
+        for e in edits:
+            section = e["section"]
+            eid = e["entry_id"] or ""
+            action = e["action"]
+            summary = ""
+            if e.get("before_json"):
+                try:
+                    before = json.loads(e["before_json"])
+                    if isinstance(before, dict) and before.get("text"):
+                        summary = f' — was: "{before["text"][:80]}"'
+                except (ValueError, TypeError):
+                    pass
+            lines.append(f"  - {action} {section}[{eid}]{summary}")
+        lines.append("")  # blank line between digest and user's actual message
+        _store.mark_user_edits_consumed(session_id)
+        return "\n".join(lines) + "\n" + content
 
     def _handle_message_queue(self, request_id, params):
         session_id = params.get("session_id")
@@ -330,6 +363,36 @@ class ProtocolServer:
             self.service.remove_section_entry(session_id, section, entry_id)
         else:
             self.service.remove_section(session_id, section)
+        self._respond(request_id, result={"ok": True})
+
+    def _handle_user_section_edited(self, request_id, params):
+        """Emacs → agent: the user just edited an agent-owned entry.
+        Persists the edit to agent_session_sections (if applicable),
+        logs to agent_user_edits, and returns immediately. The
+        agent will see the digest on its next message.send.
+
+        params: session_id, section, entry_id?, action, before?
+          action ∈ {'removed', 'marked_done', 'edited',
+                    'promoted', 'section_cleared'}
+          before: optional entry dict snapshot before the change."""
+        session_id = params.get("session_id")
+        section = params.get("section")
+        entry_id = params.get("entry_id")
+        action = params.get("action")
+        before = params.get("before")
+        if not (session_id and section and action):
+            self._respond(request_id,
+                          error="session_id, section, action required")
+            return
+        # Persist the change to sections if it's a remove — updates and
+        # promotes are handled by the Emacs side re-rendering; we just
+        # log the audit trail. section_cleared drops the whole section.
+        from agent import store as _store
+        if action == "removed" and entry_id:
+            _store.remove_section_entry(session_id, section, entry_id)
+        elif action == "section_cleared":
+            _store.remove_section(session_id, section)
+        _store.log_user_edit(session_id, section, entry_id, action, before)
         self._respond(request_id, result={"ok": True})
 
     def _handle_session_fork(self, request_id, params):

@@ -165,5 +165,58 @@ class TestSessionOpenIncludesSections(unittest.TestCase):
         self.assertEqual("yo", result["findings"][0]["text"])
 
 
+class TestUserEditsReverseChannel(unittest.TestCase):
+    """Reverse channel: user edits agent-owned state → audit trail →
+    digest prepended to the next message.send."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db_path = setup_test_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        teardown_test_db()
+
+    def _session(self):
+        from agent.store import create_session
+        return create_session('fake')['id']
+
+    def test_log_and_read_back(self):
+        from agent.store import (log_user_edit, unconsumed_user_edits)
+        sid = self._session()
+        log_user_edit(sid, "findings", "f1", "removed",
+                      {"text": "webpack finding"})
+        rows = unconsumed_user_edits(sid)
+        self.assertEqual(1, len(rows))
+        self.assertEqual("removed", rows[0]["action"])
+        self.assertEqual("findings", rows[0]["section"])
+        self.assertEqual("f1", rows[0]["entry_id"])
+        payload = json.loads(rows[0]["before_json"])
+        self.assertEqual("webpack finding", payload["text"])
+
+    def test_mark_consumed(self):
+        from agent.store import (log_user_edit,
+                                 unconsumed_user_edits,
+                                 mark_user_edits_consumed)
+        sid = self._session()
+        log_user_edit(sid, "todo", "t1", "removed")
+        log_user_edit(sid, "todo", "t2", "removed")
+        self.assertEqual(2, len(unconsumed_user_edits(sid)))
+        mark_user_edits_consumed(sid)
+        self.assertEqual(0, len(unconsumed_user_edits(sid)))
+
+    def test_consumed_only_for_session(self):
+        from agent.store import (log_user_edit,
+                                 unconsumed_user_edits,
+                                 mark_user_edits_consumed)
+        s1 = self._session()
+        s2 = self._session()
+        log_user_edit(s1, "findings", "a", "removed")
+        log_user_edit(s2, "findings", "b", "removed")
+        mark_user_edits_consumed(s1)
+        self.assertEqual(0, len(unconsumed_user_edits(s1)))
+        self.assertEqual(1, len(unconsumed_user_edits(s2)))
+
+
 if __name__ == '__main__':
     unittest.main()
