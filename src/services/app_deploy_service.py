@@ -8,14 +8,61 @@ the configured build + deploy commands.
 """
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from services.base import BaseService
 import db_utils
+
+
+# Env-var reference patterns used by _derive_worker_secrets.
+# JS/TS: process.env.NAME, process.env['NAME'], process.env["NAME"]
+# Cloudflare Worker binding: env.NAME (only valid inside Worker handlers,
+# but we grep everywhere — false positives are pruned by the intersect
+# with TempleDB's known-secret store).
+_ENV_REF_PATTERNS = [
+    re.compile(r"process\.env\.([A-Z][A-Z0-9_]*)"),
+    re.compile(r"""process\.env\[['"]([A-Z][A-Z0-9_]*)['"]\]"""),
+    re.compile(r"\benv\.([A-Z][A-Z0-9_]*)"),
+]
+_SCAN_EXTENSIONS = {'.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'}
+_SCAN_SKIP_DIRS = {'node_modules', '.next', '.open-next', 'dist', 'build', '.turbo'}
+
+
+def _derive_worker_secrets(work_dir: str) -> Set[str]:
+    """Scan work_dir for env-var references, return the unique set of names.
+
+    Walks source files under work_dir looking for `process.env.NAME` and
+    `env.NAME` patterns. Skips node_modules and build artifacts. Deploy
+    caller intersects this with TempleDB's known-secret store to decide
+    what to push to Cloudflare — false positives (e.g. env.EXPORT_MAP
+    from unrelated JS) are naturally pruned by that intersect.
+
+    Runtime-safe: never raises on unreadable files.
+    """
+    root = Path(work_dir)
+    if not root.exists():
+        return set()
+
+    names: Set[str] = set()
+    for path in root.rglob('*'):
+        if not path.is_file():
+            continue
+        if path.suffix not in _SCAN_EXTENSIONS:
+            continue
+        if any(part in _SCAN_SKIP_DIRS for part in path.parts):
+            continue
+        try:
+            text = path.read_text(encoding='utf-8', errors='ignore')
+        except (OSError, UnicodeDecodeError):
+            continue
+        for pattern in _ENV_REF_PATTERNS:
+            names.update(pattern.findall(text))
+    return names
 
 
 @dataclass
@@ -29,7 +76,8 @@ class AppDeployConfig:
     post_deploy_secrets_cmd: Optional[str] = None  # e.g. "npx wrangler secret:bulk"
     env_projects: List[str] = field(default_factory=list)  # sibling projects to source vars from
     static_env: Dict[str, str] = field(default_factory=dict)  # extra env vars to inject
-    worker_secrets: List[str] = field(default_factory=list)  # secret names to push to platform
+    worker_secrets: List[str] = field(default_factory=list)  # DEPRECATED (kept for backwards compat): secrets are now derived from code by default. See worker_secrets_extra.
+    worker_secrets_extra: List[str] = field(default_factory=list)  # secrets not detectable via code scan (build scripts, dynamic lookups). Merged into the derived set.
     worker_name: Optional[str] = None  # e.g. "aireadalong" for wrangler --name
 
     @classmethod
@@ -44,6 +92,7 @@ class AppDeployConfig:
             env_projects=d.get('env_projects', []),
             static_env=d.get('static_env', {}),
             worker_secrets=d.get('worker_secrets', []),
+            worker_secrets_extra=d.get('worker_secrets_extra', []),
             worker_name=d.get('worker_name'),
         )
 
@@ -58,6 +107,7 @@ class AppDeployConfig:
             'env_projects': self.env_projects,
             'static_env': self.static_env,
             'worker_secrets': self.worker_secrets,
+            'worker_secrets_extra': self.worker_secrets_extra,
             'worker_name': self.worker_name,
         }
 
@@ -379,21 +429,50 @@ class AppDeployService(BaseService):
             subprocess.run(
                 config.post_deploy_secrets_cmd, shell=True, env=env, cwd=work_dir,
             )
-        elif config.worker_secrets and config.platform == 'cloudflare-workers':
-            print(f"  Pushing worker secrets to Cloudflare...")
-            name_flag = f" --name {config.worker_name}" if config.worker_name else ""
-            for secret_name in config.worker_secrets:
-                val = env.get(secret_name, '')
-                if not val:
-                    continue
-                cmd = ['npx', 'wrangler', 'secret', 'put', secret_name]
-                if config.worker_name:
-                    cmd.extend(['--name', config.worker_name])
-                subprocess.run(
-                    cmd, input=val.encode(), env=env, cwd=work_dir,
-                    capture_output=True,
-                )
-            print(f"  Pushed {len(config.worker_secrets)} secrets.")
+        elif config.platform == 'cloudflare-workers':
+            # Resolve secret set:
+            #   derived from `process.env.*` / `env.*` in the worker code
+            #   ∪ worker_secrets_extra (dynamic-lookup escape hatch)
+            #   ∪ worker_secrets (legacy field, deprecated but honoured)
+            #   ∩ env (things TempleDB actually has a value for)
+            derived = _derive_worker_secrets(work_dir)
+            extras = set(config.worker_secrets_extra) | set(config.worker_secrets)
+            requested = derived | extras
+            available = {n for n in requested if env.get(n)}
+            missing = requested - available - set(config.static_env.keys())
+
+            if not available:
+                if missing:
+                    print(f"  ⚠  No worker secrets pushed (none have values). Missing: {sorted(missing)}")
+            else:
+                print(f"  Pushing worker secrets to Cloudflare...")
+                for secret_name in sorted(available):
+                    val = env.get(secret_name, '')
+                    cmd = ['npx', 'wrangler', 'secret', 'put', secret_name]
+                    if config.worker_name:
+                        cmd.extend(['--name', config.worker_name])
+                    subprocess.run(
+                        cmd, input=val.encode(), env=env, cwd=work_dir,
+                        capture_output=True,
+                    )
+
+                # Transparency: show the diff vs the legacy manual list, so a
+                # dead entry that used to be pushed but isn't referenced by the
+                # code anymore is visible.
+                summary = f"  Pushed {len(available)} secrets"
+                if derived and not extras:
+                    summary += f" (all derived from code scan)"
+                elif derived and extras:
+                    summary += f" ({len(derived & available)} derived, {len(extras & available)} from *_extra)"
+                elif extras:
+                    summary += f" (all from *_extra; code scan found none)"
+                print(summary + ".")
+
+                if missing:
+                    print(f"  ⚠  Referenced but no value in TempleDB env: {sorted(missing)}")
+                stale = set(config.worker_secrets) - derived - set(config.worker_secrets_extra)
+                if stale:
+                    print(f"  ℹ  Legacy worker_secrets entries no longer found in code (consider removing): {sorted(stale)}")
 
         duration = time.time() - start
         tracker.complete_deployment(

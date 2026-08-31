@@ -44,13 +44,23 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-08-31-worker-secrets-sync-derive-from-code-vs-schema-scopes.html">
+  <div class="row">
+    <span class="date">2026-08-31</span>
+    <span class="title">Worker secrets sync &mdash; derive from code vs. schema scopes</span>
+  </div>
+  <div class="summary">
+    Assessing how bza&rsquo;s Cloudflare Worker secrets list should stay in sync with the code that actually uses those secrets. Written 2026-08-31 after the Spotify prune commit (8d1529a5) left two dead entries in deployment_config.app_deploy.worker_secrets until they were manually removed. If we don&rsquo;t fix the mechanism, the same drift will happen again.
+  </div>
+</a>
+
 <a class="report" href="2026-08-30-reflection-on-the-agent-buffer-bet.html">
   <div class="row">
     <span class="date">2026-08-30</span>
     <span class="title">Reflection on the agent buffer bet</span>
   </div>
   <div class="summary">
-    One-paragraph summary of what this report covers and why.
+    Written after a marathon day rebuilding the Temple Agent rendering pipeline end-to-end: persistence firewall, section anchors, an ewoc-driven Conversation region, agent-writable sections with MCP tools, and a working Python test suite. This report captures the missing-features list, the project philosophy as observed from inside a full day of dogfooding, analogies that helped me reason about the design, and concrete ideas for making the human/agent shared-state UX better.
   </div>
 </a>
 
