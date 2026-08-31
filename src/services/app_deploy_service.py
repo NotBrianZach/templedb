@@ -33,20 +33,63 @@ _SCAN_EXTENSIONS = {'.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'}
 _SCAN_SKIP_DIRS = {'node_modules', '.next', '.open-next', 'dist', 'build', '.turbo'}
 
 
-def _derive_worker_secrets(work_dir: str) -> Set[str]:
+def _derive_worker_secrets(
+    work_dir: str,
+    project_slug: Optional[str] = None,
+    work_dir_root_in_project: Optional[str] = None,
+) -> Set[str]:
     """Scan work_dir for env-var references, return the unique set of names.
 
     Walks source files under work_dir looking for `process.env.NAME` and
-    `env.NAME` patterns. Skips node_modules and build artifacts. Deploy
-    caller intersects this with TempleDB's known-secret store to decide
-    what to push to Cloudflare — false positives (e.g. env.EXPORT_MAP
-    from unrelated JS) are naturally pruned by that intersect.
+    `env.NAME` patterns. Skips node_modules and build artifacts.
+
+    If `project_slug` is provided, only files that are `status='active'`
+    in the project's DB record are scanned — even if stale copies of
+    deleted files linger on disk (see materialize-doesn't-delete drift,
+    task #13). `work_dir_root_in_project` is the subpath of the project
+    that work_dir corresponds to (e.g. 'frontend' for bza), used to
+    translate DB paths → on-disk paths.
+
+    Deploy caller intersects the returned set with TempleDB's known-secret
+    store to decide what to push to Cloudflare — false positives (e.g.
+    `env.EXPORT_MAP` from unrelated JS) are naturally pruned by that
+    intersect.
 
     Runtime-safe: never raises on unreadable files.
     """
     root = Path(work_dir)
     if not root.exists():
         return set()
+
+    # Build the "allowed to scan" set. If we have a slug, ask the DB
+    # for the authoritative active-file list. Otherwise walk the disk.
+    active_paths: Optional[Set[Path]] = None
+    if project_slug:
+        try:
+            rows = db_utils.query_all(
+                """
+                SELECT pf.file_path
+                  FROM project_files pf
+                  JOIN projects p ON p.id = pf.project_id
+                 WHERE p.slug = ?
+                   AND pf.status = 'active'
+                """,
+                (project_slug,),
+            )
+            prefix = (work_dir_root_in_project or '').strip('/')
+            active_paths = set()
+            for r in rows:
+                fp = r['file_path']
+                if prefix:
+                    if not fp.startswith(prefix + '/'):
+                        continue
+                    rel = fp[len(prefix) + 1:]
+                else:
+                    rel = fp
+                active_paths.add((root / rel).resolve())
+        except Exception:
+            # Fall back to full disk scan on any DB hiccup
+            active_paths = None
 
     names: Set[str] = set()
     for path in root.rglob('*'):
@@ -55,6 +98,8 @@ def _derive_worker_secrets(work_dir: str) -> Set[str]:
         if path.suffix not in _SCAN_EXTENSIONS:
             continue
         if any(part in _SCAN_SKIP_DIRS for part in path.parts):
+            continue
+        if active_paths is not None and path.resolve() not in active_paths:
             continue
         try:
             text = path.read_text(encoding='utf-8', errors='ignore')
@@ -431,11 +476,22 @@ class AppDeployService(BaseService):
             )
         elif config.platform == 'cloudflare-workers':
             # Resolve secret set:
-            #   derived from `process.env.*` / `env.*` in the worker code
+            #   derived from `process.env.*` / `env.*` in the worker code,
+            #     scoped to files that are status='active' in the project DB
+            #     (so stale on-disk copies of deleted files don't
+            #     contaminate the derive — see task #13)
             #   ∪ worker_secrets_extra (dynamic-lookup escape hatch)
             #   ∪ worker_secrets (legacy field, deprecated but honoured)
             #   ∩ env (things TempleDB actually has a value for)
-            derived = _derive_worker_secrets(work_dir)
+            #
+            # The working_dir root within the project is typically 'frontend'
+            # (Next.js under bza). Infer it from the working_dir tail.
+            wd_tail = Path(work_dir).name  # e.g. 'frontend'
+            derived = _derive_worker_secrets(
+                work_dir,
+                project_slug=project_slug,
+                work_dir_root_in_project=wd_tail,
+            )
             extras = set(config.worker_secrets_extra) | set(config.worker_secrets)
             requested = derived | extras
             available = {n for n in requested if env.get(n)}
