@@ -175,6 +175,8 @@ class SystemService:
             checkout_dir.mkdir(parents=True, exist_ok=True)
 
             written = 0
+            # Track authoritative paths so we can delete stragglers below
+            db_paths = {(checkout_dir / f["file_path"]).resolve() for f in files}
             for f in files:
                 fpath = checkout_dir / f["file_path"]
                 fpath.parent.mkdir(parents=True, exist_ok=True)
@@ -186,6 +188,49 @@ class SystemService:
                 else:
                     fpath.write_bytes(b"")
                 written += 1
+
+            # Delete files that exist on disk but are no longer in the DB
+            # active set — closes the drift class where materialize copied
+            # additively and never cleaned up (task #13). Sample impact
+            # observed 2026-08-31: bza had Spotify files lingering in
+            # checkout for two weeks post-delete because materialize left
+            # them; that in turn contaminated worker_secrets code-scan.
+            #
+            # Skip .git (nix-git-daemon state) and standard build-artifact /
+            # dep dirs that are node-managed, not DB-managed.
+            _SKIP_DIRS = {
+                '.git', 'node_modules', '.next', '.open-next', '.wrangler',
+                '.turbo', '.direnv', 'dist', 'build', 'target',
+                '__pycache__', '.venv', 'venv',
+            }
+            deleted = 0
+            for path in checkout_dir.rglob('*'):
+                if not path.is_file():
+                    continue
+                if any(part in _SKIP_DIRS for part in path.relative_to(checkout_dir).parts):
+                    continue
+                if path.resolve() in db_paths:
+                    continue
+                try:
+                    path.unlink()
+                    deleted += 1
+                except OSError as e:
+                    logger.warning(f"Could not unlink stale {path}: {e}")
+
+            # Sweep empty directories bottom-up so parents can drop after children
+            for dirpath in sorted(
+                (p for p in checkout_dir.rglob('*') if p.is_dir()),
+                key=lambda p: len(p.parts), reverse=True,
+            ):
+                if any(part in _SKIP_DIRS for part in dirpath.relative_to(checkout_dir).parts):
+                    continue
+                try:
+                    dirpath.rmdir()  # only removes if empty
+                except OSError:
+                    pass  # not empty — fine
+
+            if deleted:
+                logger.info(f"Removed {deleted} stale files no longer in DB active set")
 
             # Ensure git repo with committed files (git daemon needs commits to serve)
             git_dir = checkout_dir / ".git"
@@ -215,7 +260,8 @@ class SystemService:
                          "GIT_COMMITTER_EMAIL": "templedb@localhost"}
                 )
 
-            logger.info(f"Materialized {written} files to {checkout_dir}")
+            suffix = f" ({deleted} stale removed)" if deleted else ""
+            logger.info(f"Materialized {written} files to {checkout_dir}{suffix}")
             return checkout_dir
 
         except Exception as e:
