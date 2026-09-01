@@ -1570,12 +1570,41 @@ Full detail already lives in the file bucket; this is just a cross-index."
                           (if duration (format " (%.1fs)" duration) "")
                           (if tool-id (format "  [TOOL_ID: %s]" tool-id) ""))))))))
 
+(defun templedb-agent--section-of-point (&optional pos)
+  "Return the section-id containing POS (default `point'), or nil.
+Walks backward from POS to the nearest `templedb-section' heading
+anchor. Used by auto-scroll to decide whether the user is actively
+editing (Next Prompt / scratch space) or passively watching."
+  (save-excursion
+    (goto-char (or pos (point)))
+    (or (get-text-property (point) 'templedb-section)
+        (let ((prev (previous-single-property-change
+                     (point) 'templedb-section)))
+          (and prev (get-text-property (max 1 (1- prev))
+                                       'templedb-section))))))
+
 (defun templedb-agent--auto-scroll ()
-  "Scroll the agent buffer window to show the latest content."
+  "Scroll the agent buffer window to show the latest content.
+
+Only moves point when the user's cursor is inside the Conversation
+section (or before it — Guide/Now/Goal/Context). If the user is
+typing in Next Prompt, editing Scratch/Notes/Pinned, or in the
+agent-writable sections (Findings/Todo/Open Questions/dynamic),
+the scroll is a no-op — otherwise every streaming chunk and tool
+event yanks point out of what they're typing into whatever
+happens to be at `point-max' (usually Scratch)."
   (when-let ((win (get-buffer-window (current-buffer))))
-    (with-selected-window win
-      (goto-char (point-max))
-      (recenter -3))))
+    (let* ((section (templedb-agent--section-of-point))
+           (user-editing
+            (memq section '(next-prompt findings todo open-questions
+                            pinned notes scratch)))
+           (in-dynamic (and section
+                            (string-prefix-p "dynamic:"
+                                             (symbol-name section)))))
+      (unless (or user-editing in-dynamic)
+        (with-selected-window win
+          (goto-char (point-max))
+          (recenter -3))))))
 
 (defun templedb-agent--truncate-output (text max-len)
   "Truncate TEXT for display, showing line count if truncated."
