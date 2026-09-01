@@ -195,5 +195,76 @@ class TestMCPToolsWithSession(unittest.TestCase):
             self.assertEqual("findings", h["section"])
 
 
+class TestPendingEventBackpressure(unittest.TestCase):
+    """Guards against unbounded growth in agent_pending_events when
+    Emacs isn't polling — the previous read path had no TTL and no
+    cap, so a session reopened after weeks of neglect would replay
+    the whole backlog.
+
+    We test the store functions directly since the poll loop takes
+    defaults and doesn't need to know about the knobs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db_path = setup_test_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        teardown_test_db()
+
+    def setUp(self):
+        from agent.store import create_session
+        self.sid = create_session('fake')['id']
+
+    def _insert_old_event(self, days_old, event_type="agent.test"):
+        """Bypass create_pending_event so we can backdate created_at."""
+        from db_utils import execute
+        execute(
+            """INSERT INTO agent_pending_events
+                   (session_id, event_type, payload_json, summary, created_at)
+                 VALUES (?, ?, '{}', NULL,
+                         datetime('now', ?))""",
+            (self.sid, event_type, f"-{days_old} days"),
+        )
+
+    def test_ttl_hides_ancient_events(self):
+        from agent.store import (create_pending_event,
+                                 undispatched_pending_events_for_session)
+        self._insert_old_event(days_old=30)   # abandoned, past TTL
+        create_pending_event(self.sid, "agent.test.new", {})
+        rows = undispatched_pending_events_for_session(self.sid)
+        # Ancient row filtered out, fresh row survives.
+        types = [r["event_type"] for r in rows]
+        self.assertIn("agent.test.new", types)
+        self.assertNotIn("agent.test", types)
+
+    def test_batch_cap_limits_reads(self):
+        from agent.store import (create_pending_event,
+                                 undispatched_pending_events_for_session)
+        for i in range(15):
+            create_pending_event(self.sid, f"agent.test.{i}", {"i": i})
+        rows = undispatched_pending_events_for_session(self.sid, limit=10)
+        self.assertEqual(10, len(rows))
+
+    def test_gc_clears_dispatched_and_ancient(self):
+        from agent.store import (create_pending_event,
+                                 mark_pending_event_dispatched,
+                                 undispatched_pending_events_for_session,
+                                 gc_dispatched_pending_events)
+        create_pending_event(self.sid, "agent.test.a", {})
+        create_pending_event(self.sid, "agent.test.b", {})
+        # Dispatch one, leave the other pending.
+        rows = undispatched_pending_events_for_session(self.sid)
+        mark_pending_event_dispatched(rows[0]["id"])
+        # Add an ancient undispatched row (should also be GC'd).
+        self._insert_old_event(days_old=30, event_type="agent.test.old")
+        gc_dispatched_pending_events(session_id=self.sid)
+        # Only the recent, still-undispatched row survives.
+        after = undispatched_pending_events_for_session(self.sid)
+        types = [r["event_type"] for r in after]
+        self.assertEqual(1, len(after))
+        self.assertIn("agent.test.b", types)
+
+
 if __name__ == '__main__':
     unittest.main()

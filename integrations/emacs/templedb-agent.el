@@ -576,6 +576,7 @@ when the agent has written new state into the section."
   (when-let ((start (templedb-agent--find-section id)))
     (let* ((current-ids (mapcar (lambda (e) (plist-get e :id)) entries))
            (prev-pair (assoc id templedb-agent--previous-entry-ids))
+           (first-render (null prev-pair))
            (prev-ids (cdr prev-pair))
            (fresh-ids (cl-set-difference current-ids prev-ids :test #'equal)))
       (save-excursion
@@ -591,8 +592,14 @@ when the agent has written new state into the section."
               (dolist (e entries) (funcall renderer e))
             (insert "(none)\n"))
           (insert "\n")))
-      ;; Highlight-on-write for entries that weren't there last time.
-      (templedb-agent--highlight-fresh id fresh-ids)
+      ;; Highlight-on-write: skip on the very first render of this
+      ;; section in this buffer session — otherwise reopening a
+      ;; session with existing entries flashes every entry at once
+      ;; (there's no "new" state, we just don't have prior state
+      ;; recorded yet). Real fresh writes on subsequent renders
+      ;; still flash normally.
+      (unless first-render
+        (templedb-agent--highlight-fresh id fresh-ids))
       ;; Remember what we just rendered so the NEXT rerender can diff.
       (if prev-pair
           (setcdr prev-pair current-ids)
@@ -1602,9 +1609,19 @@ happens to be at `point-max' (usually Scratch)."
                             (string-prefix-p "dynamic:"
                                              (symbol-name section)))))
       (unless (or user-editing in-dynamic)
-        (with-selected-window win
-          (goto-char (point-max))
-          (recenter -3))))))
+        ;; Scroll WIN without selecting it — otherwise if the user
+        ;; was focused in another window/frame (checking email while
+        ;; the agent streams), --auto-scroll would steal focus to
+        ;; the agent buffer. `set-window-point' + `set-window-start'
+        ;; move only WIN's view, leaving `selected-window' alone.
+        (let* ((end (point-max))
+               (h (window-body-height win))
+               (start (save-excursion
+                        (goto-char end)
+                        (forward-line (- 3 h))
+                        (line-beginning-position))))
+          (set-window-point win end)
+          (set-window-start win start))))))
 
 (defun templedb-agent--truncate-output (text max-len)
   "Truncate TEXT for display, showing line count if truncated."

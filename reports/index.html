@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-09-01-nix-as-projection-of-templedb.html">
+  <div class="row">
+    <span class="date">2026-09-01</span>
+    <span class="title">Nix as a projection of TempleDB</span>
+  </div>
+  <div class="summary">
+    Design proposal, not implementation. TempleDB and Nix each behave as if they are the ambient source of truth for the same content (Python source, Emacs .el files, NixOS config). The result is drift: five reproducible &ldquo;edited the wrong copy&rdquo; incidents in the last month. This report argues that the durable fix is to make Nix a projection of TempleDB — the DB emits derivations, the store paths are named views, and drift becomes a category error rather than a bug. Includes the cheaper interim (templedb file where diagnostic), a mirror inventory, and a rough migration path.
+  </div>
+</a>
+
 <a class="report" href="2026-08-31-worker-secrets-sync-derive-from-code-vs-schema-scopes.html">
   <div class="row">
     <span class="date">2026-08-31</span>

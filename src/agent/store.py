@@ -512,15 +512,63 @@ def create_pending_event(session_id, event_type, payload, summary=None):
     ))
 
 
-def undispatched_pending_events_for_session(session_id):
-    """Return not-yet-forwarded events for SESSION_ID, oldest first."""
+PENDING_EVENT_TTL_DAYS = 7
+PENDING_EVENT_MAX_BATCH = 500
+
+
+def undispatched_pending_events_for_session(session_id,
+                                            ttl_days=PENDING_EVENT_TTL_DAYS,
+                                            limit=PENDING_EVENT_MAX_BATCH):
+    """Return not-yet-forwarded events for SESSION_ID, oldest first.
+
+    TTL_DAYS: events older than this are treated as abandoned and
+        skipped — happens when Emacs was closed for a long time and
+        the poll loop would otherwise replay a week of stale
+        `agent.section.*.add` events when the session reopens.
+    LIMIT: cap on rows returned per call. The poll loop calls this
+        repeatedly; capping the batch means one giant backlog
+        doesn't stall the loop or blow memory. Newer events are
+        preferred over ancient ones once the cap is reached.
+
+    Related GC: `gc_dispatched_pending_events` (called on session
+    close) hard-deletes dispatched rows; TTL only *hides* rows
+    from the read path so they can be inspected in the DB for
+    debugging."""
     return query_all(
         """SELECT id, event_type, payload_json, summary, created_at
              FROM agent_pending_events
-            WHERE session_id = ? AND dispatched_at IS NULL
-            ORDER BY id""",
-        (session_id,),
+            WHERE session_id = ?
+              AND dispatched_at IS NULL
+              AND created_at >= datetime('now', ?)
+            ORDER BY id
+            LIMIT ?""",
+        (session_id, f"-{int(ttl_days)} days", int(limit)),
     )
+
+
+def gc_dispatched_pending_events(session_id=None,
+                                 older_than_days=PENDING_EVENT_TTL_DAYS):
+    """Hard-delete dispatched pending events. Called on session close
+    (per-session) and by admin GC (whole DB). Also sweeps
+    undispatched events older than TTL — those are truly abandoned
+    (Emacs never came back to consume them) and would otherwise
+    bloat the table forever.
+
+    Returns rows deleted."""
+    if session_id is not None:
+        return _retry_on_lock(lambda: execute(
+            """DELETE FROM agent_pending_events
+                WHERE session_id = ?
+                  AND (dispatched_at IS NOT NULL
+                       OR created_at < datetime('now', ?))""",
+            (session_id, f"-{int(older_than_days)} days"),
+        ))
+    return _retry_on_lock(lambda: execute(
+        """DELETE FROM agent_pending_events
+            WHERE dispatched_at IS NOT NULL
+               OR created_at < datetime('now', ?)""",
+        (f"-{int(older_than_days)} days",),
+    ))
 
 
 def mark_pending_event_dispatched(event_id):
