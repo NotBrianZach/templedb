@@ -203,7 +203,64 @@ class SystemService:
                 '.turbo', '.direnv', 'dist', 'build', 'target',
                 '__pycache__', '.venv', 'venv',
             }
+
+            # Compute gitignored-paths set once so we can preserve local
+            # secrets and other .gitignore'd files. Fixes the .authinfo.gpg
+            # sweep (2026-09-01): system_config's home.nix references
+            # ./.authinfo.gpg, which is a real on-disk secret the DB
+            # doesn't track. Prior materialize deleted it; nix build then
+            # failed because git-daemon serves committed content only, so
+            # the flake source stopped containing the file after the
+            # auto-commit picked up the deletion.
+            #
+            # Rule: if a file matches .gitignore, it is "not templedb's
+            # business" and we leave it alone. Requires the checkout to
+            # already be a git repo (git-daemon needs commits anyway, so
+            # this is almost always true; on first materialize into a
+            # fresh directory, ignored_paths is empty and behavior matches
+            # the pre-fix path).
+            ignored_paths = set()
+            if git_dir_check := (checkout_dir / ".git"):
+                if git_dir_check.exists():
+                    candidates = []
+                    for p in checkout_dir.rglob('*'):
+                        if not p.is_file():
+                            continue
+                        rel = p.relative_to(checkout_dir)
+                        if any(part in _SKIP_DIRS for part in rel.parts):
+                            continue
+                        candidates.append(str(rel))
+                    if candidates:
+                        try:
+                            result = subprocess.run(
+                                ["git", "check-ignore", "--stdin"],
+                                cwd=str(checkout_dir),
+                                input="\n".join(candidates),
+                                capture_output=True, text=True, check=False,
+                            )
+                            # Exit code 0: at least one path is ignored (matches printed).
+                            # Exit code 1: no paths ignored (empty output).
+                            # Anything else: real error — log and proceed as if empty.
+                            if result.returncode in (0, 1):
+                                for line in result.stdout.splitlines():
+                                    line = line.strip()
+                                    if line:
+                                        ignored_paths.add(
+                                            (checkout_dir / line).resolve()
+                                        )
+                            else:
+                                logger.debug(
+                                    f"git check-ignore returned {result.returncode}: "
+                                    f"{result.stderr.strip()[:200]}"
+                                )
+                        except Exception as e:
+                            logger.debug(
+                                f"Could not compute gitignored paths for "
+                                f"{project_slug}: {e}"
+                            )
+
             deleted = 0
+            preserved_ignored = 0
             for path in checkout_dir.rglob('*'):
                 if not path.is_file():
                     continue
@@ -211,11 +268,20 @@ class SystemService:
                     continue
                 if path.resolve() in db_paths:
                     continue
+                if path.resolve() in ignored_paths:
+                    preserved_ignored += 1
+                    continue
                 try:
                     path.unlink()
                     deleted += 1
                 except OSError as e:
                     logger.warning(f"Could not unlink stale {path}: {e}")
+
+            if preserved_ignored:
+                logger.debug(
+                    f"Preserved {preserved_ignored} gitignored file(s) "
+                    f"in {project_slug} checkout (not templedb's business)"
+                )
 
             # Sweep empty directories bottom-up so parents can drop after children
             for dirpath in sorted(

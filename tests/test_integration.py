@@ -394,6 +394,156 @@ class TestMaterialize:
         assert result.returncode == 0
         assert "materialize" in result.stdout.lower()
 
+    def test_materialize_preserves_gitignored_files(self, populated_env,
+                                                    monkeypatch, tmp_path):
+        """A file in the checkout that is .gitignored must survive materialize,
+        even though it doesn't exist in the DB. Fixes the .authinfo.gpg
+        sweep incident (2026-09-01): local secrets referenced by
+        home.nix's `source = ./.authinfo.gpg` were being deleted by
+        the stale-file cleanup, and the auto-commit picked up the
+        deletion, breaking every subsequent build.
+        """
+        from services.system_service import SystemService
+
+        # Force materialize to use our tmp_path so we can prepare state.
+        target = tmp_path / "testproj"
+
+        svc = SystemService()
+        monkeypatch.setattr(svc, "_checkout_dir_for",
+                            lambda slug: target)
+
+        # First materialize creates the checkout + inits git.
+        checkout = svc.materialize_from_db("testproj")
+        assert checkout is not None
+
+        # Plant a real "secret" and .gitignore it, then commit .gitignore
+        # so `git check-ignore` recognises the rule on the next materialize.
+        secret = checkout / ".mysecret"
+        secret.write_text("very sensitive")
+        gitignore = checkout / ".gitignore"
+        gitignore.write_text(".mysecret\n")
+        subprocess.run(["git", "add", ".gitignore"],
+                       cwd=str(checkout), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add gitignore"],
+                       cwd=str(checkout), check=True, capture_output=True)
+
+        # Sanity: check-ignore agrees before we materialize.
+        r = subprocess.run(["git", "check-ignore", ".mysecret"],
+                           cwd=str(checkout), capture_output=True, text=True)
+        assert r.returncode == 0, "test setup: gitignore rule didn't apply"
+
+        # Second materialize would (pre-fix) delete .mysecret because
+        # it's not in the DB active set. Post-fix, it must survive.
+        checkout2 = svc.materialize_from_db("testproj")
+        assert checkout2 is not None
+        assert secret.exists(), \
+            ".mysecret was swept by materialize despite being gitignored"
+        assert secret.read_text() == "very sensitive"
+
+    def test_materialize_still_deletes_non_ignored_strays(self, populated_env,
+                                                          monkeypatch, tmp_path):
+        """Regression guard: the gitignore fix must NOT preserve everything.
+        Non-ignored files that aren't in the DB should still be swept.
+        This keeps the original "clean up stale files" behaviour intact.
+        """
+        from services.system_service import SystemService
+
+        target = tmp_path / "testproj"
+        svc = SystemService()
+        monkeypatch.setattr(svc, "_checkout_dir_for",
+                            lambda slug: target)
+
+        checkout = svc.materialize_from_db("testproj")
+        assert checkout is not None
+
+        # A file that is NOT gitignored — should get swept.
+        stray = checkout / "stray_file.txt"
+        stray.write_text("not tracked, not ignored")
+
+        checkout2 = svc.materialize_from_db("testproj")
+        assert checkout2 is not None
+        assert not stray.exists(), \
+            "non-gitignored stray file was preserved but should be swept"
+
+
+# ── File Where (drift diagnostic) Tests ──────────────────────────────────────
+
+class TestFileWhere:
+    """Tests for `templedb file where` — the mirror drift diagnostic
+    added as part of Phase 0 of the observer/integrator plan. Makes drift
+    among DB / checkouts / edit-workspaces / legacy paths visible."""
+
+    def test_where_returns_zero_when_all_mirrors_agree(self, populated_env,
+                                                       monkeypatch, tmp_path):
+        """DB has content X, checkout has content X, no other mirrors exist.
+        Exit code 0, no drift detected."""
+        import hashlib
+        from cli.commands.file import FileCommands
+        import argparse
+
+        # Materialize testproj so a checkout exists at a known-good hash.
+        from services.system_service import SystemService
+        target = tmp_path / ".config" / "templedb" / "checkouts" / "testproj"
+        target.parent.mkdir(parents=True)
+        svc = SystemService()
+        monkeypatch.setattr(svc, "_checkout_dir_for", lambda slug: target)
+        svc.materialize_from_db("testproj")
+
+        # Point Path.home() at our tmp_path so `where` probes it.
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        cmd = FileCommands()
+        args = argparse.Namespace(project="testproj", file_path="README.md")
+        rc = cmd.where(args)
+        assert rc == 0, "expected 0 when all present mirrors agree"
+
+    def test_where_detects_drift(self, populated_env, monkeypatch, tmp_path,
+                                 capsys):
+        """DB has content X, edit-workspace has content Y. Exit 1, output
+        contains 'drift'."""
+        from cli.commands.file import FileCommands
+        import argparse
+
+        # Set up edit-workspace with wrong content.
+        ews = tmp_path / ".config" / "templedb" / "edit-workspaces" / "testproj"
+        (ews).mkdir(parents=True)
+        (ews / "README.md").write_text("wrong content")
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        cmd = FileCommands()
+        args = argparse.Namespace(project="testproj", file_path="README.md")
+        rc = cmd.where(args)
+        captured = capsys.readouterr()
+        assert rc == 1, f"expected 1 (drift), got {rc}: {captured.out}"
+        assert "drift" in captured.out.lower()
+
+    def test_where_returns_two_when_db_has_no_current(self, populated_env,
+                                                     monkeypatch, tmp_path,
+                                                     capsys):
+        """No file_contents row → exit 2 with a diagnostic message."""
+        from cli.commands.file import FileCommands
+        import argparse
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        cmd = FileCommands()
+        args = argparse.Namespace(project="testproj",
+                                  file_path="doesnotexist.md")
+        rc = cmd.where(args)
+        assert rc == 2
+
+    def test_where_returns_two_when_project_missing(self, populated_env,
+                                                    capsys):
+        """Bad project slug → exit 2."""
+        from cli.commands.file import FileCommands
+        import argparse
+
+        cmd = FileCommands()
+        args = argparse.Namespace(project="no-such-project-slug-xyz",
+                                  file_path="README.md")
+        rc = cmd.where(args)
+        assert rc == 2
 
 
 # ── Mirror Tests ──────────────────────────────────────────────────────────────

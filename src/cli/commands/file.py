@@ -302,6 +302,104 @@ class FileCommands(Command):
             logger.debug("Full error:", exc_info=True)
             return 1
 
+    def where(self, args) -> int:
+        """Print every known mirror location for SLUG/PATH, with hash + status.
+
+        Solves the 'which of these copies is the current one' pain: templedb
+        content lives in several places (DB, writable/read-only checkouts,
+        legacy FUSE-era paths). Silent drift among them was the root of
+        five recent incidents. This command makes drift *visible* without
+        trying to make it *impossible*.
+
+        Mirrors probed (skip any that don't exist for this slug):
+          - DB (via file_contents.is_current)
+          - ~/.config/templedb/checkouts/<slug>/<path>       (read-only publish)
+          - ~/.config/templedb/edit-workspaces/<slug>/<path> (writable workspace)
+          - ~/temple/<slug>/<path>                            (legacy FUSE)
+          - ~/status/<slug>/<path>                            (legacy status)
+
+        Not yet probed (need per-project resolution): nix store paths that
+        home-manager symlinks into (e.g. spacemacs layer). Follow-up.
+
+        Exit code: 0 if all present mirrors agree with the DB. 1 if any
+        mirror is drifted. 2 if the DB has no current row for the path.
+        """
+        from pathlib import Path
+        import hashlib
+
+        # 1. Resolve project + get DB hash.
+        project = fuzzy_match_project(args.project, show_matched=False)
+        if not project:
+            logger.error(f"Project '{args.project}' not found")
+            return 2
+        slug = project['slug']
+        path = args.file_path
+
+        db_hash = self._get_current_hash(project['id'], path)
+        if not db_hash:
+            print(f"file:  {slug}/{path}")
+            print(f"  DB:  (no current row — file is deleted or never existed)")
+            return 2
+
+        # 2. Probe filesystem mirrors.
+        home = Path.home()
+        mirrors = [
+            ("checkout ", home / ".config/templedb/checkouts" / slug / path),
+            ("edit-work", home / ".config/templedb/edit-workspaces" / slug / path),
+            ("~/temple ", home / "temple" / slug / path),
+            ("~/status ", home / "status" / slug / path),
+        ]
+
+        # 3. Print header.
+        print(f"file:  {slug}/{path}")
+        print(f"  {'DB':<10} {db_hash[:12]}  current")
+
+        # 4. Print each mirror with status.
+        any_drift = False
+        for label, mpath in mirrors:
+            if not mpath.exists():
+                # Skip printing missing mirrors — noisier than helpful,
+                # and their absence is expected for most slug/path pairs.
+                continue
+            try:
+                fs_hash = hashlib.sha256(mpath.read_bytes()).hexdigest()
+            except Exception as e:
+                print(f"  {label} ????????????  \033[33munreadable\033[0m ({e})")
+                any_drift = True
+                continue
+            if fs_hash == db_hash:
+                # Green
+                marker = "\033[32m✓ match\033[0m"
+            else:
+                # Red
+                marker = f"\033[31m✗ drift\033[0m (fs={fs_hash[:12]})"
+                any_drift = True
+            print(f"  {label} {fs_hash[:12]}  {marker}")
+
+        # 5. Summary hint.
+        if any_drift:
+            print()
+            print("  \033[33mdrift detected\033[0m — run "
+                  "'templedb project checkout <slug> <path> --writable --force' "
+                  "to publish DB → checkouts, or 'templedb file set' from a "
+                  "trusted mirror to update DB.")
+            return 1
+        return 0
+
+    def _get_current_hash(self, project_id: int, file_path: str) -> Optional[str]:
+        """Return the current content_hash for project_id/file_path, or None."""
+        from db_utils import query_one
+        row = query_one(
+            """SELECT fc.content_hash
+                 FROM file_contents fc
+                 JOIN project_files pf ON pf.id = fc.file_id
+                WHERE pf.project_id = ? AND pf.file_path = ?
+                  AND pf.status = 'active' AND fc.is_current = 1
+                LIMIT 1""",
+            (project_id, file_path),
+        )
+        return row['content_hash'] if row else None
+
     def _read_content_from_db(self, file_record: dict) -> Optional[str]:
         """Read file content directly from the TempleDB database (content_blobs).
 
@@ -557,3 +655,12 @@ def register(cli):
     ls_parser.add_argument('path', nargs='?', help='Optional path prefix to filter by')
     ls_parser.add_argument('-l', '--long', action='store_true', help='Show detailed info (lines of code)')
     cli.commands['file.ls'] = cmd.ls
+
+    # file where (mirror drift diagnostic — Phase 0 of the observer plan)
+    where_parser = file_subparsers.add_parser(
+        'where',
+        help='Show every mirror location for a file with content-hash drift status'
+    )
+    where_parser.add_argument('project', help='Project name or slug')
+    where_parser.add_argument('file_path', help='File path within project')
+    cli.commands['file.where'] = cmd.where

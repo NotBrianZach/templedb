@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Workflows before and after: what the observer/integrator model changes in daily use</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); color: var(--muted); font-weight: 500; }
+  .dim { color: var(--muted); }
+  .workflow {
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 0.85rem 1.1rem; margin: 1.2rem 0; background: var(--panel);
+  }
+  .workflow h3 { margin-top: 0; color: var(--pos); }
+  .before, .after {
+    padding: 0.5rem 0.9rem; margin: 0.5rem 0; border-radius: 3px;
+    font-size: 0.93em;
+  }
+  .before { background: rgba(233, 112, 112, 0.08); border-left: 3px solid var(--neg); }
+  .after { background: rgba(127, 214, 160, 0.08); border-left: 3px solid var(--pos); }
+  .before .label, .after .label {
+    display: block; font-size: 0.7rem; letter-spacing: 0.1em;
+    text-transform: uppercase; margin-bottom: 0.3rem; font-weight: 600;
+  }
+  .before .label { color: var(--neg); }
+  .after .label { color: var(--pos); }
+</style>
+</head>
+<body>
+
+<h1>Workflows before and after: what the observer/integrator model changes in daily use</h1>
+<p class="lede">
+  Companion to the <em>from observer to integrator</em> implementation plan. That report argued for the shift in the abstract; this one grounds it in concrete daily workflows &mdash; starting with the editing session that produced this report itself, then walking through five other everyday scenarios (multi-agent refactor, deploy archaeology, cross-project impact analysis, broken-deploy investigation, new contributor onboarding, report/decision archaeology). The theme is boring in a good way: fewer failures at the boundaries, new queries the graph now supports, and no upheaval on the paths that already worked. Most commands stay the same. The changes are concentrated in <em>authoring</em> and <em>querying</em>; everything in between is untouched.
+</p>
+
+<h2>Our current session, before and after</h2>
+
+<p>This session shipped three design reports and one Emacs cursor fix. Walk-through of what actually happened, and what would have been different under the proposed architecture.</p>
+
+<div class="workflow">
+<h3>The session as it went</h3>
+
+<div class="before">
+<span class="label">Today</span>
+<ol>
+  <li>Cursor hijack reported. Diagnosed at <code>templedb-agent.el:1573</code>.</li>
+  <li><code>templedb edit templedb --no-editor</code> for a writable workspace.</li>
+  <li>Edited the file; ran ERT + pytest.</li>
+  <li><code>templedb commit templedb &lt;workspace&gt;</code> to record a DB commit.</li>
+  <li><code>templedb project checkout templedb &lt;checkouts&gt; --writable --force</code> to publish to the git-repo view.</li>
+  <li><code>git commit</code> in the checkout to update the git ref.</li>
+  <li><code>templedb nixos update-input system_config templedb</code>. <strong>This also re-materialized system_config&rsquo;s own checkout</strong>, and the materialize step deleted <code>.authinfo.gpg</code> from the working tree because it wasn&rsquo;t in the DB.</li>
+  <li>Rebuild failed. Fifteen minutes of investigation. Force-added <code>.authinfo.gpg</code> back to git.</li>
+  <li>Rebuild again. Success.</li>
+  <li>Wrote three design reports; repeated mini-versions of steps 2&ndash;8 for each.</li>
+  <li>Reports GUI showed a stale list until a hard-refresh.</li>
+</ol>
+</div>
+
+<div class="after">
+<span class="label">Under the proposed architecture</span>
+<ol>
+  <li>Same diagnosis; nothing about debugging changes.</li>
+  <li><code>templedb edit templedb</code> still gives you a workspace, but the workspace <em>is a normal git checkout</em>, not a materialized DB projection. <code>git status</code>, <code>git diff</code>, <code>git log</code> work as usual. Any editor opens it without templedb knowing.</li>
+  <li>You edit the file. On save, a filesystem watcher fires <code>templedb ingest git templedb --incremental</code>, which re-parses the changed file and updates the entity/relation graph. <strong><code>file_contents</code> snapshots the new state automatically; you don&rsquo;t call <code>file set</code>.</strong></li>
+  <li><code>templedb intent create --from-workspace</code> collects your local changes as an <code>EditIntent</code>. <code>templedb intent apply &lt;id&gt;</code> runs <code>git commit</code> inside the workspace and records <code>applied_at</code>.</li>
+  <li><strong>No separate publish step.</strong> The git checkout IS the source. Nix reads from it directly (same flake input path).</li>
+  <li><code>templedb nixos update-input system_config templedb</code> still bumps <code>flake.lock</code>. <strong>But there&rsquo;s no materialize sweep</strong> &mdash; system_config&rsquo;s checkout is already the authoritative git tree, nothing to overwrite. The <code>.authinfo.gpg</code> incident is impossible by construction.</li>
+  <li>Rebuild proceeds normally.</li>
+  <li>Reports get reindexed automatically on ingest; GUI reflects it on next request.</li>
+</ol>
+</div>
+
+<p><strong>Net difference:</strong> four fewer commands, one fewer failure mode, one fewer 15-minute debug session. Same output. And every state change (edit &rarr; commit &rarr; deploy) is a chain of typed entities in the graph, queryable as &ldquo;who wrote this, when, in which session, to fix what, and where did it land.&rdquo;</p>
+</div>
+
+<h2>Workflow A &mdash; multi-agent parallel refactor</h2>
+
+<p>Three agents in three sessions, each renaming <code>foo_bar</code> &rarr; <code>foo_baz</code> across templedb, bza, and woofsledger.</p>
+
+<div class="before">
+<span class="label">Today</span>
+Each agent gets a separate <code>TEMPLEDB_SESSION_ID</code> and edits files via <code>templedb file set</code>. Session-scoped VCS staging protects them from clobbering each other, but there&rsquo;s no unified view of &ldquo;what has each agent proposed so far&rdquo; without dropping to SQL. Conflicts between agents on the same file are silent races &mdash; whoever commits last wins.
+</div>
+
+<div class="after">
+<span class="label">Proposed</span>
+Each agent creates <code>EditIntent</code> rows tagged with their session. You run <code>templedb intent list --outstanding</code> and see one row per agent per file. <code>templedb intent dry-run &lt;id&gt;</code> shows the effect without touching the workspace. <code>templedb intent apply &lt;id&gt;</code> applies one at a time; you can cherry-pick, reorder, or reject before final commit. If two agents propose conflicting changes to the same file, the second <code>apply</code> fails cleanly with a rebase-style conflict message.
+<br><br>
+Bonus: <code>templedb graph query "AgentSession &rarr; EditIntent &rarr; FileSnapshot"</code> gives you &ldquo;which files did agent X propose changes to?&rdquo; as a first-class query.
+</div>
+
+<h2>Workflow B &mdash; deploy archaeology</h2>
+
+<p>&ldquo;Was this bug in the currently deployed version?&rdquo; The question surfaces after every regression report.</p>
+
+<div class="before">
+<span class="label">Today</span>
+<code>git log</code> in the checkout, eyeball the commit, cross-reference the deployment table by hand. Fine for a familiar codebase; hostile for anything you haven&rsquo;t touched in months. If the deployment history isn&rsquo;t in the DB (fleet deploys sometimes are, ad-hoc deploys usually aren&rsquo;t), the question becomes unanswerable.
+</div>
+
+<div class="after">
+<span class="label">Proposed</span>
+<code>templedb graph explain deployment/42</code> walks the graph: Deployment 42 &rarr; StorePath xyz &rarr; Derivation &rarr; Commit abc123 &rarr; FileSnapshot foo.py@abc123 &rarr; defines-function <code>handle_request</code>. Then <code>templedb graph diff deployment/42 deployment/45</code> diffs the two source snapshots directly. Every fact in the chain carries <code>observed_by</code> and <code>observed_at</code>, so you can see whether any hop is stale.
+</div>
+
+<h2>Workflow C &mdash; cross-project impact analysis</h2>
+
+<p>Renaming a function in the templedb agent&rsquo;s public interface. Which projects call it?</p>
+
+<div class="before">
+<span class="label">Today</span>
+<code>templedb graph who-uses &lt;function&gt;</code> if it works for your language; otherwise <code>grep -r</code> across every project directory. Coverage depends on templedb&rsquo;s scanner, which currently handles Python moderately and Nix via the AST-deploy work.
+</div>
+
+<div class="after">
+<span class="label">Proposed</span>
+Same query, but backed by SCIP facts ingested from language-specific indexers (<code>scip-python</code>, <code>scip-typescript</code>, <code>scip-nix</code>). Coverage grows with the SCIP ecosystem, not templedb&rsquo;s parser budget. Every project registered with templedb gets uniform semantic search over its symbols, imports, references, and callers. The answer is one query no matter how many languages the target codebase spans.
+</div>
+
+<h2>Workflow D &mdash; broken deploy investigation</h2>
+
+<p>A deploy went sideways at 3am; you&rsquo;re trying to figure out where reality diverged from what the DB thinks.</p>
+
+<div class="before">
+<span class="label">Today</span>
+SSH to the machine, <code>nixos-rebuild switch --rollback</code>, <code>journalctl -xeu whatever.service</code>, guess. If templedb has stale deployment records, you&rsquo;re fighting phantom information.
+</div>
+
+<div class="after">
+<span class="label">Proposed</span>
+<code>templedb doctor entities --host zMothership3</code> runs the reconcile: for every entity claiming to be about <code>zMothership3</code>, asks the machine (via SSH) whether it&rsquo;s still current. Output tells you: &ldquo;DB thinks generation 47 is running; machine reports generation 45. Drift of ~4 hours. DB last observed at 03:12; machine last modified at 06:47.&rdquo; You now know which side is wrong, which is stale, and by how much. Same reconcile catches &ldquo;DB thinks store path X exists in nix store; nix store says missing&rdquo; from garbage collection.
+</div>
+
+<h2>Workflow E &mdash; new contributor onboarding</h2>
+
+<p>Someone (or some future you on a new machine) wants to work on templedb from scratch.</p>
+
+<div class="before">
+<span class="label">Today</span>
+Clone the system_config repo. Try to build. Hit <code>.authinfo.gpg does not exist</code>. Get told about the secret handling story. Clone templedb separately (or accept that browsing it means jumping through nix-store hoops). Learn about <code>TEMPLEDB_DEV_MODE=1</code> for the CLI. Discover the FUSE mount is gone. Discover materialize sweeps. Discover the write-path history in CLAUDE.md. Two-day onboarding.
+</div>
+
+<div class="after">
+<span class="label">Proposed</span>
+Templedb is a normal git repo. <code>git clone</code>, <code>nix build</code>, done. No secret required at eval time (home.nix source references move to sops-nix or age-encrypted paths that don&rsquo;t exist at eval time). Contributor <code>cd</code>s into templedb&rsquo;s flake input and reads/edits like any other project. CLAUDE.md becomes a short document about the entity graph and the ingestion algebras, not a survival guide for the write-path bugs.
+</div>
+
+<h2>Workflow F &mdash; report and decision archaeology</h2>
+
+<p>&ldquo;Which of these design reports actually got implemented?&rdquo;</p>
+
+<div class="before">
+<span class="label">Today</span>
+<code>templedb reports list</code>, grep titles, hope the implementation commit references the report by name in its message. Half the time it doesn&rsquo;t. You end up scrolling through the HTML in a browser tab.
+</div>
+
+<div class="after">
+<span class="label">Proposed</span>
+<code>templedb graph query "Report &rarr; motivated &rarr; Decision &rarr; implemented-in &rarr; Commit"</code> gives you &ldquo;which reports have been acted on?&rdquo; The complementary query, <code>Decision &rarr; ~implemented-in</code>, gives you &ldquo;which decisions have no code trace?&rdquo; That second one is genuinely useful for finding half-shipped design work. Reports become first-class graph entities linked to their implementation, not just HTML files sitting in a directory.
+</div>
+
+<h2>What stays exactly the same</h2>
+
+<p>Important honest note: most daily commands don&rsquo;t change. All of these keep working identically:</p>
+
+<table class="matrix">
+  <tr><th>Command family</th><th>Behavior</th></tr>
+  <tr><td><code>templedb file cat / ls</code></td><td>Unchanged. Reads snapshots.</td></tr>
+  <tr><td><code>templedb graph search / who-uses / callers</code></td><td>Same interface; backing store gets richer under the hood.</td></tr>
+  <tr><td><code>templedb vcs log / diff / branch</code></td><td>Unchanged. Reads commit facts from the graph.</td></tr>
+  <tr><td><code>templedb reports list</code></td><td>Unchanged. Reports get new optional Decision links.</td></tr>
+  <tr><td><code>templedb gui</code></td><td>Unchanged endpoints; new graph pages available.</td></tr>
+  <tr><td><code>templedb ai vibe / agent / chat</code></td><td>Unchanged. Agent runtime stays DB-native.</td></tr>
+  <tr><td><code>templedb project list / show / register</code></td><td>Unchanged.</td></tr>
+  <tr><td><code>templedb deploy fleet</code></td><td>Unchanged. Deploy records get new StorePath &rarr; Commit provenance edges.</td></tr>
+  <tr><td><code>templedb config-ast</code></td><td>Unchanged. AST-deploy work is already observer-shaped.</td></tr>
+</table>
+
+<p>The changes are concentrated in the <em>authoring</em> surface (edit workflow, deployment prep, materialize) and the <em>querying</em> surface (new graph queries that couldn&rsquo;t be asked before). Everything in between keeps working as-is.</p>
+
+<h2>Summary: the shape of the shift</h2>
+
+<div class="callout">
+  <span class="label">Where the improvement lives</span>
+  <strong>Fewer failures at the boundaries.</strong> No more materialize sweeps. No more edit-the-wrong-copy. No more &ldquo;which mirror is stale?&rdquo; The classes of bug we&rsquo;ve been hitting close by construction, not by policing.
+</div>
+
+<div class="callout">
+  <span class="label">Where the new capability lives</span>
+  <strong>Cross-authority provenance queries.</strong> &ldquo;What did this deployment run, from which commit, from which agent&rsquo;s intent, motivated by which report?&rdquo; is now a five-hop graph query. Freshness telemetry per fact makes drift measurable, not just detectable. Multi-agent staging becomes trivially safe.
+</div>
+
+<div class="callout">
+  <span class="label">Where nothing changes</span>
+  <strong>The daily shell.</strong> Read commands, agent commands, deploy commands, config commands &mdash; all unchanged. The philosophical shift (&ldquo;observer of source, owner of intents&rdquo;) is invisible to most workflows most of the time. It shows up where it should: at the boundaries that were breaking, and in the queries you couldn&rsquo;t previously ask.
+</div>
+
+<p>
+  That&rsquo;s the honest before/after. Less friction on paths that were breaking. More capability on queries you couldn&rsquo;t previously make. And no upheaval on paths that were already working. The design is good in the specific sense that most of it doesn&rsquo;t look like a design at all &mdash; it looks like the friction quietly going away.
+</p>
+
+</body>
+</html>
