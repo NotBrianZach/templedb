@@ -4,11 +4,18 @@ Convention for adding reports to `reports/` inside the templedb project.
 
 ## Filename
 
-`reports/YYYY-MM-DD-kebab-title.html`
+`reports/YYYY-MM-DD-HHMM-kebab-title.html`
 
-Date is today. Title ≤ ~8 words. Prefer `templedb reports new "Your title"` —
-it computes the filename, drops the standard template, and refuses to
-overwrite.
+Date is today. Time is 24h HHMM (local), so multiple reports the same
+day sort naturally and stay visually distinguishable in the GUI list.
+Title ≤ ~8 words. Prefer `templedb reports new "Your title"` — it
+computes the filename (including current time), drops the standard
+template, and refuses to overwrite.
+
+Reports from before this convention landed use the shorter
+`YYYY-MM-DD-kebab-title.html` form; both are still parsed correctly.
+Don't rename older files just to add time — links live in commit
+messages and other reports.
 
 ## Self-contained
 

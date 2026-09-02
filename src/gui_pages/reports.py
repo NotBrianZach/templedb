@@ -57,8 +57,17 @@ def _list_reports():
         path = r["file_path"]
         html_text = r["content_text"] or ""
         filename = path.removeprefix(f"{REPORT_DIR}/")
-        m = re.search(r"^(\d{4}-\d{2}-\d{2})-", filename)
-        date_str = m.group(1) if m else "----------"
+        # Filename format: YYYY-MM-DD[-HHMM]-slug.html. HHMM is optional
+        # for backward compat with reports created before the convention
+        # was tightened; when present, display as "YYYY-MM-DD HH:MM" so
+        # multiple reports the same day are visually distinguishable.
+        m = re.search(r"^(\d{4}-\d{2}-\d{2})(?:-(\d{4}))?-", filename)
+        if m:
+            date_str = m.group(1)
+            if m.group(2):
+                date_str = f"{date_str} {m.group(2)[:2]}:{m.group(2)[2:]}"
+        else:
+            date_str = "----------"
         title = "(untitled)"
         tm = _TITLE_RE.search(html_text)
         if tm:

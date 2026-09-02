@@ -77,9 +77,16 @@ def _list_report_files():
     for r in rows:
         path = r["file_path"]
         html = r["content_text"] or ""
-        # File date is the leading YYYY-MM-DD in the filename
-        m = re.search(r"/(\d{4}-\d{2}-\d{2})-", path)
-        date_str = m.group(1) if m else "----------"
+        # File date/time from filename: YYYY-MM-DD[-HHMM]-slug.html.
+        # HHMM was added late so we accept both forms and render time
+        # only when present.
+        m = re.search(r"/(\d{4}-\d{2}-\d{2})(?:-(\d{4}))?-", path)
+        if m:
+            date_str = m.group(1)
+            if m.group(2):
+                date_str = f"{date_str} {m.group(2)[:2]}:{m.group(2)[2:]}"
+        else:
+            date_str = "----------"
         # Prefer <title>, fall back to first <h1>, then filename stem
         title = "(untitled)"
         tm = _TITLE_RE.search(html)
@@ -343,8 +350,11 @@ class ReportsCommands(Command):
             print("Title required.")
             return 1
         slug = _slugify(title)
-        today = date.today().isoformat()
-        filename = f"{today}-{slug}.html"
+        # HHMM in the filename so multiple reports per day sort and
+        # display distinctly in the CLI list and GUI index.
+        now = datetime.now()
+        stamp = now.strftime("%Y-%m-%d-%H%M")
+        filename = f"{stamp}-{slug}.html"
         rel_path = f"{REPORT_DIR}/{filename}"
 
         # Refuse to overwrite an existing report
