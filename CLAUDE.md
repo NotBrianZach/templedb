@@ -220,6 +220,76 @@ SELECT * FROM source_snapshots
 This is Phase 1 of the observer/integrator plan. See
 `reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html`.
 
+## Entity graph (Phase 3 vocabulary)
+
+As of migrations 089–095, TempleDB carries a typed knowledge graph
+that unifies facts across git, nix, agent-runtime, deployment, and
+author authorities. See [`docs/ENTITY_GRAPH_DESIGN.md`](docs/ENTITY_GRAPH_DESIGN.md)
+for the categorical framing (entities as objects, relations as
+morphisms, first-class spans, commuting-diagram invariants).
+
+**Tables:** `entities (kind, external_ref, source_authority, label,
+observed_at)` + `relations (from, kind, to, source_authority, observed_at,
+attributes_json)` + first-class span tables (`edit_intents`,
+`report_implementations`, `tool_calls`, plus existing `ast_builds`,
+`deployment_history`, `nix_generations`).
+
+### Populate the graph
+
+```bash
+templedb ingest all                    # all six adapters
+templedb ingest {git,agent,intent,reports,nix,deploy}   # one at a time
+templedb ingest history                # per-adapter freshness telemetry
+```
+
+### Query the graph
+
+```bash
+templedb entity stats                                    # counts by kind
+templedb entity explore <kind>/<external_ref>            # one hop out + in
+templedb entity trace <kind>/<ref> --depth N --via K1,K2 # multi-hop BFS
+
+# Preset workflow queries (thin wrappers over `entity trace`):
+templedb provenance machine <name>       # workflow B: deploy archaeology
+templedb provenance deployment <id>      # deployment ↔ commit + machine
+templedb provenance report <path>        # workflow F: report → commit
+templedb provenance commit <hash>        # reverse walk from a commit
+templedb provenance intent <id>          # workflow A: intent → applied-to
+```
+
+### Reconcile (Workflow D)
+
+Active probing of foreign authorities. Where doctor is passive,
+reconcile is network-active:
+
+```bash
+templedb reconcile machine <name>        # SSH probe + diff against DB
+templedb reconcile machine all           # every fleet_machine
+templedb reconcile history [--machine]   # persisted run log (mig 095)
+
+templedb doctor entities                 # passive commuting invariants
+templedb doctor history [--check NAME]   # per-check history (mig 092)
+```
+
+### Cross-session handoff (Phase 2.5)
+
+```bash
+templedb handoff send --topic <t> --subject "..." --body "..."
+templedb handoff send --broadcast --subject "..." --body "..."
+templedb handoff list [--for SID] [--unread]
+templedb handoff show <id>              # marks read
+templedb handoff ack <id> [-m note]     # marks acked
+templedb handoff pop [--for SID]        # show + ack oldest unacked
+```
+
+Unread count appears in `templedb status` when non-zero.
+
+### Web GUI: /entities
+
+`templedb gui` → http://localhost:8420/entities → browse the graph.
+Click a kind for the list; click an entity for its detail with
+inbound/outbound relations as clickable links.
+
 ## What NOT to do
 
 - Do NOT use `git add`, `git commit`, `git push`, `git status`, `git diff`, `git log`
