@@ -113,6 +113,15 @@ class SystemCommands(Command):
         print("╚════════════════════════════════════════════════════════════════╝")
         print()
 
+        # Phase 2.5 discovery hook: unread handoff notes for this
+        # session. Silent when empty, so the status output isn't
+        # noisier for people who never use handoffs.
+        try:
+            self._print_handoff_badge()
+        except Exception:
+            # Non-fatal — status shouldn't fail on a diagnostic.
+            pass
+
         # Overall Statistics
         print("═════ Overall Statistics ═════")
         print()
@@ -233,6 +242,47 @@ class SystemCommands(Command):
         print()
 
         return 0
+
+    def _print_handoff_badge(self) -> None:
+        """Show unread handoff notes for the current session.
+
+        Phase 2.5 discovery hook: pull-based inboxes are useless if
+        nobody checks, so the top-line status advertises the count.
+        Prints nothing when no unread notes exist for this session.
+        """
+        import os
+        import socket
+        sid = (os.environ.get('TEMPLEDB_SESSION_ID')
+               or f"{socket.gethostname()}-{os.getppid()}")
+
+        # A note is "for" this session if to_session matches or it's
+        # a broadcast (both to_session AND to_topic NULL). Topic-
+        # subscribed notes require --topic filtering explicitly.
+        rows = self.system_repo.query_all(
+            """SELECT COUNT(*) as n_direct, 0 as n_broadcast
+                 FROM handoff_notes
+                WHERE to_session = ?
+                  AND acked_at IS NULL
+                UNION ALL
+               SELECT 0, COUNT(*)
+                 FROM handoff_notes
+                WHERE to_session IS NULL AND to_topic IS NULL
+                  AND acked_at IS NULL""",
+            (sid,),
+        )
+        n_direct = rows[0]['n_direct'] if rows else 0
+        n_broadcast = rows[1]['n_broadcast'] if len(rows) > 1 else 0
+
+        if n_direct == 0 and n_broadcast == 0:
+            return  # silent
+
+        print("═════ Handoff Inbox ═════")
+        if n_direct:
+            print(f"  {n_direct} unacked note(s) for session {sid}")
+        if n_broadcast:
+            print(f"  {n_broadcast} unacked broadcast(s)")
+        print(f"  view: templedb handoff list --for {sid}")
+        print()
 
 
 

@@ -466,6 +466,117 @@ class TestMaterialize:
             "non-gitignored stray file was preserved but should be swept"
 
 
+# ── Nix Ingest (Phase 3 extension) Tests ─────────────────────────────────────
+
+class TestNixIngest:
+    """Tests for the nix ingest adapter — StorePath, Derivation,
+    AstBuild entities and relations."""
+
+    def _seed_nix_data(self, populated_env):
+        """Populate a small amount of nix_store_paths + ast_builds
+        for a real-ish ingest run."""
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.execute(
+            """INSERT INTO nix_store_paths
+                   (store_path, store_hash, name, deriver,
+                    is_valid, nar_size)
+                 VALUES ('/nix/store/aaaa-hello-1.0', 'aaaa',
+                         'hello-1.0',
+                         '/nix/store/bbbb-hello-1.0.drv', 1, 1024)"""
+        )
+        conn.execute(
+            """INSERT INTO nix_store_paths
+                   (store_path, store_hash, name, deriver,
+                    is_valid)
+                 VALUES ('/nix/store/bbbb-hello-1.0.drv',
+                         'bbbb', 'hello-1.0.drv', NULL, 1)"""
+        )
+        # Invalid path — should be skipped
+        conn.execute(
+            """INSERT INTO nix_store_paths
+                   (store_path, store_hash, name, is_valid)
+                 VALUES ('/nix/store/cccc-old', 'cccc', 'old', 0)"""
+        )
+        # An AstBuild
+        conn.execute(
+            """INSERT INTO ast_builds
+                   (output_hash, host_name, scopes, output_path,
+                    manifest_json, nix_buildable)
+                 VALUES ('deadbeef1234', 'zMothership2', '[]',
+                         '/nix/store/aaaa-hello-1.0',
+                         '{}', 1)"""
+        )
+        conn.commit()
+        conn.close()
+
+    def test_ingest_nix_emits_store_paths(self, populated_env, capsys):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_nix_data(populated_env)
+        EntityCommands().ingest(argparse.Namespace(source='nix', limit=20))
+        capsys.readouterr()
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        # Two valid store paths inserted; the invalid one shouldn't be.
+        rows = conn.execute(
+            """SELECT external_ref FROM entities
+                WHERE kind='StorePath' ORDER BY external_ref"""
+        ).fetchall()
+        conn.close()
+        paths = [r['external_ref'] for r in rows]
+        assert '/nix/store/aaaa-hello-1.0' in paths
+        assert '/nix/store/bbbb-hello-1.0.drv' in paths
+        assert '/nix/store/cccc-old' not in paths
+
+    def test_ingest_nix_emits_derivation_and_relation(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_nix_data(populated_env)
+        EntityCommands().ingest(argparse.Namespace(source='nix', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        drv = conn.execute(
+            """SELECT * FROM entities WHERE kind='Derivation'"""
+        ).fetchone()
+        assert drv is not None
+        assert drv['external_ref'] == '/nix/store/bbbb-hello-1.0.drv'
+        # Relation: StorePath aaaa built-by Derivation bbbb
+        rel = conn.execute(
+            """SELECT r.kind FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.external_ref = '/nix/store/aaaa-hello-1.0'
+                  AND e2.kind = 'Derivation'"""
+        ).fetchone()
+        conn.close()
+        assert rel is not None
+        assert rel['kind'] == 'built-by'
+
+    def test_ingest_nix_emits_astbuild_span(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_nix_data(populated_env)
+        EntityCommands().ingest(argparse.Namespace(source='nix', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        ab = conn.execute(
+            """SELECT * FROM entities WHERE kind='AstBuild'"""
+        ).fetchone()
+        assert ab is not None
+        assert ab['external_ref'] == 'zMothership2/deadbeef1234'
+        # Relation: AstBuild produces StorePath
+        rel = conn.execute(
+            """SELECT r.kind FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.kind = 'AstBuild'
+                  AND e2.kind = 'StorePath'
+                  AND r.kind = 'produces'"""
+        ).fetchone()
+        conn.close()
+        assert rel is not None
+
+
 # ── Cross-Session Handoff Notes (Phase 2.5) Tests ────────────────────────────
 
 class TestHandoffNotes:

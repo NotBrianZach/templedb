@@ -55,6 +55,7 @@ class EntityCommands(Command):
             'agent':  self._ingest_agent,
             'intent': self._ingest_intent,
             'reports': self._ingest_reports,
+            'nix':    self._ingest_nix,
             'all':    self._ingest_all,
         }
         adapter = adapters.get(args.source)
@@ -139,7 +140,7 @@ class EntityCommands(Command):
         return 0
 
     def _ingest_all(self, args) -> int:
-        for sub in ('git', 'agent', 'intent', 'reports'):
+        for sub in ('git', 'agent', 'intent', 'reports', 'nix'):
             args.source = sub
             rc = self.ingest(args)
             if rc != 0:
@@ -273,6 +274,107 @@ class EntityCommands(Command):
                             added_r += 1
 
         print(f"✓ ingest intent: +{added_e} entities, +{added_r} relations")
+        self._last_counts = {'e': added_e, 'r': added_r}
+        return 0
+
+    def _ingest_nix(self, args) -> int:
+        """Ingest nix-authority entities: StorePath, Derivation, AstBuild
+        + their relations.
+
+        Reads three existing tables:
+          nix_store_paths — populated by earlier nix-store scans
+          ast_builds      — first-class span (Commit ← Build → StorePath)
+                            per docs/ENTITY_GRAPH_DESIGN.md
+
+        Emits:
+          StorePath entities (kind='StorePath', external_ref=store_path)
+          Derivation entities (kind='Derivation', external_ref=deriver
+                                store path when present)
+          AstBuild entities (kind='AstBuild',
+                             external_ref='{host}/{output_hash}')
+
+        Relations:
+          StorePath → built-by → Derivation (from nix_store_paths.deriver)
+          AstBuild → produces → StorePath (from ast_builds.output_path)
+          AstBuild → built-for-host → the host is stored on the entity
+                                       label, not a relation
+
+        Note: ast_builds does NOT currently carry a commit_hash column,
+        so we can't emit AstBuild → built-from → Commit yet. That would
+        need a schema change (add commit_hash to ast_builds, or join
+        via config_nodes → commit). Deferred to a follow-up.
+        """
+        from db_utils import query_all
+        added_e, added_r = 0, 0
+
+        # 1. StorePath entities from nix_store_paths.
+        paths = query_all(
+            """SELECT store_path, store_hash, name, deriver, is_valid,
+                      nar_size, closure_size, last_seen_at
+                 FROM nix_store_paths
+                WHERE is_valid = 1"""
+        )
+        for p in paths:
+            label = f"{p['name']} ({p['store_hash'][:8]})"
+            if self._upsert_entity('StorePath', p['store_path'],
+                                   'nix', label=label):
+                added_e += 1
+
+        # 2. Derivation entities from unique nix_store_paths.deriver.
+        derivers = query_all(
+            """SELECT DISTINCT deriver
+                 FROM nix_store_paths
+                WHERE deriver IS NOT NULL
+                  AND is_valid = 1"""
+        )
+        for d in derivers:
+            drv = d['deriver']
+            # Derivation label: strip /nix/store/<hash>- prefix
+            label = drv.split('/')[-1] if '/' in drv else drv
+            if self._upsert_entity('Derivation', drv, 'nix', label=label):
+                added_e += 1
+
+        # 3. StorePath → built-by → Derivation relations
+        deriver_pairs = query_all(
+            """SELECT store_path, deriver
+                 FROM nix_store_paths
+                WHERE deriver IS NOT NULL AND is_valid = 1"""
+        )
+        for row in deriver_pairs:
+            sp_id = self._entity_id('StorePath', row['store_path'])
+            drv_id = self._entity_id('Derivation', row['deriver'])
+            if sp_id and drv_id:
+                if self._upsert_relation(sp_id, 'built-by', drv_id, 'nix'):
+                    added_r += 1
+
+        # 4. AstBuild entities (first-class span).
+        builds = query_all(
+            """SELECT id, output_hash, host_name, output_path,
+                      nix_buildable, generated_at
+                 FROM ast_builds"""
+        )
+        for b in builds:
+            eref = f"{b['host_name']}/{b['output_hash']}"
+            buildable = ('' if b['nix_buildable'] is None
+                        else ' ✓' if b['nix_buildable']
+                        else ' ✗')
+            label = (f"{b['host_name']} "
+                     f"({b['output_hash'][:12]}){buildable}")
+            if self._upsert_entity('AstBuild', eref, 'nix',
+                                   label=label):
+                added_e += 1
+
+        # 5. AstBuild → produces → StorePath relations
+        for b in builds:
+            eref = f"{b['host_name']}/{b['output_hash']}"
+            from_id = self._entity_id('AstBuild', eref)
+            to_id = self._entity_id('StorePath', b['output_path'])
+            if from_id and to_id:
+                if self._upsert_relation(from_id, 'produces',
+                                         to_id, 'nix'):
+                    added_r += 1
+
+        print(f"✓ ingest nix: +{added_e} entities, +{added_r} relations")
         self._last_counts = {'e': added_e, 'r': added_r}
         return 0
 
@@ -906,7 +1008,7 @@ def register(cli):
     )
     ingest_parser.add_argument(
         'source',
-        choices=['git', 'agent', 'intent', 'reports', 'all', 'history'],
+        choices=['git', 'agent', 'intent', 'reports', 'nix', 'all', 'history'],
         help="Which ingestion adapter to run, or 'history' to show past runs",
     )
     ingest_parser.add_argument(
