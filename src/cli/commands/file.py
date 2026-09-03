@@ -176,7 +176,45 @@ class FileCommands(Command):
                 logger.error("No content provided (use --content or pipe to stdin)")
                 return 1
 
+            # Phase 2 intent recording: unless --skip-intent, record an
+            # EditIntent as a bookkeeping side-effect of this write. The
+            # write itself still happens the same way; the intent gives
+            # us provenance ("who set this, when, from what session")
+            # without changing external behavior. Any failure recording
+            # the intent is non-fatal — the source write is the primary
+            # operation and we don't want intent overhead to break
+            # existing callers.
+            intent_id = None
+            skip_intent = getattr(args, 'skip_intent', False)
+            if not skip_intent:
+                intent_id = self._record_and_apply_intent(
+                    project_id=project['id'],
+                    file_path=args.file_path,
+                    content=content,
+                )
+
             self._write_content_to_db(project['id'], args.project, args.file_path, content)
+
+            # Link the just-staged working-state row to the intent
+            # (migration 088 adds intent_id column). Cosmetic — the
+            # commit path doesn't need it, but downstream provenance
+            # queries do.
+            if intent_id is not None:
+                try:
+                    from db_utils import execute
+                    execute(
+                        """UPDATE vcs_working_state
+                              SET intent_id = ?
+                            WHERE project_id = ?
+                              AND file_id = (SELECT id FROM project_files
+                                              WHERE project_id = ?
+                                                AND file_path = ?
+                                              LIMIT 1)
+                              AND intent_id IS NULL""",
+                        (intent_id, project['id'], project['id'], args.file_path),
+                    )
+                except Exception as e:
+                    logger.debug(f"intent_id link failed (non-fatal): {e}")
 
             # --verify: confirm the write actually landed in file_contents.is_current.
             # Guards against the write-broken bug where later refresh/commit can revert.
@@ -212,6 +250,11 @@ class FileCommands(Command):
                 print(f"✓ Set and staged {args.file_path}")
             else:
                 print(f"✓ Set {args.file_path}")
+
+            # Emit the intent id so scripted callers can inspect / cancel
+            # it later. Silent when --skip-intent was passed.
+            if intent_id is not None:
+                print(f"  intent: #{intent_id}")
 
             return 0
 
@@ -301,6 +344,55 @@ class FileCommands(Command):
             logger.error(f"Failed to list files: {e}")
             logger.debug("Full error:", exc_info=True)
             return 1
+
+    def _record_and_apply_intent(self, project_id: int, file_path: str,
+                                 content) -> Optional[int]:
+        """Create an EditIntent row for this write and mark it applied.
+
+        Bookkeeping only — the actual file_contents write still happens
+        via the pre-existing `_write_content_to_db` path (called by the
+        caller). Recording the intent gives us provenance data for
+        Phase 3 cross-authority queries.
+
+        Returns the intent id on success, None on failure. Never
+        raises: intent recording must not break the write path.
+        """
+        try:
+            from db_utils import execute
+            content_bytes = (content.encode('utf-8')
+                             if isinstance(content, str) else content)
+            new_hash = hashlib.sha256(content_bytes).hexdigest()
+            author = os.environ.get('TEMPLEDB_AUTHOR') \
+                or os.environ.get('USER') or None
+            sid = os.environ.get('TEMPLEDB_SESSION_ID')
+            try:
+                sid = int(sid) if sid else None
+            except (ValueError, TypeError):
+                sid = None
+            # Insert content_blobs so `intent apply` (if replayed
+            # from CLI) could find it. Idempotent via OR IGNORE.
+            execute(
+                """INSERT OR IGNORE INTO content_blobs
+                       (hash_sha256, content_text, content_type,
+                        encoding, file_size_bytes, reference_count)
+                     VALUES (?, ?, 'text', 'utf-8', ?, 1)""",
+                (new_hash, content, len(content_bytes)),
+            )
+            intent_id = execute(
+                """INSERT INTO edit_intents
+                       (session_id, project_id, file_path,
+                        base_revision, new_content_hash,
+                        patch_summary, author, description,
+                        status, applied_at)
+                     VALUES (?, ?, ?, 'current', ?, ?, ?,
+                             'file set', 'applied', datetime('now'))""",
+                (sid, project_id, file_path, new_hash,
+                 f"{len(content_bytes)} bytes", author),
+            )
+            return intent_id
+        except Exception as e:
+            logger.debug(f"intent recording skipped (non-fatal): {e}")
+            return None
 
     def where(self, args) -> int:
         """Print every known mirror location for SLUG/PATH, with hash + status.
@@ -635,6 +727,11 @@ def register(cli):
     set_parser.add_argument('--verify', action='store_true',
                             help='After write, confirm file_contents.is_current holds the written hash. '
                                  'Exits 2 on mismatch. Guards against silent revert (see docs/known-bugs).')
+    set_parser.add_argument('--skip-intent', action='store_true',
+                            help='Bypass the EditIntent bookkeeping layer '
+                                 '(Phase 2). Rare — mainly for bootstrap and '
+                                 'tests. Normal writes should record their '
+                                 'intent for provenance.')
     cli.commands['file.set'] = cmd.set
 
     # file rm (stage a file for deletion)

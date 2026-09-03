@@ -901,8 +901,18 @@ CREATE TABLE IF NOT EXISTS vcs_working_state (
     state TEXT NOT NULL DEFAULT 'unmodified',  -- 'unmodified', 'modified', 'added', 'deleted', 'conflict'
     last_modified TEXT NOT NULL DEFAULT (datetime('now')), staged_by_session_id INTEGER,
 
+    -- Migration 088: links stage to the EditIntent that produced it,
+    -- if any. Populated by `file set` (via intent path) and `intent
+    -- apply`. NULL for legacy staged rows and for anything that
+    -- bypasses the intent layer with --skip-intent.
+    intent_id INTEGER REFERENCES edit_intents(id),
+
     UNIQUE(project_id, branch_id, file_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_vcs_working_state_intent
+    ON vcs_working_state(intent_id)
+    WHERE intent_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS secret_blobs (
   id INTEGER PRIMARY KEY,

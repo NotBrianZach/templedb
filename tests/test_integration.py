@@ -596,6 +596,88 @@ class TestEditIntents:
         assert row['status'] == 'cancelled'
         assert row['cancelled_at'] is not None
 
+    def test_file_set_records_intent(self, populated_env, capsys):
+        """After 'templedb file set', an EditIntent row exists with
+        status='applied' pointing at the new content hash. Phase 2
+        Round 2 wiring."""
+        from cli.commands.file import FileCommands
+        import argparse, hashlib
+        cmd = FileCommands()
+        args = argparse.Namespace(
+            project='testproj', file_path='README.md',
+            content='# via file set\n', stage=False,
+            verify=False, skip_intent=False,
+        )
+        rc = cmd.set(args)
+        assert rc == 0
+        # Intent row exists, applied
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT status, new_content_hash, description
+                 FROM edit_intents
+                ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        conn.close()
+        expected_hash = hashlib.sha256(b'# via file set\n').hexdigest()
+        assert row['status'] == 'applied'
+        assert row['new_content_hash'] == expected_hash
+        assert row['description'] == 'file set'
+
+    def test_file_set_skip_intent_bypasses(self, populated_env):
+        """--skip-intent must NOT record an intent. Rare path for
+        bootstrap / tests where intent overhead is unwanted."""
+        from cli.commands.file import FileCommands
+        import argparse
+        conn = sqlite3.connect(populated_env["db_path"])
+        before = conn.execute(
+            "SELECT COUNT(*) FROM edit_intents"
+        ).fetchone()[0]
+        conn.close()
+        cmd = FileCommands()
+        args = argparse.Namespace(
+            project='testproj', file_path='src/main.py',
+            content='raw = 1\n', stage=False,
+            verify=False, skip_intent=True,
+        )
+        assert cmd.set(args) == 0
+        conn = sqlite3.connect(populated_env["db_path"])
+        after = conn.execute(
+            "SELECT COUNT(*) FROM edit_intents"
+        ).fetchone()[0]
+        conn.close()
+        assert after == before, \
+            f"--skip-intent must not record intents (before={before}, after={after})"
+
+    def test_vcs_working_state_intent_id_populated(self, populated_env):
+        """After file set (with --stage), vcs_working_state.intent_id
+        links to the recorded intent. Phase 2 provenance wiring."""
+        from cli.commands.file import FileCommands
+        import argparse
+        cmd = FileCommands()
+        args = argparse.Namespace(
+            project='testproj', file_path='README.md',
+            content='# staged\n', stage=True,
+            verify=False, skip_intent=False,
+        )
+        assert cmd.set(args) == 0
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT ws.intent_id, i.status
+                 FROM vcs_working_state ws
+                 LEFT JOIN edit_intents i ON i.id = ws.intent_id
+                 JOIN project_files pf ON pf.id = ws.file_id
+                 JOIN projects p ON p.id = pf.project_id
+                WHERE p.slug='testproj' AND pf.file_path='README.md'"""
+        ).fetchone()
+        conn.close()
+        assert row is not None, "no vcs_working_state row for testproj/README.md"
+        assert row['intent_id'] is not None, \
+            "vcs_working_state.intent_id was not populated by file set"
+        assert row['status'] == 'applied', \
+            "linked intent should be status=applied"
+
     def test_list_defaults_to_proposed(self, populated_env, capsys):
         from cli.commands.intent import IntentCommands
         cmd = IntentCommands()
