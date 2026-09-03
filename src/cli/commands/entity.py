@@ -480,7 +480,7 @@ def register(cli):
         'entity',
         help='Entity graph query (Phase 3)',
     )
-    esub = entity_parser.add_subparsers(dest='entity_sub', required=True)
+    esub = entity_parser.add_subparsers(dest='entity_subcommand', required=True)
 
     explore = esub.add_parser(
         'explore',
@@ -499,7 +499,7 @@ def register(cli):
         'doctor',
         help='Reconcile checks (Phase 3 groundwork)',
     )
-    dsub = doctor_parser.add_subparsers(dest='doctor_sub', required=True)
+    dsub = doctor_parser.add_subparsers(dest='doctor_subcommand', required=True)
     ent = dsub.add_parser(
         'entities',
         help='Run commuting-diagram invariant checks',
