@@ -895,6 +895,61 @@ class TestReconcile:
         assert any('no-such-host' in r.message for r in caplog.records)
 
 
+# ── Ingest Schedule (systemd timer) Tests ────────────────────────────────────
+
+class TestIngestSchedule:
+    """Systemd user timer for scheduled ingest. Parallel to
+    reconcile schedule."""
+
+    def test_ingest_schedule_install_writes_units(self, tmp_path,
+                                                   monkeypatch):
+        from cli.commands.entity import EntityCommands
+        import argparse, subprocess as _sub
+        from pathlib import Path
+        monkeypatch.setenv('HOME', str(tmp_path))
+        monkeypatch.setattr(Path, 'home',
+                            classmethod(lambda cls: tmp_path))
+        class _FakeCompleted:
+            returncode = 0
+            stdout = ''
+            stderr = ''
+        monkeypatch.setattr(_sub, 'run',
+                            lambda *a, **k: _FakeCompleted())
+
+        cmd = EntityCommands()
+        rc = cmd.ingest_schedule(argparse.Namespace(
+            action='install', interval=None,
+        ))
+        assert rc == 0
+        svc = tmp_path / '.config/systemd/user/templedb-ingest.service'
+        tm = tmp_path / '.config/systemd/user/templedb-ingest.timer'
+        assert svc.exists()
+        assert tm.exists()
+        assert 'ingest all' in svc.read_text()
+        assert 'OnCalendar=hourly' in tm.read_text()
+
+    def test_ingest_schedule_custom_interval(self, tmp_path,
+                                              monkeypatch):
+        from cli.commands.entity import EntityCommands
+        import argparse, subprocess as _sub
+        from pathlib import Path
+        monkeypatch.setenv('HOME', str(tmp_path))
+        monkeypatch.setattr(Path, 'home',
+                            classmethod(lambda cls: tmp_path))
+        class _FakeCompleted:
+            returncode = 0
+            stdout = ''
+            stderr = ''
+        monkeypatch.setattr(_sub, 'run',
+                            lambda *a, **k: _FakeCompleted())
+
+        EntityCommands().ingest_schedule(argparse.Namespace(
+            action='install', interval='*:0/15',
+        ))
+        tm = tmp_path / '.config/systemd/user/templedb-ingest.timer'
+        assert 'OnCalendar=*:0/15' in tm.read_text()
+
+
 # ── Deploy Ingest (Deployment first-class span) Tests ────────────────────────
 
 class TestDeployIngest:

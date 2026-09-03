@@ -113,6 +113,128 @@ class EntityCommands(Command):
         )
         return rc
 
+    def ingest_schedule(self, args) -> int:
+        """Manage the systemd user timer for scheduled ingest.
+
+        Parallel to `templedb reconcile schedule`. Ingest is cheaper
+        than reconcile (no SSH), so default cadence is hourly rather
+        than daily — new commits, intents, deployments show up in the
+        graph within ~1h without manual runs.
+
+        Sub-actions:
+          install [--interval SPEC]   default 'hourly' (systemd OnCalendar)
+          uninstall
+          status
+        """
+        action = args.action
+        if action == 'install':
+            return self._ingest_schedule_install(args)
+        if action == 'uninstall':
+            return self._ingest_schedule_uninstall()
+        if action == 'status':
+            return self._ingest_schedule_status()
+        logger.error(f"Unknown schedule action: {action}")
+        return 1
+
+    def _ingest_schedule_install(self, args) -> int:
+        import shutil
+        import subprocess
+        from pathlib import Path
+
+        interval = args.interval or 'hourly'
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True, exist_ok=True)
+
+        templedb_bin = shutil.which('templedb') \
+            or '/home/zach/.nix-profile/bin/templedb'
+
+        service = f"""[Unit]
+Description=TempleDB scheduled ingest — refresh entity graph
+Documentation=file://{Path.home()}/.config/templedb/checkouts/templedb/docs/ENTITY_GRAPH_DESIGN.md
+
+[Service]
+Type=oneshot
+ExecStart={templedb_bin} ingest all
+"""
+
+        timer = f"""[Unit]
+Description=Trigger templedb ingest {interval}
+Documentation=file://{Path.home()}/.config/templedb/checkouts/templedb/docs/ENTITY_GRAPH_DESIGN.md
+
+[Timer]
+OnCalendar={interval}
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+        svc_path = unit_dir / "templedb-ingest.service"
+        timer_path = unit_dir / "templedb-ingest.timer"
+        svc_path.write_text(service)
+        timer_path.write_text(timer)
+
+        for cmd, label in (
+            (['systemctl', '--user', 'daemon-reload'], 'reload'),
+            (['systemctl', '--user', 'enable', '--now',
+              'templedb-ingest.timer'], 'enable + start'),
+        ):
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                logger.error(f"systemctl failed ({label}): "
+                             f"{r.stderr.strip()}")
+                return 2
+
+        print(f"✓ Installed templedb-ingest.timer")
+        print(f"  units:      {unit_dir}")
+        print(f"  oncalendar: {interval} (randomized ±5m)")
+        print()
+        print("  status:  templedb ingest schedule status")
+        print("  logs:    journalctl --user -u templedb-ingest "
+              "--since '24 hours ago'")
+        print("  disable: templedb ingest schedule uninstall")
+        return 0
+
+    def _ingest_schedule_uninstall(self) -> int:
+        import subprocess
+        from pathlib import Path
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        for cmd in (
+            ['systemctl', '--user', 'disable', '--now',
+             'templedb-ingest.timer'],
+            ['systemctl', '--user', 'reset-failed',
+             'templedb-ingest.service'],
+        ):
+            subprocess.run(cmd, capture_output=True)
+        for name in ('templedb-ingest.timer',
+                     'templedb-ingest.service'):
+            p = unit_dir / name
+            if p.exists():
+                p.unlink()
+        subprocess.run(
+            ['systemctl', '--user', 'daemon-reload'],
+            capture_output=True,
+        )
+        print("✓ Uninstalled templedb-ingest timer + service")
+        return 0
+
+    def _ingest_schedule_status(self) -> int:
+        import subprocess
+        r = subprocess.run(
+            ['systemctl', '--user', 'list-timers',
+             'templedb-ingest.timer', '--no-pager'],
+            capture_output=True, text=True,
+        )
+        print(r.stdout)
+        r2 = subprocess.run(
+            ['systemctl', '--user', 'status',
+             'templedb-ingest.service', '--no-pager', '-n', '3'],
+            capture_output=True, text=True,
+        )
+        print(r2.stdout)
+        return 0
+
     def ingest_history(self, args) -> int:
         """Print the last N ingestion runs. Handy for 'when did this
         adapter last see updates?' questions."""
@@ -1458,17 +1580,35 @@ def register(cli):
     ingest_parser.add_argument(
         'source',
         choices=['git', 'agent', 'intent', 'reports', 'nix', 'deploy',
-                 'all', 'history'],
-        help="Which ingestion adapter to run, or 'history' to show past runs",
+                 'all', 'history', 'schedule'],
+        help="Which ingestion adapter to run, or 'history'/'schedule' "
+             "for meta-commands",
     )
     ingest_parser.add_argument(
         '--limit', default=20,
         help='For history: max rows (default 20)',
     )
+    # Schedule action + interval — only meaningful when source='schedule'.
+    ingest_parser.add_argument(
+        'action', nargs='?',
+        choices=['install', 'uninstall', 'status'],
+        help="For schedule: install / uninstall / status",
+    )
+    ingest_parser.add_argument(
+        '--interval',
+        help="For schedule install: systemd OnCalendar spec "
+             "(default: 'hourly')",
+    )
 
     def _ingest_dispatch(args):
         if args.source == 'history':
             return cmd.ingest_history(args)
+        if args.source == 'schedule':
+            if not args.action:
+                logger.error("ingest schedule needs an action: "
+                             "install | uninstall | status")
+                return 1
+            return cmd.ingest_schedule(args)
         return cmd.ingest(args)
     cli.commands['ingest'] = _ingest_dispatch
 
