@@ -85,13 +85,23 @@ class ReconcileCommands(Command):
         return 1 if any_drift else 0
 
     def _probe_one(self, machine, verbose=False) -> int:
-        """SSH one machine and diff its state against the DB."""
-        from db_utils import query_one
+        """SSH one machine, diff its state against the DB, record the
+        result to reconcile_runs (migration 095)."""
+        import json
+        import os
+        import time
+        from db_utils import query_one, execute
 
         host = machine['target_host']
+        machine_name = machine['machine_name']
+        t0 = time.monotonic()
+
         if not host:
-            print(f"  ? {machine['machine_name']:<20} "
+            print(f"  ? {machine_name:<20} "
                   f"no target_host recorded — skipping")
+            self._record_run(machine_name, 'error', None, None,
+                             'no target_host recorded',
+                             int((time.monotonic() - t0) * 1000))
             return 0
         user = machine['target_user'] or 'root'
         port = machine['target_port'] or 22
@@ -119,26 +129,32 @@ class ReconcileCommands(Command):
                 capture_output=True, text=True, timeout=15,
             )
         except subprocess.TimeoutExpired:
-            print(f"  ? {machine['machine_name']:<20} "
+            elapsed = int((time.monotonic() - t0) * 1000)
+            print(f"  ? {machine_name:<20} "
                   f"SSH timeout ({host}:{port})")
+            self._record_run(machine_name, 'unreachable', None,
+                             None, 'SSH timeout', elapsed)
             return 2
 
+        elapsed = int((time.monotonic() - t0) * 1000)
         if result.returncode != 0:
             err = (result.stderr or '').strip().splitlines()
             hint = err[-1] if err else '(no stderr)'
-            print(f"  ✗ {machine['machine_name']:<20} "
+            print(f"  ✗ {machine_name:<20} "
                   f"SSH failed: {hint[:60]}")
+            self._record_run(machine_name, 'unreachable',
+                             result.returncode, None, hint, elapsed)
             return 2
 
         lines = (result.stdout or '').strip().splitlines()
         if len(lines) < 3:
-            print(f"  ? {machine['machine_name']:<20} "
+            print(f"  ? {machine_name:<20} "
                   f"probe returned incomplete output")
+            self._record_run(machine_name, 'error', result.returncode,
+                             None, 'incomplete output', elapsed)
             return 2
         machine_toplevel, machine_nixos, machine_bootid = lines[:3]
 
-        # Look up what the DB thinks is running (most recent successful
-        # switch).
         db = query_one(
             """SELECT generation_number, toplevel_path,
                       nixos_version, boot_id, switched_at
@@ -147,44 +163,120 @@ class ReconcileCommands(Command):
                   AND switch_success = 1
                 ORDER BY switched_at DESC
                 LIMIT 1""",
-            (machine['machine_name'],),
+            (machine_name,),
         )
         if not db:
-            print(f"  ? {machine['machine_name']:<20} "
+            print(f"  ? {machine_name:<20} "
                   f"no DB generation records — first probe?")
+            self._record_run(machine_name, 'error', 0, None,
+                             'no DB record for this machine', elapsed)
             return 0
 
         drift = []
+        drift_data = {}
         if db['toplevel_path'] != machine_toplevel:
             drift.append(
                 f"toplevel:  DB has gen {db['generation_number']} "
                 f"({db['toplevel_path']}); "
                 f"machine on {machine_toplevel}"
             )
+            drift_data['toplevel'] = {
+                'db': db['toplevel_path'],
+                'machine': machine_toplevel,
+            }
         if db['nixos_version'] and db['nixos_version'] != machine_nixos:
             drift.append(
                 f"nixos:     DB {db['nixos_version']!r} vs "
                 f"machine {machine_nixos!r}"
             )
+            drift_data['nixos_version'] = {
+                'db': db['nixos_version'],
+                'machine': machine_nixos,
+            }
         if db['boot_id'] and db['boot_id'] != machine_bootid:
             drift.append(
                 f"boot_id:   DB {db['boot_id'][:12]!r} vs "
                 f"machine {machine_bootid[:12]!r} "
                 f"(machine has rebooted since DB record)"
             )
+            drift_data['boot_id'] = {
+                'db': db['boot_id'],
+                'machine': machine_bootid,
+            }
 
         if not drift:
-            print(f"  ✓ {machine['machine_name']:<20} "
+            print(f"  ✓ {machine_name:<20} "
                   f"gen {db['generation_number']}  in sync "
                   f"({db['switched_at']})")
+            self._record_run(machine_name, 'ok', 0, None, None, elapsed)
             return 0
-        print(f"  ✗ {machine['machine_name']:<20} DRIFT:")
+        print(f"  ✗ {machine_name:<20} DRIFT:")
         for d in drift:
             print(f"      {d}")
         if verbose:
             print(f"    DB says      switched_at = {db['switched_at']}")
             print(f"    machine says toplevel    = {machine_toplevel}")
+        self._record_run(machine_name, 'drift', 0,
+                         json.dumps(drift_data), None, elapsed)
         return 1
+
+    def _record_run(self, machine_name, status, ssh_exit_code,
+                    drift_details_json, note, duration_ms):
+        """Persist to reconcile_runs (migration 095). Non-fatal."""
+        import os
+        from db_utils import execute
+        try:
+            ran_by = (os.environ.get('TEMPLEDB_AUTHOR')
+                      or os.environ.get('USER') or None)
+            details = drift_details_json
+            if not details and note:
+                details = f'{{"note": "{note}"}}'
+            execute(
+                """INSERT INTO reconcile_runs
+                       (machine_name, status, ssh_exit_code,
+                        drift_details_json, ran_by, duration_ms)
+                     VALUES (?, ?, ?, ?, ?, ?)""",
+                (machine_name, status, ssh_exit_code,
+                 details, ran_by, duration_ms),
+            )
+        except Exception as e:
+            logger.debug(f"reconcile_runs record failed: {e}")
+
+    def history(self, args) -> int:
+        """Print recent reconcile_runs. Filter by --machine, --status."""
+        from db_utils import query_all
+        clauses = []
+        params = []
+        if args.machine:
+            clauses.append("machine_name = ?")
+            params.append(args.machine)
+        if args.status:
+            clauses.append("status = ?")
+            params.append(args.status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = query_all(
+            f"""SELECT id, machine_name, ran_at, duration_ms, status,
+                       ssh_exit_code, drift_details_json, ran_by
+                  FROM reconcile_runs
+                  {where}
+                 ORDER BY ran_at DESC
+                 LIMIT ?""",
+            tuple(params) + (int(args.limit),),
+        )
+        if not rows:
+            print("(no reconcile runs recorded — try "
+                  "`templedb reconcile machine <name>`)")
+            return 0
+        marker = {'ok': '✓', 'drift': '✗',
+                  'unreachable': '?', 'error': '!'}
+        for r in rows:
+            m = marker.get(r['status'], '?')
+            dur = f"{r['duration_ms']}ms" if r['duration_ms'] else ""
+            by = f" by {r['ran_by']}" if r['ran_by'] else ""
+            print(f"  {m} #{r['id']:<5} {r['ran_at']}  "
+                  f"{r['machine_name']:<20} {r['status']:<11} "
+                  f"{dur}{by}")
+        return 0
 
 
 def register(cli):
@@ -203,3 +295,14 @@ def register(cli):
                    help='Machine name from fleet_machines, or "all"')
     m.add_argument('-v', '--verbose', action='store_true')
     cli.commands['reconcile.machine'] = cmd.machine
+
+    h = sub.add_parser('history',
+                       help='Show recent reconcile runs '
+                            '(persistence from migration 095)')
+    h.add_argument('--machine', help='Filter by machine_name')
+    h.add_argument('--status',
+                   choices=['ok', 'drift', 'unreachable', 'error'],
+                   help='Filter by status')
+    h.add_argument('--limit', default=30,
+                   help='Max rows (default 30)')
+    cli.commands['reconcile.history'] = cmd.history

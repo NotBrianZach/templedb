@@ -3696,3 +3696,26 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_active
     ON tool_calls(status) WHERE status IN ('running', 'unknown');
+
+
+-- ============================================================================
+-- Migration 095: reconcile_runs (active-reconcile persistence)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS reconcile_runs (
+    id                INTEGER PRIMARY KEY,
+    machine_name      TEXT NOT NULL,
+    ran_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    duration_ms       INTEGER,
+    status            TEXT NOT NULL DEFAULT 'ok'
+                        CHECK (status IN ('ok', 'drift', 'unreachable', 'error')),
+    ssh_exit_code     INTEGER,
+    drift_details_json TEXT,
+    ran_by            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reconcile_runs_machine_time
+    ON reconcile_runs(machine_name, ran_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reconcile_runs_status
+    ON reconcile_runs(status, ran_at DESC)
+    WHERE status IN ('drift', 'unreachable', 'error');

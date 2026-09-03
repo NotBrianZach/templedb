@@ -709,6 +709,114 @@ class TestReconcile:
         out = capsys.readouterr().out
         assert 'boot_id' in out
 
+    def test_reconcile_records_run_in_db(self, populated_env,
+                                          monkeypatch):
+        from cli.commands.reconcile import ReconcileCommands
+        import argparse
+        self._seed_machine_and_gen(
+            populated_env,
+            toplevel_on_db='/nix/store/aaa-sys',
+        )
+        self._mock_ssh(monkeypatch,
+                       stdout='/nix/store/aaa-sys\n24.11\nboot-abc\n')
+        ReconcileCommands().machine(argparse.Namespace(
+            name='reconHost', verbose=False,
+        ))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT * FROM reconcile_runs
+                WHERE machine_name = 'reconHost'
+                ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['status'] == 'ok'
+        assert row['duration_ms'] is not None
+
+    def test_reconcile_records_drift(self, populated_env, monkeypatch):
+        from cli.commands.reconcile import ReconcileCommands
+        import argparse
+        self._seed_machine_and_gen(
+            populated_env,
+            toplevel_on_db='/nix/store/aaa-sys',
+        )
+        self._mock_ssh(monkeypatch,
+                       stdout='/nix/store/bbb-sys\n24.11\nboot-abc\n')
+        ReconcileCommands().machine(argparse.Namespace(
+            name='reconHost', verbose=False,
+        ))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT status, drift_details_json
+                 FROM reconcile_runs
+                WHERE machine_name = 'reconHost'
+                ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        conn.close()
+        assert row['status'] == 'drift'
+        import json
+        details = json.loads(row['drift_details_json'])
+        assert 'toplevel' in details
+
+    def test_reconcile_history_prints(self, populated_env,
+                                       monkeypatch, capsys):
+        from cli.commands.reconcile import ReconcileCommands
+        import argparse
+        self._seed_machine_and_gen(
+            populated_env,
+            toplevel_on_db='/nix/store/aaa-sys',
+        )
+        self._mock_ssh(monkeypatch,
+                       stdout='/nix/store/aaa-sys\n24.11\nboot-abc\n')
+        cmd = ReconcileCommands()
+        cmd.machine(argparse.Namespace(name='reconHost', verbose=False))
+        capsys.readouterr()
+        rc = cmd.history(argparse.Namespace(
+            machine=None, status=None, limit=20,
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'reconHost' in out
+        assert 'ok' in out
+
+    def test_doctor_reconcile_freshness_never_run(self, populated_env,
+                                                    capsys):
+        """A fleet_machine that's never been reconciled should trigger
+        the freshness invariant."""
+        from cli.commands.entity import EntityCommands
+        import argparse
+        # Seed a fleet_machine but NO reconcile_runs for it
+        conn = sqlite3.connect(populated_env["db_path"])
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO fleet_networks
+                   (project_id, network_name, network_uuid,
+                    config_file_path)
+                 VALUES (?, 'net', 'uuid-net', 'net.nix')""",
+            (pid,),
+        )
+        nid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO fleet_machines
+                   (network_id, machine_name, machine_uuid,
+                    target_host, target_user)
+                 VALUES (?, 'staleHost', 'uuid-stale',
+                         '10.0.0.99', 'root')""",
+            (nid,),
+        )
+        conn.commit()
+        conn.close()
+        rc = EntityCommands().doctor_entities(argparse.Namespace(
+            check='fleet_machines_reconciled_within_7_days'
+        ))
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert 'staleHost' in out or 'issue' in out.lower()
+
     def test_reconcile_unknown_machine(self, populated_env, capsys, caplog):
         from cli.commands.reconcile import ReconcileCommands
         import argparse, logging

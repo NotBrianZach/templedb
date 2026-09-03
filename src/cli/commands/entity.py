@@ -1102,6 +1102,8 @@ class EntityCommands(Command):
              self._check_generations_have_built_from),
             ('every_deployment_has_entity',
              self._check_deployments_have_entities),
+            ('fleet_machines_reconciled_within_7_days',
+             self._check_reconcile_freshness),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -1230,6 +1232,28 @@ class EntityCommands(Command):
         )
         return [f"Commit {r['slug']}/{r['commit_hash'][:12]} not in "
                 f"entities table (run `templedb ingest git`)" for r in rows]
+
+    def _check_reconcile_freshness(self):
+        """Invariant: every fleet_machine should have been reconciled
+        within the last 7 days. Otherwise drift is undetectable —
+        we can't know if the machine has diverged from the DB.
+
+        Warns for machines never probed too."""
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT fm.machine_name,
+                      MAX(rr.ran_at) AS last_run
+                 FROM fleet_machines fm
+                 LEFT JOIN reconcile_runs rr
+                   ON rr.machine_name = fm.machine_name
+                GROUP BY fm.machine_name
+                HAVING last_run IS NULL
+                    OR datetime(last_run) < datetime('now', '-7 days')"""
+        )
+        return [f"Machine {r['machine_name']} last reconciled at "
+                f"{r['last_run'] or '(never)'} — "
+                f"run `templedb reconcile machine {r['machine_name']}`"
+                for r in rows]
 
     def _check_deployments_have_entities(self):
         """Invariant: every deployment_history row has a matching
