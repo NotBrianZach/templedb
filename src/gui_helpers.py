@@ -141,6 +141,7 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("nix-store", "/nix-store",  "Nix Store",  ", X"),
             ("tests", "/tests",        "Tests",      ", t"),
             ("reports", "/reports",    "Reports",    ", r"),
+            ("entities", "/entities",  "Entities",   ", e"),
         ]
     )
     page = f"""<!DOCTYPE html>

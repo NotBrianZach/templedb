@@ -746,3 +746,9 @@ try:
 except Exception as e:
     logger.warning(f'Failed to load GUI page reports: {e}')
 
+try:
+    from gui_pages.entities import router as entities_router
+    app.include_router(entities_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page entities: {e}')
+
