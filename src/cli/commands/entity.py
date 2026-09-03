@@ -1673,9 +1673,17 @@ def register(cli):
         'search',
         help='Case-insensitive substring search across '
              'entity label + external_ref',
+        description="Search across every entity's label and external_ref. "
+                    "See `templedb entity stats` for the current kind list.",
     )
     search.add_argument('query', help='Substring to look for')
-    search.add_argument('--kind', help='Restrict to this entity kind')
+    search.add_argument(
+        '--kind',
+        help='Restrict to one entity kind. Common kinds: File, Commit, '
+             'Machine, Generation, Deployment, EditIntent, Report, '
+             'AgentSession, ToolCall, StorePath, Derivation, AstBuild. '
+             'Full list: `templedb entity stats`.',
+    )
     search.add_argument('--limit', default=30,
                         help='Max rows (default 30)')
     cli.commands['entity.search'] = cmd.graph_search
