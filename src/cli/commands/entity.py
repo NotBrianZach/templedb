@@ -760,7 +760,7 @@ def register(cli):
     )
     ingest_parser.add_argument(
         'source',
-        choices=['git', 'agent', 'intent', 'all'],
+        choices=['git', 'agent', 'intent', 'reports', 'all'],
         help='Which ingestion adapter to run',
     )
     cli.commands['ingest'] = cmd.ingest
