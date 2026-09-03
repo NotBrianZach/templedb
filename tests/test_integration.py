@@ -466,6 +466,149 @@ class TestMaterialize:
             "non-gitignored stray file was preserved but should be swept"
 
 
+# ── Cross-Session Handoff Notes (Phase 2.5) Tests ────────────────────────────
+
+class TestHandoffNotes:
+    """Tests for the cross-session pinboard added in migration 093.
+    Pull-based: send + list + show + ack + pop lifecycle."""
+
+    def test_table_exists(self, temp_env):
+        conn = sqlite3.connect(temp_env["db_path"])
+        row = conn.execute(
+            "SELECT type FROM sqlite_master WHERE name='handoff_notes'"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == 'table'
+
+    def _args(self, **kwargs):
+        import argparse
+        defaults = dict(
+            to=None, topic=None, broadcast=False,
+            subject=None, body=None, tag=[],
+            ref_report=None, ref_commit=None, ref_file=None,
+            project=None, expires_at=None,
+            for_session=None, unread=False,
+            include_acked=False, limit=30,
+            id=None, message=None,
+        )
+        defaults.update(kwargs)
+        return argparse.Namespace(**defaults)
+
+    def test_send_requires_destination(self, temp_env, capsys):
+        from cli.commands.handoff import HandoffCommands
+        cmd = HandoffCommands()
+        rc = cmd.send(self._args(subject='hi', body='there'))
+        assert rc == 1
+
+    def test_send_and_list_roundtrip(self, temp_env, capsys):
+        from cli.commands.handoff import HandoffCommands
+        cmd = HandoffCommands()
+        rc = cmd.send(self._args(
+            to='sess-1', subject='hello', body='world',
+        ))
+        assert rc == 0
+        capsys.readouterr()
+        cmd.list(self._args())
+        out = capsys.readouterr().out
+        assert 'hello' in out
+        assert 'sess-1' in out
+
+    def test_show_marks_read(self, populated_env, capsys):
+        from cli.commands.handoff import HandoffCommands
+        cmd = HandoffCommands()
+        cmd.send(self._args(
+            topic='templedb', subject='s', body='b',
+        ))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        nid = conn.execute(
+            "SELECT id FROM handoff_notes ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        conn.close()
+        capsys.readouterr()
+        cmd.show(self._args(id=nid))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT read_at FROM handoff_notes WHERE id=?", (nid,)
+        ).fetchone()
+        conn.close()
+        assert row['read_at'] is not None
+
+    def test_ack_marks_acked_with_reply(self, populated_env, capsys):
+        from cli.commands.handoff import HandoffCommands
+        cmd = HandoffCommands()
+        cmd.send(self._args(
+            broadcast=True, subject='s', body='b',
+        ))
+        conn = sqlite3.connect(populated_env["db_path"])
+        nid = conn.execute(
+            "SELECT id FROM handoff_notes ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        conn.close()
+        capsys.readouterr()
+        cmd.ack(self._args(id=nid, message='got it'))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT acked_at, body FROM handoff_notes WHERE id=?",
+            (nid,),
+        ).fetchone()
+        conn.close()
+        assert row['acked_at'] is not None
+        assert 'got it' in row['body']
+        assert 'ack from' in row['body']
+
+    def test_list_default_hides_acked(self, populated_env, capsys):
+        from cli.commands.handoff import HandoffCommands
+        cmd = HandoffCommands()
+        cmd.send(self._args(broadcast=True, subject='keep', body='.'))
+        cmd.send(self._args(broadcast=True, subject='gone', body='.'))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, subject FROM handoff_notes ORDER BY id"
+        ).fetchall()
+        conn.close()
+        gone_id = next(r['id'] for r in rows if r['subject'] == 'gone')
+        cmd.ack(self._args(id=gone_id))
+        capsys.readouterr()
+        cmd.list(self._args())
+        out = capsys.readouterr().out
+        assert 'keep' in out
+        assert 'gone' not in out
+        # But --include-acked shows both
+        cmd.list(self._args(include_acked=True))
+        out = capsys.readouterr().out
+        assert 'keep' in out
+        assert 'gone' in out
+
+    def test_pop_shows_and_acks_oldest(self, populated_env, capsys):
+        from cli.commands.handoff import HandoffCommands
+        cmd = HandoffCommands()
+        cmd.send(self._args(
+            to='sess-42', subject='oldest', body='.',
+        ))
+        cmd.send(self._args(
+            to='sess-42', subject='newer', body='.',
+        ))
+        capsys.readouterr()
+        cmd.pop(self._args(for_session='sess-42'))
+        out = capsys.readouterr().out
+        assert 'oldest' in out
+        # oldest was acked, newer was not
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT subject, acked_at FROM handoff_notes"
+            " WHERE to_session='sess-42' ORDER BY id"
+        ).fetchall()
+        conn.close()
+        assert rows[0]['acked_at'] is not None
+        assert rows[1]['acked_at'] is None
+
+
 # ── Ingestion Runs + Invariant Checks (Phase 3 reconcile) Tests ──────────────
 
 class TestReconcileHistory:

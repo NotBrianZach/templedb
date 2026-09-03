@@ -101,6 +101,7 @@ MIGRATION_SEQUENCE = [
     "090_report_implementations.sql",
     "091_ingestion_runs.sql",
     "092_invariant_checks.sql",
+    "093_handoff_notes.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",

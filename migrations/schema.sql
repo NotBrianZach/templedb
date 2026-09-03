@@ -3637,3 +3637,37 @@ CREATE INDEX IF NOT EXISTS idx_invariant_checks_name_time
 CREATE INDEX IF NOT EXISTS idx_invariant_checks_violated
     ON invariant_checks(status, ran_at DESC)
     WHERE status IN ('violated', 'error');
+
+
+-- ============================================================================
+-- Migration 093: handoff_notes (Phase 2.5 cross-session pinboard)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS handoff_notes (
+    id              INTEGER PRIMARY KEY,
+    from_session    TEXT NOT NULL,
+    from_actor      TEXT,
+    to_session      TEXT,
+    to_topic        TEXT,
+    subject         TEXT NOT NULL,
+    body            TEXT NOT NULL,
+    tags            TEXT,
+    ref_report      TEXT,
+    ref_commit      TEXT,
+    ref_file        TEXT,
+    project_id      INTEGER REFERENCES projects(id),
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    read_at         TEXT,
+    acked_at        TEXT,
+    expires_at      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoff_notes_to_session
+    ON handoff_notes(to_session, acked_at);
+CREATE INDEX IF NOT EXISTS idx_handoff_notes_to_topic
+    ON handoff_notes(to_topic, acked_at);
+CREATE INDEX IF NOT EXISTS idx_handoff_notes_project
+    ON handoff_notes(project_id);
+CREATE INDEX IF NOT EXISTS idx_handoff_notes_broadcast
+    ON handoff_notes(created_at DESC)
+    WHERE to_session IS NULL AND to_topic IS NULL;
