@@ -316,34 +316,60 @@ WantedBy=timers.target
                 # next python ingest after a git ingest lands.
                 continue
 
-            # Walk module-level FunctionDef/ClassDef nodes. Nested
-            # symbols are deferred to a follow-up; module-level covers
-            # the most useful case ("who calls foo").
-            local_defs = {}  # name → (entity_id, eref)
+            # Two-pass walk. First pass collects every symbol —
+            # module-level defs, class methods, and inner functions
+            # too if we walked them; for now we keep to two levels:
+            # module + one nesting layer inside a class (methods).
+            #
+            # Symbol name conventions:
+            #   module-level def foo   → 'foo'
+            #   class Foo              → 'Foo'
+            #   method Foo.bar         → 'Foo.bar'
+            #
+            # Same-file call resolution then handles three cases:
+            #   bare foo()             → 'foo' (module-level)
+            #   self.foo() (in method) → '<enclosing class>.foo'
+            #   Class.foo()            → 'Class.foo' via attribute chain
+            local_defs = {}  # name → (entity_id, eref, ast_node,
+                             #          enclosing_class or None)
+
+            def _register(name, node, kind_label, enclosing=None):
+                nonlocal added_e, added_r
+                eref = f"{r['slug']}:{r['file_path']}:{name}"
+                label = f"{kind_label} {name} (line {node.lineno})"
+                if self._upsert_entity('Symbol', eref, 'python',
+                                       label=label):
+                    added_e += 1
+                sym_id = self._entity_id('Symbol', eref)
+                if sym_id and self._upsert_relation(
+                    file_id, 'defines', sym_id, 'python'
+                ):
+                    added_r += 1
+                if sym_id:
+                    local_defs[name] = (sym_id, eref, node, enclosing)
+
             for node in ast.iter_child_nodes(tree):
                 if isinstance(node, (ast.FunctionDef,
-                                     ast.AsyncFunctionDef,
-                                     ast.ClassDef)):
-                    kind_label = ('class' if isinstance(node, ast.ClassDef)
-                                  else 'def')
-                    eref = f"{r['slug']}:{r['file_path']}:{node.name}"
-                    label = f"{kind_label} {node.name} (line {node.lineno})"
-                    if self._upsert_entity('Symbol', eref, 'python',
-                                           label=label):
-                        added_e += 1
-                    sym_id = self._entity_id('Symbol', eref)
-                    if sym_id and self._upsert_relation(
-                        file_id, 'defines', sym_id, 'python'
-                    ):
-                        added_r += 1
-                    if sym_id:
-                        local_defs[node.name] = (sym_id, eref, node)
+                                     ast.AsyncFunctionDef)):
+                    _register(node.name, node, 'def')
+                elif isinstance(node, ast.ClassDef):
+                    _register(node.name, node, 'class')
+                    # Methods: iterate the class body
+                    for cnode in ast.iter_child_nodes(node):
+                        if isinstance(cnode, (ast.FunctionDef,
+                                              ast.AsyncFunctionDef)):
+                            _register(
+                                f"{node.name}.{cnode.name}",
+                                cnode, 'method',
+                                enclosing=node.name,
+                            )
 
             # Second pass: for each locally-defined symbol, walk its
-            # body for Call nodes. If the call target is a Name that
-            # matches another local def, emit Symbol → calls → Symbol.
-            # Cross-file resolution deferred (needs import tracking).
-            for name, (sym_id, eref, def_node) in local_defs.items():
+            # body for Call nodes and emit Symbol → calls → Symbol
+            # for same-file matches. Attribute access is resolved for
+            # self.foo() and Class.foo().
+            for name, (sym_id, eref, def_node, enclosing) in \
+                    local_defs.items():
                 for sub in ast.walk(def_node):
                     if not isinstance(sub, ast.Call):
                         continue
@@ -351,14 +377,19 @@ WantedBy=timers.target
                     if isinstance(sub.func, ast.Name):
                         called = sub.func.id
                     elif isinstance(sub.func, ast.Attribute):
-                        # Attribute access like self.foo() — walk to root
-                        # and check if root is a Name matching a local.
-                        # Method calls typically fail this check; ok.
-                        cur = sub.func
-                        while isinstance(cur, ast.Attribute):
-                            cur = cur.value
-                        if isinstance(cur, ast.Name):
-                            called = cur.id
+                        # Handle: self.foo, Class.foo, module.foo, etc.
+                        func = sub.func
+                        if isinstance(func.value, ast.Name):
+                            root = func.value.id
+                            attr = func.attr
+                            if root == 'self' and enclosing:
+                                # self.foo → <enclosing>.foo
+                                called = f"{enclosing}.{attr}"
+                            elif root in local_defs:
+                                # Class.method or foo.attr where foo is
+                                # a local def (rare but honest)
+                                called = f"{root}.{attr}"
+                        # Deeper chains (a.b.c.foo) deferred.
                     if called and called in local_defs and called != name:
                         target_sym_id = local_defs[called][0]
                         if self._upsert_relation(

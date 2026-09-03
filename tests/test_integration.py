@@ -1323,6 +1323,63 @@ class TestPythonIngest:
         conn.close()
         assert row['n'] == 1, "main → calls → helper not emitted"
 
+    def test_python_ingest_extracts_methods(self, populated_env):
+        """Class methods should be emitted as Symbol entities with
+        qualified refs (Class.method)."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/oop.py',
+            "class Widget:\n"
+            "    def __init__(self):\n"
+            "        pass\n"
+            "    def render(self):\n"
+            "        return 'hi'\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT external_ref, label FROM entities
+                WHERE kind = 'Symbol'
+                  AND external_ref LIKE '%oop.py%'
+                ORDER BY external_ref"""
+        ).fetchall()
+        conn.close()
+        refs = {r['external_ref'] for r in rows}
+        assert 'testproj:src/oop.py:Widget' in refs
+        assert 'testproj:src/oop.py:Widget.__init__' in refs
+        assert 'testproj:src/oop.py:Widget.render' in refs
+
+    def test_python_ingest_resolves_self_method_calls(self, populated_env):
+        """self.foo() inside a method should resolve to Class.foo
+        via same-file scope."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/methods.py',
+            "class Doer:\n"
+            "    def helper(self):\n"
+            "        return 1\n"
+            "    def go(self):\n"
+            "        return self.helper()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.external_ref = 'testproj:src/methods.py:Doer.go'
+                  AND e2.external_ref = 'testproj:src/methods.py:Doer.helper'
+                  AND r.kind = 'calls'"""
+        ).fetchone()
+        conn.close()
+        assert row['n'] == 1, "self.helper() → Doer.helper not resolved"
+
     def test_python_ingest_ignores_cross_file_calls(self, populated_env):
         """Cross-file calls aren't resolved (needs import tracking)
         so no relation is emitted. Test guards against accidental
