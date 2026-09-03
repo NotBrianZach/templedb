@@ -195,6 +195,11 @@ away from.
   — the plan this doc is Phase 3 of
 - `reports/2026-09-02-0227-own-vs-observe-templedb-identity.html`
   — the identity crisis this doc resolves
+- `reports/2026-09-03-0843-proposed-schema-after-observer-integrator-plan.html`
+  — full 131-table disposition matrix (keep/shrink/view/retire/new)
+  authored by a parallel session. Authoritative for the target
+  shape of the schema; this doc names the theoretical pattern the
+  schema report applies.
 - `AST_DEPLOY_DESIGN.md` — the AST-first version of the same pattern
   applied to NixOS config
 - External comparables:
@@ -202,3 +207,16 @@ away from.
     similar shape
   - LSIF / SCIP — same span/relation pattern for code facts
   - Service meshes — coordinator with reconcile loops
+
+## Naming notes (workflow F junction)
+
+The schema report proposes `decisions` as the name for the
+Report ↔ Commit first-class span. We shipped it as
+`report_implementations` (migration 090) before the schema report
+landed. Both names describe the same shape; `decisions` is broader
+in scope (a decision might reference a code range, not a single
+commit) and better aligned with the design vocabulary. The current
+implementation stays as `report_implementations` for backward
+compatibility; a future migration can rename or introduce
+`decisions` as a superset that references `report_implementations`
+as one kind of decision.

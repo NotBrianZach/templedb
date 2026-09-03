@@ -99,6 +99,8 @@ MIGRATION_SEQUENCE = [
     "088_vcs_working_state_intent_id.sql",
     "089_entities_and_relations.sql",
     "090_report_implementations.sql",
+    "091_ingestion_runs.sql",
+    "092_invariant_checks.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",

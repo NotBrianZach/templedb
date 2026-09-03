@@ -466,6 +466,107 @@ class TestMaterialize:
             "non-gitignored stray file was preserved but should be swept"
 
 
+# ── Ingestion Runs + Invariant Checks (Phase 3 reconcile) Tests ──────────────
+
+class TestReconcileHistory:
+    """Tests for the two persistence tables added in migrations 091 + 092:
+    ingestion_runs (per-adapter run log) and invariant_checks (doctor
+    result history). Together these make freshness telemetry queryable
+    and let 'when did drift first appear' become answerable."""
+
+    def test_tables_exist(self, temp_env):
+        conn = sqlite3.connect(temp_env["db_path"])
+        for name in ('ingestion_runs', 'invariant_checks'):
+            row = conn.execute(
+                "SELECT type FROM sqlite_master WHERE name=?", (name,)
+            ).fetchone()
+            assert row is not None, f"{name} missing"
+            assert row[0] == 'table'
+        conn.close()
+
+    def test_ingest_records_a_run(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        cmd = EntityCommands()
+        cmd.ingest(argparse.Namespace(source='git', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM ingestion_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['adapter'] == 'git'
+        assert row['status'] == 'ok'
+        assert row['finished_at'] is not None
+        assert row['entities_added'] >= 3  # 3 files in populated_env
+
+    def test_ingest_history_prints_runs(self, populated_env, capsys):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        cmd = EntityCommands()
+        cmd.ingest(argparse.Namespace(source='git', limit=20))
+        capsys.readouterr()
+        rc = cmd.ingest_history(argparse.Namespace(limit=10))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'git' in out
+        assert 'ok' in out
+
+    def test_doctor_records_invariant_checks(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        cmd = EntityCommands()
+        # Doctor without prior ingest → intents/commits missing entities
+        # → violations get recorded.
+        cmd.doctor_entities(argparse.Namespace(check=None))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT check_name, status, issue_count
+                 FROM invariant_checks
+                ORDER BY id DESC LIMIT 10"""
+        ).fetchall()
+        conn.close()
+        assert len(rows) > 0, "doctor should have inserted invariant_checks rows"
+        names = {r['check_name'] for r in rows}
+        assert 'relations_reference_valid_entities' in names
+        assert 'edit_intent_applied_to_valid_commit' in names
+
+    def test_doctor_history_prints(self, populated_env, capsys):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        cmd = EntityCommands()
+        cmd.doctor_entities(argparse.Namespace(check=None))
+        capsys.readouterr()
+        rc = cmd.doctor_history(argparse.Namespace(
+            check=None, violated_only=False, limit=20
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'relations_reference_valid_entities' in out
+
+    def test_doctor_history_violated_only_filters(self, populated_env, capsys):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        cmd = EntityCommands()
+        # No prior ingest → these will be violated
+        cmd.doctor_entities(argparse.Namespace(check=None))
+        # Now ingest, doctor again — should be clean
+        cmd.ingest(argparse.Namespace(source='git', limit=20))
+        cmd.ingest(argparse.Namespace(source='intent', limit=20))
+        cmd.doctor_entities(argparse.Namespace(check=None))
+        capsys.readouterr()
+        cmd.doctor_history(argparse.Namespace(
+            check=None, violated_only=True, limit=50
+        ))
+        out = capsys.readouterr().out
+        # Every line should say ✗ or ! — never ✓
+        for line in out.splitlines():
+            if line.strip().startswith(('#', ' ')):
+                assert '✓' not in line, f"violated-only leaked ok line: {line}"
+
+
 # ── Report↔Commit Span (Workflow F) Tests ────────────────────────────────────
 
 class TestReportImplementations:

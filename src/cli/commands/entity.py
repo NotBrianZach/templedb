@@ -45,7 +45,11 @@ class EntityCommands(Command):
 
         Each adapter reads from its authority's native tables and
         upserts into entities/relations. See docs/ENTITY_GRAPH_DESIGN.md
-        for the local-algebras framing."""
+        for the local-algebras framing.
+
+        Wraps each adapter run in an ingestion_runs row (migration 091)
+        so freshness telemetry per authority is queryable via
+        `templedb ingest history`."""
         adapters = {
             'git':    self._ingest_git,
             'agent':  self._ingest_agent,
@@ -60,7 +64,79 @@ class EntityCommands(Command):
                 f"Available: {', '.join(sorted(adapters))}"
             )
             return 1
-        return adapter(args)
+        # 'all' recursively calls ingest() for each sub-source, which
+        # will each open their own run row. Don't double-wrap.
+        if args.source == 'all':
+            return adapter(args)
+        return self._run_with_log(args.source, adapter, args)
+
+    def _run_with_log(self, adapter_name, fn, args) -> int:
+        """Execute an adapter inside an ingestion_runs row. Records
+        status + any exception as notes. Adapters that want to report
+        entity/relation counts can set self._last_counts before
+        returning (a dict with e/r/x keys)."""
+        from db_utils import execute
+        self._last_counts = None
+        run_id = execute(
+            "INSERT INTO ingestion_runs (adapter) VALUES (?)",
+            (adapter_name,),
+        )
+        try:
+            rc = fn(args)
+        except Exception as e:
+            execute(
+                """UPDATE ingestion_runs
+                      SET finished_at = datetime('now'),
+                          status = 'error',
+                          notes = ?
+                    WHERE id = ?""",
+                (str(e), run_id),
+            )
+            raise
+        # Success — record counts if adapter set them.
+        counts = self._last_counts or {}
+        execute(
+            """UPDATE ingestion_runs
+                  SET finished_at = datetime('now'),
+                      status = ?,
+                      entities_added = ?,
+                      relations_added = ?,
+                      extra_added = ?
+                WHERE id = ?""",
+            ('ok' if rc == 0 else 'partial',
+             int(counts.get('e', 0)),
+             int(counts.get('r', 0)),
+             int(counts.get('x', 0)),
+             run_id),
+        )
+        return rc
+
+    def ingest_history(self, args) -> int:
+        """Print the last N ingestion runs. Handy for 'when did this
+        adapter last see updates?' questions."""
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT id, adapter, started_at, finished_at, status,
+                      entities_added, relations_added, extra_added,
+                      notes
+                 FROM ingestion_runs
+                ORDER BY started_at DESC
+                LIMIT ?""",
+            (int(args.limit),),
+        )
+        if not rows:
+            print("(no ingestion runs recorded)")
+            return 0
+        marker = {'ok': '✓', 'partial': '⋯', 'error': '✗', 'running': '…'}
+        for r in rows:
+            m = marker.get(r['status'], '?')
+            counts = (f"+{r['entities_added']}e "
+                      f"+{r['relations_added']}r "
+                      f"+{r['extra_added']}x")
+            note = f"  — {r['notes']}" if r['notes'] else ""
+            print(f"  {m} #{r['id']:<4} {r['adapter']:<9} "
+                  f"{r['started_at']}  {r['status']:<7}  {counts}{note}")
+        return 0
 
     def _ingest_all(self, args) -> int:
         for sub in ('git', 'agent', 'intent', 'reports'):
@@ -123,6 +199,7 @@ class EntityCommands(Command):
                     added_r += 1
 
         print(f"✓ ingest git: +{added_e} entities, +{added_r} relations")
+        self._last_counts = {'e': added_e, 'r': added_r}
         return 0
 
     def _ingest_agent(self, args) -> int:
@@ -160,6 +237,7 @@ class EntityCommands(Command):
                     added_r += 1
 
         print(f"✓ ingest agent: +{added_e} entities, +{added_r} relations")
+        self._last_counts = {'e': added_e, 'r': added_r}
         return 0
 
     def _ingest_intent(self, args) -> int:
@@ -195,6 +273,7 @@ class EntityCommands(Command):
                             added_r += 1
 
         print(f"✓ ingest intent: +{added_e} entities, +{added_r} relations")
+        self._last_counts = {'e': added_e, 'r': added_r}
         return 0
 
     def _ingest_reports(self, args) -> int:
@@ -306,6 +385,7 @@ class EntityCommands(Command):
 
         print(f"✓ ingest reports: +{added_e} entities, "
               f"+{added_impls} auto-detected impl link(s)")
+        self._last_counts = {'e': added_e, 'r': 0, 'x': added_impls}
         return 0
 
     # ==== REPORT LINKS ========================================================
@@ -572,18 +652,84 @@ class EntityCommands(Command):
             if not checks:
                 logger.error(f"Unknown check: {args.check}")
                 return 1
+        import json, time
+        from db_utils import execute
         problems = []
         for name, fn in checks:
-            issues = fn()
-            marker = "✓" if not issues else "✗"
-            print(f"  {marker} {name:<40} "
-                  f"{'OK' if not issues else f'{len(issues)} issue(s)'}")
+            t0 = time.monotonic()
+            try:
+                issues = fn()
+                status = 'ok' if not issues else 'violated'
+                note = None
+            except Exception as e:
+                issues = []
+                status = 'error'
+                note = str(e)
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            marker = {'ok': '✓', 'violated': '✗',
+                      'error': '!'}.get(status, '?')
+            summary = ('OK' if status == 'ok'
+                       else f'{len(issues)} issue(s)'
+                       if status == 'violated'
+                       else f'error: {note}')
+            print(f"  {marker} {name:<40} {summary}")
             for issue in issues[:5]:
                 print(f"      - {issue}")
             if len(issues) > 5:
                 print(f"      ... and {len(issues) - 5} more")
+            # Persist to invariant_checks (migration 092).
+            try:
+                execute(
+                    """INSERT INTO invariant_checks
+                           (check_name, duration_ms, status,
+                            issue_count, sample_issues_json)
+                         VALUES (?, ?, ?, ?, ?)""",
+                    (name, elapsed_ms, status, len(issues),
+                     json.dumps(issues[:20]) if issues else note),
+                )
+            except Exception as e:
+                # Non-fatal — doctor is diagnostic, not required.
+                logger.debug(f"invariant_checks record failed: {e}")
             problems.extend(issues)
         return 0 if not problems else 1
+
+    def doctor_history(self, args) -> int:
+        """Print the recent history of invariant check results.
+
+        Handy for 'when did this drift first appear?' questions.
+        Filter by --check to see one invariant over time."""
+        from db_utils import query_all
+        clauses = []
+        params = []
+        if args.check:
+            clauses.append("check_name = ?")
+            params.append(args.check)
+        if args.violated_only:
+            clauses.append("status != 'ok'")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = query_all(
+            f"""SELECT id, check_name, ran_at, duration_ms, status,
+                       issue_count, sample_issues_json
+                  FROM invariant_checks
+                  {where}
+                 ORDER BY ran_at DESC
+                 LIMIT ?""",
+            tuple(params) + (int(args.limit),),
+        )
+        if not rows:
+            print("(no invariant check history yet — run "
+                  "`templedb doctor entities` first)")
+            return 0
+        marker = {'ok': '✓', 'violated': '✗', 'error': '!'}
+        for r in rows:
+            m = marker.get(r['status'], '?')
+            summary = ('OK' if r['status'] == 'ok'
+                       else f"{r['issue_count']} issue(s)"
+                       if r['status'] == 'violated'
+                       else 'error')
+            print(f"  {m} #{r['id']:<5} {r['ran_at']}  "
+                  f"{r['check_name']:<40} {summary}")
+        return 0
 
     def _check_intent_applied_valid(self):
         """Invariant: edit_intents.applied_commit_id points at a real
@@ -756,14 +902,23 @@ def register(cli):
     # --- templedb ingest ---
     ingest_parser = cli.subparsers.add_parser(
         'ingest',
-        help='Populate entity graph from an authority (git, agent, intent)',
+        help='Populate entity graph from an authority (git, agent, intent, reports, history)',
     )
     ingest_parser.add_argument(
         'source',
-        choices=['git', 'agent', 'intent', 'reports', 'all'],
-        help='Which ingestion adapter to run',
+        choices=['git', 'agent', 'intent', 'reports', 'all', 'history'],
+        help="Which ingestion adapter to run, or 'history' to show past runs",
     )
-    cli.commands['ingest'] = cmd.ingest
+    ingest_parser.add_argument(
+        '--limit', default=20,
+        help='For history: max rows (default 20)',
+    )
+
+    def _ingest_dispatch(args):
+        if args.source == 'history':
+            return cmd.ingest_history(args)
+        return cmd.ingest(args)
+    cli.commands['ingest'] = _ingest_dispatch
 
     # --- extend existing graph subparser if it exists ---
     # We inject explore/stats subcommands under `templedb graph`.
@@ -787,7 +942,7 @@ def register(cli):
     )
     cli.commands['entity.stats'] = cmd.graph_stats
 
-    # --- templedb doctor entities ---
+    # --- templedb doctor entities / history ---
     doctor_parser = cli.subparsers.add_parser(
         'doctor',
         help='Reconcile checks (Phase 3 groundwork)',
@@ -795,13 +950,25 @@ def register(cli):
     dsub = doctor_parser.add_subparsers(dest='doctor_subcommand', required=True)
     ent = dsub.add_parser(
         'entities',
-        help='Run commuting-diagram invariant checks',
+        help='Run commuting-diagram invariant checks (persisted to invariant_checks)',
     )
     ent.add_argument(
         '--check', metavar='NAME',
         help='Run one named check instead of all',
     )
     cli.commands['doctor.entities'] = cmd.doctor_entities
+
+    dhist = dsub.add_parser(
+        'history',
+        help='Show recent invariant check history (drift over time)',
+    )
+    dhist.add_argument('--check', metavar='NAME',
+                       help='Filter to one invariant name')
+    dhist.add_argument('--violated-only', action='store_true',
+                       help='Only show violations / errors')
+    dhist.add_argument('--limit', default=30,
+                       help='Max rows (default 30)')
+    cli.commands['doctor.history'] = cmd.doctor_history
 
     # --- templedb report {link, links, confirm, reject} ---
     # Workflow F: Report ↔ Commit first-class span

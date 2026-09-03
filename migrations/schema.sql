@@ -3590,3 +3590,50 @@ CREATE INDEX IF NOT EXISTS idx_report_impls_commit
     ON report_implementations(commit_hash);
 CREATE INDEX IF NOT EXISTS idx_report_impls_confidence
     ON report_implementations(confidence);
+
+
+-- ============================================================================
+-- Migration 091: ingestion_runs (Phase 3 reconcile groundwork)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS ingestion_runs (
+    id                INTEGER PRIMARY KEY,
+    adapter           TEXT NOT NULL,
+    started_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at       TEXT,
+    status            TEXT NOT NULL DEFAULT 'running'
+                        CHECK (status IN ('running', 'ok', 'partial', 'error')),
+    entities_added    INTEGER DEFAULT 0,
+    entities_refreshed INTEGER DEFAULT 0,
+    relations_added   INTEGER DEFAULT 0,
+    extra_added       INTEGER DEFAULT 0,
+    notes             TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingestion_runs_adapter_started
+    ON ingestion_runs(adapter, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ingestion_runs_status
+    ON ingestion_runs(status) WHERE status IN ('running', 'error');
+
+
+-- ============================================================================
+-- Migration 092: invariant_checks (Phase 3 reconcile groundwork)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS invariant_checks (
+    id            INTEGER PRIMARY KEY,
+    check_name    TEXT NOT NULL,
+    ran_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    duration_ms   INTEGER,
+    status        TEXT NOT NULL DEFAULT 'ok'
+                    CHECK (status IN ('ok', 'violated', 'error')),
+    issue_count   INTEGER NOT NULL DEFAULT 0,
+    sample_issues_json TEXT,
+    ingestion_run_id INTEGER REFERENCES ingestion_runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_invariant_checks_name_time
+    ON invariant_checks(check_name, ran_at DESC);
+CREATE INDEX IF NOT EXISTS idx_invariant_checks_violated
+    ON invariant_checks(status, ran_at DESC)
+    WHERE status IN ('violated', 'error');
