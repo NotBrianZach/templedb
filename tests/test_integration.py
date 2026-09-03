@@ -1322,6 +1322,42 @@ class TestNixIngest:
         assert rel is not None
 
 
+# ── Summary CLI Tests ────────────────────────────────────────────────────────
+
+class TestSummary:
+    """Health-at-a-glance summary command."""
+
+    def test_summary_on_empty_env(self, temp_env, capsys):
+        """With no data, summary should print zero-state sections
+        without crashing."""
+        from cli.commands.summary import SummaryCommand
+        import argparse
+        rc = SummaryCommand().summary(argparse.Namespace())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'TempleDB Summary' in out
+        assert 'Entity graph' in out
+        # ANSI codes strip: we expect 0 entities
+        assert '0' in out
+
+    def test_summary_with_data(self, populated_env, capsys):
+        """With populated_env's 3 files + our ingest, summary shows
+        real counts."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        from cli.commands.summary import SummaryCommand
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().doctor_entities(argparse.Namespace(check=None))
+        capsys.readouterr()
+        rc = SummaryCommand().summary(argparse.Namespace())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'Entity graph' in out
+        assert 'File' in out  # top kind should be File after git ingest
+        assert 'Doctor invariants' in out
+        assert 'Handoff inbox' in out
+
+
 # ── Cross-Session Handoff Notes (Phase 2.5) Tests ────────────────────────────
 
 class TestHandoffNotes:
