@@ -466,6 +466,97 @@ class TestMaterialize:
             "non-gitignored stray file was preserved but should be swept"
 
 
+# ── Deploy Ingest (Deployment first-class span) Tests ────────────────────────
+
+class TestDeployIngest:
+    """Deployment first-class span from deployment_history. Uses the
+    existing table's lifecycle columns (status, started_at,
+    completed_at) rather than requiring a schema migration."""
+
+    def _seed_deploy(self, populated_env):
+        conn = sqlite3.connect(populated_env["db_path"])
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        bid = conn.execute(
+            "SELECT id FROM vcs_branches WHERE project_id=?", (pid,)
+        ).fetchone()[0]
+        # A commit the deployment was built from
+        conn.execute(
+            """INSERT INTO vcs_commits
+                   (project_id, branch_id, commit_hash,
+                    commit_message, author, commit_timestamp)
+                 VALUES (?, ?, 'feedbeef2222', 'a commit', 'x',
+                         datetime('now'))""",
+            (pid, bid),
+        )
+        # A deployment_history row
+        conn.execute(
+            """INSERT INTO deployment_history
+                   (project_id, target_name, deployment_type,
+                    commit_hash, status, started_at, completed_at,
+                    deployed_by)
+                 VALUES (?, 'testhost', 'deploy',
+                         'feedbeef2222', 'success',
+                         datetime('now'), datetime('now'),
+                         'test')""",
+            (pid,),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_ingest_deploy_emits_deployment_entity(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_deploy(populated_env)
+        EntityCommands().ingest(
+            argparse.Namespace(source='git', limit=20)
+        )
+        EntityCommands().ingest(
+            argparse.Namespace(source='deploy', limit=20)
+        )
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT * FROM entities WHERE kind='Deployment'"""
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['source_authority'] == 'templedb'
+        assert 'testhost' in row['label']
+
+    def test_ingest_deploy_emits_from_commit_relation(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_deploy(populated_env)
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='deploy', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        rel_count = conn.execute(
+            """SELECT COUNT(*) FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.kind = 'Deployment'
+                  AND e2.kind = 'Commit'
+                  AND r.kind = 'from-commit'"""
+        ).fetchone()[0]
+        conn.close()
+        assert rel_count == 1
+
+    def test_doctor_deployment_invariant(self, populated_env, capsys):
+        """Insert deployment without ingesting → doctor flags it."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_deploy(populated_env)
+        cmd = EntityCommands()
+        rc = cmd.doctor_entities(argparse.Namespace(
+            check='every_deployment_has_entity'
+        ))
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert 'testhost' in out or 'issue' in out.lower()
+
+
 # ── Tool Calls (Phase 3 extraction) Tests ────────────────────────────────────
 
 class TestToolCalls:

@@ -56,6 +56,7 @@ class EntityCommands(Command):
             'intent': self._ingest_intent,
             'reports': self._ingest_reports,
             'nix':    self._ingest_nix,
+            'deploy': self._ingest_deploy,
             'all':    self._ingest_all,
         }
         adapter = adapters.get(args.source)
@@ -140,11 +141,88 @@ class EntityCommands(Command):
         return 0
 
     def _ingest_all(self, args) -> int:
-        for sub in ('git', 'agent', 'intent', 'reports', 'nix'):
+        for sub in ('git', 'agent', 'intent', 'reports', 'nix', 'deploy'):
             args.source = sub
             rc = self.ingest(args)
             if rc != 0:
                 return rc
+        return 0
+
+    def _ingest_deploy(self, args) -> int:
+        """Ingest deployment_history as first-class Deployment span.
+
+        Deployment is a junction with its own identity + lifecycle
+        (status: in_progress / success / failed / rolled_back) plus
+        timestamps, per the schema-report's Phase 3 promotion queue.
+        We don't need a migration because deployment_history already
+        carries all this — just wire it into the entity graph.
+
+        Emits:
+          Deployment entities (kind='Deployment',
+              external_ref=deployment_history.id as string,
+              source_authority='templedb')
+          Deployment → targets → Machine (via target_name)
+          Deployment → from-commit → Commit (fuzzy match on commit_hash)
+        """
+        from db_utils import query_all
+        added_e, added_r = 0, 0
+
+        deployments = query_all(
+            """SELECT id, project_id, target_name, deployment_type,
+                      commit_hash, status, started_at, completed_at,
+                      duration_ms, deployed_by
+                 FROM deployment_history"""
+        )
+        for d in deployments:
+            eref = str(d['id'])
+            # Nice compact label: 'zMothership2 deploy (success)'
+            status_marker = {
+                'success': '✓', 'failed': '✗',
+                'rolled_back': '↩', 'in_progress': '⋯',
+            }.get(d['status'], '?')
+            label = (f"{d['target_name']} {d['deployment_type']} "
+                     f"{status_marker}")
+            if self._upsert_entity('Deployment', eref, 'templedb',
+                                   label=label):
+                added_e += 1
+
+        # Deployment → targets → Machine
+        for d in deployments:
+            from_id = self._entity_id('Deployment', str(d['id']))
+            to_id = self._entity_id('Machine', d['target_name'])
+            if from_id and to_id:
+                if self._upsert_relation(from_id, 'targets',
+                                         to_id, 'templedb'):
+                    added_r += 1
+
+        # Deployment → from-commit → Commit (fuzzy match)
+        for d in deployments:
+            if not d['commit_hash']:
+                continue
+            from_id = self._entity_id('Deployment', str(d['id']))
+            if not from_id:
+                continue
+            commit_rows = query_all(
+                """SELECT external_ref FROM entities
+                    WHERE kind = 'Commit'
+                      AND (external_ref LIKE '%/' || ?
+                           OR LOWER(external_ref) LIKE '%/' || LOWER(?))
+                    LIMIT 1""",
+                (d['commit_hash'], d['commit_hash']),
+            )
+            if commit_rows:
+                to_id = self._entity_id(
+                    'Commit', commit_rows[0]['external_ref']
+                )
+                if to_id:
+                    if self._upsert_relation(
+                        from_id, 'from-commit', to_id, 'templedb'
+                    ):
+                        added_r += 1
+
+        print(f"✓ ingest deploy: +{added_e} entities, "
+              f"+{added_r} relations")
+        self._last_counts = {'e': added_e, 'r': added_r}
         return 0
 
     def _ingest_git(self, args) -> int:
@@ -886,6 +964,8 @@ class EntityCommands(Command):
              self._check_tool_calls_have_entities),
             ('every_generation_with_commit_has_relation',
              self._check_generations_have_built_from),
+            ('every_deployment_has_entity',
+             self._check_deployments_have_entities),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -1014,6 +1094,24 @@ class EntityCommands(Command):
         )
         return [f"Commit {r['slug']}/{r['commit_hash'][:12]} not in "
                 f"entities table (run `templedb ingest git`)" for r in rows]
+
+    def _check_deployments_have_entities(self):
+        """Invariant: every deployment_history row has a matching
+        Deployment entity. Flags stale ingest after new deploys."""
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT dh.id, dh.target_name, dh.status
+                 FROM deployment_history dh
+                 LEFT JOIN entities e
+                   ON e.kind = 'Deployment'
+                  AND e.external_ref = CAST(dh.id AS TEXT)
+                WHERE e.id IS NULL
+                LIMIT 100"""
+        )
+        return [f"deployment_history#{r['id']} "
+                f"({r['target_name']}, {r['status']}) not in "
+                f"entities table (run `templedb ingest deploy`)"
+                for r in rows]
 
     def _check_generations_have_built_from(self):
         """Invariant: every nix_generations row with a commit_hash
@@ -1199,7 +1297,8 @@ def register(cli):
     )
     ingest_parser.add_argument(
         'source',
-        choices=['git', 'agent', 'intent', 'reports', 'nix', 'all', 'history'],
+        choices=['git', 'agent', 'intent', 'reports', 'nix', 'deploy',
+                 'all', 'history'],
         help="Which ingestion adapter to run, or 'history' to show past runs",
     )
     ingest_parser.add_argument(
