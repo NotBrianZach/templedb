@@ -42,6 +42,78 @@ def _kind_glyph(kind: str) -> str:
     }.get(kind, '•')
 
 
+@router.get("/entities/search", response_class=HTMLResponse)
+def entities_search(q: str = "", kind: str = ""):
+    """Full-text search across entity label + external_ref."""
+    if not q or len(q) < 2:
+        body = """
+<h1>Search entities</h1>
+<form method="get" action="/entities/search">
+  <input type="text" name="q" placeholder="Type ≥ 2 chars — search across labels + external refs"
+         style="width:70%;padding:0.6rem;background:#13131f;color:#d0d0e8;
+                border:1px solid #2a2a4a;border-radius:4px;font-size:0.95rem"
+         autofocus>
+  <button style="padding:0.6rem 1rem;background:#e94560;color:#fff;
+                  border:none;border-radius:4px;cursor:pointer">Search</button>
+</form>
+<p class="dim" style="margin-top:1rem">Examples: <code>auth</code>,
+<code>zMothership</code>, <code>flake.lock</code></p>
+"""
+        return _base("Search entities", body, active="entities")
+
+    pattern = f"%{q.lower()}%"
+    params = [pattern, pattern]
+    where = "(LOWER(label) LIKE ? OR LOWER(external_ref) LIKE ?)"
+    if kind:
+        where += " AND kind = ?"
+        params.append(kind)
+    rows = query_all(
+        f"""SELECT kind, external_ref, label, source_authority,
+                   observed_at
+              FROM entities
+             WHERE {where}
+             ORDER BY observed_at DESC
+             LIMIT 100""",
+        tuple(params),
+    )
+    row_html = "".join(
+        f'<tr>'
+        f'<td>{_kind_glyph(r["kind"])} {html.escape(r["kind"])}</td>'
+        f'<td><a href="/entity/{html.escape(r["kind"])}/{html.escape(r["external_ref"])}">'
+        f'{html.escape(r["external_ref"])}</a></td>'
+        f'<td>{html.escape(r["label"] or "")}</td>'
+        f'<td class="dim">{html.escape(r["source_authority"])}</td>'
+        f'</tr>'
+        for r in rows
+    )
+    body = f"""
+<style>
+  table.res {{ border-collapse: collapse; width: 100%; font-size: 0.88em; }}
+  table.res th, table.res td {{ border: 1px solid var(--border);
+                                 padding: 4px 8px; vertical-align: top; }}
+  table.res th {{ background: var(--panel); color: var(--muted);
+                   text-align: left; }}
+  table.res a {{ font-family: "JetBrains Mono", monospace; }}
+  .dim {{ color: var(--muted); font-size: 0.85em; }}
+</style>
+<p><a href="/entities">← entities overview</a></p>
+<h1>Search: <code>{html.escape(q)}</code>
+   {f'in <code>{html.escape(kind)}</code>' if kind else ''}
+   <span class="dim">({len(rows)} match{"es" if len(rows) != 1 else ""})</span>
+</h1>
+<form method="get" action="/entities/search" style="margin-bottom:1rem">
+  <input type="text" name="q" value="{html.escape(q)}"
+         style="width:60%;padding:0.4rem;background:#13131f;color:#d0d0e8;
+                border:1px solid #2a2a4a;border-radius:4px">
+  <button style="padding:0.4rem 0.9rem;background:#e94560;color:#fff;
+                  border:none;border-radius:4px">Search</button>
+</form>
+{f'<table class="res"><tr><th>kind</th><th>external_ref</th><th>label</th><th>authority</th></tr>{row_html}</table>'
+ if row_html else '<p class="dim">No matches.</p>'}
+"""
+    return _base(f"Search: {q}", body, active="entities")
+
+
 @router.get("/entities", response_class=HTMLResponse)
 def entities_overview():
     """Grid of entity kinds with counts. Click through to list."""
@@ -117,6 +189,19 @@ def entities_overview():
   source authority (git, nix, agent-runtime, templedb, author) and
   observed-at timestamp.
 </p>
+
+<form method="get" action="/entities/search"
+      style="margin: 0 0 1.5rem 0">
+  <input type="text" name="q"
+         placeholder="Search across all entity labels + refs…"
+         style="width:60%;padding:0.5rem;background:#13131f;color:#d0d0e8;
+                border:1px solid #2a2a4a;border-radius:4px;
+                font-family:monospace;font-size:0.9em">
+  <button style="padding:0.5rem 1rem;background:#e94560;color:#fff;
+                  border:none;border-radius:4px;cursor:pointer">
+    Search
+  </button>
+</form>
 
 <div class="grid-stats">
   <div class="stat-box">

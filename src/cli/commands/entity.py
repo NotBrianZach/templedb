@@ -1170,6 +1170,41 @@ WantedBy=timers.target
                 rows.append({**dict(r), 'dir': 'in'})
         return rows
 
+    def graph_search(self, args) -> int:
+        """Case-insensitive substring search across entity
+        label + external_ref.
+
+        Examples:
+          templedb entity search 'auth cookie'   # find commits about auth
+          templedb entity search zMothership --kind Machine
+        """
+        from db_utils import query_all
+        clauses = ["(LOWER(label) LIKE ? OR LOWER(external_ref) LIKE ?)"]
+        pattern = f"%{args.query.lower()}%"
+        params = [pattern, pattern]
+        if args.kind:
+            clauses.append("kind = ?")
+            params.append(args.kind)
+        where = " AND ".join(clauses)
+        rows = query_all(
+            f"""SELECT kind, external_ref, label, source_authority,
+                       observed_at
+                  FROM entities
+                 WHERE {where}
+                 ORDER BY observed_at DESC
+                 LIMIT ?""",
+            tuple(params) + (int(args.limit),),
+        )
+        if not rows:
+            print(f"(no entities match {args.query!r}"
+                  f"{f' in kind={args.kind}' if args.kind else ''})")
+            return 0
+        for r in rows:
+            label = f" — {r['label']}" if r['label'] else ""
+            print(f"  {r['kind']:<14} {r['external_ref']:<50} "
+                  f"{r['source_authority']:<12}{label}")
+        return 0
+
     def graph_stats(self, args) -> int:
         """Compact summary of the graph."""
         from db_utils import query_all, query_one
@@ -1633,6 +1668,17 @@ def register(cli):
         'stats', help='Print entity + relation counts by kind',
     )
     cli.commands['entity.stats'] = cmd.graph_stats
+
+    search = esub.add_parser(
+        'search',
+        help='Case-insensitive substring search across '
+             'entity label + external_ref',
+    )
+    search.add_argument('query', help='Substring to look for')
+    search.add_argument('--kind', help='Restrict to this entity kind')
+    search.add_argument('--limit', default=30,
+                        help='Max rows (default 30)')
+    cli.commands['entity.search'] = cmd.graph_search
 
     trace = esub.add_parser(
         'trace',
