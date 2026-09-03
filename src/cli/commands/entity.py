@@ -319,6 +319,7 @@ WantedBy=timers.target
             # Walk module-level FunctionDef/ClassDef nodes. Nested
             # symbols are deferred to a follow-up; module-level covers
             # the most useful case ("who calls foo").
+            local_defs = {}  # name → (entity_id, eref)
             for node in ast.iter_child_nodes(tree):
                 if isinstance(node, (ast.FunctionDef,
                                      ast.AsyncFunctionDef,
@@ -335,6 +336,35 @@ WantedBy=timers.target
                         file_id, 'defines', sym_id, 'python'
                     ):
                         added_r += 1
+                    if sym_id:
+                        local_defs[node.name] = (sym_id, eref, node)
+
+            # Second pass: for each locally-defined symbol, walk its
+            # body for Call nodes. If the call target is a Name that
+            # matches another local def, emit Symbol → calls → Symbol.
+            # Cross-file resolution deferred (needs import tracking).
+            for name, (sym_id, eref, def_node) in local_defs.items():
+                for sub in ast.walk(def_node):
+                    if not isinstance(sub, ast.Call):
+                        continue
+                    called = None
+                    if isinstance(sub.func, ast.Name):
+                        called = sub.func.id
+                    elif isinstance(sub.func, ast.Attribute):
+                        # Attribute access like self.foo() — walk to root
+                        # and check if root is a Name matching a local.
+                        # Method calls typically fail this check; ok.
+                        cur = sub.func
+                        while isinstance(cur, ast.Attribute):
+                            cur = cur.value
+                        if isinstance(cur, ast.Name):
+                            called = cur.id
+                    if called and called in local_defs and called != name:
+                        target_sym_id = local_defs[called][0]
+                        if self._upsert_relation(
+                            sym_id, 'calls', target_sym_id, 'python'
+                        ):
+                            added_r += 1
 
         print(f"✓ ingest python: +{added_e} symbols, +{added_r} relations, "
               f"{skipped} unparseable")

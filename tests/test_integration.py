@@ -1296,6 +1296,64 @@ class TestPythonIngest:
         conn.close()
         assert row['n'] == 1
 
+    def test_python_ingest_extracts_same_file_calls(self, populated_env):
+        """Symbol → calls → Symbol for a call whose target is defined
+        in the same file."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/callers.py',
+            "def helper(x):\n    return x + 1\n\n"
+            "def main():\n    return helper(42)\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.kind = 'Symbol'
+                  AND e1.external_ref = 'testproj:src/callers.py:main'
+                  AND e2.kind = 'Symbol'
+                  AND e2.external_ref = 'testproj:src/callers.py:helper'
+                  AND r.kind = 'calls'"""
+        ).fetchone()
+        conn.close()
+        assert row['n'] == 1, "main → calls → helper not emitted"
+
+    def test_python_ingest_ignores_cross_file_calls(self, populated_env):
+        """Cross-file calls aren't resolved (needs import tracking)
+        so no relation is emitted. Test guards against accidental
+        false-positive relations."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/other.py',
+            "def other_helper():\n    return 1\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/caller.py',
+            "def uses_helper():\n    return other_helper()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.kind = 'Symbol'
+                  AND e2.kind = 'Symbol'
+                  AND r.kind = 'calls'
+                  AND (e1.external_ref LIKE '%caller.py:%'
+                       OR e2.external_ref LIKE '%other.py:%')"""
+        ).fetchone()
+        conn.close()
+        assert row['n'] == 0, "cross-file call falsely resolved"
+
     def test_python_ingest_skips_unparseable(self, populated_env, capsys):
         import argparse
         from cli.commands.entity import EntityCommands
