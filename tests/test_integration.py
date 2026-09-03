@@ -603,6 +603,124 @@ class TestGraphTraversal:
         assert 'Commit' in out
 
 
+# ── SSH-Probe Reconcile (Workflow D) Tests ───────────────────────────────────
+
+class TestReconcile:
+    """SSH-probe reconcile. Mocks subprocess.run so we test the diff
+    logic, not the actual SSH."""
+
+    def _seed_machine_and_gen(self, populated_env, toplevel_on_db,
+                              nixos_on_db='24.11'):
+        conn = sqlite3.connect(populated_env["db_path"])
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO fleet_networks
+                   (project_id, network_name, network_uuid,
+                    config_file_path)
+                 VALUES (?, 'net', 'uuid-net', 'net.nix')""",
+            (pid,),
+        )
+        nid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO fleet_machines
+                   (network_id, machine_name, machine_uuid,
+                    target_host, target_user)
+                 VALUES (?, 'reconHost', 'uuid-reconHost',
+                         '10.0.0.42', 'root')""",
+            (nid,),
+        )
+        conn.execute(
+            """INSERT INTO nix_generations
+                   (machine_name, generation_number, toplevel_path,
+                    nixos_version, boot_id, switched_at,
+                    switch_success)
+                 VALUES ('reconHost', 5, ?, ?,
+                         'boot-abc', datetime('now'), 1)""",
+            (toplevel_on_db, nixos_on_db),
+        )
+        conn.commit()
+        conn.close()
+
+    def _mock_ssh(self, monkeypatch, stdout, returncode=0):
+        import subprocess as _sub
+        class _FakeCompleted:
+            def __init__(self):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = ''
+        monkeypatch.setattr(
+            _sub, 'run',
+            lambda *args, **kwargs: _FakeCompleted(),
+        )
+
+    def test_reconcile_in_sync(self, populated_env, monkeypatch,
+                                capsys):
+        from cli.commands.reconcile import ReconcileCommands
+        import argparse
+        self._seed_machine_and_gen(
+            populated_env,
+            toplevel_on_db='/nix/store/aaa-sys',
+        )
+        self._mock_ssh(monkeypatch,
+                       stdout='/nix/store/aaa-sys\n24.11\nboot-abc\n')
+        rc = ReconcileCommands().machine(argparse.Namespace(
+            name='reconHost', verbose=False,
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'in sync' in out
+        assert '✓' in out
+
+    def test_reconcile_detects_toplevel_drift(self, populated_env,
+                                               monkeypatch, capsys):
+        from cli.commands.reconcile import ReconcileCommands
+        import argparse
+        self._seed_machine_and_gen(
+            populated_env,
+            toplevel_on_db='/nix/store/aaa-sys',
+        )
+        self._mock_ssh(monkeypatch,
+                       stdout='/nix/store/bbb-sys\n24.11\nboot-abc\n')
+        rc = ReconcileCommands().machine(argparse.Namespace(
+            name='reconHost', verbose=False,
+        ))
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert 'DRIFT' in out
+        assert 'toplevel' in out
+
+    def test_reconcile_detects_reboot(self, populated_env,
+                                       monkeypatch, capsys):
+        from cli.commands.reconcile import ReconcileCommands
+        import argparse
+        self._seed_machine_and_gen(
+            populated_env,
+            toplevel_on_db='/nix/store/aaa-sys',
+        )
+        # Same toplevel + version, different boot_id → machine rebooted
+        self._mock_ssh(monkeypatch,
+                       stdout='/nix/store/aaa-sys\n24.11\nboot-XYZ\n')
+        rc = ReconcileCommands().machine(argparse.Namespace(
+            name='reconHost', verbose=False,
+        ))
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert 'boot_id' in out
+
+    def test_reconcile_unknown_machine(self, populated_env, capsys, caplog):
+        from cli.commands.reconcile import ReconcileCommands
+        import argparse, logging
+        with caplog.at_level(logging.ERROR):
+            rc = ReconcileCommands().machine(argparse.Namespace(
+                name='no-such-host', verbose=False,
+            ))
+        assert rc == 1
+        # The message went via logger.error, not print
+        assert any('no-such-host' in r.message for r in caplog.records)
+
+
 # ── Deploy Ingest (Deployment first-class span) Tests ────────────────────────
 
 class TestDeployIngest:
@@ -1070,6 +1188,71 @@ class TestNixIngest:
         assert rc == 1
         out = capsys.readouterr().out
         assert 'zMothership9' in out or 'issue' in out.lower()
+
+    def test_astbuild_built_from_commit(self, populated_env):
+        """AstBuild → built-from → Commit via toplevel_path bridge
+        through nix_generations."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        conn = sqlite3.connect(populated_env["db_path"])
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        bid = conn.execute(
+            "SELECT id FROM vcs_branches WHERE project_id=?", (pid,)
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO vcs_commits (project_id, branch_id,
+                                        commit_hash, commit_message,
+                                        author, commit_timestamp)
+                 VALUES (?, ?, 'ab12cd34ef56', 'ast test',
+                         'x', datetime('now'))""",
+            (pid, bid),
+        )
+        # StorePath for the AstBuild output
+        conn.execute(
+            """INSERT INTO nix_store_paths
+                   (store_path, store_hash, name, is_valid)
+                 VALUES ('/nix/store/xyz-ast', 'xyz', 'ast', 1)"""
+        )
+        # AstBuild
+        conn.execute(
+            """INSERT INTO ast_builds
+                   (output_hash, host_name, scopes, output_path,
+                    manifest_json, nix_buildable)
+                 VALUES ('abhash', 'hostA', '[]',
+                         '/nix/store/xyz-ast', '{}', 1)"""
+        )
+        # nix_generations bridge: same toplevel_path, has commit_hash
+        conn.execute(
+            """INSERT INTO nix_generations
+                   (machine_name, generation_number, toplevel_path,
+                    commit_hash, switched_at, switch_success)
+                 VALUES ('hostA', 1, '/nix/store/xyz-ast',
+                         'ab12cd34ef56', datetime('now'), 1)"""
+        )
+        conn.commit()
+        conn.close()
+
+        # git first so Commit entities exist as targets
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='nix', limit=20))
+
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        # AstBuild → built-from → Commit
+        rel = conn.execute(
+            """SELECT r.kind, e2.external_ref
+                 FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.kind = 'AstBuild'
+                  AND e2.kind = 'Commit'
+                  AND r.kind = 'built-from'"""
+        ).fetchone()
+        conn.close()
+        assert rel is not None, \
+            "AstBuild → built-from → Commit not created"
 
     def test_ingest_nix_emits_astbuild_span(self, populated_env):
         import argparse

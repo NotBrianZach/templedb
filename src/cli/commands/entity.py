@@ -480,6 +480,48 @@ class EntityCommands(Command):
                                          to_id, 'nix'):
                     added_r += 1
 
+        # 5b. AstBuild → built-from → Commit
+        #     No commit_hash column on ast_builds, so bridge via
+        #     nix_generations: AstBuild.output_path matches
+        #     Generation.toplevel_path, and Generation.commit_hash
+        #     is the source. This uses only existing schema.
+        for b in builds:
+            eref = f"{b['host_name']}/{b['output_hash']}"
+            from_id = self._entity_id('AstBuild', eref)
+            if not from_id:
+                continue
+            # Find a Generation with matching toplevel_path AND
+            # matching host_name (both must agree to be safe).
+            gen_row = query_all(
+                """SELECT commit_hash FROM nix_generations
+                    WHERE toplevel_path = ?
+                      AND machine_name = ?
+                      AND commit_hash IS NOT NULL
+                    LIMIT 1""",
+                (b['output_path'], b['host_name']),
+            )
+            if not gen_row or not gen_row[0]['commit_hash']:
+                continue
+            commit_hash = gen_row[0]['commit_hash']
+            commit_rows = query_all(
+                """SELECT external_ref FROM entities
+                    WHERE kind = 'Commit'
+                      AND (external_ref LIKE '%/' || ?
+                           OR LOWER(external_ref) LIKE
+                              '%/' || LOWER(?))
+                    LIMIT 1""",
+                (commit_hash, commit_hash),
+            )
+            if commit_rows:
+                to_id = self._entity_id(
+                    'Commit', commit_rows[0]['external_ref']
+                )
+                if to_id:
+                    if self._upsert_relation(
+                        from_id, 'built-from', to_id, 'nix'
+                    ):
+                        added_r += 1
+
         # 6a. Machine entities from fleet_machines (source_authority=
         #     templedb, since fleet is our own config).
         machines = query_all(
