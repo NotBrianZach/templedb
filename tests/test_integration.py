@@ -466,6 +466,143 @@ class TestMaterialize:
             "non-gitignored stray file was preserved but should be swept"
 
 
+# ── Graph Traversal (entity trace + provenance) Tests ────────────────────────
+
+class TestGraphTraversal:
+    """Multi-hop graph queries — templedb entity trace and its
+    workflow-preset wrappers under templedb provenance."""
+
+    def _seed_chain(self, populated_env):
+        """Build a chain: Machine → Generation → Commit → File."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        conn = sqlite3.connect(populated_env["db_path"])
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        # fleet_networks + fleet_machines
+        conn.execute(
+            """INSERT INTO fleet_networks (project_id, network_name,
+                                            network_uuid,
+                                            config_file_path)
+                 VALUES (?, 'net', 'uuid-net', 'net.nix')""",
+            (pid,),
+        )
+        nid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO fleet_machines
+                   (network_id, machine_name, machine_uuid,
+                    target_host, system_type)
+                 VALUES (?, 'traceHost', 'uuid-traceHost',
+                         '10.0.0.9', 'nixos')""",
+            (nid,),
+        )
+        bid = conn.execute(
+            "SELECT id FROM vcs_branches WHERE project_id=?", (pid,)
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO vcs_commits (project_id, branch_id,
+                                        commit_hash, commit_message,
+                                        author, commit_timestamp)
+                 VALUES (?, ?, 'aaabbbcccddd', 'chain commit',
+                         'x', datetime('now'))""",
+            (pid, bid),
+        )
+        conn.execute(
+            """INSERT INTO nix_generations
+                   (machine_name, generation_number, toplevel_path,
+                    commit_hash, switched_at, switch_success)
+                 VALUES ('traceHost', 1, '/nix/store/xx-traceHost',
+                         'aaabbbcccddd', datetime('now'), 1)"""
+        )
+        conn.execute(
+            """INSERT INTO nix_store_paths
+                   (store_path, store_hash, name, is_valid)
+                 VALUES ('/nix/store/xx-traceHost', 'xx',
+                         'traceHost', 1)"""
+        )
+        conn.commit()
+        conn.close()
+        # Ingest so entities + relations exist
+        EntityCommands().ingest(
+            argparse.Namespace(source='git', limit=20)
+        )
+        EntityCommands().ingest(
+            argparse.Namespace(source='nix', limit=20)
+        )
+
+    def test_trace_walks_multi_hop(self, populated_env, capsys):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_chain(populated_env)
+        rc = EntityCommands().graph_trace(argparse.Namespace(
+            entity='Machine/traceHost',
+            depth=3,
+            direction='out',
+            via=None,
+            limit=10,
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Machine start, Generation next hop, Commit hop after that
+        assert 'Machine/traceHost' in out
+        assert 'Generation/traceHost/gen-1' in out
+        # Commit or StorePath appears at second hop
+        assert 'Commit/' in out or 'StorePath/' in out
+
+    def test_trace_via_filter(self, populated_env, capsys):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_chain(populated_env)
+        rc = EntityCommands().graph_trace(argparse.Namespace(
+            entity='Machine/traceHost',
+            depth=2,
+            direction='out',
+            via='ran',  # only follow 'ran' edges
+            limit=10,
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'Generation' in out
+        # Since we only followed 'ran' and stopped at depth 2 with
+        # no further 'ran' edges, we shouldn't see StorePath
+        assert 'StorePath' not in out
+
+    def test_trace_bad_entity(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        rc = EntityCommands().graph_trace(argparse.Namespace(
+            entity='Machine/nonexistent',
+            depth=2, direction='out', via=None, limit=10,
+        ))
+        assert rc == 2
+
+    def test_provenance_machine_shortcut(self, populated_env, capsys):
+        import argparse
+        from cli.commands.provenance import ProvenanceCommands
+        self._seed_chain(populated_env)
+        rc = ProvenanceCommands().machine(argparse.Namespace(
+            name='traceHost', depth=4, limit=15,
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'Machine/traceHost' in out
+        assert 'Generation' in out
+
+    def test_provenance_commit_by_prefix(self, populated_env, capsys):
+        import argparse
+        from cli.commands.provenance import ProvenanceCommands
+        self._seed_chain(populated_env)
+        # commit hash 'aaabbbcccddd' — try prefix
+        rc = ProvenanceCommands().commit(argparse.Namespace(
+            hash='aaabbb', depth=2, limit=15,
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Should find via reverse-walk: Generation ← built-from ← Commit
+        assert 'Commit' in out
+
+
 # ── Deploy Ingest (Deployment first-class span) Tests ────────────────────────
 
 class TestDeployIngest:

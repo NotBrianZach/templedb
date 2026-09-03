@@ -912,6 +912,123 @@ class EntityCommands(Command):
                       f"-[{r['kind']}]→")
         return 0
 
+    def graph_trace(self, args) -> int:
+        """Recursive BFS from a starting entity, printing a path tree.
+
+        Turns the entity graph into a queryable substrate: the 5-hop
+        provenance query the plan has been building toward is now
+        one command.
+
+        Args:
+          entity:     <kind>/<external_ref> to start from
+          depth:      max hops (default 3)
+          direction:  out (outbound edges only, default), in, or both
+          via:        comma-separated relation kinds to follow;
+                      empty = all
+          limit:      per-node fan-out cap (avoid StorePath explosions)
+        """
+        from db_utils import query_one, query_all
+
+        kind, sep, ref = args.entity.partition('/')
+        if not sep:
+            logger.error(
+                "Expected `<kind>/<ref>` "
+                "(e.g. `Machine/zMothership2`)"
+            )
+            return 1
+        start = query_one(
+            """SELECT id FROM entities
+                WHERE kind = ? AND external_ref = ?""",
+            (kind, ref),
+        )
+        if not start:
+            logger.error(f"Entity not found: {kind}/{ref}")
+            return 2
+
+        via = None
+        if args.via:
+            via = {v.strip() for v in args.via.split(',') if v.strip()}
+        direction = args.direction or 'out'
+        depth = int(args.depth)
+        fanout_limit = int(args.limit)
+
+        visited = {start['id']}
+        # Queue of (entity_id, path_prefix). path_prefix is a list of
+        # ("kind/ref", "→ relkind →" | "← relkind ←") strings.
+        queue = [(start['id'], [f"● {kind}/{ref}"])]
+        print(queue[0][1][0])
+
+        current_depth = 0
+        while queue and current_depth < depth:
+            next_queue = []
+            for eid, prefix in queue:
+                edges = self._fetch_edges(
+                    eid, direction, via, fanout_limit,
+                )
+                for e in edges:
+                    peer_id = e['peer_id']
+                    if peer_id in visited:
+                        continue
+                    visited.add(peer_id)
+                    if e['dir'] == 'out':
+                        arrow = f"─[{e['relkind']}]→"
+                    else:
+                        arrow = f"←[{e['relkind']}]─"
+                    label_bit = f" — {e['peer_label']}" \
+                        if e['peer_label'] else ""
+                    indent = "  " * (current_depth + 1)
+                    print(f"{indent}{arrow} {e['peer_kind']}/"
+                          f"{e['peer_ref']}{label_bit}")
+                    next_queue.append((peer_id, prefix + [arrow]))
+            queue = next_queue
+            current_depth += 1
+        return 0
+
+    def _fetch_edges(self, entity_id, direction, via, limit):
+        """Fetch one hop from entity_id in the given direction,
+        filtered by via (set of relation kinds) if provided."""
+        from db_utils import query_all
+        rows = []
+        if direction in ('out', 'both'):
+            where = "r.from_entity_id = ?"
+            if via:
+                placeholders = ','.join('?' for _ in via)
+                where += f" AND r.kind IN ({placeholders})"
+            params = [entity_id] + list(via) if via else [entity_id]
+            outbound = query_all(
+                f"""SELECT r.kind AS relkind,
+                           e.id AS peer_id, e.kind AS peer_kind,
+                           e.external_ref AS peer_ref,
+                           e.label AS peer_label
+                      FROM relations r
+                      JOIN entities e ON e.id = r.to_entity_id
+                     WHERE {where}
+                     LIMIT ?""",
+                tuple(params) + (limit,),
+            )
+            for r in outbound:
+                rows.append({**dict(r), 'dir': 'out'})
+        if direction in ('in', 'both'):
+            where = "r.to_entity_id = ?"
+            if via:
+                placeholders = ','.join('?' for _ in via)
+                where += f" AND r.kind IN ({placeholders})"
+            params = [entity_id] + list(via) if via else [entity_id]
+            inbound = query_all(
+                f"""SELECT r.kind AS relkind,
+                           e.id AS peer_id, e.kind AS peer_kind,
+                           e.external_ref AS peer_ref,
+                           e.label AS peer_label
+                      FROM relations r
+                      JOIN entities e ON e.id = r.from_entity_id
+                     WHERE {where}
+                     LIMIT ?""",
+                tuple(params) + (limit,),
+            )
+            for r in inbound:
+                rows.append({**dict(r), 'dir': 'in'})
+        return rows
+
     def graph_stats(self, args) -> int:
         """Compact summary of the graph."""
         from db_utils import query_all, query_one
@@ -1333,6 +1450,24 @@ def register(cli):
         'stats', help='Print entity + relation counts by kind',
     )
     cli.commands['entity.stats'] = cmd.graph_stats
+
+    trace = esub.add_parser(
+        'trace',
+        help='Recursive BFS walk from an entity — multi-hop graph queries',
+    )
+    trace.add_argument('entity',
+                       help='<kind>/<external_ref> (e.g. Machine/zMothership2)')
+    trace.add_argument('--depth', default=3,
+                       help='Max hops (default 3)')
+    trace.add_argument('--direction',
+                       choices=['out', 'in', 'both'], default='out',
+                       help="Follow outbound (default), inbound, or both")
+    trace.add_argument('--via',
+                       help='Comma-separated relation kinds to follow '
+                            '(default: all)')
+    trace.add_argument('--limit', default=10,
+                       help='Per-node fan-out cap (default 10)')
+    cli.commands['entity.trace'] = cmd.graph_trace
 
     # --- templedb doctor entities / history ---
     doctor_parser = cli.subparsers.add_parser(
