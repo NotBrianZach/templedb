@@ -3483,3 +3483,35 @@ CREATE VIEW IF NOT EXISTS source_snapshots AS
     JOIN vcs_commits c      ON c.id = vfs.commit_id
     JOIN project_files pf   ON pf.id = vfs.file_id
     JOIN projects p         ON p.id = pf.project_id;
+
+
+-- ============================================================================
+-- Migration 087: edit_intents (Phase 2 groundwork observer/integrator plan)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS edit_intents (
+    id                INTEGER PRIMARY KEY,
+    session_id        INTEGER REFERENCES vcs_sessions(id),
+    project_id        INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    file_path         TEXT NOT NULL,
+    base_revision     TEXT NOT NULL DEFAULT 'current',
+    new_content_hash  TEXT NOT NULL,
+    patch_summary     TEXT,
+    author            TEXT,
+    description       TEXT,
+    status            TEXT NOT NULL DEFAULT 'proposed'
+                        CHECK (status IN ('proposed', 'applied', 'cancelled')),
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    applied_at        TEXT,
+    cancelled_at      TEXT,
+    applied_commit_id INTEGER REFERENCES vcs_commits(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_edit_intents_project
+    ON edit_intents(project_id);
+CREATE INDEX IF NOT EXISTS idx_edit_intents_session
+    ON edit_intents(session_id);
+CREATE INDEX IF NOT EXISTS idx_edit_intents_status
+    ON edit_intents(status) WHERE status = 'proposed';
+CREATE INDEX IF NOT EXISTS idx_edit_intents_file
+    ON edit_intents(project_id, file_path, status);

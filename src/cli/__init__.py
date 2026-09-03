@@ -48,7 +48,7 @@ from cli.commands import (
     gui_launcher, config, ai, merge,
     domain, nixos, config_compiler, ast,
     file, tutorial, dev, deploy_history,
-    reports, edit, source,
+    reports, edit, source, intent,
 )
 from cli.core import cli
 
@@ -247,6 +247,7 @@ def main():
     reports.register(cli)
     edit.register(cli)
     source.register(cli)
+    intent.register(cli)
 
     # Lazy imports for optional modules
     try:

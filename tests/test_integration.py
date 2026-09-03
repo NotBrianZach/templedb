@@ -466,6 +466,163 @@ class TestMaterialize:
             "non-gitignored stray file was preserved but should be swept"
 
 
+# ── EditIntent (Phase 2 groundwork) Tests ────────────────────────────────────
+
+class TestEditIntents:
+    """MVP tests for the edit_intents table + CLI. Lifecycle:
+    create → apply | cancel."""
+
+    def test_table_exists(self, temp_env):
+        conn = sqlite3.connect(temp_env["db_path"])
+        row = conn.execute(
+            "SELECT type FROM sqlite_master WHERE name='edit_intents'"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == 'table'
+
+    def _make_args(self, **kwargs):
+        import argparse
+        defaults = dict(
+            project=None, file_path=None, content=None, from_file=None,
+            base_rev=None, message=None, id=None, session=None,
+            all_statuses=False, limit=50,
+        )
+        defaults.update(kwargs)
+        return argparse.Namespace(**defaults)
+
+    def test_create_records_proposed_intent(self, populated_env, capsys):
+        from cli.commands.intent import IntentCommands
+        cmd = IntentCommands()
+        args = self._make_args(
+            project='testproj', file_path='README.md',
+            content='# NEW TITLE\n', message='rename title',
+        )
+        rc = cmd.create(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'created (proposed)' in out
+        # Row exists with status='proposed'
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM edit_intents ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row['status'] == 'proposed'
+        assert row['file_path'] == 'README.md'
+        assert row['description'] == 'rename title'
+        # content_blobs got the new hash too (for apply to find)
+        import hashlib
+        expected = hashlib.sha256(b'# NEW TITLE\n').hexdigest()
+        assert row['new_content_hash'] == expected
+
+    def test_apply_writes_to_file_contents(self, populated_env, capsys):
+        from cli.commands.intent import IntentCommands
+        cmd = IntentCommands()
+        # Create then apply
+        cmd.create(self._make_args(
+            project='testproj', file_path='README.md',
+            content='# APPLIED\n',
+        ))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        intent_id = conn.execute(
+            "SELECT id FROM edit_intents ORDER BY id DESC LIMIT 1"
+        ).fetchone()['id']
+        conn.close()
+        capsys.readouterr()  # clear buffer
+
+        rc = cmd.apply(self._make_args(id=intent_id))
+        assert rc == 0
+        # file_contents.is_current now points at the new hash
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT fc.content_hash, i.status, i.applied_at
+                 FROM file_contents fc
+                 JOIN project_files pf ON pf.id = fc.file_id
+                 JOIN projects p ON p.id = pf.project_id
+                 JOIN edit_intents i ON i.id = ?
+                WHERE p.slug='testproj' AND pf.file_path='README.md'
+                  AND fc.is_current=1""",
+            (intent_id,),
+        ).fetchone()
+        conn.close()
+        import hashlib
+        expected = hashlib.sha256(b'# APPLIED\n').hexdigest()
+        assert row['content_hash'] == expected
+        assert row['status'] == 'applied'
+        assert row['applied_at'] is not None
+
+    def test_apply_rejects_non_proposed(self, populated_env):
+        from cli.commands.intent import IntentCommands
+        cmd = IntentCommands()
+        cmd.create(self._make_args(
+            project='testproj', file_path='README.md',
+            content='# X\n',
+        ))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        iid = conn.execute(
+            "SELECT id FROM edit_intents ORDER BY id DESC LIMIT 1"
+        ).fetchone()['id']
+        conn.close()
+        cmd.apply(self._make_args(id=iid))
+        # Second apply should fail with exit 2
+        assert cmd.apply(self._make_args(id=iid)) == 2
+
+    def test_cancel_marks_cancelled(self, populated_env):
+        from cli.commands.intent import IntentCommands
+        cmd = IntentCommands()
+        cmd.create(self._make_args(
+            project='testproj', file_path='README.md',
+            content='# CANCELLED\n',
+        ))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        iid = conn.execute(
+            "SELECT id FROM edit_intents ORDER BY id DESC LIMIT 1"
+        ).fetchone()['id']
+        conn.close()
+        assert cmd.cancel(self._make_args(id=iid)) == 0
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT status, cancelled_at FROM edit_intents WHERE id=?",
+            (iid,),
+        ).fetchone()
+        conn.close()
+        assert row['status'] == 'cancelled'
+        assert row['cancelled_at'] is not None
+
+    def test_list_defaults_to_proposed(self, populated_env, capsys):
+        from cli.commands.intent import IntentCommands
+        cmd = IntentCommands()
+        cmd.create(self._make_args(
+            project='testproj', file_path='README.md', content='a'))
+        cmd.create(self._make_args(
+            project='testproj', file_path='src/main.py', content='b'))
+        # Apply one of them
+        conn = sqlite3.connect(populated_env["db_path"])
+        iid = conn.execute(
+            "SELECT id FROM edit_intents ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        conn.close()
+        cmd.apply(self._make_args(id=iid))
+        capsys.readouterr()
+        # Default list should show only the 1 remaining proposed
+        cmd.list(self._make_args())
+        out = capsys.readouterr().out
+        assert 'proposed' in out
+        assert 'applied' not in out
+        # --all-statuses shows everything
+        cmd.list(self._make_args(all_statuses=True))
+        out = capsys.readouterr().out
+        assert 'proposed' in out
+        assert 'applied' in out
+
+
 # ── Source Snapshots (Phase 1) Tests ─────────────────────────────────────────
 
 class TestSourceSnapshots:

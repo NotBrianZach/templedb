@@ -95,6 +95,7 @@ MIGRATION_SEQUENCE = [
     "084_agent_sections.sql",
     "085_agent_user_edits.sql",
     "086_source_snapshots_view.sql",
+    "087_edit_intents.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",

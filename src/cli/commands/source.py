@@ -48,18 +48,38 @@ class SourceCommands(Command):
             logger.error(f"Project '{args.project}' not found")
             return 1
 
-        revision = args.rev or 'current'
-        row = query_one(
-            """SELECT content_text, content_blob, content_type,
-                      content_hash, file_size_bytes, line_count,
-                      observed_at, source_authority
-                 FROM source_snapshots
-                WHERE project_slug = ?
-                  AND file_path = ?
-                  AND revision = ?
-                LIMIT 1""",
-            (project['slug'], args.file_path, revision),
-        )
+        # Revision lookup: case-insensitive prefix match. Historical
+        # commits use bimodal formats (older 16-char uppercase, newer
+        # 40-char lowercase) — accept either and let the user type
+        # whatever prefix they see. `current` is a literal string.
+        rev_input = args.rev or 'current'
+        if rev_input == 'current':
+            row = query_one(
+                """SELECT content_text, content_blob, content_type,
+                          content_hash, file_size_bytes, line_count,
+                          observed_at, source_authority, revision
+                     FROM source_snapshots
+                    WHERE project_slug = ?
+                      AND file_path = ?
+                      AND revision = 'current'
+                    LIMIT 1""",
+                (project['slug'], args.file_path),
+            )
+        else:
+            row = query_one(
+                """SELECT content_text, content_blob, content_type,
+                          content_hash, file_size_bytes, line_count,
+                          observed_at, source_authority, revision
+                     FROM source_snapshots
+                    WHERE project_slug = ?
+                      AND file_path = ?
+                      AND revision != 'current'
+                      AND UPPER(revision) LIKE UPPER(?) || '%'
+                    ORDER BY observed_at DESC
+                    LIMIT 1""",
+                (project['slug'], args.file_path, rev_input),
+            )
+        revision = rev_input
 
         if not row:
             if args.rev:
@@ -75,11 +95,17 @@ class SourceCommands(Command):
                 )
             return 2
 
+        # Normalize the matched revision hash to lowercase for display,
+        # keeping the underlying data alone (historical provenance).
+        matched_rev = row['revision']
+        if matched_rev != 'current':
+            matched_rev = matched_rev.lower()
+
         if args.meta:
             # Metadata mode — print observation record, not content.
             print(f"project:           {project['slug']}")
             print(f"path:              {args.file_path}")
-            print(f"revision:          {revision}")
+            print(f"revision:          {matched_rev}")
             print(f"content_hash:      {row['content_hash']}")
             print(f"size:              {row['file_size_bytes']} bytes")
             print(f"lines:             {row['line_count']}")
@@ -129,7 +155,10 @@ class SourceCommands(Command):
         for r in rows:
             rev = r['revision']
             if rev != 'current':
-                rev = rev[:12]
+                # Normalize to lowercase for display consistency;
+                # historical data has mixed case from an old templedb
+                # VCS format. Truncate to 12 chars either way.
+                rev = rev.lower()[:12]
             print(f"  {rev:<14} {r['observed_at']}  "
                   f"{r['content_hash'][:12]}  "
                   f"{r['file_size_bytes']} bytes, "
