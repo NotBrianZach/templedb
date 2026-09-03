@@ -181,6 +181,45 @@ sqlite3 ~/.local/share/templedb/templedb.sqlite \
       AND fc.is_current = 1;"
 ```
 
+## Source snapshots vs `file_contents` (Phase 1 vocabulary)
+
+As of migration 086, `file_contents` is a **snapshot** table, not an
+authoritative-bytes store. The row with `is_current=1` is the most
+recent *observation* of a file, not "the truth of the file." Truth of
+source code lives in git — TempleDB records what it saw.
+
+Query surface:
+
+```bash
+# Current snapshot (equivalent to templedb file cat)
+templedb source snapshot <slug> <path>
+
+# Historical snapshot at a specific commit
+templedb source snapshot <slug> <path> --rev <commit_hash>
+
+# Metadata only (content_hash, observed_at, source_authority)
+templedb source snapshot <slug> <path> --meta
+
+# Every known revision of a file
+templedb source revisions <slug> <path>
+```
+
+Backing view: `source_snapshots` (columns: `project_slug, file_path,
+revision, content_hash, content_text, content_blob, content_type,
+file_size_bytes, line_count, observed_at, source_authority`).
+
+Direct SQL still works:
+
+```sql
+SELECT * FROM source_snapshots
+ WHERE project_slug = 'templedb'
+   AND file_path = 'src/foo.py'
+   AND revision = 'current';   -- or a real commit_hash
+```
+
+This is Phase 1 of the observer/integrator plan. See
+`reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html`.
+
 ## What NOT to do
 
 - Do NOT use `git add`, `git commit`, `git push`, `git status`, `git diff`, `git log`

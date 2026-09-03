@@ -3437,3 +3437,49 @@ BEGIN
     WHERE id = NEW.id;
 END;
 
+
+
+-- ============================================================================
+-- Migration 086: source_snapshots view (Phase 1 observer/integrator plan)
+-- ============================================================================
+
+CREATE VIEW IF NOT EXISTS source_snapshots AS
+    SELECT
+        p.slug                       AS project_slug,
+        pf.file_path                 AS file_path,
+        'current'                    AS revision,
+        fc.content_hash              AS content_hash,
+        cb.content_text              AS content_text,
+        cb.content_blob              AS content_blob,
+        cb.content_type              AS content_type,
+        fc.file_size_bytes           AS file_size_bytes,
+        fc.line_count                AS line_count,
+        fc.updated_at                AS observed_at,
+        'git'                        AS source_authority
+    FROM file_contents fc
+    JOIN project_files pf   ON pf.id = fc.file_id
+    JOIN projects p         ON p.id = pf.project_id
+    JOIN content_blobs cb   ON cb.hash_sha256 = fc.content_hash
+    WHERE fc.is_current = 1
+      AND pf.status = 'active'
+    UNION ALL
+    SELECT
+        p.slug                       AS project_slug,
+        pf.file_path                 AS file_path,
+        c.commit_hash                AS revision,
+        vfs.content_hash             AS content_hash,
+        vfs.content_text             AS content_text,
+        vfs.content_blob             AS content_blob,
+        CASE
+            WHEN vfs.content_text IS NOT NULL THEN 'text'
+            WHEN vfs.content_blob IS NOT NULL THEN 'binary'
+            ELSE NULL
+        END                          AS content_type,
+        vfs.file_size                AS file_size_bytes,
+        vfs.line_count               AS line_count,
+        c.commit_timestamp           AS observed_at,
+        'git'                        AS source_authority
+    FROM vcs_file_states vfs
+    JOIN vcs_commits c      ON c.id = vfs.commit_id
+    JOIN project_files pf   ON pf.id = vfs.file_id
+    JOIN projects p         ON p.id = pf.project_id;

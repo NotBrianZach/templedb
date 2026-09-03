@@ -466,6 +466,103 @@ class TestMaterialize:
             "non-gitignored stray file was preserved but should be swept"
 
 
+# ── Source Snapshots (Phase 1) Tests ─────────────────────────────────────────
+
+class TestSourceSnapshots:
+    """Tests for the source_snapshots view + templedb source CLI added in
+    Phase 1 of the observer/integrator plan. Reframes file_contents /
+    vcs_file_states as observations queryable via one unified view."""
+
+    def test_view_exists_and_is_queryable(self, temp_env):
+        conn = sqlite3.connect(temp_env["db_path"])
+        row = conn.execute(
+            "SELECT type FROM sqlite_master WHERE name='source_snapshots'"
+        ).fetchone()
+        conn.close()
+        assert row is not None, \
+            "source_snapshots view missing after migration"
+        assert row[0] == 'view'
+
+    def test_view_returns_current_row(self, populated_env):
+        """populated_env inserts three files with is_current=1;
+        source_snapshots should surface all three with revision='current'."""
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT file_path, revision, source_authority
+                 FROM source_snapshots
+                WHERE project_slug = 'testproj'
+                ORDER BY file_path"""
+        ).fetchall()
+        conn.close()
+        paths = [r['file_path'] for r in rows]
+        assert 'README.md' in paths
+        assert 'src/main.py' in paths
+        # Everything from is_current=1 should have revision='current'
+        for r in rows:
+            assert r['revision'] == 'current'
+            assert r['source_authority'] == 'git'
+
+    def test_cli_snapshot_prints_current_content(self, populated_env, capsys):
+        from cli.commands.source import SourceCommands
+        import argparse
+        cmd = SourceCommands()
+        args = argparse.Namespace(project='testproj',
+                                  file_path='README.md',
+                                  rev=None, meta=False)
+        rc = cmd.snapshot(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'Test Project' in out
+
+    def test_cli_snapshot_meta_prints_observation(self, populated_env,
+                                                  capsys):
+        from cli.commands.source import SourceCommands
+        import argparse
+        cmd = SourceCommands()
+        args = argparse.Namespace(project='testproj',
+                                  file_path='README.md',
+                                  rev=None, meta=True)
+        rc = cmd.snapshot(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'revision:' in out
+        assert 'source_authority:' in out
+        assert 'git' in out
+        assert 'content_hash:' in out
+
+    def test_cli_snapshot_missing_file(self, populated_env):
+        from cli.commands.source import SourceCommands
+        import argparse
+        cmd = SourceCommands()
+        args = argparse.Namespace(project='testproj',
+                                  file_path='doesnotexist.md',
+                                  rev=None, meta=False)
+        assert cmd.snapshot(args) == 2
+
+    def test_cli_snapshot_bad_revision(self, populated_env):
+        from cli.commands.source import SourceCommands
+        import argparse
+        cmd = SourceCommands()
+        args = argparse.Namespace(project='testproj',
+                                  file_path='README.md',
+                                  rev='deadbeef000000',
+                                  meta=False)
+        assert cmd.snapshot(args) == 2
+
+    def test_cli_revisions_lists_current(self, populated_env, capsys):
+        from cli.commands.source import SourceCommands
+        import argparse
+        cmd = SourceCommands()
+        args = argparse.Namespace(project='testproj',
+                                  file_path='README.md')
+        rc = cmd.revisions(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'current' in out
+        assert 'snapshot(s)' in out
+
+
 # ── File Where (drift diagnostic) Tests ──────────────────────────────────────
 
 class TestFileWhere:
