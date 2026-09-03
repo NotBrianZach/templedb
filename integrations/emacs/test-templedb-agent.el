@@ -376,5 +376,29 @@ new sections."
   (should (equal nil (templedb-agent-test--other-buckets-past-eoc))))
 
 
+(ert-deftest templedb-agent-test/reload-from-checkout-defined-and-bound ()
+  "Phase 0 escape hatch: the reload command must exist and be bound to
+C-c C-l in the agent mode map."
+  (should (fboundp 'templedb-agent-reload-from-checkout))
+  (should (commandp 'templedb-agent-reload-from-checkout))
+  (should (eq (lookup-key templedb-agent-mode-map (kbd "C-c C-l"))
+              'templedb-agent-reload-from-checkout))
+  ;; Sanity: default checkout path is a string ending in the expected file.
+  (should (stringp templedb-agent-checkout-path))
+  (should (string-suffix-p "templedb-agent.el"
+                           templedb-agent-checkout-path)))
+
+(ert-deftest templedb-agent-test/reload-from-checkout-missing-file-warns ()
+  "If the checkout doesn't exist, reload must print a warning and NOT
+signal an error. Dev-mode should never crash Emacs."
+  (let ((templedb-agent-checkout-path "/nonexistent/definitely-not-there.el")
+        (msg nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (templedb-agent-reload-from-checkout))
+    (should msg)
+    (should (string-match-p "checkout not found" msg))))
+
+
 (provide 'test-templedb-agent)
 ;;; test-templedb-agent.el ends here

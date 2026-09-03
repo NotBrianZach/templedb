@@ -117,3 +117,19 @@ def register(cli):
 
     # --- ai agent ---
     register_agent_commands(subparsers, cli)
+
+    # --- ai emacs (dev-mode helpers for the Emacs layer) ---
+    from cli.commands.emacs import EmacsCommands
+    emacs_cmd = EmacsCommands()
+    emacs_parser = subparsers.add_parser(
+        'emacs',
+        help='Emacs layer dev helpers (reload from checkout, etc.)',
+    )
+    emacs_sub = emacs_parser.add_subparsers(dest='emacs_subcommand', required=True)
+
+    reload_parser = emacs_sub.add_parser(
+        'reload',
+        help='Reload templedb-agent.el from the writable checkout via emacsclient. '
+             'Falls back to printing the M-x command if the daemon is not running.',
+    )
+    cli.commands['ai.emacs.reload'] = emacs_cmd.reload

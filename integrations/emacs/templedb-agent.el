@@ -1822,6 +1822,45 @@ and gets a `PINNED: <ISO timestamp>' property."
    `((session_id . ,templedb-agent--session-id))
    (lambda (_result) nil)))
 
+(defcustom templedb-agent-checkout-path
+  "~/.config/templedb/checkouts/templedb/integrations/emacs/templedb-agent.el"
+  "Path to the writable checkout copy of templedb-agent.el.
+Used by `templedb-agent-reload-from-checkout' to iterate on the
+elisp without a NixOS rebuild. The default matches the standard
+`templedb project checkout` layout."
+  :type 'string
+  :group 'templedb-agent)
+
+(defun templedb-agent-reload-from-checkout ()
+  "Reload templedb-agent.el from the writable checkout copy.
+
+Phase 0 escape hatch for the Emacs layer (companion to
+`TEMPLEDB_DEV_MODE=1' which does the same job for the CLI).
+Home-manager owns the top-level symlink at
+`~/.emacs.d/private/local-layers/templedb', so a filesystem
+symlink swap is fragile; instead we do the load-path override
+inside Emacs itself. Same effect for the user \(edit the
+checkout, see changes live\), no fight with home-manager.
+
+Reloads the file at `templedb-agent-checkout-path'. Definitions
+in that file override the ones loaded from the nix store until
+Emacs restarts. Won't help with buffer-local state or timers
+that were captured against the old code; when in doubt, close
+and reopen the agent buffer after reload.
+
+Bound to \\[templedb-agent-reload-from-checkout] in
+`templedb-agent-mode-map'. Also callable via `M-x'."
+  (interactive)
+  (let ((path (expand-file-name templedb-agent-checkout-path)))
+    (cond
+     ((not (file-exists-p path))
+      (message
+       "templedb-agent reload: checkout not found at %s (run `templedb project checkout templedb ...' first)"
+       path))
+     (t
+      (load-file path)
+      (message "templedb-agent reloaded from checkout: %s" path)))))
+
 (defun templedb-agent-guide (guidance)
   "Send GUIDANCE to influence the current run."
   (interactive "sGuidance: ")
@@ -2673,6 +2712,7 @@ Optionally filter by PROJECT slug."
     (define-key map (kbd "C-c C-r") #'templedb-agent-resume)
     (define-key map (kbd "C-c C-s") #'templedb-agent-save-user-sections)
     (define-key map (kbd "C-c u")   #'templedb-agent-remove-entry-at-point)
+    (define-key map (kbd "C-c C-l") #'templedb-agent-reload-from-checkout)
     map)
   "Keymap for `templedb-agent-mode'.")
 
