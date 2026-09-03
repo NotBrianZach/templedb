@@ -402,7 +402,8 @@ class EntityCommands(Command):
                                          to_id, 'nix'):
                     added_r += 1
 
-        # 6. Machine entities from fleet_machines.
+        # 6a. Machine entities from fleet_machines (source_authority=
+        #     templedb, since fleet is our own config).
         machines = query_all(
             """SELECT machine_name, machine_uuid, target_host,
                       system_type
@@ -415,6 +416,23 @@ class EntityCommands(Command):
                      else m['machine_name'])
             if self._upsert_entity('Machine', eref, 'templedb',
                                    label=label):
+                added_e += 1
+
+        # 6b. Machine entities from nix_generations.machine_name for
+        #     any hosts not in fleet_machines. These are NixOS host
+        #     names observed via generation records — source_authority
+        #     is 'nix' (the nix-generation scan told us they exist).
+        #     Covers zMothership2, zStation, etc. — configured but
+        #     not registered as fleet targets.
+        observed_hosts = query_all(
+            """SELECT DISTINCT machine_name FROM nix_generations"""
+        )
+        for h in observed_hosts:
+            if self._entity_id('Machine', h['machine_name']):
+                continue  # already covered by fleet_machines path
+            if self._upsert_entity('Machine', h['machine_name'], 'nix',
+                                   label=f"{h['machine_name']} "
+                                         f"(via nix generations)"):
                 added_e += 1
 
         # 7. Generation entities from nix_generations.
