@@ -402,6 +402,94 @@ class EntityCommands(Command):
                                          to_id, 'nix'):
                     added_r += 1
 
+        # 6. Machine entities from fleet_machines.
+        machines = query_all(
+            """SELECT machine_name, machine_uuid, target_host,
+                      system_type
+                 FROM fleet_machines"""
+        )
+        for m in machines:
+            eref = m['machine_name']
+            label = (f"{m['machine_name']}"
+                     f" ({m['target_host']})" if m['target_host']
+                     else m['machine_name'])
+            if self._upsert_entity('Machine', eref, 'templedb',
+                                   label=label):
+                added_e += 1
+
+        # 7. Generation entities from nix_generations.
+        #    Rich span: Machine ← Generation → Commit + StorePath
+        gens = query_all(
+            """SELECT id, machine_name, generation_number,
+                      commit_hash, toplevel_path,
+                      switched_at, switch_success
+                 FROM nix_generations"""
+        )
+        for g in gens:
+            eref = f"{g['machine_name']}/gen-{g['generation_number']}"
+            marker = '' if g['switch_success'] else ' ✗'
+            label = (f"{g['machine_name']} gen "
+                     f"{g['generation_number']}{marker}")
+            if self._upsert_entity('Generation', eref, 'nix',
+                                   label=label):
+                added_e += 1
+
+        # 8. Machine → ran → Generation
+        for g in gens:
+            from_id = self._entity_id('Machine', g['machine_name'])
+            to_id = self._entity_id(
+                'Generation',
+                f"{g['machine_name']}/gen-{g['generation_number']}"
+            )
+            if from_id and to_id:
+                if self._upsert_relation(from_id, 'ran', to_id, 'nix'):
+                    added_r += 1
+
+        # 9. Generation → built-from → Commit (when commit_hash known
+        #    and a matching Commit entity exists).
+        for g in gens:
+            if not g['commit_hash']:
+                continue
+            from_id = self._entity_id(
+                'Generation',
+                f"{g['machine_name']}/gen-{g['generation_number']}"
+            )
+            if not from_id:
+                continue
+            # Match commit_hash against Commit entities. External_ref
+            # is 'project_slug/hash', so we need a fuzzy match.
+            commit_rows = query_all(
+                """SELECT external_ref FROM entities
+                    WHERE kind = 'Commit'
+                      AND (external_ref LIKE '%/' || ?
+                           OR LOWER(external_ref) LIKE '%/' || LOWER(?))
+                    LIMIT 1""",
+                (g['commit_hash'], g['commit_hash']),
+            )
+            if commit_rows:
+                to_id = self._entity_id(
+                    'Commit', commit_rows[0]['external_ref']
+                )
+                if to_id:
+                    if self._upsert_relation(
+                        from_id, 'built-from', to_id, 'nix'
+                    ):
+                        added_r += 1
+
+        # 10. Generation → installs → StorePath (via toplevel_path)
+        for g in gens:
+            if not g['toplevel_path']:
+                continue
+            from_id = self._entity_id(
+                'Generation',
+                f"{g['machine_name']}/gen-{g['generation_number']}"
+            )
+            to_id = self._entity_id('StorePath', g['toplevel_path'])
+            if from_id and to_id:
+                if self._upsert_relation(from_id, 'installs',
+                                         to_id, 'nix'):
+                    added_r += 1
+
         print(f"✓ ingest nix: +{added_e} entities, +{added_r} relations")
         self._last_counts = {'e': added_e, 'r': added_r}
         return 0
@@ -778,6 +866,8 @@ class EntityCommands(Command):
              self._check_report_impls_valid_commit),
             ('every_tool_call_has_entity',
              self._check_tool_calls_have_entities),
+            ('every_generation_with_commit_has_relation',
+             self._check_generations_have_built_from),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -906,6 +996,42 @@ class EntityCommands(Command):
         )
         return [f"Commit {r['slug']}/{r['commit_hash'][:12]} not in "
                 f"entities table (run `templedb ingest git`)" for r in rows]
+
+    def _check_generations_have_built_from(self):
+        """Invariant: every nix_generations row with a commit_hash
+        should have a corresponding Generation → built-from → Commit
+        relation, provided both entities exist. Flags stale ingest.
+        This is a commuting-diagram check: the join through
+        nix_generations should match the join through relations."""
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT g.id, g.machine_name, g.generation_number,
+                      g.commit_hash
+                 FROM nix_generations g
+                WHERE g.commit_hash IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                        FROM entities e_gen
+                        JOIN relations r
+                          ON r.from_entity_id = e_gen.id
+                         AND r.kind = 'built-from'
+                        JOIN entities e_com
+                          ON e_com.id = r.to_entity_id
+                       WHERE e_gen.kind = 'Generation'
+                         AND e_gen.external_ref =
+                             g.machine_name || '/gen-' ||
+                             g.generation_number
+                         AND e_com.kind = 'Commit'
+                         AND (e_com.external_ref LIKE '%/' || g.commit_hash
+                              OR LOWER(e_com.external_ref) LIKE
+                                  '%/' || LOWER(g.commit_hash))
+                  )
+                LIMIT 50"""
+        )
+        return [f"nix_generation#{r['id']} "
+                f"{r['machine_name']}/gen-{r['generation_number']} "
+                f"(commit {r['commit_hash'][:12]}) has no built-from "
+                f"relation — run `templedb ingest nix`" for r in rows]
 
     def _check_tool_calls_have_entities(self):
         """Invariant: every tool_calls row has a corresponding ToolCall

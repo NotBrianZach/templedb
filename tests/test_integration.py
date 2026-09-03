@@ -722,6 +722,127 @@ class TestNixIngest:
         assert rel is not None
         assert rel['kind'] == 'built-by'
 
+    def _seed_machine_and_generation(self, populated_env):
+        """Add fleet_networks + fleet_machines + nix_generations."""
+        conn = sqlite3.connect(populated_env["db_path"])
+        # fleet_networks parent (network_name is the actual column;
+        # project_id is required to satisfy UNIQUE constraint)
+        pid_for_net = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO fleet_networks
+                   (project_id, network_name, network_uuid,
+                    config_file_path, description)
+                 VALUES (?, 'testnet', 'uuid-testnet',
+                         'network.nix', 'test')""",
+            (pid_for_net,),
+        )
+        nid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # fleet_machines
+        conn.execute(
+            """INSERT INTO fleet_machines
+                   (network_id, machine_name, machine_uuid,
+                    target_host, system_type)
+                 VALUES (?, 'zMothership9', 'uuid-9',
+                         '192.168.1.9', 'nixos')""",
+            (nid,),
+        )
+        # A commit that the generation was built from
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        bid = conn.execute(
+            "SELECT id FROM vcs_branches WHERE project_id=?", (pid,)
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO vcs_commits (project_id, branch_id,
+                                        commit_hash, commit_message,
+                                        author, commit_timestamp)
+                 VALUES (?, ?, 'cafebabe1234', 'gen commit',
+                         'test', datetime('now'))""",
+            (pid, bid),
+        )
+        # nix_generations
+        conn.execute(
+            """INSERT INTO nix_generations
+                   (machine_name, generation_number,
+                    toplevel_path, commit_hash,
+                    switched_at, switch_success)
+                 VALUES ('zMothership9', 47,
+                         '/nix/store/aaaa-hello-1.0',
+                         'cafebabe1234',
+                         datetime('now'), 1)"""
+        )
+        conn.commit()
+        conn.close()
+
+    def test_ingest_nix_emits_machine_and_generation(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_nix_data(populated_env)
+        self._seed_machine_and_generation(populated_env)
+        # git ingest first so Commit entities exist for the built-from
+        # relation to have a target.
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='nix', limit=20))
+
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        m = conn.execute(
+            """SELECT * FROM entities WHERE kind='Machine'
+                AND external_ref='zMothership9'"""
+        ).fetchone()
+        assert m is not None
+        g = conn.execute(
+            """SELECT * FROM entities WHERE kind='Generation'
+                AND external_ref='zMothership9/gen-47'"""
+        ).fetchone()
+        assert g is not None
+        # Machine → ran → Generation
+        rel = conn.execute(
+            """SELECT COUNT(*) FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.kind = 'Machine' AND e2.kind = 'Generation'
+                  AND r.kind = 'ran'"""
+        ).fetchone()[0]
+        assert rel >= 1
+        # Generation → built-from → Commit
+        rel = conn.execute(
+            """SELECT COUNT(*) FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.kind = 'Generation' AND e2.kind = 'Commit'
+                  AND r.kind = 'built-from'"""
+        ).fetchone()[0]
+        assert rel >= 1, "Generation → built-from → Commit missing"
+        # Generation → installs → StorePath (toplevel_path)
+        rel = conn.execute(
+            """SELECT COUNT(*) FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.kind = 'Generation' AND e2.kind = 'StorePath'
+                  AND r.kind = 'installs'"""
+        ).fetchone()[0]
+        conn.close()
+        assert rel >= 1, "Generation → installs → StorePath missing"
+
+    def test_doctor_generations_have_built_from(self, populated_env,
+                                                capsys):
+        """Adding a generation WITHOUT ingesting nix should trigger the
+        commuting-invariant check."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_machine_and_generation(populated_env)
+        cmd = EntityCommands()
+        rc = cmd.doctor_entities(argparse.Namespace(
+            check='every_generation_with_commit_has_relation'
+        ))
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert 'zMothership9' in out or 'issue' in out.lower()
+
     def test_ingest_nix_emits_astbuild_span(self, populated_env):
         import argparse
         from cli.commands.entity import EntityCommands
