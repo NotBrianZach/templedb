@@ -56,7 +56,8 @@ def _init_test_db():
     for fname in ('073_add_temple_agent.sql',
                   '080_agent_pending_asks.sql',
                   '084_agent_sections.sql',
-                  '085_agent_user_edits.sql'):
+                  '085_agent_user_edits.sql',
+                  '094_tool_calls.sql'):
         p = os.path.join(mig_dir, fname)
         if os.path.exists(p):
             with open(p) as f:
@@ -101,6 +102,7 @@ def setup_test_db():
                   "agent_pending_asks",
                   "agent_session_notes",
                   "agent_work_log",
+                  "tool_calls",
                   "agent_events",
                   "agent_messages",
                   "agent_runs",

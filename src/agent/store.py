@@ -253,6 +253,17 @@ def add_event(run_id, event_type, summary=None, payload=None, raw_payload=None):
     """Add an event to a run. Auto-assigns sequence number. Returns event row.
 
     Retries on DB lock since events stream in rapidly during agent runs.
+
+    Phase 3 side effect: for tool.* events, also updates the tool_calls
+    table (migration 094). Previously tool_calls was populated only via
+    the migration's one-time backfill; this closes the extraction loop
+    so new tool invocations become first-class span rows without a
+    periodic re-ingest. See docs/ENTITY_GRAPH_DESIGN.md for the
+    span-as-first-class-relation framing.
+
+    Failures inside the tool_calls path are swallowed — they must not
+    break event ingestion. The graph will just be missing a row until
+    the next `templedb ingest agent` sweep.
     """
     def _do():
         row = query_one("SELECT last_event_sequence FROM agent_runs WHERE id = ?", (run_id,))
@@ -278,9 +289,57 @@ def add_event(run_id, event_type, summary=None, payload=None, raw_payload=None):
             commit=False,
         )
 
+        # Best-effort tool_calls integration.
+        try:
+            if event_type == 'tool.started':
+                _record_tool_call_started(run_id, event_id, payload)
+            elif event_type == 'tool.completed':
+                _record_tool_call_completed(run_id)
+            elif event_type == 'tool.failed':
+                _record_tool_call_completed(run_id, failed=True)
+        except Exception:
+            # Non-fatal — event write is the primary op.
+            pass
+
         return query_one("SELECT * FROM agent_events WHERE id = ?", (event_id,))
 
     return _retry_on_lock(_do)
+
+
+def _record_tool_call_started(run_id, event_id, payload):
+    """Insert a tool_calls row with status='running' when tool.started
+    fires. Called from add_event as a side effect."""
+    tool_name = (payload or {}).get('tool_name', 'unknown')
+    run = query_one(
+        "SELECT session_id FROM agent_runs WHERE id = ?", (run_id,),
+    )
+    session_id = run['session_id'] if run else None
+    execute(
+        """INSERT INTO tool_calls
+               (run_id, session_id, tool_name, started_at,
+                status, source_event_id)
+             VALUES (?, ?, ?, datetime('now'), 'running', ?)""",
+        (run_id, session_id, tool_name, event_id),
+    )
+
+
+def _record_tool_call_completed(run_id, failed=False):
+    """Close out the most recent 'running' tool_call for this run.
+
+    Heuristic: tool.completed doesn't carry which specific tool.started
+    it closes (payload is minimal per the observed live data), so
+    'most recent running in this run' is the honest approximation.
+    Correct in practice for sequential tool invocations, which is
+    what Claude Code produces."""
+    execute(
+        """UPDATE tool_calls
+              SET status = ?,
+                  finished_at = datetime('now')
+            WHERE id = (SELECT id FROM tool_calls
+                         WHERE run_id = ? AND status = 'running'
+                         ORDER BY started_at DESC LIMIT 1)""",
+        ('failed' if failed else 'completed', run_id),
+    )
 
 
 def get_events_since(run_id, since_sequence=0, limit=500):

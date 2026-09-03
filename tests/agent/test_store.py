@@ -75,6 +75,69 @@ class TestStore(unittest.TestCase):
         events = get_events_since(run['id'], 0)
         self.assertEqual(len(events), 1)
 
+    def test_add_event_records_tool_call_started(self):
+        """Phase 3: add_event('tool.started') should also insert a
+        tool_calls row with status='running'."""
+        from agent.store import create_session, create_run, add_event
+        import sqlite3
+        session = create_session('fake')
+        run = create_run(session['id'])
+        add_event(run['id'], 'tool.started',
+                  payload={'tool_name': 'Read file'})
+
+        # tool_calls row exists
+        conn = sqlite3.connect(os.environ.get('TEMPLEDB_PATH'))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM tool_calls WHERE run_id = ?",
+            (run['id'],),
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(row, "tool_calls row not created")
+        self.assertEqual(row['status'], 'running')
+        self.assertEqual(row['tool_name'], 'Read file')
+        self.assertEqual(row['session_id'], session['id'])
+
+    def test_add_event_completes_tool_call(self):
+        """Phase 3: tool.completed should close the most recent
+        running tool_call in the same run."""
+        from agent.store import create_session, create_run, add_event
+        import sqlite3
+        session = create_session('fake')
+        run = create_run(session['id'])
+        add_event(run['id'], 'tool.started',
+                  payload={'tool_name': 'Read'})
+        add_event(run['id'], 'tool.completed', payload={})
+
+        conn = sqlite3.connect(os.environ.get('TEMPLEDB_PATH'))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT status, finished_at FROM tool_calls WHERE run_id = ?",
+            (run['id'],),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row['status'], 'completed')
+        self.assertIsNotNone(row['finished_at'])
+
+    def test_add_event_tool_failed_marks_failed(self):
+        """tool.failed should mark status='failed'."""
+        from agent.store import create_session, create_run, add_event
+        import sqlite3
+        session = create_session('fake')
+        run = create_run(session['id'])
+        add_event(run['id'], 'tool.started',
+                  payload={'tool_name': 'Bash'})
+        add_event(run['id'], 'tool.failed', payload={})
+
+        conn = sqlite3.connect(os.environ.get('TEMPLEDB_PATH'))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT status FROM tool_calls WHERE run_id = ?",
+            (run['id'],),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row['status'], 'failed')
+
     def test_session_notes(self):
         from agent.store import create_session, set_notes, get_notes
         session = create_session('fake')
