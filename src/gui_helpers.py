@@ -142,6 +142,7 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("tests", "/tests",        "Tests",      ", t"),
             ("reports", "/reports",    "Reports",    ", r"),
             ("entities", "/entities",  "Entities",   ", e"),
+            ("summary", "/summary",    "Summary",    ", h"),
         ]
     )
     page = f"""<!DOCTYPE html>

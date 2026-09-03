@@ -1,12 +1,13 @@
-"""TempleDB GUI — Entity graph pages.
+"""TempleDB GUI — Entity graph + health pages.
 
-Three routes:
+Four routes:
   GET /entities                        Overview: counts by kind
   GET /entities/{kind}                 List entities of that kind
   GET /entity/{kind}/{ref:path}        Single entity + relations
+  GET /summary                         Health at a glance
+                                       (visual mirror of `templedb summary`)
 
 The graph substrate is described in docs/ENTITY_GRAPH_DESIGN.md.
-This is a browseable version of `templedb entity explore`.
 """
 import html
 import sys
@@ -294,3 +295,251 @@ def entity_detail(kind: str, ref: str):
  if inbound_rows else '<p class="dim">(no inbound relations)</p>'}
 """
     return _base(f"{kind}/{ref}", body, active="entities")
+
+
+def _age_hint(ts, threshold_hours=1):
+    """Return (age_string, class) where class is 'ok' | 'stale' | 'never'."""
+    if not ts:
+        return ('never', 'never')
+    row = query_one(
+        "SELECT (julianday('now') - julianday(?)) * 24 AS hours",
+        (ts,),
+    )
+    hours = row['hours'] if row else None
+    if hours is None:
+        return ('unknown', 'stale')
+    if hours < 1:
+        return (f"{int(hours * 60)}min ago", 'ok')
+    if hours < threshold_hours:
+        return (f"{int(hours)}h ago", 'ok')
+    if hours < threshold_hours * 24:
+        return (f"{int(hours)}h ago", 'stale')
+    return (f"{int(hours / 24)}d ago", 'ancient')
+
+
+@router.get("/summary", response_class=HTMLResponse)
+def summary_page():
+    """Visual health mirror of `templedb summary`."""
+    import os
+    import socket
+
+    e_total = query_one("SELECT COUNT(*) AS n FROM entities")['n']
+    r_total = query_one("SELECT COUNT(*) AS n FROM relations")['n']
+    e_kinds = query_all(
+        """SELECT kind, COUNT(*) AS n FROM entities
+            GROUP BY kind ORDER BY n DESC"""
+    )
+
+    # Ingest freshness per adapter
+    adapters = query_all(
+        """SELECT adapter,
+                  MAX(started_at) AS last_run,
+                  SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok_count,
+                  SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS err_count
+             FROM ingestion_runs
+            GROUP BY adapter
+            ORDER BY last_run DESC"""
+    )
+
+    # Doctor invariants (latest result per check)
+    checks = query_all(
+        """SELECT check_name, status, MAX(ran_at) AS ran_at,
+                  issue_count
+             FROM invariant_checks
+            GROUP BY check_name
+            ORDER BY status ASC, ran_at DESC"""
+    )
+    violated = sum(1 for c in checks if c['status'] != 'ok')
+
+    # Reconcile per machine
+    machines = query_all(
+        """SELECT fm.machine_name,
+                  MAX(rr.ran_at) AS last_run,
+                  (SELECT status FROM reconcile_runs rr2
+                    WHERE rr2.machine_name = fm.machine_name
+                    ORDER BY rr2.ran_at DESC LIMIT 1) AS last_status
+             FROM fleet_machines fm
+             LEFT JOIN reconcile_runs rr
+               ON rr.machine_name = fm.machine_name
+            GROUP BY fm.machine_name
+            ORDER BY fm.machine_name"""
+    )
+
+    # Handoff inbox for this session's SID (best effort — GUI has
+    # no session context, so use host+ppid heuristic).
+    sid = os.environ.get('TEMPLEDB_SESSION_ID') \
+        or f"{socket.gethostname()}-{os.getppid()}"
+    direct = query_one(
+        """SELECT COUNT(*) AS n FROM handoff_notes
+            WHERE to_session = ? AND acked_at IS NULL""",
+        (sid,),
+    )['n']
+    broadcast = query_one(
+        """SELECT COUNT(*) AS n FROM handoff_notes
+            WHERE to_session IS NULL AND to_topic IS NULL
+              AND acked_at IS NULL"""
+    )['n']
+
+    # Render.
+    def _pill(text, cls):
+        return f'<span class="pill pill-{cls}">{html.escape(str(text))}</span>'
+
+    kind_html = "".join(
+        f'<span class="chip">'
+        f'<a href="/entities/{html.escape(k["kind"])}">'
+        f'{_kind_glyph(k["kind"])} {html.escape(k["kind"])}</a>'
+        f' <b>{k["n"]:,}</b></span>'
+        for k in e_kinds
+    )
+
+    ingest_rows = ""
+    for a in adapters:
+        age, cls = _age_hint(a['last_run'], threshold_hours=6)
+        pill = 'ok' if cls == 'ok' else ('warn' if cls == 'stale' else 'err')
+        err_pill = _pill(f"{a['err_count']} err", 'err') \
+            if a['err_count'] else ''
+        ingest_rows += (
+            f'<tr>'
+            f'<td>{html.escape(a["adapter"])}</td>'
+            f'<td>{_pill(age, pill)}</td>'
+            f'<td class="dim">{html.escape(a["last_run"] or "")}</td>'
+            f'<td>{a["ok_count"]:,} ok {err_pill}</td>'
+            f'</tr>'
+        )
+
+    check_rows = ""
+    for c in checks:
+        marker = '✓' if c['status'] == 'ok' else '✗'
+        cls = 'ok' if c['status'] == 'ok' else 'err'
+        summary = ('OK' if c['status'] == 'ok'
+                   else f"{c['issue_count']} issue(s)")
+        check_rows += (
+            f'<tr>'
+            f'<td>{_pill(marker, cls)}</td>'
+            f'<td><code>{html.escape(c["check_name"])}</code></td>'
+            f'<td>{html.escape(summary)}</td>'
+            f'<td class="dim">{html.escape(c["ran_at"] or "")}</td>'
+            f'</tr>'
+        )
+
+    machine_rows = ""
+    for m in machines:
+        if not m['last_run']:
+            machine_rows += (
+                f'<tr>'
+                f'<td><a href="/entity/Machine/{html.escape(m["machine_name"])}">'
+                f'{html.escape(m["machine_name"])}</a></td>'
+                f'<td>{_pill("never", "warn")}</td>'
+                f'<td class="dim">—</td>'
+                f'</tr>'
+            )
+            continue
+        age, _ = _age_hint(m['last_run'], threshold_hours=168)
+        st = m['last_status'] or '?'
+        cls = ('ok' if st == 'ok'
+               else 'err' if st == 'drift'
+               else 'warn')
+        machine_rows += (
+            f'<tr>'
+            f'<td><a href="/entity/Machine/{html.escape(m["machine_name"])}">'
+            f'{html.escape(m["machine_name"])}</a></td>'
+            f'<td>{_pill(st, cls)}</td>'
+            f'<td class="dim">{html.escape(age)} — {html.escape(m["last_run"])}</td>'
+            f'</tr>'
+        )
+
+    handoff_body = ''
+    if direct or broadcast:
+        parts = []
+        if direct:
+            parts.append(f'{direct} unacked note(s) for this session')
+        if broadcast:
+            parts.append(f'{broadcast} unacked broadcast(s)')
+        handoff_body = _pill(' · '.join(parts), 'warn')
+    else:
+        handoff_body = '<span class="dim">(no unacked handoffs)</span>'
+
+    body = f"""
+<style>
+  .pill {{
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 0.8em; font-weight: 500;
+    font-family: "JetBrains Mono", monospace;
+  }}
+  .pill-ok {{ background: rgba(127, 214, 160, 0.15); color: var(--pos); }}
+  .pill-warn {{ background: rgba(224, 192, 96, 0.15); color: var(--warn); }}
+  .pill-err {{ background: rgba(233, 112, 112, 0.15); color: var(--neg); }}
+  .card {{
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 1rem 1.2rem; border-radius: 6px; margin-bottom: 1.2rem;
+  }}
+  .card h2 {{ margin-top: 0; color: var(--accent);
+              font-size: 0.95rem; text-transform: uppercase;
+              letter-spacing: 0.06em; border: none; padding-top: 0; }}
+  .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;
+             margin-bottom: 1rem; }}
+  .grid-2 .n {{ font-size: 2rem; color: var(--accent);
+                font-family: "JetBrains Mono", monospace; }}
+  .grid-2 .lbl {{ color: var(--muted); font-size: 0.75rem;
+                  text-transform: uppercase; letter-spacing: 0.08em; }}
+  .chip {{
+    display: inline-block; padding: 3px 9px; margin: 3px 4px 0 0;
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 4px; font-size: 0.85em;
+  }}
+  .chip a {{ text-decoration: none; }}
+  .chip b {{ color: var(--accent); font-family: "JetBrains Mono", monospace; }}
+  table.hs {{ border-collapse: collapse; width: 100%; font-size: 0.88em; }}
+  table.hs td {{ border-top: 1px solid var(--border); padding: 5px 8px;
+                  vertical-align: top; }}
+  table.hs td:first-child {{ color: #b0b0d0; font-family: "JetBrains Mono", monospace; }}
+  .dim {{ color: var(--muted); font-size: 0.82em; }}
+</style>
+
+<h1>Summary</h1>
+<p class="lede">
+  Health at a glance. Visual mirror of <code>templedb summary</code>.
+  Refresh manually — this page is not currently auto-polling.
+</p>
+
+<div class="card">
+  <h2>Entity graph</h2>
+  <div class="grid-2">
+    <div>
+      <div class="lbl">Entities</div>
+      <div class="n">{e_total:,}</div>
+    </div>
+    <div>
+      <div class="lbl">Relations</div>
+      <div class="n">{r_total:,}</div>
+    </div>
+  </div>
+  <div>{kind_html}</div>
+</div>
+
+<div class="card">
+  <h2>Ingestion — per adapter</h2>
+  {f'<table class="hs">{ingest_rows}</table>' if ingest_rows
+   else '<span class="dim">(no ingests recorded)</span>'}
+</div>
+
+<div class="card">
+  <h2>Doctor invariants —
+    {_pill(f'{violated} violated', 'err') if violated else _pill('all passing', 'ok')}
+    <span class="dim">({len(checks)} tracked)</span></h2>
+  {f'<table class="hs">{check_rows}</table>' if check_rows
+   else '<span class="dim">(no doctor runs)</span>'}
+</div>
+
+<div class="card">
+  <h2>Reconcile — per fleet machine</h2>
+  {f'<table class="hs">{machine_rows}</table>' if machine_rows
+   else '<span class="dim">(no fleet_machines registered)</span>'}
+</div>
+
+<div class="card">
+  <h2>Handoff inbox</h2>
+  {handoff_body}
+</div>
+"""
+    return _base("Summary", body, active="summary")
