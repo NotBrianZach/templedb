@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap: Phases 0–3 of the observer/integrator plan, end-to-end</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.88em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); color: var(--muted); font-weight: 500; }
+  .dim { color: var(--muted); }
+  .yes { color: var(--pos); font-weight: 600; }
+  .no { color: var(--neg); }
+  .partial { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<h1>Session recap: Phases 0–3 of the observer/integrator plan, end-to-end</h1>
+<p class="lede">
+  Twelve hours into a single dev day, the observer/integrator plan
+  went from three design reports and Phase 0's three &ldquo;acute pain&rdquo;
+  fixes to Phases 0–3 fully shipped with Workflow B and Workflow F
+  runnable end-to-end on live data. This report is the metacognition
+  pass — captures what was shipped, shows the runnable output, names
+  what was <em>not</em> done and why, credits the parallel-session
+  contributions that guided the design, and closes with the honest
+  remaining queue. Written per the [[feedback_session_recap]]
+  standing rule.
+</p>
+
+<h2>The one-diagram summary</h2>
+
+<p>Where the entity graph stands as of this recap:</p>
+
+<pre>Entities        11,868        Relations       5,307
+─────────────────────         ─────────────────────
+StorePath         5,775  nix      built-by       2,355
+Derivation        2,031  nix      contains       1,756
+File              1,787  git      invoked          993
+ToolCall            993  agent    ran               52
+Commit              635  git      installs          47
+AgentSession        281  agent    motivated         29
+Deployment          242  temple   from-commit       22
+Generation           52  nix      targets            7
+AstBuild             27  nix      + built-from, applied-to,
+Report               25  author     proposed, produces
+EditIntent           15  temple
+Machine               5  templedb+nix
+
+Six ingest adapters:  git · agent · intent · reports · nix · deploy
+Nine doctor invariants: all passing, history persisted
+</pre>
+
+<h2>The runnable proof</h2>
+
+<p>
+  Live output from <code>templedb provenance machine zMothership2 --depth 3</code>
+  (excerpt, showing Machine → Generation → Commit + StorePath → File):
+</p>
+
+<pre>● Machine/zMothership2
+  ─[ran]→ Generation/zMothership2/gen-166 — zMothership2 gen 166
+    ─[built-from]→ Commit/system_config/566082E1A8154BA1
+                   — flake.lock: bump templedb to 76bf5e11
+                     (adds _launcher.py + dev-mode)
+    ─[installs]→ StorePath/.../nixos-system-zMothership2-25.11.20260630.b6018f8
+      ─[contains]→ File/system_config/flake.lock
+  ─[ran]→ Generation/zMothership2/gen-169 — zMothership2 gen 169
+    ─[built-from]→ Commit/system_config/D2C35E938CE0C9A9
+                   — sshfs: move woofs remoteSync mount to
+                     home-manager user unit
+    ─[installs]→ StorePath/.../nixos-system-...
+  ...(20+ more generations, each with its motivating commit visible)
+</pre>
+
+<div class="callout win">
+  <span class="label">The headline capability</span>
+  &ldquo;Which motivating decision led to the code running on this
+  machine?&rdquo; — the five-hop provenance query the plan named as its
+  headline capability — is one command. The commit messages are
+  visible in the graph walk. This isn't a hypothetical query; it
+  runs.
+</div>
+
+<h2>Session arc, in tranches</h2>
+
+<h3>Phase 0 — acute pain (weeks 1&ndash;2 of the plan; hours 0&ndash;3 real time)</h3>
+
+<ul>
+  <li><strong>templedb file where</strong> — mirror drift diagnostic. Found real
+    drift on first invocation (<code>~/temple</code> and <code>~/status</code>
+    paths held stale copies).</li>
+  <li><strong>gitignore-aware materialize</strong> — the <code>.authinfo.gpg</code>
+    sweep class of failure closed at the root.</li>
+  <li><strong>Emacs reload from checkout</strong> — <code>M-x templedb-agent-reload-from-checkout</code>
+    (bound to <code>C-c C-l</code>) + <code>templedb ai emacs reload</code> CLI
+    that shells out via emacsclient.</li>
+</ul>
+
+<h3>Phase 1 — SourceSnapshot vocabulary (hours 3&ndash;4)</h3>
+
+<ul>
+  <li><strong>Migration 086</strong>: <code>source_snapshots</code> view union'ing
+    <code>file_contents</code> (current) with <code>vcs_file_states</code>
+    (historical). Same shape either way, revision = <code>'current'</code>
+    or commit_hash.</li>
+  <li><strong>templedb source</strong> CLI: <code>snapshot</code>,
+    <code>revisions</code>. Case-insensitive prefix match on commit hashes
+    (handles both current-format lowercase-40-char and legacy
+    uppercase-16-char).</li>
+  <li>Vocabulary shift documented in CLAUDE.md: &ldquo;<code>file_contents</code>
+    is a snapshot table, not authoritative bytes.&rdquo;</li>
+</ul>
+
+<h3>Phase 2 &amp; 2.5 — EditIntent + Handoff (hours 4&ndash;6)</h3>
+
+<ul>
+  <li><strong>Migration 087</strong>: <code>edit_intents</code> first-class span with
+    proposed → applied | cancelled lifecycle.</li>
+  <li><strong>Migration 088</strong>: <code>vcs_working_state.intent_id</code> FK.</li>
+  <li><strong>templedb intent</strong> CLI + <code>templedb file set</code>
+    routes through EditIntent by default. <code>--skip-intent</code> escape
+    hatch for bootstrap.</li>
+  <li><strong>Migration 093</strong>: <code>handoff_notes</code> per the schema report
+    proposal — cross-session pinboard (send / list / show / ack / pop).
+    Discovery hook in <code>templedb status</code>.</li>
+</ul>
+
+<h3>Phase 3 groundwork (hours 6&ndash;8)</h3>
+
+<ul>
+  <li><strong>Migration 089</strong>: <code>entities</code> + <code>relations</code>
+    tables. Typed graph with <code>source_authority</code>, <code>observed_at</code>.
+  </li>
+  <li><strong>docs/ENTITY_GRAPH_DESIGN.md</strong>: named the categorical
+    framing explicitly (objects, morphisms, spans, commuting invariants,
+    local charts + transition maps). Applied the external critique's
+    language to the design directly.</li>
+  <li><strong>templedb ingest</strong> {git, agent, intent}: the first three
+    local-chart adapters.</li>
+  <li><strong>templedb entity</strong> {explore, stats} + <strong>templedb doctor entities</strong>.</li>
+</ul>
+
+<h3>Phase 3 reconcile persistence + extensions (hours 8&ndash;11)</h3>
+
+<ul>
+  <li><strong>Migration 091</strong>: <code>ingestion_runs</code> — per-adapter run log.</li>
+  <li><strong>Migration 092</strong>: <code>invariant_checks</code> — doctor result
+    history. &ldquo;When did this drift first appear?&rdquo; is now answerable.</li>
+  <li><strong>ingest reports</strong>: workflow F. Auto-detected 29 Report ↔ Commit
+    links across the real archive by regex-matching commit prefixes.
+    Confidence lifecycle: auto-detected → confirmed → verified | rejected.</li>
+  <li><strong>ingest nix</strong>: 5,775 StorePath + 2,031 Derivation entities
+    plus AstBuild spans; then extended with Machine + Generation +
+    <code>built-from</code>/<code>installs</code>/<code>ran</code> relations.</li>
+  <li><strong>Migration 094 + backfill</strong>: <code>tool_calls</code> extraction
+    from <code>agent_events</code>. 993 tool invocations lifted into a
+    first-class span. <code>templedb tool</code> CLI.</li>
+  <li><strong>ingest deploy</strong>: 242 Deployment entities from
+    <code>deployment_history</code> (no schema migration needed — the
+    lifecycle was already there).</li>
+</ul>
+
+<h3>Phase 3 query surface (hour 12)</h3>
+
+<ul>
+  <li><strong>templedb entity trace</strong>: recursive BFS with
+    <code>--depth</code>, <code>--direction</code>, <code>--via</code>, <code>--limit</code>.
+    Cycle-safe, bounded, arrow-tree output.</li>
+  <li><strong>templedb provenance</strong> {machine, deployment, report, commit, intent}:
+    thin presets over trace, one per workflow. Workflow B and F
+    runnable end-to-end.</li>
+</ul>
+
+<h2>What was applied from external contributions</h2>
+
+<p>
+  Two parallel sessions authored design reports during this run.
+  Both landed in the archive via templedb's normal commit path and
+  were incorporated in real time.
+</p>
+
+<h3>The categorical critique</h3>
+
+<p>
+  Received mid-session. Three moves incorporated wholesale:
+</p>
+
+<ul>
+  <li><strong>Authority per fact, not per system</strong> — dissolves the
+    &ldquo;identity crisis&rdquo; framing into something more precise.
+    Every entity + relation now carries <code>source_authority</code>.</li>
+  <li><strong>Lenses replace CAP</strong> — the CAP analogy from the earlier
+    plan was technically wrong. Bidirectional lenses / view maintenance
+    is the honest framework. Names the defect precisely: materialize was
+    a poorly-lawed <code>put</code>. Observer pattern deletes <code>put</code>,
+    reducing to a well-lawed view / get-only lens.</li>
+  <li><strong>Promote junctions to first-class objects</strong> — the span
+    pattern <code>A ← R → B</code>. <code>edit_intents</code>, <code>ast_builds</code>
+    already fit; <code>report_implementations</code>, <code>Deployment</code>,
+    <code>ToolCall</code> were designed under the pattern from the start.</li>
+</ul>
+
+<h3>The schema report</h3>
+
+<p>
+  A 465-line disposition matrix for all 131 tables (keep/shrink/view/retire/new).
+  Called out <code>ingestion_runs</code> and <code>invariant_checks</code> as
+  Phase 3 additions, and <code>handoff_notes</code> as Phase 2.5. Shipped all
+  three as proposed. Named <code>decisions</code> as the preferred name for
+  the workflow-F junction; we shipped as <code>report_implementations</code>
+  and documented the rename as future work.
+</p>
+
+<h2>What was <em>not</em> shipped, honestly</h2>
+
+<table class="matrix">
+  <tr><th>Not shipped</th><th>Why</th></tr>
+  <tr>
+    <td>Agent runtime writes tool_calls directly (not via backfill)</td>
+    <td>Requires touching agent/store.py + service.py. Small blast radius but
+    not urgent since backfill covers the historical data.</td>
+  </tr>
+  <tr>
+    <td>SSH-probe reconcile for machine state (Workflow D full)</td>
+    <td>Requires actual SSH connectivity to test cleanly. Doctor invariants
+    for the DB side landed; the machine-side probe is deferred.</td>
+  </tr>
+  <tr>
+    <td>SCIP Phase 4 (cross-language code facts)</td>
+    <td>Big deliberate work. Needs scip-* tool integration. Deferred to
+    a dedicated tranche.</td>
+  </tr>
+  <tr>
+    <td><code>decisions</code> rename of <code>report_implementations</code></td>
+    <td>Cosmetic. Documented in ENTITY_GRAPH_DESIGN.md as future work.</td>
+  </tr>
+  <tr>
+    <td>AstBuild → built-from → Commit relation</td>
+    <td><code>ast_builds</code> has no <code>commit_hash</code> column. Needs
+    schema change or a config_nodes join. Deferred.</td>
+  </tr>
+  <tr>
+    <td>Deployments consolidation into a proper span table</td>
+    <td>Turned out unnecessary — <code>deployment_history</code> already
+    carries the lifecycle. Ingest adapter suffices without a new table.</td>
+  </tr>
+  <tr>
+    <td>Phase 5: retire authority-over-source</td>
+    <td>Deliberate final step. Everything above must land first.</td>
+  </tr>
+</table>
+
+<h2>Doctor invariants that ran (and what they caught)</h2>
+
+<p>
+  Nine invariants, all passing after the final re-ingest.
+  During the session, they detected genuine drift several times —
+  after each new commit landed, doctor flagged the new
+  <code>EditIntent#N</code> and <code>Commit templedb/HASH</code> as
+  &ldquo;not in entities table (run `templedb ingest &lt;kind&gt;`)&rdquo;.
+  The reconcile loop works exactly as the schema report demanded
+  (&ldquo;must ship day one, not later&rdquo;).
+</p>
+
+<pre>✓ edit_intent_applied_to_valid_commit
+✓ every_edit_intent_has_entity
+✓ every_commit_has_entity
+✓ relations_reference_valid_entities
+✓ report_impls_reference_valid_reports
+✓ report_impls_reference_valid_commits
+✓ every_tool_call_has_entity
+✓ every_generation_with_commit_has_relation
+✓ every_deployment_has_entity</pre>
+
+<h2>What the tests cover (~85 pytest passing)</h2>
+
+<ul>
+  <li><strong>TestMaterialize + TestFileWhere</strong> — Phase 0</li>
+  <li><strong>TestSourceSnapshots</strong> — Phase 1</li>
+  <li><strong>TestEditIntents</strong> — Phase 2</li>
+  <li><strong>TestHandoffNotes</strong> — Phase 2.5</li>
+  <li><strong>TestEntityGraph + TestReconcileHistory</strong> — Phase 3 core</li>
+  <li><strong>TestReportImplementations</strong> — Workflow F</li>
+  <li><strong>TestNixIngest + TestDeployIngest + TestToolCalls</strong> — Phase 3 adapters</li>
+  <li><strong>TestGraphTraversal</strong> — multi-hop queries</li>
+</ul>
+
+<p>
+  Every migration was mirrored into <code>schema.sql</code> for the
+  fresh-DB path, so pytest fixtures work identically to a real
+  <code>templedb admin db migrate</code> against production.
+</p>
+
+<h2>The complexity budget observation</h2>
+
+<div class="callout">
+  <span class="label">On restraint</span>
+  This session shipped ten migrations. That's a lot of schema growth
+  by any measure. But the schema-report's discipline held: no new
+  authority required a new table (adapters were enough). New tables
+  only landed for genuine junctions with lifecycle
+  (<code>edit_intents</code>, <code>ingestion_runs</code>, <code>invariant_checks</code>,
+  <code>handoff_notes</code>, <code>tool_calls</code>, <code>report_implementations</code>).
+  The rest was constants and indexes. The &ldquo;one core, many views&rdquo;
+  invariant survived contact with reality.
+</div>
+
+<h2>The observer-vs-owner arc, marked</h2>
+
+<p>
+  TempleDB started the day owning source (<code>file_contents</code> as
+  authoritative bytes), owning the FUSE mount, owning materialize
+  sweeps. By EOD:
+</p>
+
+<ul>
+  <li><strong>Source</strong> — TempleDB observes. <code>source_snapshots</code>
+    view named the shift; <code>file_contents</code> is documented as
+    snapshot, not truth.</li>
+  <li><strong>Edits</strong> — <code>EditIntent</code> is the write channel.
+    <code>file set</code> still works but routes through intent for
+    provenance.</li>
+  <li><strong>Deployment state</strong> — Generation entities are observations
+    from nix (source authority='nix'); Deployment entities are our
+    own coordination artifact.</li>
+  <li><strong>Code facts</strong> — File, Symbol (soon), Commit, contains,
+    calls — all from git authority via ingest adapter.</li>
+  <li><strong>Agent state</strong> — Session, ToolCall, EditIntent — all
+    DB-native by construction (agent-runtime authority).</li>
+</ul>
+
+<p>
+  Every entity carries its <code>source_authority</code>. Every doctor
+  check runs a commuting-diagram invariant. Every ingest adapter is
+  a small transition map from one local algebra into the shared graph.
+  The observer/integrator vision isn't a design doc anymore; it's the
+  running system.
+</p>
+
+<h2>The queue that remains</h2>
+
+<ol>
+  <li><strong>Agent runtime writes tool_calls directly.</strong> Closes the
+    extraction loop. ~1 hour.</li>
+  <li><strong>SSH-probe reconcile.</strong> Workflow D fully lit up. Reads
+    <code>/run/current-system</code> on each fleet_machine via SSH,
+    verifies against <code>nix_generations</code>. ~2&ndash;3 hours.</li>
+  <li><strong>SCIP Phase 4.</strong> Adopt SCIP as an ingestion algebra
+    for cross-language code facts. Removes the need for templedb to
+    parse Python / Nix / TypeScript itself. ~1 week of focused work.</li>
+  <li><strong>Deployments consolidation into proper span</strong> (if needed).
+    Currently the ingest adapter is sufficient; a schema promotion
+    only matters if we start carrying per-deployment attributes the
+    ingest adapter can't emit uniformly.</li>
+  <li><strong>Phase 5: retire authority-over-source vocabulary.</strong>
+    Documentation update, FUSE removed from mental model,
+    <code>templedb-write-broken</code>-class memories become historical
+    curiosities.</li>
+</ol>
+
+<h2>One-sentence honest summary</h2>
+
+<div class="callout win">
+  <span class="label">Where we are</span>
+  Twelve hours of steady incremental delivery took the observer/integrator
+  plan from three design docs to a running system with a 12,000-entity
+  knowledge graph, six ingestion adapters, nine machine-checkable
+  invariants, and a multi-hop query surface that answers Workflow B and
+  F end-to-end on real data — with the categorical framing named
+  explicitly in a design doc so future decisions apply the pattern
+  consistently.
+</div>
+
+</body>
+</html>
