@@ -3525,3 +3525,40 @@ CREATE INDEX IF NOT EXISTS idx_edit_intents_status
     ON edit_intents(status) WHERE status = 'proposed';
 CREATE INDEX IF NOT EXISTS idx_edit_intents_file
     ON edit_intents(project_id, file_path, status);
+
+
+-- ============================================================================
+-- Migration 089: entities + relations (Phase 3 groundwork)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS entities (
+    id                INTEGER PRIMARY KEY,
+    kind              TEXT NOT NULL,
+    external_ref      TEXT,
+    source_authority  TEXT NOT NULL,
+    label             TEXT,
+    observed_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(kind, external_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind);
+CREATE INDEX IF NOT EXISTS idx_entities_authority
+    ON entities(source_authority);
+
+CREATE TABLE IF NOT EXISTS relations (
+    id                INTEGER PRIMARY KEY,
+    from_entity_id    INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    kind              TEXT NOT NULL,
+    to_entity_id      INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    source_authority  TEXT NOT NULL,
+    observed_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    attributes_json   TEXT,
+    UNIQUE(from_entity_id, kind, to_entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_relations_from
+    ON relations(from_entity_id, kind);
+CREATE INDEX IF NOT EXISTS idx_relations_to
+    ON relations(to_entity_id, kind);
+CREATE INDEX IF NOT EXISTS idx_relations_kind ON relations(kind);

@@ -466,6 +466,168 @@ class TestMaterialize:
             "non-gitignored stray file was preserved but should be swept"
 
 
+# ── Entity Graph (Phase 3 groundwork) Tests ──────────────────────────────────
+
+class TestEntityGraph:
+    """MVP tests for the entity/relation substrate + ingest + doctor.
+    See docs/ENTITY_GRAPH_DESIGN.md for the framing."""
+
+    def test_tables_exist(self, temp_env):
+        conn = sqlite3.connect(temp_env["db_path"])
+        for name in ('entities', 'relations'):
+            row = conn.execute(
+                "SELECT type FROM sqlite_master WHERE name=?", (name,)
+            ).fetchone()
+            assert row is not None, f"{name} table missing"
+            assert row[0] == 'table'
+        conn.close()
+
+    def test_ingest_git_creates_file_and_commit_entities(self, populated_env,
+                                                         capsys):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        cmd = EntityCommands()
+        cmd.ingest(argparse.Namespace(source='git'))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        # File entities
+        n_files = conn.execute(
+            "SELECT COUNT(*) FROM entities WHERE kind='File'"
+        ).fetchone()[0]
+        assert n_files >= 3  # populated_env inserts 3 files
+        # Every File entity has source_authority='git'
+        wrong = conn.execute(
+            """SELECT COUNT(*) FROM entities
+                WHERE kind='File' AND source_authority != 'git'"""
+        ).fetchone()[0]
+        assert wrong == 0
+        conn.close()
+
+    def test_ingest_intent_creates_edit_intent_entities(self, populated_env):
+        """After creating an EditIntent + ingesting, an entities row of
+        kind='EditIntent' exists with the intent id as external_ref."""
+        from cli.commands.intent import IntentCommands
+        from cli.commands.entity import EntityCommands
+        import argparse
+        IntentCommands().create(argparse.Namespace(
+            project='testproj', file_path='README.md',
+            content='# ingest test\n', base_rev=None, message=None,
+            content_argument=None, from_file=None,
+        ))
+        EntityCommands().ingest(argparse.Namespace(source='intent'))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT e.kind, e.external_ref, e.source_authority
+                 FROM entities e
+                WHERE e.kind = 'EditIntent'
+                ORDER BY e.id DESC LIMIT 1"""
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['kind'] == 'EditIntent'
+        assert row['source_authority'] == 'templedb'
+
+    def test_ingest_is_idempotent(self, populated_env, capsys):
+        """Running ingest twice must not duplicate entities."""
+        from cli.commands.entity import EntityCommands
+        import argparse
+        cmd = EntityCommands()
+        cmd.ingest(argparse.Namespace(source='git'))
+        capsys.readouterr()
+        conn = sqlite3.connect(populated_env["db_path"])
+        n_files_1 = conn.execute(
+            "SELECT COUNT(*) FROM entities WHERE kind='File'"
+        ).fetchone()[0]
+        conn.close()
+        # Run again
+        cmd.ingest(argparse.Namespace(source='git'))
+        conn = sqlite3.connect(populated_env["db_path"])
+        n_files_2 = conn.execute(
+            "SELECT COUNT(*) FROM entities WHERE kind='File'"
+        ).fetchone()[0]
+        conn.close()
+        assert n_files_1 == n_files_2, \
+            f"ingest not idempotent: {n_files_1} → {n_files_2}"
+
+    def test_graph_explore_walks_relations(self, populated_env, capsys):
+        """After ingesting, `entity explore` prints the entity + edges."""
+        from cli.commands.entity import EntityCommands
+        import argparse
+        cmd = EntityCommands()
+        cmd.ingest(argparse.Namespace(source='git'))
+        capsys.readouterr()
+        rc = cmd.graph_explore(argparse.Namespace(
+            entity='File/testproj/README.md',
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'File/testproj/README.md' in out
+        assert 'source_authority' in out
+
+    def test_graph_explore_missing_entity(self, populated_env):
+        from cli.commands.entity import EntityCommands
+        import argparse
+        cmd = EntityCommands()
+        assert cmd.graph_explore(argparse.Namespace(
+            entity='File/nonexistent/path.py',
+        )) == 2
+
+    def test_graph_stats_prints_counts(self, populated_env, capsys):
+        from cli.commands.entity import EntityCommands
+        import argparse
+        cmd = EntityCommands()
+        cmd.ingest(argparse.Namespace(source='git'))
+        capsys.readouterr()
+        assert cmd.graph_stats(argparse.Namespace()) == 0
+        out = capsys.readouterr().out
+        assert 'entities:' in out
+        assert 'relations:' in out
+        assert 'File' in out
+
+    def test_doctor_entities_clean_on_populated(self, populated_env, capsys):
+        """After a full ingest, all invariants should hold."""
+        from cli.commands.entity import EntityCommands
+        import argparse
+        cmd = EntityCommands()
+        cmd.ingest(argparse.Namespace(source='git'))
+        capsys.readouterr()
+        rc = cmd.doctor_entities(argparse.Namespace(check=None))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert '✓' in out
+
+    def test_doctor_detects_missing_commit_entity(self, populated_env, capsys):
+        """Insert a vcs_commit, do NOT ingest, and doctor should flag
+        the missing entity."""
+        conn = sqlite3.connect(populated_env["db_path"])
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        # Get the default branch
+        bid = conn.execute(
+            "SELECT id FROM vcs_branches WHERE project_id=?", (pid,)
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO vcs_commits (project_id, branch_id,
+                                        commit_hash, commit_message,
+                                        author, commit_timestamp)
+                 VALUES (?, ?, 'deadbeef00', 'test commit', 'test',
+                         datetime('now'))""",
+            (pid, bid,)
+        )
+        conn.commit()
+        conn.close()
+        from cli.commands.entity import EntityCommands
+        import argparse
+        rc = EntityCommands().doctor_entities(
+            argparse.Namespace(check='every_commit_has_entity')
+        )
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert 'deadbeef00'[:12] in out or 'issue' in out.lower()
+
+
 # ── EditIntent (Phase 2 groundwork) Tests ────────────────────────────────────
 
 class TestEditIntents:
