@@ -57,6 +57,7 @@ class EntityCommands(Command):
             'reports': self._ingest_reports,
             'nix':    self._ingest_nix,
             'deploy': self._ingest_deploy,
+            'python': self._ingest_python,
             'all':    self._ingest_all,
         }
         adapter = adapters.get(args.source)
@@ -263,11 +264,81 @@ WantedBy=timers.target
         return 0
 
     def _ingest_all(self, args) -> int:
-        for sub in ('git', 'agent', 'intent', 'reports', 'nix', 'deploy'):
+        for sub in ('git', 'agent', 'intent', 'reports', 'nix', 'deploy',
+                    'python'):
             args.source = sub
             rc = self.ingest(args)
             if rc != 0:
                 return rc
+        return 0
+
+    def _ingest_python(self, args) -> int:
+        """Parse every .py file in the DB and emit Symbol entities
+        for module-level function + class definitions, with
+        File → defines → Symbol relations.
+
+        Zero external dependencies — uses stdlib `ast` module. Ships
+        Phase 4 groundwork for the class of code-intelligence queries
+        SCIP would give you across many languages; here we cover
+        Python natively.
+
+        Skips files that fail to parse (syntax errors in old snapshots,
+        Python-2-only files). Counts skipped files in `extra_added`.
+        """
+        import ast
+        from db_utils import query_all
+        added_e, added_r, skipped = 0, 0, 0
+
+        rows = query_all(
+            """SELECT p.slug AS slug, pf.file_path AS file_path,
+                      cb.content_text AS content
+                 FROM project_files pf
+                 JOIN projects p ON p.id = pf.project_id
+                 JOIN file_contents fc ON fc.file_id = pf.id
+                    AND fc.is_current = 1
+                 JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+                WHERE pf.status = 'active'
+                  AND pf.file_path LIKE '%.py'
+                  AND cb.content_text IS NOT NULL"""
+        )
+
+        for r in rows:
+            try:
+                tree = ast.parse(r['content'] or '')
+            except (SyntaxError, ValueError):
+                skipped += 1
+                continue
+            file_ref = f"{r['slug']}/{r['file_path']}"
+            file_id = self._entity_id('File', file_ref)
+            if not file_id:
+                # File entity doesn't exist yet — run git ingest first.
+                # Skip rather than fail; the relation will be added on
+                # next python ingest after a git ingest lands.
+                continue
+
+            # Walk module-level FunctionDef/ClassDef nodes. Nested
+            # symbols are deferred to a follow-up; module-level covers
+            # the most useful case ("who calls foo").
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, (ast.FunctionDef,
+                                     ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    kind_label = ('class' if isinstance(node, ast.ClassDef)
+                                  else 'def')
+                    eref = f"{r['slug']}:{r['file_path']}:{node.name}"
+                    label = f"{kind_label} {node.name} (line {node.lineno})"
+                    if self._upsert_entity('Symbol', eref, 'python',
+                                           label=label):
+                        added_e += 1
+                    sym_id = self._entity_id('Symbol', eref)
+                    if sym_id and self._upsert_relation(
+                        file_id, 'defines', sym_id, 'python'
+                    ):
+                        added_r += 1
+
+        print(f"✓ ingest python: +{added_e} symbols, +{added_r} relations, "
+              f"{skipped} unparseable")
+        self._last_counts = {'e': added_e, 'r': added_r, 'x': skipped}
         return 0
 
     def _ingest_deploy(self, args) -> int:
@@ -1615,7 +1686,7 @@ def register(cli):
     ingest_parser.add_argument(
         'source',
         choices=['git', 'agent', 'intent', 'reports', 'nix', 'deploy',
-                 'all', 'history', 'schedule'],
+                 'python', 'all', 'history', 'schedule'],
         help="Which ingestion adapter to run, or 'history'/'schedule' "
              "for meta-commands",
     )

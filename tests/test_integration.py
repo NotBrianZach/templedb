@@ -1211,6 +1211,104 @@ class TestToolCalls:
         assert out.index('Read') < out.index('Search')
 
 
+# ── Python AST Ingest (Phase 4 groundwork) Tests ─────────────────────────────
+
+class TestPythonIngest:
+    """Python AST ingest — Symbol entities + defines relations.
+    Zero-dependency Phase 4 groundwork."""
+
+    def _seed_python_file(self, populated_env, path, content):
+        """Add a .py file to populated_env with the given content."""
+        import hashlib
+        conn = sqlite3.connect(populated_env["db_path"])
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        conn.execute(
+            """INSERT OR IGNORE INTO content_blobs
+                   (hash_sha256, content_text, content_type,
+                    encoding, file_size_bytes)
+                 VALUES (?, ?, 'text', 'utf-8', ?)""",
+            (chash, content, len(content)),
+        )
+        conn.execute(
+            """INSERT INTO project_files
+                   (project_id, file_type_id, file_path, file_name,
+                    status)
+                 VALUES (?, 1, ?, ?, 'active')""",
+            (pid, path, path.rsplit('/', 1)[-1]),
+        )
+        fid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO file_contents
+                   (file_id, content_hash, file_size_bytes, is_current)
+                 VALUES (?, ?, ?, 1)""",
+            (fid, chash, len(content)),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_python_ingest_extracts_functions(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/utils.py',
+            "def foo():\n    pass\n\n"
+            "def bar(x):\n    return x + 1\n\n"
+            "class Baz:\n    pass\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT external_ref, label FROM entities
+                WHERE kind = 'Symbol'
+                ORDER BY external_ref"""
+        ).fetchall()
+        conn.close()
+        refs = {r['external_ref'] for r in rows}
+        assert 'testproj:src/utils.py:foo' in refs
+        assert 'testproj:src/utils.py:bar' in refs
+        assert 'testproj:src/utils.py:Baz' in refs
+
+    def test_python_ingest_creates_defines_relations(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/tiny.py',
+            "def hello():\n    return 'hi'\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.kind = 'File'
+                  AND e1.external_ref = 'testproj/src/tiny.py'
+                  AND e2.kind = 'Symbol'
+                  AND r.kind = 'defines'"""
+        ).fetchone()
+        conn.close()
+        assert row['n'] == 1
+
+    def test_python_ingest_skips_unparseable(self, populated_env, capsys):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/broken.py',
+            "def foo(:\n  syntax error\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        out = capsys.readouterr().out
+        assert '1 unparseable' in out  # from ingest python output
+
+
 # ── Nix Ingest (Phase 3 extension) Tests ─────────────────────────────────────
 
 class TestNixIngest:
