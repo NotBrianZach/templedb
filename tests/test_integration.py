@@ -466,6 +466,204 @@ class TestMaterialize:
             "non-gitignored stray file was preserved but should be swept"
 
 
+# ── Report↔Commit Span (Workflow F) Tests ────────────────────────────────────
+
+class TestReportImplementations:
+    """Workflow F: report_implementations first-class span linking
+    Report ↔ Commit. Auto-detection via regex + human confirm/reject."""
+
+    def _seed_commit_and_report(self, populated_env, commit_hash,
+                                report_body):
+        """Insert a commit + a fake report file into populated_env."""
+        import hashlib
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()['id']
+        bid = conn.execute(
+            "SELECT id FROM vcs_branches WHERE project_id=?", (pid,)
+        ).fetchone()['id']
+        # Insert commit
+        conn.execute(
+            """INSERT INTO vcs_commits
+                   (project_id, branch_id, commit_hash, commit_message,
+                    author, commit_timestamp)
+                 VALUES (?, ?, ?, 'a commit', 'test', datetime('now'))""",
+            (pid, bid, commit_hash),
+        )
+        # Insert report file
+        content = f"<html><head><title>Test Report</title></head><body>{report_body}</body></html>"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        conn.execute(
+            """INSERT INTO content_blobs
+                   (hash_sha256, content_text, content_type, encoding,
+                    file_size_bytes)
+                 VALUES (?, ?, 'text', 'utf-8', ?)""",
+            (chash, content, len(content)),
+        )
+        conn.execute(
+            """INSERT INTO project_files
+                   (project_id, file_type_id, file_path, file_name,
+                    status)
+                 VALUES (?, 1, 'reports/test-report.html',
+                         'test-report.html', 'active')""",
+            (pid,),
+        )
+        fid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO file_contents
+                   (file_id, content_hash, file_size_bytes, is_current)
+                 VALUES (?, ?, ?, 1)""",
+            (fid, chash, len(content)),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_ingest_reports_creates_entity(self, populated_env, capsys):
+        from cli.commands.entity import EntityCommands
+        import argparse
+        self._seed_commit_and_report(
+            populated_env, 'abc1234567890def',
+            'no commit ref in this report',
+        )
+        # Ingest git first so commit entities exist for the relation
+        EntityCommands().ingest(argparse.Namespace(source='git'))
+        capsys.readouterr()
+        EntityCommands().ingest(argparse.Namespace(source='reports'))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT * FROM entities
+                WHERE kind='Report' AND external_ref='reports/test-report.html'"""
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['source_authority'] == 'author'
+        assert row['label'] == 'Test Report'
+
+    def test_auto_detect_creates_impl_when_hash_matches(self, populated_env,
+                                                       capsys):
+        from cli.commands.entity import EntityCommands
+        import argparse
+        commit_hash = 'abc1234567890def' + 'x' * 24  # 40-char
+        commit_hash = 'abc1234567890def0000000000000000abcdef00'
+        # Report mentions the prefix
+        self._seed_commit_and_report(
+            populated_env, commit_hash,
+            f"This report describes work in commit abc1234567.",
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git'))
+        EntityCommands().ingest(argparse.Namespace(source='reports'))
+        capsys.readouterr()
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT confidence, commit_hash FROM report_implementations
+                WHERE report_path='reports/test-report.html'"""
+        ).fetchone()
+        conn.close()
+        assert row is not None, "auto-detect should have inserted impl"
+        assert row['confidence'] == 'auto-detected'
+        assert row['commit_hash'] == commit_hash
+
+    def test_report_link_confirms(self, populated_env, capsys):
+        from cli.commands.entity import EntityCommands
+        import argparse
+        commit_hash = '1111111111111111111111111111111111111111'
+        self._seed_commit_and_report(
+            populated_env, commit_hash,
+            'no auto-detectable hash here',
+        )
+        cmd = EntityCommands()
+        rc = cmd.report_link(argparse.Namespace(
+            report_path='reports/test-report.html',
+            commit='1111111',
+            message='I confirm this',
+        ))
+        assert rc == 0
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT confidence, note FROM report_implementations"
+        ).fetchone()
+        conn.close()
+        assert row['confidence'] == 'confirmed'
+        assert row['note'] == 'I confirm this'
+
+    def test_report_reject_marks_rejected(self, populated_env, capsys):
+        from cli.commands.entity import EntityCommands
+        import argparse
+        commit_hash = '2222222222222222222222222222222222222222'
+        self._seed_commit_and_report(
+            populated_env, commit_hash,
+            'This mentions 2222222 explicitly.',
+        )
+        EntityCommands().ingest(argparse.Namespace(source='reports'))
+        capsys.readouterr()
+        conn = sqlite3.connect(populated_env["db_path"])
+        iid = conn.execute(
+            "SELECT id FROM report_implementations LIMIT 1"
+        ).fetchone()[0]
+        conn.close()
+        rc = EntityCommands().report_reject(argparse.Namespace(id=iid))
+        assert rc == 0
+        conn = sqlite3.connect(populated_env["db_path"])
+        row = conn.execute(
+            "SELECT confidence FROM report_implementations WHERE id=?",
+            (iid,)
+        ).fetchone()
+        conn.close()
+        assert row[0] == 'rejected'
+
+    def test_ingest_reports_preserves_confirmed_over_autodetect(
+            self, populated_env, capsys):
+        """A confirmed link must not be overwritten by a rerun of
+        auto-detect."""
+        from cli.commands.entity import EntityCommands
+        import argparse
+        commit_hash = '3333333333333333333333333333333333333333'
+        self._seed_commit_and_report(
+            populated_env, commit_hash,
+            'Report mentions 3333333.',
+        )
+        cmd = EntityCommands()
+        cmd.report_link(argparse.Namespace(
+            report_path='reports/test-report.html',
+            commit='3333333',
+            message='confirmed manually',
+        ))
+        capsys.readouterr()
+        # Now run auto-detect; should NOT downgrade our confirmed link
+        cmd.ingest(argparse.Namespace(source='reports'))
+        conn = sqlite3.connect(populated_env["db_path"])
+        row = conn.execute(
+            "SELECT confidence FROM report_implementations"
+        ).fetchone()
+        conn.close()
+        assert row[0] == 'confirmed'
+
+    def test_doctor_detects_dangling_report_impl(self, populated_env, capsys):
+        from cli.commands.entity import EntityCommands
+        import argparse
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.execute(
+            """INSERT INTO report_implementations
+                   (report_path, project_slug, commit_hash, confidence)
+                 VALUES ('reports/nonexistent.html', 'testproj',
+                         'deadbeef00', 'confirmed')"""
+        )
+        conn.commit()
+        conn.close()
+        cmd = EntityCommands()
+        rc = cmd.doctor_entities(argparse.Namespace(
+            check='report_impls_reference_valid_reports'
+        ))
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert 'nonexistent.html' in out
+
+
 # ── Entity Graph (Phase 3 groundwork) Tests ──────────────────────────────────
 
 class TestEntityGraph:

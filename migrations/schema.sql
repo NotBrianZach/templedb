@@ -3562,3 +3562,31 @@ CREATE INDEX IF NOT EXISTS idx_relations_from
 CREATE INDEX IF NOT EXISTS idx_relations_to
     ON relations(to_entity_id, kind);
 CREATE INDEX IF NOT EXISTS idx_relations_kind ON relations(kind);
+
+
+-- ============================================================================
+-- Migration 090: report_implementations (first-class span, workflow F)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS report_implementations (
+    id                INTEGER PRIMARY KEY,
+    report_path       TEXT NOT NULL,
+    project_slug      TEXT NOT NULL,
+    commit_hash       TEXT NOT NULL,
+    confidence        TEXT NOT NULL DEFAULT 'auto-detected'
+                        CHECK (confidence IN
+                            ('auto-detected', 'confirmed',
+                             'verified', 'rejected')),
+    note              TEXT,
+    linked_by         TEXT,
+    linked_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    verified_at       TEXT,
+    UNIQUE(report_path, commit_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_report_impls_report
+    ON report_implementations(report_path);
+CREATE INDEX IF NOT EXISTS idx_report_impls_commit
+    ON report_implementations(commit_hash);
+CREATE INDEX IF NOT EXISTS idx_report_impls_confidence
+    ON report_implementations(confidence);

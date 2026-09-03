@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Proposed schema after observer/integrator plan</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --neg: #e97070;
+    --warn: #e0c060;
+    --keep: #7fd6a0;
+    --shrink: #e0c060;
+    --retire: #e97070;
+    --new: #7ec7ff;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  h4 { color: #a0a0c0; font-size: 0.92rem; margin: 1.2rem 0 0.4rem;
+       text-transform: uppercase; letter-spacing: 0.05em; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.88em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); color: var(--muted); font-weight: 500; }
+  .keep   { color: var(--keep); font-weight: 500; }
+  .shrink { color: var(--shrink); font-weight: 500; }
+  .retire { color: var(--retire); font-weight: 500; }
+  .new    { color: var(--new); font-weight: 500; }
+  .view   { color: var(--muted); font-style: italic; }
+  .dim { color: var(--muted); }
+  .group-card {
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 0.9rem 1.15rem; margin: 1.2rem 0; background: var(--panel);
+  }
+  .group-card h3 { margin-top: 0; }
+  .legend {
+    font-size: 0.85em; color: var(--muted); padding: 0.5rem 0.8rem;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 4px; margin: 0.8rem 0;
+  }
+  .legend span { margin-right: 1.5em; }
+</style>
+</head>
+<body>
+
+<h1>Proposed schema after observer/integrator plan</h1>
+<p class="lede">
+  Maps the current 131-table TempleDB schema onto the target shape implied by <a href="2026-09-02-1430-from-observer-to-integrator-implementation-plan.html">the observer/integrator plan</a> and the <a href="2026-09-03-0826-cross-session-handoff-semantics.html">cross-session handoff</a> proposal. The overarching move: <strong>collapse the sprawl of typed tables into a small load-bearing core (<code>entities</code>, <code>relations</code>, <code>content_blobs</code>) plus first-class junction objects for the shapes that carry identity (<code>Deployment</code>, <code>EditIntent</code>, <code>Build</code>, <code>Handoff</code>).</strong> Existing typed tables become materialized views for backward compatibility. Diffs and byte-level source history stop being ours to keep; git and nix reclaim those. Explains what each group of current tables becomes: <span class="keep">keep as-is</span>, <span class="shrink">shrink to metadata + FK to entity</span>, <span class="view">demote to materialized view</span>, <span class="retire">retire</span>, or <span class="new">new/promoted</span>.
+</p>
+
+<div class="legend">
+  <span><span class="keep">■</span> keep</span>
+  <span><span class="shrink">■</span> shrink</span>
+  <span><span class="view">■</span> becomes view</span>
+  <span><span class="retire">■</span> retire</span>
+  <span><span class="new">■</span> new/promoted</span>
+</div>
+
+<h2>The five framings that drive every schema decision</h2>
+
+<ol>
+  <li><strong>Authority per fact, not per system.</strong> Every stored fact carries <code>source_authority</code> (git, nix, ssh-probe, agent, scip, human) and <code>observed_at</code>. Truth becomes a per-column property, not a table-wide property.</li>
+  <li><strong>Observer over owner for source bytes.</strong> Git is authoritative for commit-file bytes; we snapshot for query, not for authorship. The write path becomes <code>EditIntent</code>, not <code>file set</code> directly to blob storage.</li>
+  <li><strong>Promote junctions to first-class objects.</strong> Any relationship that acquires identity/history/state transitions becomes an entity with its own row and lifecycle. <code>Build</code>, <code>Deployment</code>, <code>EditIntent</code>, <code>Handoff</code>, <code>Report&harr;Commit</code> all fit this shape.</li>
+  <li><strong>One core, many views.</strong> Two tables (<code>entities</code>, <code>relations</code>) plus one blob store (<code>content_blobs</code>) carry the load. Existing typed tables become materialized views over the core so old queries keep working.</li>
+  <li><strong>Ingestion algebras, not schemas.</strong> Each authority (git, nix, scip, ssh-probe, agent runtime) has a small adapter that upserts entities and relations. Schema doesn&rsquo;t grow when authorities do &mdash; adapters do.</li>
+</ol>
+
+<h2>Where we are: the 131 tables today</h2>
+
+<p>
+  Grouping the current schema by concern reveals the sprawl the plan is responding to.
+  Numbers below are current table counts per concern.
+</p>
+
+<table class="matrix">
+  <tr><th>Concern</th><th>Tables (n)</th><th>Notable members</th></tr>
+  <tr><td>VCS / source history</td><td>15</td><td>vcs_commits, vcs_branches, vcs_commit_parents, vcs_commit_tags, vcs_commit_metadata, vcs_file_states, vcs_file_change_metadata, vcs_working_state, vcs_sessions, vcs_tags, commit_files, content_blobs, file_contents, project_files, file_metadata</td></tr>
+  <tr><td>Nix / config compiler / ast</td><td>19</td><td>nix_store_paths, nix_store_refs, nix_closures, nix_closure_paths, nix_closure_diffs, nix_generations, nix_configs, nix_environments, nix_env_sessions, nix_flake_metadata, nix_flake_validation_history, nix_project_paths, nix_cache_entries, nix_eval_cache, nix_service_metadata, nixos_managed_packages, config_nodes, config_hosts, config_node_owners, config_roots, config_links, config_checkouts, system_config, ast_builds</td></tr>
+  <tr><td>Deployment / fleet</td><td>17</td><td>deployment_history, deployment_snapshots, deployment_targets, deployment_triggers, deployment_cache, deployment_cache_stats, deployment_health_checks, deployment_rollbacks, deployment_notifications, deployment_scripts, system_deployments, blue_green_state, edge_function_deployments, fleet_deployments, fleet_machine_deployments, fleet_machines, fleet_networks, fleet_resources, fleet_local_services</td></tr>
+  <tr><td>Code intelligence</td><td>8</td><td>code_symbols, code_symbol_dependencies, code_search_index, code_clusters, code_cluster_files, code_cluster_members, file_dependencies, impact_transitive_cache, graph_query_log</td></tr>
+  <tr><td>Agent runtime</td><td>11</td><td>agent_sessions, agent_providers, agent_runs, agent_messages, agent_events, agent_session_notes, agent_work_log, agent_pending_asks, edit_intents, edit_sessions, editor_sessions</td></tr>
+  <tr><td>Projects / metadata</td><td>12</td><td>projects, project_files, project_domains, project_tags, project_env_vars, project_prompts, project_secret_blobs, project_test_deps, project_tests, tags, dns_records, checkouts, checkout_snapshots</td></tr>
+  <tr><td>Env / secrets</td><td>6</td><td>environment_variables, env_vars, secret_blobs, secret_key_assignments, encryption_keys, encryption_key_audit</td></tr>
+  <tr><td>Tests / prompts / readme</td><td>7</td><td>test_runs, prompt_templates, prompt_usage_log, readme_files, readme_sections, readme_topics, project_tests</td></tr>
+  <tr><td>Sync (crsql)</td><td>~20</td><td>sync_projects, sync_vcs_commits, sync_vcs_branches, sync_environment_variables, sync_nixos_config, sync_system_config, sync_cache + each&rsquo;s __crsql_clock / __crsql_pks pair</td></tr>
+  <tr><td>Backups / audit / infra</td><td>5</td><td>backup_history, audit_log, migration_history, schema_version, entities, relations</td></tr>
+</table>
+
+<p>
+  Two of those tables are already the target shape but currently unused as the core: <code>entities</code> and <code>relations</code> were added (visible in <code>migrations/schema.sql</code>) as scaffolding but nothing routes through them yet. Phase 3 makes them load-bearing.
+</p>
+
+<h2>The load-bearing core after the plan</h2>
+
+<p>Everything else is an adapter, a view, or a decoration on these:</p>
+
+<pre>content_blobs             -- content-addressable byte store
+  (hash_sha256 PK, content_text/blob, size, refcount, storage_location)
+
+entities                  -- every noun in the system
+  (id, kind, external_ref, source_authority, label,
+   observed_at, created_at, UNIQUE(kind, external_ref))
+
+relations                 -- every typed edge
+  (id, from_entity_id, kind, to_entity_id, source_authority,
+   observed_at, attributes_json,
+   UNIQUE(from_entity_id, kind, to_entity_id))</pre>
+
+<p>
+  Every ingestion adapter upserts entities and relations with its own <code>source_authority</code> tag. Every existing typed table becomes either a materialized view over these (for read-side backward compatibility) or a first-class junction with its own row when the relationship itself carries identity (see below).
+</p>
+
+<div class="callout win">
+  <span class="label">Design invariant</span>
+  Adding a new authority never requires a new table. It requires a new adapter that emits into <code>entities</code> and <code>relations</code>. Adding a new junction object <em>does</em> require a new table &mdash; but only when the relationship has its own lifecycle (states, timestamps, references, ack semantics).
+</div>
+
+<h2>The junction objects that get first-class tables</h2>
+
+<p>
+  Not every relation deserves its own table. A relation gets promoted when it acquires:
+  <em>identity</em> (queryable by id independent of endpoints), <em>state transitions</em> (created &rarr; applied &rarr; reverted), <em>attributes distinct from either endpoint</em> (timestamps, hashes, reasons), or <em>lifecycle history</em> (audit trail).
+</p>
+
+<table class="matrix">
+  <tr><th>Junction</th><th>Span shape</th><th>Status</th><th>Owns</th></tr>
+  <tr><td><code>ast_builds</code></td><td>Commit &larr; Build &rarr; StorePath</td><td><span class="keep">exists</span></td><td>output_hash, timestamp, deployment_id, nix-build status</td></tr>
+  <tr><td><code>edit_intents</code></td><td>Session &larr; EditIntent &rarr; FileSnapshot</td><td><span class="shrink">exists, Phase 2 makes primary</span></td><td>base_revision, patch, status (created/applied/reverted), author</td></tr>
+  <tr><td><code>deployments</code> (new name)</td><td>Commit &larr; Deployment &rarr; Machine (via StorePath)</td><td><span class="new">promote from deployment_history + deployment_snapshots</span></td><td>triggered_at, activated_at, rolled_back_at, agent, reason</td></tr>
+  <tr><td><code>handoff_notes</code></td><td>Session &larr; Handoff &rarr; Session|Topic|Broadcast</td><td><span class="new">Phase 2.5</span></td><td>subject, body, refs, read_at, acked_at, expires_at</td></tr>
+  <tr><td><code>decisions</code></td><td>Report &larr; Decision &rarr; Commit</td><td><span class="new">Phase 3 side-effect</span></td><td>proposed_at, accepted_at, implemented_at, rationale</td></tr>
+  <tr><td><code>tool_calls</code></td><td>AgentRun &larr; ToolCall &rarr; Effect</td><td><span class="shrink">extract from agent_events</span></td><td>tool_name, args_hash, result_hash, started_at, finished_at</td></tr>
+</table>
+
+<p>
+  <code>deployment_snapshots</code> today is a row-per-file with no identity of its own; under the new shape a <code>Deployment</code> row carries identity and lifecycle, and per-file snapshots become <code>Deployment &rarr; contains &rarr; SourceSnapshot</code> relations. Same for <code>agent_events</code> &mdash; where a specific tool call has its own start/finish/result state, that&rsquo;s a <code>ToolCall</code> row; where an event is just a log line, it stays in <code>agent_events</code>.
+</p>
+
+<h2>Table-by-table disposition</h2>
+
+<h3>VCS / source history</h3>
+
+<div class="group-card">
+<p><strong>The most-changed group.</strong> Git reclaims authority for commit bytes. TempleDB keeps commit metadata (author, message, timestamp, parents) as observation, and stops storing per-commit inline file content.</p>
+
+<table class="matrix">
+  <tr><th>Table</th><th>Disposition</th><th>Why</th></tr>
+  <tr><td><code>vcs_commits</code></td><td><span class="shrink">shrink</span></td><td>Keep as observation of git commits. Drop tables that duplicate git behavior; keep author/message/timestamp/parents as denormalized cache for offline queries. Becomes an entity of kind <code>Commit</code>, <code>source_authority='git'</code>.</td></tr>
+  <tr><td><code>vcs_commit_parents</code></td><td><span class="view">view</span></td><td>Redundant with git&rsquo;s own parent chain; keep as materialized view over relations of kind <code>parent-of</code>.</td></tr>
+  <tr><td><code>vcs_commit_metadata</code>, <code>vcs_commit_tags</code>, <code>vcs_file_change_metadata</code></td><td><span class="retire">retire</span></td><td>Metadata sidecars added ad hoc; move onto <code>entities.attributes_json</code>.</td></tr>
+  <tr><td><code>vcs_branches</code>, <code>vcs_tags</code></td><td><span class="shrink">shrink</span></td><td>Branch/tag pointers are cheap to re-read from git; keep only as cache with <code>observed_at</code>.</td></tr>
+  <tr><td><code>vcs_file_states</code></td><td><span class="retire">retire</span> (Phase 5)</td><td>Per-commit inline file content is redundant with git&rsquo;s own object store. Under observer, reconstruct file content via <code>git show &lt;hash&gt;:&lt;path&gt;</code> on demand.</td></tr>
+  <tr><td><code>vcs_working_state</code></td><td><span class="view">view</span></td><td>Rewired to point at <code>edit_intents</code> rather than store raw content. Backward-compatible via view (Phase 2).</td></tr>
+  <tr><td><code>vcs_sessions</code></td><td><span class="keep">keep</span></td><td>Session identity is DB-native; no filesystem analog. Becomes an entity of kind <code>Session</code>.</td></tr>
+  <tr><td><code>commit_files</code></td><td><span class="retire">retire</span></td><td>Superseded by <code>Commit contains FileSnapshot</code> relations.</td></tr>
+  <tr><td><code>content_blobs</code></td><td><span class="keep">keep</span></td><td>The one storage table that survives untouched. Content-addressed dedup is load-bearing for both source snapshots and agent-produced content.</td></tr>
+  <tr><td><code>file_contents</code></td><td><span class="shrink">reframe</span> (Phase 1)</td><td>Becomes <code>source_snapshots</code>: an immutable observation of &ldquo;the bytes of this path at this revision, as seen at <code>observed_at</code>.&rdquo; No longer the authoring surface.</td></tr>
+  <tr><td><code>project_files</code>, <code>file_metadata</code>, <code>file_types</code></td><td><span class="keep">keep</span></td><td>Denormalized file registry; still useful for cross-project queries.</td></tr>
+  <tr><td><code>readme_files</code>, <code>readme_sections</code>, <code>readme_topics</code></td><td><span class="shrink">shrink</span></td><td>Specialized derived content; keep tables but classify as adapter-fed views.</td></tr>
+</table>
+</div>
+
+<div class="callout warn">
+  <span class="label">On diffs specifically</span>
+  We do not store per-commit diffs today and will not add them. Snapshots (via <code>content_blobs</code> + <code>source_snapshots</code> view) are the storage shape; diffs are computed on demand from two blobs. Under Phase 5, even snapshots become optional for source paths &mdash; if git holds the bytes and we hold the provenance, we can re-fetch bytes when a query needs them. The remaining reason to hold source bytes locally is offline queries and cross-project dedup, both satisfied by opportunistic <code>content_blobs</code> caching, not by full history mirroring.
+</div>
+
+<h3>Deployment / fleet</h3>
+
+<div class="group-card">
+<p><strong>The junction-object promotion group.</strong> Deployment is currently spread across <code>deployment_history</code>, <code>deployment_snapshots</code>, and half a dozen sidecars; the target consolidates into a first-class <code>Deployment</code> entity with lifecycle.</p>
+
+<table class="matrix">
+  <tr><th>Table</th><th>Disposition</th><th>Why</th></tr>
+  <tr><td><code>deployment_history</code></td><td><span class="shrink">consolidate</span></td><td>Merge with <code>deployment_snapshots</code> into a single <code>deployments</code> entity/table. Retain rows; column-add <code>lifecycle_state</code> and lifecycle timestamps.</td></tr>
+  <tr><td><code>deployment_snapshots</code></td><td><span class="view">view</span></td><td>Per-file rows become <code>Deployment contains SourceSnapshot</code> relations; existing table becomes a compat view.</td></tr>
+  <tr><td><code>deployment_targets</code>, <code>deployment_triggers</code>, <code>deployment_health_checks</code></td><td><span class="shrink">shrink</span></td><td>Keep, but rewire to reference <code>Deployment</code> entity. Move small structs into <code>attributes_json</code>.</td></tr>
+  <tr><td><code>deployment_rollbacks</code>, <code>deployment_notifications</code>, <code>deployment_scripts</code></td><td><span class="shrink">shrink</span></td><td>Same &mdash; adapter-fed rows against <code>Deployment</code>.</td></tr>
+  <tr><td><code>deployment_cache</code>, <code>deployment_cache_stats</code></td><td><span class="keep">keep</span></td><td>Cache; kept as-is, orthogonal to authority discussion.</td></tr>
+  <tr><td><code>system_deployments</code>, <code>edge_function_deployments</code>, <code>blue_green_state</code></td><td><span class="shrink">shrink</span></td><td>Specialized deploy kinds; retain as attribute-carriers keyed on <code>Deployment.kind</code>.</td></tr>
+  <tr><td><code>fleet_deployments</code>, <code>fleet_machine_deployments</code></td><td><span class="view">view</span></td><td>Views over <code>Deployment targets Machine</code> relations.</td></tr>
+  <tr><td><code>fleet_machines</code>, <code>fleet_networks</code>, <code>fleet_resources</code>, <code>fleet_local_services</code></td><td><span class="keep">keep</span></td><td>Machines and infra config are DB-native. Become <code>Machine</code> entities; existing tables persist as extended attributes.</td></tr>
+</table>
+</div>
+
+<h3>Nix / config compiler / AST</h3>
+
+<div class="group-card">
+<p><strong>The biggest &ldquo;keep vs. shrink&rdquo; call.</strong> Nix is authoritative for store paths, closures, and build outputs. TempleDB keeps its own tables for cross-authority provenance (which commit built which store path) but doesn&rsquo;t need to shadow every nix eval detail.</p>
+
+<table class="matrix">
+  <tr><th>Table</th><th>Disposition</th><th>Why</th></tr>
+  <tr><td><code>nix_store_paths</code></td><td><span class="shrink">shrink</span></td><td>Keep as <code>StorePath</code> entity with <code>source_authority='nix'</code>. Drop columns that duplicate <code>nix path-info</code> output on demand.</td></tr>
+  <tr><td><code>nix_store_refs</code>, <code>nix_closures</code>, <code>nix_closure_paths</code>, <code>nix_closure_diffs</code></td><td><span class="shrink">shrink</span></td><td>Closure structure is cheap to re-query from nix. Retain summary tables; drop per-path replication. Diffs specifically are on-demand output, not storage.</td></tr>
+  <tr><td><code>nix_generations</code></td><td><span class="keep">keep</span></td><td>Local generation tracking (per host) with links to <code>Deployment</code>; nix doesn&rsquo;t hold this shape across hosts.</td></tr>
+  <tr><td><code>nix_configs</code>, <code>nix_environments</code>, <code>nix_env_sessions</code>, <code>nix_flake_metadata</code>, <code>nix_flake_validation_history</code></td><td><span class="shrink">shrink</span></td><td>Retain, but rewire as adapter-fed. Metadata and validation history stay useful.</td></tr>
+  <tr><td><code>nix_cache_entries</code>, <code>nix_eval_cache</code>, <code>nix_project_paths</code>, <code>nix_service_metadata</code>, <code>nixos_managed_packages</code></td><td><span class="keep">keep</span></td><td>Local optimization / metadata; not primary storage.</td></tr>
+  <tr><td><code>config_nodes</code></td><td><span class="shrink">reframe</span></td><td>Was headed toward "AST as authority for config content." Under the observer plan, it&rsquo;s an <em>observation</em> of Nix source (via tree-sitter), not an authoring surface. Deep-merge resolver (per AST_MERGE_SEMANTICS) still useful as a query, not as a write path.</td></tr>
+  <tr><td><code>config_hosts</code>, <code>config_node_owners</code>, <code>config_roots</code>, <code>config_links</code>, <code>config_checkouts</code></td><td><span class="shrink">shrink</span></td><td>Same demotion &mdash; observations of the source tree, not authors of it.</td></tr>
+  <tr><td><code>system_config</code></td><td><span class="retire">retire</span> (long-term)</td><td>Legacy flat key/value store for NixOS config; superseded by config_nodes (which itself is now observation). Retire once ast-based deploy is fully in place.</td></tr>
+  <tr><td><code>ast_builds</code></td><td><span class="keep">keep</span></td><td>Already the span pattern (<code>Commit &larr; Build &rarr; StorePath</code>) with output_hash and identity. Textbook shape.</td></tr>
+</table>
+</div>
+
+<h3>Code intelligence</h3>
+
+<div class="group-card">
+<p><strong>Externalize via SCIP.</strong> Language-specific parsing becomes an adapter that emits into <code>entities</code> and <code>relations</code>. Cross-project graph queries continue to work.</p>
+
+<table class="matrix">
+  <tr><th>Table</th><th>Disposition</th><th>Why</th></tr>
+  <tr><td><code>code_symbols</code>, <code>code_symbol_dependencies</code></td><td><span class="view">view</span></td><td>Materialized views over <code>Symbol</code> entities and <code>defines</code>/<code>calls</code>/<code>references</code> relations. Backing rows come from SCIP adapters (Phase 4).</td></tr>
+  <tr><td><code>code_search_index</code></td><td><span class="keep">keep</span></td><td>Full-text search index; independent of authority model.</td></tr>
+  <tr><td><code>code_clusters</code>, <code>code_cluster_files</code>, <code>code_cluster_members</code></td><td><span class="keep">keep</span></td><td>Derived analytics; not on the source-authority axis.</td></tr>
+  <tr><td><code>file_dependencies</code>, <code>impact_transitive_cache</code></td><td><span class="view">view</span></td><td>Import-graph views over relations.</td></tr>
+  <tr><td><code>graph_query_log</code></td><td><span class="keep">keep</span></td><td>Query telemetry; useful for cache tuning.</td></tr>
+</table>
+</div>
+
+<h3>Agent runtime</h3>
+
+<div class="group-card">
+<p><strong>Almost entirely keep.</strong> Agent state has no filesystem analog and is the poster child for DB-native ownership. Small extractions where events carry lifecycle (tool calls, handoffs).</p>
+
+<table class="matrix">
+  <tr><th>Table</th><th>Disposition</th><th>Why</th></tr>
+  <tr><td><code>agent_sessions</code>, <code>agent_providers</code>, <code>agent_runs</code>, <code>agent_messages</code></td><td><span class="keep">keep</span></td><td>Core agent runtime; becomes <code>Session</code>/<code>AgentRun</code>/<code>Message</code> entities but tables persist as views.</td></tr>
+  <tr><td><code>agent_events</code></td><td><span class="shrink">shrink</span></td><td>Retain for pure log lines; extract structured events (tool calls with start/finish/result) into a new <code>tool_calls</code> junction table.</td></tr>
+  <tr><td><code>agent_session_notes</code>, <code>agent_work_log</code>, <code>agent_pending_asks</code></td><td><span class="keep">keep</span></td><td>DB-native by construction. Continue as-is.</td></tr>
+  <tr><td><code>edit_intents</code></td><td><span class="keep">keep</span> + <span class="new">promote</span></td><td>Already exists as scaffolding (see <code>schema.sql</code> definition with session_id, base_revision, new_content_hash, patch_summary, author). Phase 2 makes it the canonical write path with lifecycle state (created/applied/reverted).</td></tr>
+  <tr><td><code>edit_sessions</code>, <code>editor_sessions</code></td><td><span class="shrink">consolidate</span></td><td>Two nearly-identical tables from different eras; merge into <code>vcs_sessions</code> or drop entirely if unused.</td></tr>
+  <tr><td><code>handoff_notes</code></td><td><span class="new">new</span></td><td>Cross-session pinboard (see companion report). Pull-based, single table.</td></tr>
+</table>
+</div>
+
+<h3>Projects / metadata / env / secrets</h3>
+
+<div class="group-card">
+<p><strong>Mostly keep.</strong> These are project-metadata concerns that don&rsquo;t interact with the source-authority question. Small rewires as entities.</p>
+
+<table class="matrix">
+  <tr><th>Table</th><th>Disposition</th><th>Why</th></tr>
+  <tr><td><code>projects</code>, <code>project_files</code></td><td><span class="keep">keep</span></td><td>Central identity; become <code>Project</code> and <code>File</code> entities.</td></tr>
+  <tr><td><code>project_domains</code>, <code>project_tags</code>, <code>project_prompts</code>, <code>project_secret_blobs</code></td><td><span class="keep">keep</span></td><td>Metadata sidecars; keep.</td></tr>
+  <tr><td><code>project_env_vars</code>, <code>environment_variables</code>, <code>env_vars</code></td><td><span class="shrink">consolidate</span></td><td>Three overlapping env-var tables from different eras; merge into a single canonical shape.</td></tr>
+  <tr><td><code>secret_blobs</code>, <code>secret_key_assignments</code>, <code>encryption_keys</code>, <code>encryption_key_audit</code></td><td><span class="keep">keep</span></td><td>Secrets domain; sensitive, keep isolated.</td></tr>
+  <tr><td><code>tags</code>, <code>dns_records</code></td><td><span class="keep">keep</span></td><td>Metadata; keep.</td></tr>
+  <tr><td><code>checkouts</code>, <code>checkout_snapshots</code></td><td><span class="shrink">shrink</span></td><td>Under Phase 5, checkout state is filesystem&rsquo;s job; keep only pointers and drift markers.</td></tr>
+</table>
+</div>
+
+<h3>Tests / prompts / reports (as data)</h3>
+
+<div class="group-card">
+<p><strong>All keep.</strong> These are authored artifacts with no external authority to defer to.</p>
+
+<table class="matrix">
+  <tr><th>Table</th><th>Disposition</th><th>Why</th></tr>
+  <tr><td><code>test_runs</code>, <code>project_tests</code>, <code>project_test_deps</code></td><td><span class="keep">keep</span></td><td>Test execution history is DB-native.</td></tr>
+  <tr><td><code>prompt_templates</code>, <code>prompt_usage_log</code></td><td><span class="keep">keep</span></td><td>Prompt library and usage telemetry; DB-native.</td></tr>
+</table>
+
+<p>Reports themselves live in <code>reports/*.html</code> as project files and are also becoming first-class entities via the <code>Report&harr;Commit</code> junction in Phase 3.</p>
+</div>
+
+<h3>Sync (crsql) / backups / audit / infra</h3>
+
+<div class="group-card">
+<p><strong>Keep as-is; orthogonal to authority model.</strong></p>
+
+<table class="matrix">
+  <tr><th>Table</th><th>Disposition</th><th>Why</th></tr>
+  <tr><td>Any <code>sync_*</code> / <code>__crsql_*</code></td><td><span class="keep">keep</span></td><td>Cross-machine replication layer. Independent concern; will need extension when <code>entities</code>/<code>relations</code> become primary (add crsql tracking to them).</td></tr>
+  <tr><td><code>backup_history</code>, <code>audit_log</code>, <code>migration_history</code>, <code>schema_version</code></td><td><span class="keep">keep</span></td><td>Infrastructure; no change.</td></tr>
+  <tr><td><code>entities</code>, <code>relations</code></td><td><span class="new">promote to core</span></td><td>Already scaffolded (see <code>schema.sql</code>). Phase 3 makes them load-bearing: every ingestion adapter writes here first, existing tables become views over them.</td></tr>
+</table>
+</div>
+
+<h2>New tables the plan introduces</h2>
+
+<table class="matrix">
+  <tr><th>Table</th><th>Phase</th><th>Purpose</th></tr>
+  <tr><td><code>edit_intents</code></td><td>2 (promote)</td><td>Already scaffolded; formalized as the canonical write path with (created/applied/reverted) lifecycle. Wraps <code>file set</code>.</td></tr>
+  <tr><td><code>source_snapshots</code> (view)</td><td>1</td><td>View over <code>file_contents</code> exposing <code>(repo, revision, path, hash, content, observed_at, source_authority)</code>.</td></tr>
+  <tr><td><code>handoff_notes</code></td><td>2.5</td><td>Cross-session pinboard. Pull-based, single table, tagged.</td></tr>
+  <tr><td><code>deployments</code> (consolidated)</td><td>3</td><td>Junction promotion: merge <code>deployment_history</code> + <code>deployment_snapshots</code> into one entity with lifecycle.</td></tr>
+  <tr><td><code>tool_calls</code></td><td>3</td><td>Junction promotion: extract structured tool calls from <code>agent_events</code>.</td></tr>
+  <tr><td><code>decisions</code></td><td>3</td><td>Junction: <code>Report &larr; Decision &rarr; Commit</code> (workflow F, &ldquo;which reports actually got implemented?&rdquo;).</td></tr>
+  <tr><td><code>ingestion_runs</code></td><td>3</td><td>Per-adapter run log for the reconcile story: which authority scanned what, when, how many facts changed. Sits behind <code>templedb doctor entities</code>.</td></tr>
+  <tr><td><code>invariant_checks</code></td><td>3</td><td>Named commuting-diagram invariants (e.g. <code>hash(snapshot(c)) = provenance(build(c))</code>) with last-checked-at and status. Materializes the &ldquo;commuting diagrams as machine-checked&rdquo; idea from the critique.</td></tr>
+</table>
+
+<h2>The ingestion adapter layer (new; no schema per se)</h2>
+
+<p>
+  Each authority has a small adapter that reads its native format and upserts <code>entities</code> + <code>relations</code>. No schema growth on adapter addition. Freshness policy per adapter, all recorded in <code>ingestion_runs</code>.
+</p>
+
+<pre>authority           adapter                    facts emitted
+git                 git-walker                 Commit, FileSnapshot, contains, parent-of
+nix                 nix-store queries          Derivation, StorePath, built-from, produces
+NixOS (per host)    SSH probe                  Generation, running-on, deployed-at
+agent runtime       direct DB write            Session, ToolCall, EditIntent, proposed, applied-to
+LSP / language      SCIP export                Symbol, defines, calls, references
+human               report/decision markup     Report, Decision, motivated, implemented-in</pre>
+
+<p>
+  <code>templedb doctor entities</code> walks each entity, asks its authority whether the fact is still current, records the check in <code>invariant_checks</code>. Load-bearing from day one (Phase 3), not deferred &mdash; this is the reconcile pattern every industry coordinator (Hive, Terraform, Istio) learned the hard way to build in early.
+</p>
+
+<h2>Migration ordering</h2>
+
+<p>The schema evolution is incremental; every migration keeps existing queries working.</p>
+
+<ol>
+  <li><strong>Phase 0 (shipped)</strong> &mdash; no schema changes; gitignore rules and drift diagnostics on the filesystem side.</li>
+  <li><strong>Phase 1</strong> &mdash; add <code>source_snapshots</code> view over <code>file_contents</code>. Document the reframing. No writes change.</li>
+  <li><strong>Phase 2</strong> &mdash; wire <code>edit_intents</code> as the canonical write path. <code>file set</code> becomes <code>intent create &amp;&amp; apply</code>. <code>vcs_working_state</code> gets a view definition against intents.</li>
+  <li><strong>Phase 2.5</strong> &mdash; add <code>handoff_notes</code>. Independent of the main pipeline; ~1 day.</li>
+  <li><strong>Phase 3</strong> &mdash; promote <code>entities</code> and <code>relations</code> to load-bearing. Adapters begin writing here. Existing typed tables get view definitions layered on top. Add <code>ingestion_runs</code>, <code>invariant_checks</code>. Ship <code>templedb doctor entities</code>. Promote junction objects (<code>deployments</code>, <code>tool_calls</code>, <code>decisions</code>).</li>
+  <li><strong>Phase 4</strong> &mdash; SCIP adapter. Code-facts ingestion externalized. <code>code_symbols</code> becomes a view over SCIP-emitted facts.</li>
+  <li><strong>Phase 5</strong> &mdash; retire <code>vcs_file_states</code> for source paths. Reconstruct file bytes from git on demand. Optionally retire <code>system_config</code> once ast-based config deploy is stable.</li>
+</ol>
+
+<h2>What the schema stops doing</h2>
+
+<ul>
+  <li><strong>Stops storing per-commit inline file content.</strong> Git holds bytes; we hold hashes and metadata. Full-history mirror is gone.</li>
+  <li><strong>Stops being the write path for source bytes.</strong> Writes go through <code>edit_intents</code>. The <code>file set</code> shortcut remains but is a wrapper.</li>
+  <li><strong>Stops duplicating nix-store metadata.</strong> Closure structure, path info, refs &mdash; queried from nix on demand, cached opportunistically.</li>
+  <li><strong>Stops growing a new table per authority.</strong> New authorities are new adapters, not new tables.</li>
+  <li><strong>Stops silently truncating on FUSE writes.</strong> The FUSE mount retires (Phase 5). Editing is filesystem-native via <code>templedb edit &lt;slug&gt;</code> workspaces; agent edits go through <code>edit_intents</code>.</li>
+</ul>
+
+<h2>What the schema starts doing</h2>
+
+<ul>
+  <li><strong>Tags every fact with its authority and observation time.</strong> <code>source_authority</code> and <code>observed_at</code> on every entity and relation.</li>
+  <li><strong>Records ingestion runs.</strong> <code>ingestion_runs</code> makes freshness queryable per adapter.</li>
+  <li><strong>Reconciles against authorities.</strong> <code>templedb doctor entities</code> walks the graph, asks each authority to confirm, flags drift.</li>
+  <li><strong>Checks commuting-diagram invariants.</strong> <code>invariant_checks</code> holds named laws like <code>hash(snapshot(c)) = provenance(build(c))</code> with last-checked-at.</li>
+  <li><strong>Promotes junctions to objects.</strong> <code>Build</code>, <code>Deployment</code>, <code>EditIntent</code>, <code>Handoff</code>, <code>Decision</code>, <code>ToolCall</code> each carry identity and lifecycle rather than being invisible fks.</li>
+  <li><strong>Supports the five-hop provenance query.</strong> &ldquo;Which store path is running on this machine, from which deployment, from which commit, from which agent-session-and-intent-chain, motivated by which report?&rdquo; is a graph walk over <code>relations</code>.</li>
+</ul>
+
+<h2>Open questions and risks</h2>
+
+<div class="callout warn">
+  <span class="label">Where do views actually live?</span>
+  SQLite supports <code>CREATE VIEW</code> but views can&rsquo;t be written to, and complex views (multi-table joins with lifecycle) can be slow. Some &ldquo;view&rdquo; entries above may end up as materialized tables kept in sync by triggers, which reintroduces the write-consistency problem the plan is trying to avoid. Decision needs to be made per-view during Phase 3.
+</div>
+
+<div class="callout warn">
+  <span class="label">The <code>entities</code>/<code>relations</code> table gets huge</span>
+  Every symbol, every commit, every relation with an <code>observed_at</code> row grows the graph fast. Retention policy matters. Options: partition by domain (code vs deploy vs report), garbage-collect superseded observations, allow per-adapter TTLs. The plan flags this as risk explicitly; must be settled before Phase 4 (SCIP will dump millions of symbol facts).
+</div>
+
+<div class="callout warn">
+  <span class="label">Adapter rot budget</span>
+  Every authority we adapt (git protocol changes, nix schema changes, SCIP evolves, LSP servers vary) is a maintenance cost. Adapters are small and isolated by design, but this is a recurring monthly cost, not a one-time build.
+</div>
+
+<div class="callout warn">
+  <span class="label">Backward compatibility of dropped-column data</span>
+  Shrinking <code>vcs_commit_metadata</code>, <code>vcs_file_change_metadata</code>, etc. into <code>entities.attributes_json</code> means historical data needs migration. The right time to do this is during Phase 3 when <code>entities</code> becomes primary; skipping it leaves the sidecar tables around forever.
+</div>
+
+<div class="callout warn">
+  <span class="label">CRSql layer needs to catch up</span>
+  Existing <code>sync_*</code> replication targets specific tables. When <code>entities</code>/<code>relations</code> become primary, they need crsql tracking too. Not conceptually hard, but a Phase 3 dependency worth naming.
+</div>
+
+<h2>The one-diagram summary</h2>
+
+<pre>            +--------------------+
+            |   content_blobs    |  (content-addressed bytes)
+            +--------------------+
+                       ^
+                       |
++----------+     +---------------+     +----------------+
+| entities |&lt;----|  relations    |----&gt;| entities       |
+|  (nouns) |     | (typed edges) |     |  (nouns)       |
++----------+     +---------------+     +----------------+
+     ^                  ^                     ^
+     |                  |                     |
+     |     +------------+-------------+       |
+     |     |            |             |       |
+     |  +------+  +-------------+  +---------------+
+     |  |Build |  | EditIntent  |  |  Deployment   |    (junction objects
+     |  +------+  +-------------+  +---------------+     with lifecycle)
+     |  |Handoff|  |ToolCall   |  |  Decision     |
+     |  +-------+ +------------+  +---------------+
+     |
+     +------- adapters emit into entities+relations -------+
+              (git, nix, ssh-probe, agent, scip, human)
+              +-- reconcile via `templedb doctor entities` --+</pre>
+
+<p>
+  Everything else is either a materialized view over this shape or a decoration (test runs, secrets, prompt telemetry, sync/backup infra) that&rsquo;s orthogonal to the authority question.
+</p>
+
+<h2>Where this leaves us</h2>
+
+<p>
+  The schema goes from 131 tables to roughly the same number of tables on paper &mdash; but with a different center of gravity. The load-bearing shape becomes three storage tables (<code>content_blobs</code>, <code>entities</code>, <code>relations</code>) plus a handful of junction objects with identity. Everything else is either a view for backward compatibility, a per-adapter cache, or a specialized-metadata sidecar. Adding a new authority no longer grows the schema; adding a new junction does, but only for shapes that genuinely carry lifecycle.
+</p>
+
+<p>
+  The end state is more disciplined than today&rsquo;s sprawl and more general than the DB-as-truth model it&rsquo;s replacing. It has clear industry precedent (Hive/Iceberg for metastores, Terraform for infra state, dbt for semantic layers) and a reconcile story from day one that those precedents wish they&rsquo;d built earlier. It also happens to make the &ldquo;commuting-diagram invariants&rdquo; from the critique machine-checkable rather than aspirational, and gives cross-session handoff a natural home.
+</p>
+
+</body>
+</html>

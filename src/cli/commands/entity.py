@@ -50,6 +50,7 @@ class EntityCommands(Command):
             'git':    self._ingest_git,
             'agent':  self._ingest_agent,
             'intent': self._ingest_intent,
+            'reports': self._ingest_reports,
             'all':    self._ingest_all,
         }
         adapter = adapters.get(args.source)
@@ -62,7 +63,7 @@ class EntityCommands(Command):
         return adapter(args)
 
     def _ingest_all(self, args) -> int:
-        for sub in ('git', 'agent', 'intent'):
+        for sub in ('git', 'agent', 'intent', 'reports'):
             args.source = sub
             rc = self.ingest(args)
             if rc != 0:
@@ -196,6 +197,262 @@ class EntityCommands(Command):
         print(f"✓ ingest intent: +{added_e} entities, +{added_r} relations")
         return 0
 
+    def _ingest_reports(self, args) -> int:
+        """Ingest Report entities + auto-detect Report ↔ Commit spans.
+
+        Walks reports/ HTML files from the templedb project, creates
+        Report entities, and regex-scans each report for commit hash
+        prefixes ([0-9a-f]{7,40}). For each candidate, verifies the
+        prefix is unique in vcs_commits and if so inserts a
+        report_implementations row with confidence='auto-detected'.
+
+        Existing 'confirmed' or 'verified' or 'rejected' rows are
+        preserved. Only 'auto-detected' rows can be superseded on
+        rerun.
+        """
+        import re
+        from db_utils import query_all, query_one, execute
+        added_e = 0
+        added_impls = 0
+
+        # Any project with reports/*.html files. In practice templedb
+        # is the only one, but keeping it general lets other projects
+        # accumulate report archives too.
+        reports = query_all(
+            """SELECT pf.file_path, cb.content_text, p.slug AS project_slug
+                 FROM project_files pf
+                 JOIN file_contents fc
+                   ON fc.file_id = pf.id AND fc.is_current = 1
+                 JOIN content_blobs cb
+                   ON cb.hash_sha256 = fc.content_hash
+                 JOIN projects p ON p.id = pf.project_id
+                WHERE pf.status = 'active'
+                  AND pf.file_path LIKE 'reports/%.html'
+                  AND pf.file_path NOT LIKE 'reports/index.html'"""
+        )
+
+        _HEX_RE = re.compile(r'\b([0-9a-fA-F]{7,40})\b')
+
+        for r in reports:
+            eref = r['file_path']
+            # Extract a nice label from <title> if present.
+            m = re.search(r'<title>([^<]+)</title>',
+                          r['content_text'] or '', re.IGNORECASE)
+            label = m.group(1).strip() if m else eref
+            if self._upsert_entity('Report', eref, 'author', label=label):
+                added_e += 1
+
+            # Auto-detect commit references. Deduplicate by hash prefix
+            # per report so a report that mentions the same commit
+            # 5 times only produces one impl row.
+            seen = set()
+            for match in _HEX_RE.finditer(r['content_text'] or ''):
+                candidate = match.group(1).lower()
+                # Filter out short hex substrings that are unlikely to
+                # be commit hashes (color codes, content hashes, etc.).
+                if len(candidate) < 7:
+                    continue
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+
+                # Prefix-match against vcs_commits. If exactly one
+                # match, we're confident. If zero or many, skip.
+                matches = query_all(
+                    """SELECT c.commit_hash, p.slug
+                         FROM vcs_commits c
+                         JOIN vcs_branches b ON b.id = c.branch_id
+                         JOIN projects p     ON p.id = b.project_id
+                        WHERE LOWER(c.commit_hash) LIKE ? || '%'
+                        LIMIT 2""",
+                    (candidate,),
+                )
+                if len(matches) != 1:
+                    continue
+                mrow = matches[0]
+
+                # Insert impl row, respecting existing confirmed/rejected.
+                existing = query_one(
+                    """SELECT id, confidence FROM report_implementations
+                        WHERE report_path = ? AND commit_hash = ?""",
+                    (r['file_path'], mrow['commit_hash']),
+                )
+                if existing:
+                    # Never overwrite a human decision.
+                    if existing['confidence'] in (
+                        'confirmed', 'verified', 'rejected'
+                    ):
+                        continue
+                    # Auto-detected duplicate — leave it as-is.
+                    continue
+                execute(
+                    """INSERT INTO report_implementations
+                           (report_path, project_slug, commit_hash,
+                            confidence)
+                         VALUES (?, ?, ?, 'auto-detected')""",
+                    (r['file_path'], r['project_slug'], mrow['commit_hash']),
+                )
+                added_impls += 1
+
+                # Also add the graph relation for cross-authority queries.
+                from_id = self._entity_id('Report', r['file_path'])
+                to_id = self._entity_id(
+                    'Commit', f"{mrow['slug']}/{mrow['commit_hash']}"
+                )
+                if from_id and to_id:
+                    self._upsert_relation(
+                        from_id, 'motivated', to_id, 'author'
+                    )
+
+        print(f"✓ ingest reports: +{added_e} entities, "
+              f"+{added_impls} auto-detected impl link(s)")
+        return 0
+
+    # ==== REPORT LINKS ========================================================
+
+    def report_link(self, args) -> int:
+        """Manually record a Report ↔ Commit link at confidence='confirmed'."""
+        from db_utils import query_one, execute
+        # Resolve the commit hash (accept prefixes).
+        matches = query_one(
+            """SELECT c.commit_hash, p.slug
+                 FROM vcs_commits c
+                 JOIN vcs_branches b ON b.id = c.branch_id
+                 JOIN projects p     ON p.id = b.project_id
+                WHERE LOWER(c.commit_hash) LIKE LOWER(?) || '%'
+                LIMIT 1""",
+            (args.commit,),
+        )
+        if not matches:
+            logger.error(f"No commit matches {args.commit!r}")
+            return 1
+        commit_hash = matches['commit_hash']
+        slug = matches['slug']
+
+        # Upsert with confidence='confirmed', preserve prior link's note.
+        existing = query_one(
+            """SELECT id FROM report_implementations
+                WHERE report_path = ? AND commit_hash = ?""",
+            (args.report_path, commit_hash),
+        )
+        import os
+        author = os.environ.get('TEMPLEDB_AUTHOR') \
+            or os.environ.get('USER') or None
+        if existing:
+            execute(
+                """UPDATE report_implementations
+                      SET confidence = 'confirmed',
+                          note = COALESCE(?, note),
+                          linked_by = ?,
+                          linked_at = datetime('now')
+                    WHERE id = ?""",
+                (args.message, author, existing['id']),
+            )
+            print(f"✓ Link updated to confirmed: {args.report_path} ↔ "
+                  f"{commit_hash[:12]}")
+        else:
+            execute(
+                """INSERT INTO report_implementations
+                       (report_path, project_slug, commit_hash,
+                        confidence, note, linked_by)
+                     VALUES (?, ?, ?, 'confirmed', ?, ?)""",
+                (args.report_path, slug, commit_hash,
+                 args.message, author),
+            )
+            print(f"✓ Link created (confirmed): {args.report_path} ↔ "
+                  f"{commit_hash[:12]}")
+        return 0
+
+    def report_links(self, args) -> int:
+        """Show Report ↔ Commit links. Filter by --report, --commit,
+        or --confidence."""
+        from db_utils import query_all
+        clauses = []
+        params = []
+        if args.report:
+            clauses.append("report_path LIKE ?")
+            params.append(f"%{args.report}%")
+        if args.commit:
+            clauses.append("commit_hash LIKE ? || '%'")
+            params.append(args.commit.lower())
+        if args.confidence:
+            clauses.append("confidence = ?")
+            params.append(args.confidence)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = query_all(
+            f"""SELECT id, report_path, commit_hash, confidence,
+                       note, linked_by, linked_at
+                  FROM report_implementations
+                  {where}
+                 ORDER BY linked_at DESC
+                 LIMIT ?""",
+            tuple(params) + (int(args.limit),),
+        )
+        if not rows:
+            print("(no matching report links)")
+            return 0
+        confidence_glyph = {
+            'auto-detected': '?',
+            'confirmed':     '✓',
+            'verified':      '✓✓',
+            'rejected':      '✗',
+        }
+        for r in rows:
+            g = confidence_glyph.get(r['confidence'], '?')
+            note = f" — {r['note']}" if r['note'] else ""
+            report_stem = r['report_path'].removeprefix('reports/')
+            print(f"  {g:<3} #{r['id']:<4} "
+                  f"{report_stem}  ↔  {r['commit_hash'][:12]}"
+                  f"  ({r['confidence']}){note}")
+        return 0
+
+    def report_confirm(self, args) -> int:
+        """Promote an auto-detected link to confirmed."""
+        from db_utils import query_one, execute
+        row = query_one(
+            "SELECT confidence FROM report_implementations WHERE id=?",
+            (int(args.id),),
+        )
+        if not row:
+            logger.error(f"Report link #{args.id} not found")
+            return 1
+        if row['confidence'] == 'confirmed':
+            print(f"Link #{args.id} already confirmed")
+            return 0
+        import os
+        author = os.environ.get('TEMPLEDB_AUTHOR') \
+            or os.environ.get('USER') or None
+        execute(
+            """UPDATE report_implementations
+                  SET confidence = 'confirmed',
+                      linked_by = COALESCE(linked_by, ?),
+                      linked_at = datetime('now')
+                WHERE id = ?""",
+            (author, int(args.id)),
+        )
+        print(f"✓ Link #{args.id} confirmed")
+        return 0
+
+    def report_reject(self, args) -> int:
+        """Mark a link rejected (auto-detection was wrong)."""
+        from db_utils import query_one, execute
+        row = query_one(
+            "SELECT confidence FROM report_implementations WHERE id=?",
+            (int(args.id),),
+        )
+        if not row:
+            logger.error(f"Report link #{args.id} not found")
+            return 1
+        execute(
+            """UPDATE report_implementations
+                  SET confidence = 'rejected',
+                      linked_at = datetime('now')
+                WHERE id = ?""",
+            (int(args.id),),
+        )
+        print(f"✗ Link #{args.id} rejected")
+        return 0
+
     # ==== GRAPH ===============================================================
 
     def graph_explore(self, args) -> int:
@@ -305,6 +562,10 @@ class EntityCommands(Command):
              self._check_commits_have_entities),
             ('relations_reference_valid_entities',
              self._check_relations_valid_endpoints),
+            ('report_impls_reference_valid_reports',
+             self._check_report_impls_valid_report),
+            ('report_impls_reference_valid_commits',
+             self._check_report_impls_valid_commit),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -367,6 +628,38 @@ class EntityCommands(Command):
         )
         return [f"Commit {r['slug']}/{r['commit_hash'][:12]} not in "
                 f"entities table (run `templedb ingest git`)" for r in rows]
+
+    def _check_report_impls_valid_report(self):
+        """Invariant: every report_implementations.report_path exists as
+        an active project_files entry. Catches renamed / deleted reports
+        that still have dangling impl rows."""
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT ri.id, ri.report_path
+                 FROM report_implementations ri
+                 LEFT JOIN project_files pf
+                   ON pf.file_path = ri.report_path
+                  AND pf.status = 'active'
+                 LEFT JOIN projects p ON p.id = pf.project_id
+                     AND p.slug = ri.project_slug
+                WHERE pf.id IS NULL"""
+        )
+        return [f"report_implementations#{r['id']} references missing "
+                f"report {r['report_path']}" for r in rows]
+
+    def _check_report_impls_valid_commit(self):
+        """Invariant: every report_implementations.commit_hash matches
+        a real vcs_commits row."""
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT ri.id, ri.commit_hash, ri.report_path
+                 FROM report_implementations ri
+                 LEFT JOIN vcs_commits c ON c.commit_hash = ri.commit_hash
+                WHERE c.id IS NULL"""
+        )
+        return [f"report_implementations#{r['id']} references missing "
+                f"commit {r['commit_hash'][:12]} "
+                f"(report {r['report_path']})" for r in rows]
 
     def _check_relations_valid_endpoints(self):
         """Invariant: every relations row points at entities that
@@ -509,3 +802,54 @@ def register(cli):
         help='Run one named check instead of all',
     )
     cli.commands['doctor.entities'] = cmd.doctor_entities
+
+    # --- templedb report {link, links, confirm, reject} ---
+    # Workflow F: Report ↔ Commit first-class span
+    report_parser = cli.subparsers.add_parser(
+        'report',
+        help='Report ↔ Commit links (which reports got implemented)',
+    )
+    rsub = report_parser.add_subparsers(dest='report_subcommand', required=True)
+
+    link = rsub.add_parser(
+        'link',
+        help='Manually record a Report ↔ Commit link (confidence=confirmed)',
+    )
+    link.add_argument('report_path',
+                      help='reports/YYYY-MM-DD-HHMM-slug.html')
+    link.add_argument('commit',
+                      help='Commit hash (prefix ok)')
+    link.add_argument('-m', '--message',
+                      help='Note explaining the link')
+    cli.commands['report.link'] = cmd.report_link
+
+    links = rsub.add_parser(
+        'links',
+        help='List Report ↔ Commit links',
+    )
+    links.add_argument('-r', '--report',
+                       help='Filter by report path substring')
+    links.add_argument('-c', '--commit',
+                       help='Filter by commit hash prefix')
+    links.add_argument(
+        '--confidence',
+        choices=['auto-detected', 'confirmed', 'verified', 'rejected'],
+        help='Filter by confidence level',
+    )
+    links.add_argument('--limit', default=50,
+                       help='Max rows (default 50)')
+    cli.commands['report.links'] = cmd.report_links
+
+    confirm = rsub.add_parser(
+        'confirm',
+        help='Promote an auto-detected link to confirmed',
+    )
+    confirm.add_argument('id', help='report_implementations.id')
+    cli.commands['report.confirm'] = cmd.report_confirm
+
+    reject = rsub.add_parser(
+        'reject',
+        help='Mark a link rejected (auto-detection was wrong)',
+    )
+    reject.add_argument('id', help='report_implementations.id')
+    cli.commands['report.reject'] = cmd.report_reject
