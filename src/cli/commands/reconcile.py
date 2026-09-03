@@ -242,6 +242,153 @@ class ReconcileCommands(Command):
         except Exception as e:
             logger.debug(f"reconcile_runs record failed: {e}")
 
+    def schedule(self, args) -> int:
+        """Manage the systemd user timer for scheduled reconcile.
+
+        Sub-actions:
+          install [--interval SPEC]  write units + enable + start
+          uninstall                   stop + disable + remove units
+          status                      systemctl status of timer + service
+
+        Uses ~/.config/systemd/user/ for user-level scheduling (no
+        root required, no NixOS home.nix change required). Timer runs
+        `templedb reconcile machine all` at the requested interval.
+        Default: daily at ~03:00 local with 15-minute randomized
+        delay to avoid herd effects if multiple machines run this.
+        """
+        action = args.action
+        if action == 'install':
+            return self._schedule_install(args)
+        if action == 'uninstall':
+            return self._schedule_uninstall()
+        if action == 'status':
+            return self._schedule_status()
+        logger.error(f"Unknown schedule action: {action}")
+        return 1
+
+    def _schedule_install(self, args) -> int:
+        import os
+        from pathlib import Path
+        interval = args.interval or 'daily'
+        # OnCalendar accepts systemd calendar spec directly.
+        # 'daily' expands to '*-*-* 00:00:00', so we override to
+        # 03:00 for humans-in-bed friendliness.
+        oncalendar = ('03:00' if interval == 'daily' else interval)
+
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find the templedb binary — user's PATH will pick it up but
+        # systemd needs an absolute path.
+        import shutil
+        templedb_bin = shutil.which('templedb') or '/home/zach/.nix-profile/bin/templedb'
+
+        service = f"""[Unit]
+Description=TempleDB scheduled reconcile — probe every fleet machine
+Documentation=file://{Path.home()}/.config/templedb/checkouts/templedb/docs/ENTITY_GRAPH_DESIGN.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={templedb_bin} reconcile machine all
+# Non-zero exit = drift or unreachable; that's information, not an error
+SuccessExitStatus=0 1 2
+"""
+
+        timer = f"""[Unit]
+Description=Trigger templedb reconcile daily
+Documentation=file://{Path.home()}/.config/templedb/checkouts/templedb/docs/ENTITY_GRAPH_DESIGN.md
+
+[Timer]
+OnCalendar={oncalendar}
+RandomizedDelaySec=15m
+# Fire on boot if we missed the schedule (e.g. laptop was closed)
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+        svc_path = unit_dir / "templedb-reconcile.service"
+        timer_path = unit_dir / "templedb-reconcile.timer"
+
+        # Overwrite-safe: warn if existing, but proceed (install is
+        # idempotent as a workflow).
+        for p, name in [(svc_path, 'service'), (timer_path, 'timer')]:
+            if p.exists():
+                logger.debug(f"Overwriting existing {name}: {p}")
+
+        svc_path.write_text(service)
+        timer_path.write_text(timer)
+
+        # Reload + enable + start.
+        import subprocess
+        cmds = [
+            (['systemctl', '--user', 'daemon-reload'],
+             'reload user units'),
+            (['systemctl', '--user', 'enable', '--now',
+              'templedb-reconcile.timer'],
+             'enable + start timer'),
+        ]
+        for cmd, label in cmds:
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                logger.error(f"systemctl failed ({label}): "
+                             f"{r.stderr.strip()}")
+                return 2
+
+        print(f"✓ Installed templedb-reconcile.timer")
+        print(f"  units:      {unit_dir}")
+        print(f"  oncalendar: {oncalendar} (randomized ±15m)")
+        print()
+        print("  status:  templedb reconcile schedule status")
+        print("  logs:    journalctl --user -u templedb-reconcile "
+              "--since '24 hours ago'")
+        print("  disable: templedb reconcile schedule uninstall")
+        return 0
+
+    def _schedule_uninstall(self) -> int:
+        import subprocess
+        from pathlib import Path
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        # Stop + disable, ignoring errors (may be already off)
+        for cmd in (
+            ['systemctl', '--user', 'disable', '--now',
+             'templedb-reconcile.timer'],
+            ['systemctl', '--user', 'reset-failed',
+             'templedb-reconcile.service'],
+        ):
+            subprocess.run(cmd, capture_output=True)
+        for name in ('templedb-reconcile.timer',
+                     'templedb-reconcile.service'):
+            p = unit_dir / name
+            if p.exists():
+                p.unlink()
+        subprocess.run(
+            ['systemctl', '--user', 'daemon-reload'],
+            capture_output=True,
+        )
+        print("✓ Uninstalled templedb-reconcile timer + service")
+        return 0
+
+    def _schedule_status(self) -> int:
+        import subprocess
+        r = subprocess.run(
+            ['systemctl', '--user', 'list-timers',
+             'templedb-reconcile.timer', '--no-pager'],
+            capture_output=True, text=True,
+        )
+        print(r.stdout)
+        # Also show last run summary
+        r2 = subprocess.run(
+            ['systemctl', '--user', 'status',
+             'templedb-reconcile.service', '--no-pager', '-n', '3'],
+            capture_output=True, text=True,
+        )
+        print(r2.stdout)
+        return 0
+
     def history(self, args) -> int:
         """Print recent reconcile_runs. Filter by --machine, --status."""
         from db_utils import query_all
@@ -306,3 +453,13 @@ def register(cli):
     h.add_argument('--limit', default=30,
                    help='Max rows (default 30)')
     cli.commands['reconcile.history'] = cmd.history
+
+    sc = sub.add_parser('schedule',
+                        help='Install/uninstall systemd user timer '
+                             'for daily reconcile')
+    sc.add_argument('action',
+                    choices=['install', 'uninstall', 'status'])
+    sc.add_argument('--interval',
+                    help='systemd OnCalendar spec '
+                         '(default: 03:00, i.e. daily)')
+    cli.commands['reconcile.schedule'] = cmd.schedule

@@ -709,6 +709,72 @@ class TestReconcile:
         out = capsys.readouterr().out
         assert 'boot_id' in out
 
+    def test_schedule_install_writes_units(self, tmp_path,
+                                            monkeypatch):
+        """schedule install writes service+timer to
+        ~/.config/systemd/user/. Mocks HOME and subprocess so we
+        don't actually mutate the user's systemd."""
+        from cli.commands.reconcile import ReconcileCommands
+        import argparse, subprocess as _sub
+        monkeypatch.setenv('HOME', str(tmp_path))
+        # Mock Path.home() too (some code paths use it)
+        from pathlib import Path
+        monkeypatch.setattr(Path, 'home',
+                            classmethod(lambda cls: tmp_path))
+
+        calls = []
+        class _FakeCompleted:
+            returncode = 0
+            stdout = ''
+            stderr = ''
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return _FakeCompleted()
+        monkeypatch.setattr(_sub, 'run', fake_run)
+
+        rc = ReconcileCommands().schedule(argparse.Namespace(
+            action='install', interval=None,
+        ))
+        assert rc == 0
+        svc = tmp_path / '.config/systemd/user/templedb-reconcile.service'
+        tm = tmp_path / '.config/systemd/user/templedb-reconcile.timer'
+        assert svc.exists(), "service unit not written"
+        assert tm.exists(), "timer unit not written"
+        # Service content sanity check
+        assert 'reconcile machine all' in svc.read_text()
+        assert 'ExecStart=' in svc.read_text()
+        # Timer OnCalendar default
+        assert 'OnCalendar=03:00' in tm.read_text()
+        # Systemctl was invoked
+        assert any('daemon-reload' in ' '.join(c) for c in calls)
+        assert any('enable' in ' '.join(c) for c in calls)
+
+    def test_schedule_uninstall_removes_units(self, tmp_path,
+                                               monkeypatch):
+        from cli.commands.reconcile import ReconcileCommands
+        import argparse, subprocess as _sub
+        from pathlib import Path
+        monkeypatch.setenv('HOME', str(tmp_path))
+        monkeypatch.setattr(Path, 'home',
+                            classmethod(lambda cls: tmp_path))
+        class _FakeCompleted:
+            returncode = 0
+            stdout = ''
+            stderr = ''
+        monkeypatch.setattr(_sub, 'run',
+                            lambda *a, **k: _FakeCompleted())
+        # Plant units first
+        unit_dir = tmp_path / '.config/systemd/user'
+        unit_dir.mkdir(parents=True)
+        (unit_dir / 'templedb-reconcile.service').write_text('x')
+        (unit_dir / 'templedb-reconcile.timer').write_text('x')
+        rc = ReconcileCommands().schedule(argparse.Namespace(
+            action='uninstall', interval=None,
+        ))
+        assert rc == 0
+        assert not (unit_dir / 'templedb-reconcile.service').exists()
+        assert not (unit_dir / 'templedb-reconcile.timer').exists()
+
     def test_reconcile_records_run_in_db(self, populated_env,
                                           monkeypatch):
         from cli.commands.reconcile import ReconcileCommands
