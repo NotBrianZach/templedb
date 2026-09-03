@@ -237,6 +237,34 @@ class EntityCommands(Command):
                                          to_id, 'agent-runtime'):
                     added_r += 1
 
+        # ToolCall entities (Phase 3 span extracted from agent_events
+        # via migration 094). Each tool_calls row becomes a ToolCall
+        # entity; the AgentSession that ran it gets a `invoked` edge.
+        # See docs/ENTITY_GRAPH_DESIGN.md — ToolCall is a first-class
+        # span AgentRun ← ToolCall → Tool.
+        tool_calls = query_all(
+            """SELECT tc.id, tc.tool_name, tc.status,
+                      s.session_uuid AS suid
+                 FROM tool_calls tc
+                 JOIN agent_runs ar ON ar.id = tc.run_id
+                 JOIN agent_sessions s ON s.id = ar.session_id"""
+        )
+        for tc in tool_calls:
+            eref = str(tc['id'])
+            label = f"{tc['tool_name']} ({tc['status']})"
+            if self._upsert_entity('ToolCall', eref,
+                                   'agent-runtime', label=label):
+                added_e += 1
+
+        # AgentSession → invoked → ToolCall
+        for tc in tool_calls:
+            from_id = self._entity_id('AgentSession', tc['suid'])
+            to_id = self._entity_id('ToolCall', str(tc['id']))
+            if from_id and to_id:
+                if self._upsert_relation(from_id, 'invoked',
+                                         to_id, 'agent-runtime'):
+                    added_r += 1
+
         print(f"✓ ingest agent: +{added_e} entities, +{added_r} relations")
         self._last_counts = {'e': added_e, 'r': added_r}
         return 0
@@ -748,6 +776,8 @@ class EntityCommands(Command):
              self._check_report_impls_valid_report),
             ('report_impls_reference_valid_commits',
              self._check_report_impls_valid_commit),
+            ('every_tool_call_has_entity',
+             self._check_tool_calls_have_entities),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -876,6 +906,23 @@ class EntityCommands(Command):
         )
         return [f"Commit {r['slug']}/{r['commit_hash'][:12]} not in "
                 f"entities table (run `templedb ingest git`)" for r in rows]
+
+    def _check_tool_calls_have_entities(self):
+        """Invariant: every tool_calls row has a corresponding ToolCall
+        entity. Detects when agent ingest is behind after new tool
+        events landed."""
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT tc.id
+                 FROM tool_calls tc
+                 LEFT JOIN entities e
+                   ON e.kind = 'ToolCall'
+                  AND e.external_ref = CAST(tc.id AS TEXT)
+                WHERE e.id IS NULL
+                LIMIT 200"""  # cap since backfill can be large
+        )
+        return [f"ToolCall#{r['id']} not in entities table "
+                f"(run `templedb ingest agent`)" for r in rows]
 
     def _check_report_impls_valid_report(self):
         """Invariant: every report_implementations.report_path exists as

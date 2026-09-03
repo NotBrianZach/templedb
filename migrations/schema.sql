@@ -3671,3 +3671,28 @@ CREATE INDEX IF NOT EXISTS idx_handoff_notes_project
 CREATE INDEX IF NOT EXISTS idx_handoff_notes_broadcast
     ON handoff_notes(created_at DESC)
     WHERE to_session IS NULL AND to_topic IS NULL;
+
+
+-- ============================================================================
+-- Migration 094: tool_calls (Phase 3 extraction from agent_events)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+    id                INTEGER PRIMARY KEY,
+    run_id            INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+    session_id        INTEGER,
+    tool_name         TEXT NOT NULL,
+    started_at        TEXT NOT NULL,
+    finished_at       TEXT,
+    status            TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (status IN ('running', 'completed', 'failed', 'unknown')),
+    args_hash         TEXT,
+    result_hash       TEXT,
+    source_event_id   INTEGER REFERENCES agent_events(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_active
+    ON tool_calls(status) WHERE status IN ('running', 'unknown');

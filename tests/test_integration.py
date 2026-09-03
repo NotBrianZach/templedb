@@ -466,6 +466,176 @@ class TestMaterialize:
             "non-gitignored stray file was preserved but should be swept"
 
 
+# ── Tool Calls (Phase 3 extraction) Tests ────────────────────────────────────
+
+class TestToolCalls:
+    """Tests for tool_calls extraction from agent_events and its
+    entity-graph integration."""
+
+    def test_table_exists(self, temp_env):
+        conn = sqlite3.connect(temp_env["db_path"])
+        row = conn.execute(
+            "SELECT type FROM sqlite_master WHERE name='tool_calls'"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == 'table'
+
+    def _seed_agent_session(self, populated_env):
+        """Insert an agent session + run + a couple of tool events."""
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.execute(
+            """INSERT INTO agent_providers (id, provider_kind, name)
+                 VALUES (1, 'fake', 'fake') ON CONFLICT DO NOTHING"""
+        )
+        conn.execute(
+            """INSERT INTO agent_sessions
+                   (session_uuid, provider_id, status, title)
+                 VALUES ('sess-abc', 1, 'created', 'test session')"""
+        )
+        sid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO agent_runs
+                   (session_id, status, started_at)
+                 VALUES (?, 'running', datetime('now'))""",
+            (sid,),
+        )
+        rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # Two tool.started events
+        conn.execute(
+            """INSERT INTO agent_events
+                   (run_id, sequence_number, event_type, payload_json)
+                 VALUES (?, 1, 'tool.started', ?)""",
+            (rid, '{"tool_name": "Read file"}'),
+        )
+        conn.execute(
+            """INSERT INTO agent_events
+                   (run_id, sequence_number, event_type, payload_json)
+                 VALUES (?, 2, 'tool.started', ?)""",
+            (rid, '{"tool_name": "Search"}'),
+        )
+        conn.commit()
+        return sid, rid
+
+    def test_backfill_populated_from_agent_events(self, populated_env):
+        """The migration backfills existing tool.started events into
+        tool_calls. Since populated_env starts fresh and applies all
+        migrations at fixture setup, the backfill runs on empty data —
+        so we seed events first, then re-run the backfill logic
+        manually to verify the SQL shape is correct."""
+        self._seed_agent_session(populated_env)
+        conn = sqlite3.connect(populated_env["db_path"])
+        # Re-run the migration backfill SQL manually.
+        conn.execute(
+            """INSERT INTO tool_calls
+                   (run_id, session_id, tool_name, started_at,
+                    finished_at, status, source_event_id)
+                 SELECT ae.run_id, ar.session_id,
+                        COALESCE(json_extract(ae.payload_json, '$.tool_name'),
+                                 'unknown'),
+                        ae.created_at, NULL, 'unknown', ae.id
+                   FROM agent_events ae
+                   JOIN agent_runs ar ON ar.id = ae.run_id
+                  WHERE ae.event_type = 'tool.started'"""
+        )
+        conn.commit()
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT tool_name, status FROM tool_calls ORDER BY id"
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 2
+        names = {r['tool_name'] for r in rows}
+        assert names == {'Read file', 'Search'}
+
+    def test_agent_ingest_emits_tool_call_entities(self, populated_env):
+        """After ingesting agent, ToolCall entities exist in the graph
+        with 'invoked' relations from the AgentSession."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        sid, rid = self._seed_agent_session(populated_env)
+        # Manually backfill (since migration ran on empty data)
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.execute(
+            """INSERT INTO tool_calls
+                   (run_id, session_id, tool_name, started_at,
+                    status, source_event_id)
+                 SELECT ae.run_id, ar.session_id,
+                        json_extract(ae.payload_json, '$.tool_name'),
+                        ae.created_at, 'unknown', ae.id
+                   FROM agent_events ae
+                   JOIN agent_runs ar ON ar.id = ae.run_id
+                  WHERE ae.event_type = 'tool.started'"""
+        )
+        conn.commit()
+        conn.close()
+
+        EntityCommands().ingest(argparse.Namespace(source='agent', limit=20))
+
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        tc_entities = conn.execute(
+            "SELECT external_ref, label FROM entities WHERE kind='ToolCall'"
+        ).fetchall()
+        assert len(tc_entities) == 2
+        # invoked relations exist
+        rel = conn.execute(
+            """SELECT COUNT(*) FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                WHERE e1.kind = 'AgentSession'
+                  AND r.kind = 'invoked'"""
+        ).fetchone()[0]
+        conn.close()
+        assert rel == 2
+
+    def test_tool_list_and_stats(self, populated_env, capsys):
+        import argparse
+        from cli.commands.tool import ToolCommands
+        # Seed some tool_calls directly
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.execute(
+            """INSERT INTO agent_providers (id, provider_kind, name)
+                 VALUES (1, 'fake', 'fake') ON CONFLICT DO NOTHING"""
+        )
+        conn.execute(
+            """INSERT INTO agent_sessions
+                   (session_uuid, provider_id, status, title)
+                 VALUES ('s1', 1, 'created', 'test')"""
+        )
+        sid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO agent_runs
+                   (session_id, status, started_at)
+                 VALUES (?, 'running', datetime('now'))""",
+            (sid,),
+        )
+        rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for name in ['Read', 'Read', 'Search', 'Edit']:
+            conn.execute(
+                """INSERT INTO tool_calls
+                       (run_id, session_id, tool_name,
+                        started_at, status)
+                     VALUES (?, ?, ?, datetime('now'), 'unknown')""",
+                (rid, sid, name),
+            )
+        conn.commit()
+        conn.close()
+
+        cmd = ToolCommands()
+        cmd.list(argparse.Namespace(
+            tool=None, session=None, status=None, limit=10,
+        ))
+        out = capsys.readouterr().out
+        assert 'Read' in out
+        assert 'Search' in out
+
+        cmd.stats(argparse.Namespace(by='tool', limit=10))
+        out = capsys.readouterr().out
+        assert 'Read' in out
+        # Read appears twice so should be the top row of stats
+        assert out.index('Read') < out.index('Search')
+
+
 # ── Nix Ingest (Phase 3 extension) Tests ─────────────────────────────────────
 
 class TestNixIngest:
