@@ -1798,6 +1798,105 @@ WantedBy=timers.target
                   f"{r['source_authority']:<12}{label}")
         return 0
 
+    def graph_paths(self, args) -> int:
+        """Find the shortest path between two entities.
+
+        BFS from source, tracking parent pointers. Reports the
+        shortest path if found, otherwise 'no path within depth N'.
+
+        Uses undirected traversal by default — walks both outbound
+        and inbound edges — because 'how is X related to Y' rarely
+        cares about direction. Restrict with --direction if you
+        want strict outbound-only.
+        """
+        from db_utils import query_one, query_all
+        from_kind, sep, from_ref = args.from_entity.partition('/')
+        if not sep:
+            logger.error("--from must be <kind>/<ref>")
+            return 1
+        to_kind, sep, to_ref = args.to_entity.partition('/')
+        if not sep:
+            logger.error("--to must be <kind>/<ref>")
+            return 1
+        from_row = query_one(
+            "SELECT id FROM entities WHERE kind=? AND external_ref=?",
+            (from_kind, from_ref),
+        )
+        to_row = query_one(
+            "SELECT id FROM entities WHERE kind=? AND external_ref=?",
+            (to_kind, to_ref),
+        )
+        if not from_row:
+            logger.error(f"Source not found: {from_kind}/{from_ref}")
+            return 2
+        if not to_row:
+            logger.error(f"Target not found: {to_kind}/{to_ref}")
+            return 2
+        src_id, tgt_id = from_row['id'], to_row['id']
+        if src_id == tgt_id:
+            print(f"● {from_kind}/{from_ref}  (source == target)")
+            return 0
+
+        via = None
+        if args.via:
+            via = {v.strip() for v in args.via.split(',') if v.strip()}
+        max_depth = int(args.max_depth)
+        direction = args.direction or 'both'
+
+        # BFS. queue holds entity_ids; parent[id] = (prev_id, edge_kind, arrow_char)
+        from collections import deque
+        parent = {src_id: None}
+        queue = deque([(src_id, 0)])
+        found = False
+        while queue:
+            cur, depth = queue.popleft()
+            if cur == tgt_id:
+                found = True
+                break
+            if depth >= max_depth:
+                continue
+            edges = self._fetch_edges(cur, direction, via, 100)
+            for e in edges:
+                nxt = e['peer_id']
+                if nxt in parent:
+                    continue
+                arrow = ('→' if e['dir'] == 'out' else '←')
+                parent[nxt] = (cur, e['relkind'], arrow)
+                queue.append((nxt, depth + 1))
+
+        if not found:
+            print(f"(no path within depth {max_depth} between "
+                  f"{from_kind}/{from_ref} and {to_kind}/{to_ref})")
+            return 3
+
+        # Reconstruct the path from target back to source
+        chain = []
+        node = tgt_id
+        while parent.get(node) is not None:
+            prev, relkind, arrow = parent[node]
+            chain.append((node, relkind, arrow))
+            node = prev
+        chain.reverse()
+
+        # Print with entity labels for readability
+        def label(eid):
+            row = query_one(
+                "SELECT kind, external_ref, label FROM entities WHERE id=?",
+                (eid,),
+            )
+            if not row:
+                return f"?/? ({eid})"
+            lbl = f" — {row['label']}" if row['label'] else ""
+            return f"{row['kind']}/{row['external_ref']}{lbl}"
+
+        print(f"● {label(src_id)}")
+        for i, (eid, relkind, arrow) in enumerate(chain):
+            indent = "  " * (i + 1)
+            print(f"{indent}{arrow}[{relkind}] {label(eid)}")
+        print()
+        print(f"  Path length: {len(chain)} hops")
+        return 0
+
     def graph_stats(self, args) -> int:
         """Compact summary of the graph."""
         from db_utils import query_all, query_one
@@ -2467,6 +2566,22 @@ def register(cli):
     search.add_argument('--limit', default=30,
                         help='Max rows (default 30)')
     cli.commands['entity.search'] = cmd.graph_search
+
+    paths = esub.add_parser(
+        'paths',
+        help='Shortest path between two entities (BFS)',
+    )
+    paths.add_argument('from_entity', metavar='FROM',
+                       help='<kind>/<ref>')
+    paths.add_argument('to_entity', metavar='TO',
+                       help='<kind>/<ref>')
+    paths.add_argument('--max-depth', default=6,
+                       help='BFS cutoff (default 6)')
+    paths.add_argument('--direction', choices=['out', 'in', 'both'],
+                       default='both',
+                       help="Traversal direction (default 'both')")
+    paths.add_argument('--via', help='Comma-separated relation kinds')
+    cli.commands['entity.paths'] = cmd.graph_paths
 
     trace = esub.add_parser(
         'trace',

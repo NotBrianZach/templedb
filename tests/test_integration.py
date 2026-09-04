@@ -589,6 +589,47 @@ class TestGraphTraversal:
         assert 'Machine/traceHost' in out
         assert 'Generation' in out
 
+    def test_paths_finds_shortest_path(self, populated_env, capsys):
+        """Machine → ran → Generation → built-from → Commit,
+        so paths(Machine, Commit) should be length 2."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_chain(populated_env)
+        rc = EntityCommands().graph_paths(argparse.Namespace(
+            from_entity='Machine/traceHost',
+            to_entity='Commit/testproj/aaabbbcccddd',
+            max_depth=4, direction='both', via=None,
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'Machine/traceHost' in out
+        assert 'Path length: 2 hops' in out
+
+    def test_paths_no_path_reports_cleanly(self, populated_env, capsys):
+        """Two isolated entities with no connecting relation should
+        report 'no path'."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_chain(populated_env)
+        # Add an isolated entity
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.execute(
+            """INSERT INTO entities
+                   (kind, external_ref, source_authority, label, sync_scope)
+                 VALUES ('Report', 'reports/orphan.html', 'author',
+                         'orphan', 'fleet')"""
+        )
+        conn.commit()
+        conn.close()
+        rc = EntityCommands().graph_paths(argparse.Namespace(
+            from_entity='Machine/traceHost',
+            to_entity='Report/reports/orphan.html',
+            max_depth=3, direction='both', via=None,
+        ))
+        assert rc == 3
+        out = capsys.readouterr().out
+        assert 'no path' in out
+
     def test_provenance_commit_by_prefix(self, populated_env, capsys):
         import argparse
         from cli.commands.provenance import ProvenanceCommands
