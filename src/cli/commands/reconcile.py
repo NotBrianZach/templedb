@@ -311,6 +311,10 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart={templedb_bin} reconcile machine all
+# Hygiene snapshot piggybacks on the reconcile cadence — cheap
+# SQL, records dead-import counts to hygiene_snapshots (mig 100)
+# so `templedb hygiene diff` can flag regressions.
+ExecStart={templedb_bin} hygiene snapshot
 # Non-zero exit = drift or unreachable; that's information, not an error
 SuccessExitStatus=0 1 2
 """

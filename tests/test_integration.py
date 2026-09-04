@@ -1874,6 +1874,52 @@ class TestPythonIngest:
         assert 'base_lib.py' not in out, \
             "Inheritance-only import must NOT be flagged (adapter 1.8)"
 
+    def test_hygiene_snapshot_records_per_slug(
+            self, populated_env, capsys):
+        """`hygiene snapshot` records one row per slug with real
+        dead_candidates counts, sourced from the same CTE as
+        entity dead-imports (migration 100)."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        from cli.commands.hygiene import HygieneCommands
+        # Seed 3 py files: one clean import + one dead import
+        self._seed_python_file(
+            populated_env, 'src/lib_h.py',
+            "def helper():\n    return 1\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/dead_h.py',
+            "def dead_fn():\n    return 2\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/user_h.py',
+            "from lib_h import helper\n"
+            "from dead_h import dead_fn\n"
+            "\n"
+            "def call_helper():\n    return helper()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python',
+                                                   limit=20))
+        capsys.readouterr()
+        rc = HygieneCommands().snapshot(argparse.Namespace(slug=None))
+        assert rc == 0
+
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT slug, total_imports, dead_candidates,
+                      adapter_version
+                 FROM hygiene_snapshots
+                WHERE slug = 'testproj'
+                ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['total_imports'] == 2
+        assert row['dead_candidates'] == 1
+        assert row['adapter_version'] is not None
+
     def test_dead_imports_finds_unused_and_ignores_used(
             self, populated_env, capsys):
         """`entity dead-imports` should flag a File→imports edge where

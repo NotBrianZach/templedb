@@ -3769,3 +3769,20 @@ BEGIN
         (NEW.kind, NEW.external_ref, NEW.label, NEW.source_authority,
          NEW.id, OLD.label, OLD.source_authority);
 END;
+
+
+-- Migration 100: hygiene_snapshots (import-graph hygiene over time)
+CREATE TABLE IF NOT EXISTS hygiene_snapshots (
+    id                INTEGER PRIMARY KEY,
+    slug              TEXT NOT NULL,
+    taken_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    total_imports     INTEGER,
+    dead_candidates   INTEGER,
+    symbol_defines    INTEGER,
+    inherits_edges    INTEGER,
+    adapter_version   TEXT,
+    extra_json        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_hygiene_snapshots_slug_time
+    ON hygiene_snapshots(slug, taken_at DESC);
