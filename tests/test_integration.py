@@ -2001,6 +2001,46 @@ class TestPythonIngest:
         conn.close()
         assert bridge == 1, "re-export __module__ bridge not emitted"
 
+    def test_python_ingest_tracks_bare_name_references(
+            self, populated_env):
+        """`from db_utils import DB_PATH` where DB_PATH is a module-
+        level constant, then `path.exists(DB_PATH)` — DB_PATH is
+        referenced as a Name but never called. Adapter 1.14 emits
+        Symbol → uses → Symbol (or __module__ fallback) for such
+        references."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/consts.py',
+            "DB_PATH = '/var/db.sqlite'\n"
+            "MAX_ROWS = 100\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/consumer.py',
+            "from consts import DB_PATH\n"
+            "\n"
+            "def where_am_i():\n"
+            "    return f'db at {DB_PATH}'\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python',
+                                                   limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        # Should land on consts.py's __module__ (DB_PATH isn't a
+        # def/class so no Symbol exists for it).
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e1.external_ref='testproj:src/consumer.py:where_am_i'
+                  AND e2.external_ref='testproj:src/consts.py:__module__'
+                  AND r.kind='uses'"""
+        ).fetchone()['n']
+        conn.close()
+        assert row == 1, \
+            "bare-Name reference (DB_PATH) should emit uses → __module__"
+
     def test_python_ingest_init_reexports_count_as_uses(
             self, populated_env):
         """`__init__.py` files that do nothing but re-export should

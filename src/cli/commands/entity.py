@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.13',   # 1.13 __init__ imports auto-count as uses
+        'python':  '1.14',   # 1.14 reference tracking (bare-Name refs)
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -1049,6 +1049,80 @@ WantedBy=timers.target
                         (sym_id, 'uses', target_sym_id)
                     )
                     _emit_reexport_bridges(sym_id, chase_ints)
+
+        # 1.14 reference-scan pass. For each symbol's body, look at
+        # every bare Name and Attribute-root Name. If the name is in
+        # imports_map, emit Symbol -> uses -> Symbol (or file-level
+        # __module__ if the target isn't a defined name we can
+        # resolve). Handles `from db_utils import DB_PATH` where
+        # DB_PATH is a constant that gets referenced but never
+        # called — previously invisible to dead-imports.
+        for (slug, fp), tree in file_trees_by_file.items():
+            local_defs = all_defs_by_file.get((slug, fp), {})
+            imports_map = all_imports_by_file.get((slug, fp), {})
+            if not local_defs or not imports_map:
+                continue
+            for name, (sym_id, eref, def_node, enclosing) in \
+                    local_defs.items():
+                # Extract nodes owned by this symbol (module-scope-aware)
+                if enclosing == '__module__':
+                    scan_stmts = []
+                    for stmt in def_node.body:
+                        if isinstance(stmt, (
+                            ast.FunctionDef, ast.AsyncFunctionDef,
+                            ast.ClassDef,
+                        )):
+                            continue
+                        scan_stmts.append(stmt)
+                else:
+                    scan_stmts = [def_node]
+                seen_names_here = set()
+                for stmt in scan_stmts:
+                    for n in ast.walk(stmt):
+                        ref = None
+                        if isinstance(n, ast.Name):
+                            ref = n.id
+                        elif isinstance(n, ast.Attribute) and \
+                                isinstance(n.value, ast.Name):
+                            ref = n.value.id
+                        if not ref or ref in local_defs:
+                            continue
+                        if ref not in imports_map:
+                            continue
+                        if ref in seen_names_here:
+                            continue
+                        seen_names_here.add(ref)
+                        t_slug, t_path, t_sym = imports_map[ref]
+                        chased = _chase_reexport(
+                            t_slug, t_path, t_sym, intermediates=[])
+                        if chased:
+                            (t_slug, t_path, t_sym, chase_ints) = chased
+                        else:
+                            chase_ints = []
+                        target_defs = all_defs_by_file.get(
+                            (t_slug, t_path), {})
+                        target = target_defs.get(t_sym)
+                        # If target isn't a resolved Symbol (e.g. a
+                        # module-level constant that has no Symbol),
+                        # fall back to a use of __module__.
+                        if target:
+                            target_sym_id = target[0]
+                        else:
+                            mod_ref = f"{t_slug}:{t_path}:__module__"
+                            target_sym_id = self._entity_id(
+                                'Symbol', mod_ref)
+                            if not target_sym_id:
+                                continue
+                        if target_sym_id == sym_id:
+                            continue
+                        if self._upsert_relation(
+                            sym_id, 'uses', target_sym_id, 'python'
+                        ):
+                            added_r += 1
+                        touched_relations.add(
+                            (sym_id, 'uses', target_sym_id)
+                        )
+                        _emit_reexport_bridges(sym_id, chase_ints)
 
         # 1.13 __init__.py re-export pass. For every __init__.py
         # file with resolved imports, emit
