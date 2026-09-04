@@ -2397,7 +2397,7 @@ class TestReconcileHistory:
         rows = conn.execute(
             """SELECT check_name, status, issue_count
                  FROM invariant_checks
-                ORDER BY id DESC LIMIT 10"""
+                ORDER BY id DESC LIMIT 50"""
         ).fetchall()
         conn.close()
         assert len(rows) > 0, "doctor should have inserted invariant_checks rows"

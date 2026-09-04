@@ -118,6 +118,7 @@ class SummaryCommand(Command):
         print(_c("── Reconcile (per fleet machine) ──", 'accent'))
         machines = query_all(
             """SELECT fm.machine_name,
+                      fm.last_deployed_at,
                       MAX(rr.ran_at) AS last_run,
                       (SELECT status FROM reconcile_runs rr2
                         WHERE rr2.machine_name = fm.machine_name
@@ -131,13 +132,17 @@ class SummaryCommand(Command):
         if not machines:
             print(f"  {_c('(no fleet_machines registered)', 'muted')}")
         else:
-            for m in machines:
+            # Split deployed-via-templedb from never-deployed. Only
+            # the deployed set has a meaningful reconcile baseline.
+            deployed = [m for m in machines if m['last_deployed_at']]
+            undeployed = [m for m in machines if not m['last_deployed_at']]
+            for m in deployed:
                 if not m['last_run']:
                     print(f"  {_c('?', 'yellow')} {m['machine_name']:<20} "
                           f"{_c('never reconciled', 'yellow')}")
                     continue
-                age_hint = self._age_hint(m['last_run'], threshold_hours=168)
-                # For reconcile: >7 days is stale (168h)
+                age_hint = self._age_hint(m['last_run'],
+                                          threshold_hours=168)
                 col = ('green' if m['last_status'] == 'ok'
                        else 'red' if m['last_status'] == 'drift'
                        else 'yellow')
@@ -147,6 +152,12 @@ class SummaryCommand(Command):
                 print(f"  {_c(marker, col)} {m['machine_name']:<20} "
                       f"last {age_hint[0]:<14} "
                       f"{_c(m['last_status'] or '?', col)}")
+            if undeployed:
+                names = ', '.join(m['machine_name'] for m in undeployed)
+                muted_line = _c(
+                    f"({len(undeployed)} never deployed via templedb, "
+                    f"skipped: {names})", 'muted')
+                print(f"  {muted_line}")
 
         # --- Python hygiene (dead imports) ---
         print()

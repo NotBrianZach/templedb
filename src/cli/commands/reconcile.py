@@ -70,15 +70,34 @@ class ReconcileCommands(Command):
         return self._probe_one(machine, verbose=args.verbose)
 
     def _machine_all(self, args) -> int:
-        """Iterate over every registered fleet machine."""
+        """Iterate over every registered fleet machine that has
+        actually been deployed via templedb.
+
+        Skips machines with `last_deployed_at IS NULL` — those have
+        never had a nix_generations row recorded, so there's no
+        baseline to diff against and the probe would just fail with
+        'no DB record for this machine'. Set --include-undeployed
+        to override (useful once, when onboarding a machine)."""
         from db_utils import query_all
+        include_undeployed = getattr(args, 'include_undeployed', False)
         machines = query_all(
-            """SELECT machine_name, target_host, target_user, target_port
+            """SELECT machine_name, target_host, target_user,
+                      target_port, last_deployed_at
                  FROM fleet_machines
                 ORDER BY machine_name"""
         )
+        skipped = [m for m in machines
+                   if not include_undeployed
+                   and not m['last_deployed_at']]
+        active = [m for m in machines
+                  if include_undeployed
+                  or m['last_deployed_at']]
+        if skipped:
+            names = ', '.join(m['machine_name'] for m in skipped)
+            print(f"  (skipped {len(skipped)} never-deployed: {names})")
+            print(f"  (add --include-undeployed to probe them anyway)")
         any_drift = False
-        for m in machines:
+        for m in active:
             rc = self._probe_one(m, verbose=args.verbose)
             if rc != 0:
                 any_drift = True
@@ -441,6 +460,9 @@ def register(cli):
     m.add_argument('name',
                    help='Machine name from fleet_machines, or "all"')
     m.add_argument('-v', '--verbose', action='store_true')
+    m.add_argument('--include-undeployed', action='store_true',
+                   help='For "all": probe never-deployed machines too '
+                        '(default skips them to reduce noise)')
     cli.commands['reconcile.machine'] = cmd.machine
 
     h = sub.add_parser('history',
