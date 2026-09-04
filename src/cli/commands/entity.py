@@ -1436,6 +1436,51 @@ WantedBy=timers.target
                 rows.append({**dict(r), 'dir': 'in'})
         return rows
 
+    def graph_observations_gc(self, args) -> int:
+        """Delete observations_archive rows older than the cutoff.
+
+        Per-kind retention (Symbol 90d, ToolCall 90d, Commit forever)
+        deferred to a follow-up when we have data on how the archive
+        actually grows. For now: one global cutoff.
+
+        Suggested defaults:
+          - Manual sweep: --older-than-days 90 (matches the schema
+            report's ToolCall retention proposal).
+          - Regular sweep (systemd): --older-than-days 90 daily.
+
+        Kinds to keep forever per the schema report:
+          Commit, Deployment, Report, Decision, Machine, Session.
+        For now we don't preserve those — the archive holds
+        *observations* (changes), not the current state. Commit
+        entities themselves live in entities table which never
+        gets touched by this GC."""
+        from db_utils import execute, query_one
+        cutoff_days = int(args.older_than_days)
+        pre = query_one(
+            "SELECT COUNT(*) AS n FROM observations_archive"
+        )['n']
+        if args.dry_run:
+            row = query_one(
+                """SELECT COUNT(*) AS n FROM observations_archive
+                    WHERE observed_at < datetime('now', ?)""",
+                (f"-{cutoff_days} days",),
+            )
+            print(f"Would delete {row['n']} rows "
+                  f"(of {pre} total) older than {cutoff_days} days")
+            return 0
+        execute(
+            """DELETE FROM observations_archive
+                WHERE observed_at < datetime('now', ?)""",
+            (f"-{cutoff_days} days",),
+        )
+        post = query_one(
+            "SELECT COUNT(*) AS n FROM observations_archive"
+        )['n']
+        deleted = pre - post
+        print(f"✓ Deleted {deleted} rows from observations_archive "
+              f"(pre {pre} → post {post})")
+        return 0
+
     def graph_observations(self, args) -> int:
         """Show observations_archive history for one entity.
 
@@ -2045,6 +2090,17 @@ def register(cli):
     obs.add_argument('--limit', default=50,
                      help='Max rows (default 50)')
     cli.commands['entity.observations'] = cmd.graph_observations
+
+    obs_gc = esub.add_parser(
+        'observations-gc',
+        help='Delete observations_archive rows older than a cutoff '
+             '(retention policy per Q2 answer)',
+    )
+    obs_gc.add_argument('--older-than-days', default=90,
+                        help='Delete rows older than N days (default 90)')
+    obs_gc.add_argument('--dry-run', action='store_true',
+                        help='Show what would be deleted without acting')
+    cli.commands['entity.observations-gc'] = cmd.graph_observations_gc
 
     search = esub.add_parser(
         'search',
