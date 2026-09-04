@@ -44,6 +44,28 @@ class EntityCommands(Command):
     # drift shows up as a queryable divergence, not silent noise.
     # See docs/ENTITY_GRAPH_DESIGN.md; recommended by parallel-session
     # report 2026-09-03-1947-answers-to-open-questions-*.html Q3.
+    # Per-kind default sync_scope. Values: 'fleet' | 'machine-local' | 'none'.
+    # Set at ingest time in _upsert_entity. Q5 answer classification.
+    _SYNC_SCOPES = {
+        'Project':      'fleet',
+        'Commit':       'fleet',
+        'File':         'fleet',
+        'Deployment':   'fleet',
+        'Machine':      'fleet',
+        'Generation':   'fleet',
+        'AstBuild':     'fleet',
+        'Report':       'fleet',
+        'Decision':     'fleet',
+        'EditIntent':   'fleet',
+        'Symbol':       'machine-local',
+        'ToolCall':     'machine-local',
+        'AgentSession': 'machine-local',
+        # Nix store: default machine-local since per-machine.
+        # Deployment references bump these implicitly at query time.
+        'StorePath':    'machine-local',
+        'Derivation':   'machine-local',
+    }
+
     _ADAPTER_VERSIONS = {
         'git':     '1.1',    # 1.1 dual-writes Commit.attributes_json
                              # from vcs_commit_parents + metadata (Q4)
@@ -1619,6 +1641,8 @@ WantedBy=timers.target
              self._check_reconcile_freshness),
             ('entity_counts_match_source_tables',
              self._check_entity_counts_match_sources),
+            ('every_entity_has_sync_scope',
+             self._check_entities_have_sync_scope),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -1747,6 +1771,24 @@ WantedBy=timers.target
         )
         return [f"Commit {r['slug']}/{r['commit_hash'][:12]} not in "
                 f"entities table (run `templedb ingest git`)" for r in rows]
+
+    def _check_entities_have_sync_scope(self):
+        """Invariant: every entity has a non-NULL sync_scope. New
+        rows get the default from _SYNC_SCOPES on insert; old rows
+        (pre-mig-099) may have NULL until re-ingested. This check
+        surfaces backfill status."""
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT kind, COUNT(*) AS n
+                 FROM entities
+                WHERE sync_scope IS NULL
+                GROUP BY kind
+                ORDER BY n DESC
+                LIMIT 20"""
+        )
+        return [f"{r['kind']}: {r['n']} entities with NULL sync_scope — "
+                f"re-run `templedb ingest all` or bulk-backfill"
+                for r in rows]
 
     def _check_entity_counts_match_sources(self):
         """Invariant: for every dual-write pair, the entity count
@@ -1945,7 +1987,11 @@ WantedBy=timers.target
     def _upsert_entity(self, kind: str, external_ref: str,
                        authority: str, label: Optional[str] = None) -> bool:
         """Insert-or-refresh an entity. Returns True if a new row was
-        inserted, False on update. Refreshes observed_at either way."""
+        inserted, False on update. Refreshes observed_at either way.
+
+        Sets sync_scope on insert per _SYNC_SCOPES table (Q5). Does
+        NOT overwrite existing scope on update — allows manual
+        overrides via SQL to survive re-ingest."""
         from db_utils import execute, query_one
         existing = query_one(
             "SELECT id FROM entities WHERE kind=? AND external_ref=?",
@@ -1960,11 +2006,13 @@ WantedBy=timers.target
                 (label, authority, existing['id']),
             )
             return False
+        scope = self._SYNC_SCOPES.get(kind, 'fleet')
         execute(
             """INSERT INTO entities
-                   (kind, external_ref, source_authority, label)
-                 VALUES (?, ?, ?, ?)""",
-            (kind, external_ref, authority, label),
+                   (kind, external_ref, source_authority, label,
+                    sync_scope)
+                 VALUES (?, ?, ?, ?, ?)""",
+            (kind, external_ref, authority, label, scope),
         )
         return True
 

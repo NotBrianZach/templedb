@@ -3538,6 +3538,9 @@ CREATE TABLE IF NOT EXISTS entities (
     source_authority  TEXT NOT NULL,
     label             TEXT,
     attributes_json   TEXT,
+    sync_scope        TEXT
+                        CHECK (sync_scope IN
+                            ('fleet', 'machine-local', 'none')),
     observed_at       TEXT NOT NULL DEFAULT (datetime('now')),
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(kind, external_ref)
@@ -3555,6 +3558,9 @@ CREATE TABLE IF NOT EXISTS relations (
     source_authority  TEXT NOT NULL,
     observed_at       TEXT NOT NULL DEFAULT (datetime('now')),
     attributes_json   TEXT,
+    sync_scope        TEXT
+                        CHECK (sync_scope IN
+                            ('fleet', 'machine-local', 'none')),
     UNIQUE(from_entity_id, kind, to_entity_id)
 );
 
@@ -3563,6 +3569,10 @@ CREATE INDEX IF NOT EXISTS idx_relations_from
 CREATE INDEX IF NOT EXISTS idx_relations_to
     ON relations(to_entity_id, kind);
 CREATE INDEX IF NOT EXISTS idx_relations_kind ON relations(kind);
+CREATE INDEX IF NOT EXISTS idx_entities_sync_scope
+    ON entities(sync_scope, kind);
+CREATE INDEX IF NOT EXISTS idx_relations_sync_scope
+    ON relations(sync_scope, kind);
 
 
 -- ============================================================================
