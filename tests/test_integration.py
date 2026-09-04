@@ -1989,6 +1989,61 @@ class TestReconcileHistory:
                 assert '✓' not in line, f"violated-only leaked ok line: {line}"
 
 
+# ── Dual-write drift invariant Tests ─────────────────────────────────────────
+
+class TestDualWriteDrift:
+    """Doctor invariant: entity_counts_match_source_tables."""
+
+    def test_clean_after_ingest(self, populated_env, capsys):
+        """After a full ingest, entity counts should match source
+        tables within tolerance."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        cmd = EntityCommands()
+        cmd.ingest(argparse.Namespace(source='git', limit=20))
+        cmd.ingest(argparse.Namespace(source='agent', limit=20))
+        cmd.ingest(argparse.Namespace(source='intent', limit=20))
+        capsys.readouterr()
+        rc = cmd.doctor_entities(argparse.Namespace(
+            check='entity_counts_match_source_tables'
+        ))
+        out = capsys.readouterr().out
+        assert '✓' in out
+        assert rc == 0
+
+    def test_flags_drift_when_source_grows(self, populated_env, capsys):
+        """Insert new commits WITHOUT re-ingesting — invariant fires."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        cmd = EntityCommands()
+        cmd.ingest(argparse.Namespace(source='git', limit=20))
+        capsys.readouterr()
+        # Add 10 new commits to the source table without ingesting
+        conn = sqlite3.connect(populated_env["db_path"])
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        bid = conn.execute(
+            "SELECT id FROM vcs_branches WHERE project_id=?", (pid,)
+        ).fetchone()[0]
+        for i in range(10):
+            conn.execute(
+                """INSERT INTO vcs_commits
+                       (project_id, branch_id, commit_hash,
+                        commit_message, author, commit_timestamp)
+                     VALUES (?, ?, ?, 'x', 'x', datetime('now'))""",
+                (pid, bid, f'newhash{i:04d}0000'),
+            )
+        conn.commit()
+        conn.close()
+        rc = cmd.doctor_entities(argparse.Namespace(
+            check='entity_counts_match_source_tables'
+        ))
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert 'Commit' in out
+
+
 # ── Q4 sidecar dual-write Tests ──────────────────────────────────────────────
 
 class TestSidecarDualWrite:

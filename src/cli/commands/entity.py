@@ -1572,6 +1572,8 @@ WantedBy=timers.target
              self._check_deployments_have_entities),
             ('fleet_machines_reconciled_within_7_days',
              self._check_reconcile_freshness),
+            ('entity_counts_match_source_tables',
+             self._check_entity_counts_match_sources),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -1700,6 +1702,54 @@ WantedBy=timers.target
         )
         return [f"Commit {r['slug']}/{r['commit_hash'][:12]} not in "
                 f"entities table (run `templedb ingest git`)" for r in rows]
+
+    def _check_entity_counts_match_sources(self):
+        """Invariant: for every dual-write pair, the entity count
+        equals the source table's active row count.
+
+        This is the doctor-shape answer to Q1's dual-write concern
+        (parallel-session report 2026-09-03-1947-*.html). If a
+        write to the source table silently drops the projection to
+        entities — or vice versa — the counts diverge and this
+        check surfaces it.
+
+        Not enforcing exact equality: entities are lazily upserted
+        via ingest, so a source-row landing between ingest runs
+        will legitimately show a delta. We tolerate ±5 rows before
+        flagging. Bigger deltas are actionable drift."""
+        from db_utils import query_one
+        pairs = [
+            ('Commit', "SELECT COUNT(*) FROM vcs_commits", None),
+            ('EditIntent',
+             "SELECT COUNT(*) FROM edit_intents", None),
+            ('AgentSession',
+             "SELECT COUNT(*) FROM agent_sessions", None),
+            ('ToolCall',
+             "SELECT COUNT(*) FROM tool_calls", None),
+            ('Deployment',
+             "SELECT COUNT(*) FROM deployment_history", None),
+            ('File',
+             """SELECT COUNT(*) FROM project_files
+                 WHERE status = 'active'""", None),
+            ('AstBuild',
+             "SELECT COUNT(*) FROM ast_builds", None),
+        ]
+        issues = []
+        for kind, src_sql, _extra in pairs:
+            src_row = query_one(src_sql)
+            src_n = list(src_row.values())[0] if src_row else 0
+            ent_row = query_one(
+                "SELECT COUNT(*) AS n FROM entities WHERE kind = ?",
+                (kind,),
+            )
+            ent_n = ent_row['n'] if ent_row else 0
+            delta = abs(ent_n - src_n)
+            if delta > 5:
+                issues.append(
+                    f"{kind}: {ent_n} entities vs {src_n} source rows "
+                    f"(delta {delta}) — run `templedb ingest all`"
+                )
+        return issues
 
     def _check_reconcile_freshness(self):
         """Invariant: every fleet_machine should have been reconciled
