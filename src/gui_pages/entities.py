@@ -402,6 +402,227 @@ def _age_hint(ts, threshold_hours=1):
     return (f"{int(hours / 24)}d ago", 'ancient')
 
 
+@router.get("/hygiene", response_class=HTMLResponse)
+def hygiene_page(slug: str = ""):
+    """Per-project dead-import drill-down. Mirrors
+    `templedb entity dead-imports` + `templedb summary` hygiene
+    block but with clickable file rows.
+
+    Without ?slug=…: shows the per-project rollup.
+    With ?slug=…: lists every candidate dead import in that project.
+    """
+    _dead_bridge_kinds = "('calls', 'inherits', 'uses')"
+    _base_cte = f"""
+        WITH imports AS (
+          SELECT
+            substr(fe.external_ref, 1,
+                   instr(fe.external_ref, '/') - 1) AS slug,
+            fe.id AS from_id, te.id AS to_id,
+            fe.external_ref AS from_ref,
+            te.external_ref AS to_ref
+          FROM relations r
+          JOIN entities fe ON fe.id = r.from_entity_id
+          JOIN entities te ON te.id = r.to_entity_id
+          WHERE r.kind = 'imports'
+            AND fe.kind = 'File'
+            AND te.kind = 'File'
+        ),
+        bridges AS (
+          SELECT imp.slug, imp.from_id, imp.to_id,
+                 imp.from_ref, imp.to_ref,
+                 SUM(CASE WHEN dr_to.id IS NOT NULL
+                          THEN 1 ELSE 0 END) AS bridge_count
+          FROM imports imp
+          LEFT JOIN relations dr_from
+            ON dr_from.from_entity_id = imp.from_id
+            AND dr_from.kind = 'defines'
+          LEFT JOIN entities fsym
+            ON fsym.id = dr_from.to_entity_id
+            AND fsym.kind = 'Symbol'
+          LEFT JOIN relations cr
+            ON cr.from_entity_id = fsym.id
+            AND cr.kind IN {_dead_bridge_kinds}
+          LEFT JOIN entities tsym
+            ON tsym.id = cr.to_entity_id
+            AND tsym.kind = 'Symbol'
+          LEFT JOIN relations dr_to
+            ON dr_to.from_entity_id = imp.to_id
+            AND dr_to.kind = 'defines'
+            AND dr_to.to_entity_id = tsym.id
+          GROUP BY imp.slug, imp.from_id, imp.to_id
+        )
+    """
+
+    if slug:
+        # Drill-down: every candidate for one project
+        rows = query_all(
+            _base_cte + """
+            SELECT from_ref, to_ref FROM bridges
+             WHERE slug = ? AND bridge_count = 0
+             ORDER BY from_ref, to_ref
+            """,
+            (slug,),
+        )
+        rollup = query_one(
+            _base_cte + """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN bridge_count = 0 THEN 1 ELSE 0 END)
+                       AS dead
+              FROM bridges
+             WHERE slug = ?
+            """,
+            (slug,),
+        )
+        cur = None
+        candidates_html = ''
+        for row in rows:
+            if row['from_ref'] != cur:
+                if cur is not None:
+                    candidates_html += '</td></tr>'
+                cur = row['from_ref']
+                candidates_html += (
+                    f'<tr><td><code>'
+                    f'<a href="/entity/File/{html.escape(cur)}">'
+                    f'{html.escape(cur)}</a></code></td><td>'
+                )
+            candidates_html += (
+                f'<div>→ <code>'
+                f'<a href="/entity/File/{html.escape(row["to_ref"])}">'
+                f'{html.escape(row["to_ref"])}</a></code></div>'
+            )
+        if cur is not None:
+            candidates_html += '</td></tr>'
+
+        if not rows:
+            candidates_html = (
+                '<tr><td colspan="2" class="dim">'
+                'No candidate dead imports for this project.'
+                '</td></tr>'
+            )
+
+        total = rollup['total'] if rollup else 0
+        dead = rollup['dead'] if rollup else 0
+        pct = (100.0 * dead / total) if total else 0
+        pct_cls = ('ok' if pct < 10 else 'warn' if pct < 30 else 'err')
+        body = f"""
+<style>
+  .card {{ background: var(--panel); border: 1px solid var(--border);
+           padding: 1rem 1.2rem; border-radius: 6px; margin-bottom: 1.2rem; }}
+  .card h2 {{ margin-top: 0; color: var(--accent); font-size: 0.95rem;
+              text-transform: uppercase; letter-spacing: 0.06em;
+              border: none; padding-top: 0; }}
+  .pill {{ display: inline-block; padding: 2px 8px; border-radius: 10px;
+           font-size: 0.8em; font-weight: 500;
+           font-family: "JetBrains Mono", monospace; }}
+  .pill-ok {{ background: rgba(127,214,160,.15); color: var(--pos); }}
+  .pill-warn {{ background: rgba(224,192,96,.15); color: var(--warn); }}
+  .pill-err {{ background: rgba(233,112,112,.15); color: var(--neg); }}
+  table.hs {{ border-collapse: collapse; width: 100%; font-size: 0.88em; }}
+  table.hs td {{ border-top: 1px solid var(--border); padding: 6px 10px;
+                 vertical-align: top; }}
+  .dim {{ color: var(--muted); font-size: 0.82em; }}
+</style>
+<h1>Hygiene — {html.escape(slug)}</h1>
+<p class="lede">
+  <span class="pill pill-{pct_cls}">{dead}/{total} dead ({pct:.0f}%)</span>
+  &nbsp;·&nbsp;
+  <a href="/hygiene">← all projects</a>
+</p>
+<div class="card">
+  <h2>Candidate dead imports</h2>
+  <table class="hs"><tr><th>File</th><th>Imports (no bridge)</th></tr>
+    {candidates_html}
+  </table>
+  <p class="dim">
+    Bridge = any <code>Symbol → calls|inherits|uses → Symbol</code>
+    between the two files' symbol sets. False positives from
+    attribute-chain calls (<code>svc.foo()</code>), reflection
+    (<code>getattr</code>), and side-effect imports (plugin
+    registration) are expected — see
+    <a href="/reports/2026-09-04-1450-session-recap-3-code-intelligence-hygiene.html">
+    session recap 3</a>.
+  </p>
+</div>
+"""
+        return _base(f"Hygiene — {slug}", body, active="hygiene")
+
+    # Rollup: per-project counts
+    rollup_rows = query_all(
+        _base_cte + """
+        SELECT slug,
+               COUNT(*) AS total_imports,
+               SUM(CASE WHEN bridge_count = 0 THEN 1 ELSE 0 END)
+                   AS dead_candidates
+          FROM bridges
+         GROUP BY slug
+         HAVING total_imports > 0
+         ORDER BY dead_candidates DESC, total_imports DESC
+        """
+    )
+    rows_html = ''
+    for row in rollup_rows:
+        pct = (100.0 * row['dead_candidates']
+               / row['total_imports']) if row['total_imports'] else 0
+        pct_cls = ('ok' if pct < 10 else 'warn' if pct < 30 else 'err')
+        rows_html += (
+            f'<tr>'
+            f'<td><a href="/hygiene?slug={html.escape(row["slug"])}">'
+            f'{html.escape(row["slug"])}</a></td>'
+            f'<td class="num">{row["dead_candidates"]}</td>'
+            f'<td class="num">{row["total_imports"]}</td>'
+            f'<td><span class="pill pill-{pct_cls}">'
+            f'{pct:.0f}%</span></td>'
+            f'</tr>'
+        )
+    if not rows_html:
+        rows_html = (
+            '<tr><td colspan="4" class="dim">No python imports observed. '
+            'Run <code>templedb ingest python</code>.</td></tr>'
+        )
+
+    body = f"""
+<style>
+  .card {{ background: var(--panel); border: 1px solid var(--border);
+           padding: 1rem 1.2rem; border-radius: 6px; margin-bottom: 1.2rem; }}
+  .card h2 {{ margin-top: 0; color: var(--accent); font-size: 0.95rem;
+              text-transform: uppercase; letter-spacing: 0.06em;
+              border: none; padding-top: 0; }}
+  .pill {{ display: inline-block; padding: 2px 8px; border-radius: 10px;
+           font-size: 0.8em; font-weight: 500;
+           font-family: "JetBrains Mono", monospace; }}
+  .pill-ok {{ background: rgba(127,214,160,.15); color: var(--pos); }}
+  .pill-warn {{ background: rgba(224,192,96,.15); color: var(--warn); }}
+  .pill-err {{ background: rgba(233,112,112,.15); color: var(--neg); }}
+  table.hs {{ border-collapse: collapse; width: 100%; font-size: 0.88em; }}
+  table.hs th, table.hs td {{
+    border-top: 1px solid var(--border); padding: 6px 10px;
+    text-align: left; vertical-align: top; }}
+  table.hs th {{ color: var(--muted); font-weight: 500;
+                 font-size: 0.72rem; text-transform: uppercase;
+                 letter-spacing: 0.08em; }}
+  .num {{ font-family: "JetBrains Mono", monospace;
+          font-variant-numeric: tabular-nums; text-align: right; }}
+  .dim {{ color: var(--muted); font-size: 0.82em; }}
+</style>
+<h1>Hygiene</h1>
+<p class="lede">
+  Candidate dead imports per project. A candidate is a
+  <code>File → imports → File</code> edge where no
+  <code>Symbol</code> in the source has a
+  <code>calls / inherits / uses</code> edge to any
+  <code>Symbol</code> in the target.
+</p>
+<div class="card">
+  <h2>Per project</h2>
+  <table class="hs">
+    <tr><th>Slug</th><th>Dead</th><th>Total</th><th>%</th></tr>
+    {rows_html}
+  </table>
+</div>
+"""
+    return _base("Hygiene", body, active="hygiene")
+
+
 @router.get("/summary", response_class=HTMLResponse)
 def summary_page():
     """Visual health mirror of `templedb summary`."""
