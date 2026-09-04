@@ -1722,6 +1722,69 @@ class TestPythonIngest:
         conn.close()
         assert row['n'] == 0
 
+    def test_python_ingest_emits_inherits_cross_file(
+            self, populated_env):
+        """class Provider(BaseProvider) with BaseProvider imported from
+        another file → Symbol Provider → inherits → Symbol BaseProvider.
+        Adapter 1.8 addition."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/base.py',
+            "class BaseProvider:\n    pass\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/child.py',
+            "from base import BaseProvider\n"
+            "\n"
+            "class MyProvider(BaseProvider):\n"
+            "    pass\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.external_ref =
+                      'testproj:src/child.py:MyProvider'
+                  AND e2.external_ref =
+                      'testproj:src/base.py:BaseProvider'
+                  AND r.kind = 'inherits'"""
+        ).fetchone()
+        conn.close()
+        assert row['n'] == 1
+
+    def test_dead_imports_ignores_inheritance_use(
+            self, populated_env, capsys):
+        """A file that only imports a base class for `class X(Base):`
+        should NOT be flagged as a dead import."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/base_lib.py',
+            "class MyBase:\n    pass\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/subclass.py',
+            "from base_lib import MyBase\n"
+            "\n"
+            "class Child(MyBase):\n"
+            "    pass\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        capsys.readouterr()
+        rc = EntityCommands().graph_dead_imports(argparse.Namespace(
+            slug='testproj', limit=50,
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'base_lib.py' not in out, \
+            "Inheritance-only import must NOT be flagged (adapter 1.8)"
+
     def test_dead_imports_finds_unused_and_ignores_used(
             self, populated_env, capsys):
         """`entity dead-imports` should flag a File→imports edge where

@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.7',    # 1.7 adds __module__ synthetic symbol
+        'python':  '1.8',    # 1.8 adds Symbol→inherits→Symbol
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -340,6 +340,8 @@ WantedBy=timers.target
         all_defs_by_file = {}  # → dict[name → (sym_id, ast_node, enclosing)]
         all_imports_by_file = {}  # → dict[imported_name → (slug, target_path)]
         file_trees_by_file = {}  # → (ast.Module, py_file_list_for_project)
+        # class inheritance: (slug, path) → [(class_sym_id, [base_name, ...])]
+        class_bases_by_file = {}
 
         # Pruning: track every relation this run creates or refreshes,
         # keyed by from_entity_id. At the end, delete any 'defines' /
@@ -420,12 +422,26 @@ WantedBy=timers.target
                 if sym_id:
                     local_defs[name] = (sym_id, eref, node, enclosing)
 
+            local_class_bases = []  # (class_sym_id, [base_name, ...])
             for node in ast.iter_child_nodes(tree):
                 if isinstance(node, (ast.FunctionDef,
                                      ast.AsyncFunctionDef)):
                     _register(node.name, node, 'def')
                 elif isinstance(node, ast.ClassDef):
                     _register(node.name, node, 'class')
+                    # Base classes: capture bare Name bases for later
+                    # same-file + cross-file inheritance resolution.
+                    # ast.Attribute (module.Base) deferred — matches
+                    # the same-cap as call resolution.
+                    base_names = [
+                        b.id for b in node.bases
+                        if isinstance(b, ast.Name)
+                    ]
+                    if base_names:
+                        class_sym_id = local_defs[node.name][0]
+                        local_class_bases.append(
+                            (class_sym_id, base_names)
+                        )
                     # Methods: iterate the class body
                     for cnode in ast.iter_child_nodes(node):
                         if isinstance(cnode, (ast.FunctionDef,
@@ -585,10 +601,27 @@ WantedBy=timers.target
                                 r['slug'], match_path, alias.name,
                             )
 
+            # Same-file inheritance resolution: emit Symbol → inherits
+            # → Symbol for base classes defined in this file.
+            for class_sym_id, base_names in local_class_bases:
+                for bn in base_names:
+                    if bn in local_defs and bn != '__module__':
+                        base_id = local_defs[bn][0]
+                        if base_id and base_id != class_sym_id:
+                            if self._upsert_relation(
+                                class_sym_id, 'inherits', base_id, 'python'
+                            ):
+                                added_r += 1
+                            touched_relations.add(
+                                (class_sym_id, 'inherits', base_id)
+                            )
+
             # Save state for the cross-file post-pass.
             all_defs_by_file[(r['slug'], r['file_path'])] = local_defs
             all_imports_by_file[(r['slug'], r['file_path'])] = imports_map
             file_trees_by_file[(r['slug'], r['file_path'])] = tree
+            class_bases_by_file[(r['slug'], r['file_path'])] = \
+                local_class_bases
 
         # Cross-file call resolution post-pass.
         # For each Symbol's body, walk Call nodes; if the callable is
@@ -647,6 +680,40 @@ WantedBy=timers.target
                         added_r += 1
                     touched_relations.add(
                         (sym_id, 'calls', target_sym_id)
+                    )
+
+        # Cross-file inheritance resolution.
+        # For each ClassDef with base names, if a base isn't defined
+        # locally but is imported, resolve it against the imported
+        # file's local_defs and emit Symbol → inherits → Symbol.
+        for (slug, fp), class_bases in class_bases_by_file.items():
+            imports_map = all_imports_by_file.get((slug, fp), {})
+            local_defs = all_defs_by_file.get((slug, fp), {})
+            if not class_bases or not imports_map:
+                continue
+            for class_sym_id, base_names in class_bases:
+                for bn in base_names:
+                    if bn in local_defs:
+                        continue  # same-file already handled
+                    imp = imports_map.get(bn)
+                    if not imp:
+                        continue
+                    target_slug, target_path, target_symbol_name = imp
+                    target_defs = all_defs_by_file.get(
+                        (target_slug, target_path)
+                    )
+                    if not target_defs:
+                        continue
+                    target = target_defs.get(target_symbol_name)
+                    if not target:
+                        continue
+                    base_id = target[0]
+                    if self._upsert_relation(
+                        class_sym_id, 'inherits', base_id, 'python'
+                    ):
+                        added_r += 1
+                    touched_relations.add(
+                        (class_sym_id, 'inherits', base_id)
                     )
 
         # Pruning: delete python-authority relations from processed
@@ -2001,7 +2068,7 @@ WantedBy=timers.target
                 AND fsym.kind = 'Symbol'
               LEFT JOIN relations cr
                 ON cr.from_entity_id = fsym.id
-                AND cr.kind = 'calls'
+                AND cr.kind IN ('calls', 'inherits')
               LEFT JOIN entities tsym
                 ON tsym.id = cr.to_entity_id
                 AND tsym.kind = 'Symbol'
