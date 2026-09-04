@@ -74,8 +74,9 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.4',    # 1.4 adds cross-file call resolution
-                             # via ImportFrom (bare from x import y; y())
+        'python':  '1.5',    # 1.5 = 1.4 + prunes stale python-authority
+                             # relations on re-ingest (removes phantom
+                             # edges from prior ingest bugs)
     }
 
     # ==== INGEST ==============================================================
@@ -340,6 +341,14 @@ WantedBy=timers.target
         all_imports_by_file = {}  # → dict[imported_name → (slug, target_path)]
         file_trees_by_file = {}  # → (ast.Module, py_file_list_for_project)
 
+        # Pruning: track every relation this run creates or refreshes,
+        # keyed by from_entity_id. At the end, delete any 'defines' /
+        # 'calls' / 'imports' relation from a processed File whose
+        # tuple didn't appear this run — those are stale artifacts
+        # from prior ingest bugs (e.g. wrong import resolution).
+        touched_relations = set()  # (from_id, kind, to_id)
+        processed_file_ids = set()
+
         rows = query_all(
             """SELECT p.slug AS slug, pf.file_path AS file_path,
                       cb.content_text AS content
@@ -375,6 +384,7 @@ WantedBy=timers.target
                 # Skip rather than fail; the relation will be added on
                 # next python ingest after a git ingest lands.
                 continue
+            processed_file_ids.add(file_id)
 
             # Two-pass walk. First pass collects every symbol —
             # module-level defs, class methods, and inner functions
@@ -401,10 +411,12 @@ WantedBy=timers.target
                                        label=label):
                     added_e += 1
                 sym_id = self._entity_id('Symbol', eref)
-                if sym_id and self._upsert_relation(
-                    file_id, 'defines', sym_id, 'python'
-                ):
-                    added_r += 1
+                if sym_id:
+                    if self._upsert_relation(
+                        file_id, 'defines', sym_id, 'python'
+                    ):
+                        added_r += 1
+                    touched_relations.add((file_id, 'defines', sym_id))
                 if sym_id:
                     local_defs[name] = (sym_id, eref, node, enclosing)
 
@@ -456,6 +468,9 @@ WantedBy=timers.target
                             sym_id, 'calls', target_sym_id, 'python'
                         ):
                             added_r += 1
+                        touched_relations.add(
+                            (sym_id, 'calls', target_sym_id)
+                        )
 
             # Third pass: extract imports at module level and emit
             # File → imports → File relations. Also populates the
@@ -489,6 +504,9 @@ WantedBy=timers.target
                         file_id, 'imports', target_file_id, 'python'
                     ):
                         added_r += 1
+                    touched_relations.add(
+                        (file_id, 'imports', target_file_id)
+                    )
 
             for node in ast.iter_child_nodes(tree):
                 if isinstance(node, ast.Import):
@@ -557,9 +575,61 @@ WantedBy=timers.target
                         sym_id, 'calls', target_sym_id, 'python'
                     ):
                         added_r += 1
+                    touched_relations.add(
+                        (sym_id, 'calls', target_sym_id)
+                    )
 
+        # Pruning: delete python-authority relations from processed
+        # Files (and their Symbols) whose tuples weren't touched this
+        # run. Catches stale artifacts from prior ingest bugs — e.g.
+        # a phantom logger.py → nixos.py 'imports' edge from an early
+        # buggy suffix-match implementation.
+        pruned = 0
+        if processed_file_ids:
+            from db_utils import query_all, execute
+            # Collect symbol ids in processed files (for calls pruning).
+            processed_sym_ids = set()
+            file_id_list = list(processed_file_ids)
+            # SQLite has a parameter limit; batch if it gets huge.
+            for i in range(0, len(file_id_list), 500):
+                batch = file_id_list[i:i+500]
+                placeholders = ','.join('?' for _ in batch)
+                sym_rows = query_all(
+                    f"""SELECT DISTINCT r.to_entity_id AS sid
+                          FROM relations r
+                         WHERE r.from_entity_id IN ({placeholders})
+                           AND r.kind = 'defines'
+                           AND r.source_authority = 'python'""",
+                    tuple(batch),
+                )
+                processed_sym_ids.update(row['sid'] for row in sym_rows)
+            # Now for each processed file + symbol, find its current
+            # python-authority relations and drop untouched ones.
+            all_from_ids = processed_file_ids | processed_sym_ids
+            for i in range(0, len(all_from_ids), 500):
+                batch = list(all_from_ids)[i:i+500]
+                placeholders = ','.join('?' for _ in batch)
+                cur_relations = query_all(
+                    f"""SELECT r.id, r.from_entity_id, r.kind,
+                              r.to_entity_id
+                         FROM relations r
+                        WHERE r.from_entity_id IN ({placeholders})
+                          AND r.source_authority = 'python'""",
+                    tuple(batch),
+                )
+                for r_row in cur_relations:
+                    tup = (r_row['from_entity_id'], r_row['kind'],
+                           r_row['to_entity_id'])
+                    if tup not in touched_relations:
+                        execute(
+                            "DELETE FROM relations WHERE id = ?",
+                            (r_row['id'],),
+                        )
+                        pruned += 1
+
+        prune_suffix = f", {pruned} pruned" if pruned else ""
         print(f"✓ ingest python: +{added_e} symbols, +{added_r} relations, "
-              f"{skipped} unparseable")
+              f"{skipped} unparseable{prune_suffix}")
         self._last_counts = {'e': added_e, 'r': added_r, 'x': skipped}
         return 0
 
