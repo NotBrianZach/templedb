@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.6',    # 1.6 = 1.5 + path-segment-aware import
+        'python':  '1.7',    # 1.7 adds __module__ synthetic symbol
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -436,15 +436,60 @@ WantedBy=timers.target
                                 enclosing=node.name,
                             )
 
+            # Register a synthetic __module__ symbol so module-scope
+            # calls (top-level get_logger(__name__), decorators,
+            # if __name__ == '__main__': main() blocks) get a
+            # syntactic owner. Without this, ~60% of import edges
+            # look "dead" because their sole caller is at module
+            # scope. `enclosing='__module__'` is checked below to
+            # (a) restrict the walk to non-def/class statements and
+            # (b) skip the self.foo attribute path.
+            module_eref = f"{r['slug']}:{r['file_path']}:__module__"
+            if self._upsert_entity('Symbol', module_eref, 'python',
+                                   label='module scope'):
+                added_e += 1
+            module_sym_id = self._entity_id('Symbol', module_eref)
+            if module_sym_id:
+                if self._upsert_relation(
+                    file_id, 'defines', module_sym_id, 'python'
+                ):
+                    added_r += 1
+                touched_relations.add(
+                    (file_id, 'defines', module_sym_id)
+                )
+                local_defs['__module__'] = (
+                    module_sym_id, module_eref, tree, '__module__'
+                )
+
+            def _iter_call_scope(def_node, enclosing):
+                """Yield Call ast nodes owned by this symbol.
+
+                For __module__: only module-scope statements (skip
+                nested def/class bodies — those belong to their own
+                symbols). For everything else: walk the entire body.
+                """
+                if enclosing == '__module__':
+                    for stmt in def_node.body:
+                        if isinstance(stmt, (
+                            ast.FunctionDef, ast.AsyncFunctionDef,
+                            ast.ClassDef,
+                        )):
+                            continue
+                        for n in ast.walk(stmt):
+                            if isinstance(n, ast.Call):
+                                yield n
+                else:
+                    for n in ast.walk(def_node):
+                        if isinstance(n, ast.Call):
+                            yield n
+
             # Second pass: for each locally-defined symbol, walk its
             # body for Call nodes and emit Symbol → calls → Symbol
             # for same-file matches. Attribute access is resolved for
             # self.foo() and Class.foo().
             for name, (sym_id, eref, def_node, enclosing) in \
                     local_defs.items():
-                for sub in ast.walk(def_node):
-                    if not isinstance(sub, ast.Call):
-                        continue
+                for sub in _iter_call_scope(def_node, enclosing):
                     called = None
                     if isinstance(sub.func, ast.Name):
                         called = sub.func.id
@@ -454,7 +499,8 @@ WantedBy=timers.target
                         if isinstance(func.value, ast.Name):
                             root = func.value.id
                             attr = func.attr
-                            if root == 'self' and enclosing:
+                            if (root == 'self' and enclosing
+                                    and enclosing != '__module__'):
                                 # self.foo → <enclosing>.foo
                                 called = f"{enclosing}.{attr}"
                             elif root in local_defs:
@@ -550,6 +596,23 @@ WantedBy=timers.target
         # look up the target Symbol in the imported file's local_defs.
         # Handles `from foo import bar; bar()` and
         # `from foo import bar as bz; bz()`.
+        def _iter_call_scope_post(def_node, enclosing):
+            """Same scope-aware walker as the same-file pass."""
+            if enclosing == '__module__':
+                for stmt in def_node.body:
+                    if isinstance(stmt, (
+                        ast.FunctionDef, ast.AsyncFunctionDef,
+                        ast.ClassDef,
+                    )):
+                        continue
+                    for n in ast.walk(stmt):
+                        if isinstance(n, ast.Call):
+                            yield n
+            else:
+                for n in ast.walk(def_node):
+                    if isinstance(n, ast.Call):
+                        yield n
+
         for (slug, fp), tree in file_trees_by_file.items():
             local_defs = all_defs_by_file.get((slug, fp), {})
             imports_map = all_imports_by_file.get((slug, fp), {})
@@ -557,9 +620,7 @@ WantedBy=timers.target
                 continue
             for name, (sym_id, eref, def_node, enclosing) in \
                     local_defs.items():
-                for sub in ast.walk(def_node):
-                    if not isinstance(sub, ast.Call):
-                        continue
+                for sub in _iter_call_scope_post(def_node, enclosing):
                     called_name = None
                     if isinstance(sub.func, ast.Name):
                         called_name = sub.func.id
@@ -1897,6 +1958,83 @@ WantedBy=timers.target
         print(f"  Path length: {len(chain)} hops")
         return 0
 
+    def graph_dead_imports(self, args) -> int:
+        """List File→imports→File edges where no Symbol in the source
+        file `calls` any Symbol in the target file.
+
+        Investigation tool, not a doctor invariant — side-effect imports
+        (plugin registration, monkeypatching) legitimately have no call
+        edges and should not fire warnings automatically. Use this to
+        eyeball a project for candidates.
+        """
+        from db_utils import query_all
+        slug = getattr(args, 'slug', None)
+        limit = int(getattr(args, 'limit', 50))
+        # File→imports→File pairs. Left-join calls-through-symbols
+        # to see if ANY symbol call bridges the two files. Zero call
+        # count == candidate dead import.
+        rows = query_all(
+            """
+            WITH imports AS (
+              SELECT
+                fe.external_ref  AS from_ref,
+                fe.id            AS from_id,
+                te.external_ref  AS to_ref,
+                te.id            AS to_id
+              FROM relations r
+              JOIN entities fe ON fe.id = r.from_entity_id
+              JOIN entities te ON te.id = r.to_entity_id
+              WHERE r.kind = 'imports'
+                AND fe.kind = 'File'
+                AND te.kind = 'File'
+                AND (? IS NULL OR fe.external_ref LIKE ? || '/%')
+            ),
+            calls AS (
+              SELECT
+                imp.from_ref, imp.to_ref
+              FROM imports imp
+              LEFT JOIN relations dr_from
+                ON dr_from.from_entity_id = imp.from_id
+                AND dr_from.kind = 'defines'
+              LEFT JOIN entities fsym
+                ON fsym.id = dr_from.to_entity_id
+                AND fsym.kind = 'Symbol'
+              LEFT JOIN relations cr
+                ON cr.from_entity_id = fsym.id
+                AND cr.kind = 'calls'
+              LEFT JOIN entities tsym
+                ON tsym.id = cr.to_entity_id
+                AND tsym.kind = 'Symbol'
+              LEFT JOIN relations dr_to
+                ON dr_to.from_entity_id = imp.to_id
+                AND dr_to.kind = 'defines'
+                AND dr_to.to_entity_id  = tsym.id
+              GROUP BY imp.from_ref, imp.to_ref
+              HAVING SUM(CASE WHEN dr_to.id IS NOT NULL
+                              THEN 1 ELSE 0 END) = 0
+            )
+            SELECT from_ref, to_ref FROM calls
+            ORDER BY from_ref, to_ref
+            LIMIT ?
+            """,
+            (slug, slug, limit),
+        )
+        if not rows:
+            scope = f" for '{slug}'" if slug else ""
+            print(f"No candidate dead imports found{scope}.")
+            return 0
+        print(f"Found {len(rows)} candidate dead import(s):")
+        print()
+        cur = None
+        for row in rows:
+            if row['from_ref'] != cur:
+                cur = row['from_ref']
+                print(f"● {cur}")
+            print(f"    imports (no call resolved) → {row['to_ref']}")
+        print()
+        print("Note: side-effect imports (plugin/monkeypatch) may be legit.")
+        return 0
+
     def graph_stats(self, args) -> int:
         """Compact summary of the graph."""
         from db_utils import query_all, query_one
@@ -2582,6 +2720,22 @@ def register(cli):
                        help="Traversal direction (default 'both')")
     paths.add_argument('--via', help='Comma-separated relation kinds')
     cli.commands['entity.paths'] = cmd.graph_paths
+
+    dead = esub.add_parser(
+        'dead-imports',
+        help='List File→imports→File edges with no resolved call across',
+        description=(
+            "Files that import another file without any Symbol call "
+            "landing in it. Investigation only — side-effect imports "
+            "(plugin registration, monkeypatching) legitimately have no "
+            "calls."
+        ),
+    )
+    dead.add_argument('--slug',
+                      help='Restrict to one project (default: all)')
+    dead.add_argument('--limit', default=50,
+                      help='Max candidates (default 50)')
+    cli.commands['entity.dead-imports'] = cmd.graph_dead_imports
 
     trace = esub.add_parser(
         'trace',

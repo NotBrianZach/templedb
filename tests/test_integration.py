@@ -1436,7 +1436,41 @@ class TestPythonIngest:
                   AND r.kind = 'defines'"""
         ).fetchone()
         conn.close()
-        assert row['n'] == 1
+        # 2 = hello + synthetic __module__ (adapter 1.7).
+        assert row['n'] == 2
+
+    def test_python_ingest_tracks_module_scope_calls(self, populated_env):
+        """Bare `main()` at module scope should be attributed to the
+        synthetic __module__ symbol (adapter 1.7). Without this the
+        dead-imports heuristic gets ~60% false positives because
+        top-level `logger = get_logger(__name__)` etc. never lands
+        on a Symbol."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/modscope.py',
+            "def main():\n    return 1\n\n"
+            "if __name__ == '__main__':\n    main()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.kind = 'Symbol'
+                  AND e1.external_ref =
+                      'testproj:src/modscope.py:__module__'
+                  AND e2.kind = 'Symbol'
+                  AND e2.external_ref =
+                      'testproj:src/modscope.py:main'
+                  AND r.kind = 'calls'"""
+        ).fetchone()
+        conn.close()
+        assert row['n'] == 1, \
+            "__module__ → calls → main not emitted"
 
     def test_python_ingest_extracts_same_file_calls(self, populated_env):
         """Symbol → calls → Symbol for a call whose target is defined
@@ -1687,6 +1721,46 @@ class TestPythonIngest:
         ).fetchone()
         conn.close()
         assert row['n'] == 0
+
+    def test_dead_imports_finds_unused_and_ignores_used(
+            self, populated_env, capsys):
+        """`entity dead-imports` should flag a File→imports edge where
+        no Symbol call bridges the two files, and NOT flag one where a
+        module-scope or function call does bridge them."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        # used_lib.py defines `helper` — user.py imports and calls it
+        # at module scope.
+        self._seed_python_file(
+            populated_env, 'src/used_lib.py',
+            "def helper():\n    return 1\n"
+        )
+        # unused_lib.py defines `dead_fn` — user.py imports but never
+        # calls it.
+        self._seed_python_file(
+            populated_env, 'src/unused_lib.py',
+            "def dead_fn():\n    return 2\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/user.py',
+            "from used_lib import helper\n"
+            "from unused_lib import dead_fn\n"
+            "\n"
+            "helper()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        capsys.readouterr()  # drain ingest output
+        rc = EntityCommands().graph_dead_imports(argparse.Namespace(
+            slug='testproj', limit=50,
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'unused_lib.py' in out, \
+            "unused import should be flagged"
+        # Explicit path to avoid 'used_lib.py' matching 'unused_lib.py'.
+        assert 'testproj/src/used_lib.py' not in out, \
+            "used import must NOT be flagged (module-scope call bridges)"
 
     def test_python_ingest_skips_unparseable(self, populated_env, capsys):
         import argparse
