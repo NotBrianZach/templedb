@@ -148,6 +148,81 @@ class SummaryCommand(Command):
                       f"last {age_hint[0]:<14} "
                       f"{_c(m['last_status'] or '?', col)}")
 
+        # --- Python hygiene (dead imports) ---
+        print()
+        print(_c("── Python hygiene ──", 'accent'))
+        # Total File→imports→File edges scoped to slugs with any calls
+        # so we don't bloat the summary with never-ingested projects.
+        hygiene_rows = query_all(
+            """
+            WITH imports AS (
+              SELECT
+                substr(fe.external_ref, 1,
+                       instr(fe.external_ref, '/') - 1) AS slug,
+                fe.id AS from_id, te.id AS to_id
+              FROM relations r
+              JOIN entities fe ON fe.id = r.from_entity_id
+              JOIN entities te ON te.id = r.to_entity_id
+              WHERE r.kind = 'imports'
+                AND fe.kind = 'File'
+                AND te.kind = 'File'
+            ),
+            bridges AS (
+              SELECT imp.slug, imp.from_id, imp.to_id,
+                     SUM(CASE WHEN dr_to.id IS NOT NULL
+                              THEN 1 ELSE 0 END) AS bridge_count
+              FROM imports imp
+              LEFT JOIN relations dr_from
+                ON dr_from.from_entity_id = imp.from_id
+                AND dr_from.kind = 'defines'
+              LEFT JOIN entities fsym
+                ON fsym.id = dr_from.to_entity_id
+                AND fsym.kind = 'Symbol'
+              LEFT JOIN relations cr
+                ON cr.from_entity_id = fsym.id
+                AND cr.kind IN ('calls', 'inherits')
+              LEFT JOIN entities tsym
+                ON tsym.id = cr.to_entity_id
+                AND tsym.kind = 'Symbol'
+              LEFT JOIN relations dr_to
+                ON dr_to.from_entity_id = imp.to_id
+                AND dr_to.kind = 'defines'
+                AND dr_to.to_entity_id = tsym.id
+              GROUP BY imp.slug, imp.from_id, imp.to_id
+            )
+            SELECT slug,
+                   COUNT(*) AS total_imports,
+                   SUM(CASE WHEN bridge_count = 0 THEN 1 ELSE 0 END)
+                       AS dead_candidates
+              FROM bridges
+             GROUP BY slug
+             HAVING total_imports > 0
+             ORDER BY dead_candidates DESC, total_imports DESC
+             LIMIT 5
+            """
+        )
+        if not hygiene_rows:
+            no_py = _c(
+                '(no python imports observed — '
+                'run `templedb ingest python`)', 'muted')
+            print(f"  {no_py}")
+        else:
+            for row in hygiene_rows:
+                pct = (100.0 * row['dead_candidates']
+                       / row['total_imports']) if row['total_imports'] else 0
+                col = ('green' if pct < 10 else
+                       'yellow' if pct < 30 else 'red')
+                dead_str = _c(f"{row['dead_candidates']:>3}", col)
+                pct_str = _c(f"{pct:.0f}%", col)
+                print(f"  {row['slug']:<28} "
+                      f"{dead_str}"
+                      f"/{row['total_imports']:<4} candidate dead "
+                      f"({pct_str})")
+            hint = _c(
+                'detail: templedb entity dead-imports --slug <slug>',
+                'muted')
+            print(f"  {hint}")
+
         # --- Handoff inbox ---
         print()
         print(_c("── Handoff inbox ──", 'accent'))
