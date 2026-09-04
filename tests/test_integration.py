@@ -1757,6 +1757,56 @@ class TestPythonIngest:
         conn.close()
         assert row['n'] == 1
 
+    def test_python_ingest_tracks_decorator_calls(
+            self, populated_env):
+        """@track above a module-level def should attribute a call
+        from __module__ → track (adapter 1.9). Both bare @track
+        and @track_with(args) forms."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/decor_lib.py',
+            "def track(fn):\n    return fn\n"
+            "def track_with(x):\n"
+            "    def wrap(fn):\n        return fn\n"
+            "    return wrap\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/decor_user.py',
+            "from decor_lib import track, track_with\n"
+            "\n"
+            "@track\n"
+            "def do_thing():\n    return 1\n"
+            "\n"
+            "@track_with('hi')\n"
+            "def do_other():\n    return 2\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        # __module__ → track (bare)
+        bare = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e1.external_ref='testproj:src/decor_user.py:__module__'
+                  AND e2.external_ref='testproj:src/decor_lib.py:track'
+                  AND r.kind='calls'"""
+        ).fetchone()['n']
+        # __module__ → track_with (called form)
+        called = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e1.external_ref='testproj:src/decor_user.py:__module__'
+                  AND e2.external_ref='testproj:src/decor_lib.py:track_with'
+                  AND r.kind='calls'"""
+        ).fetchone()['n']
+        conn.close()
+        assert bare == 1, "bare @track decorator call missing"
+        assert called == 1, "@track_with(...) decorator call missing"
+
     def test_dead_imports_ignores_inheritance_use(
             self, populated_env, capsys):
         """A file that only imports a base class for `class X(Base):`

@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.8',    # 1.8 adds Symbol→inherits→Symbol
+        'python':  '1.9',    # 1.9 tracks module-scope decorators
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -480,9 +480,14 @@ WantedBy=timers.target
             def _iter_call_scope(def_node, enclosing):
                 """Yield Call ast nodes owned by this symbol.
 
-                For __module__: only module-scope statements (skip
-                nested def/class bodies — those belong to their own
-                symbols). For everything else: walk the entire body.
+                For __module__: iterate module-scope non-def/class
+                statements, PLUS the decorator_list of each skipped
+                def/class (because decorators are invoked at
+                module-load time). Bare-Name decorators (@classmethod)
+                get wrapped in a synthetic Call so the resolver's
+                existing sub.func inspection just works.
+
+                For everything else: walk the entire body.
                 """
                 if enclosing == '__module__':
                     for stmt in def_node.body:
@@ -490,6 +495,19 @@ WantedBy=timers.target
                             ast.FunctionDef, ast.AsyncFunctionDef,
                             ast.ClassDef,
                         )):
+                            # decorators are invoked from module scope
+                            for dec in stmt.decorator_list:
+                                if isinstance(dec, ast.Call):
+                                    yield dec
+                                elif isinstance(
+                                    dec, (ast.Name, ast.Attribute)
+                                ):
+                                    # Wrap bare @decorator as a
+                                    # synthetic Call so the downstream
+                                    # resolver sees a uniform shape.
+                                    yield ast.Call(
+                                        func=dec, args=[], keywords=[]
+                                    )
                             continue
                         for n in ast.walk(stmt):
                             if isinstance(n, ast.Call):
@@ -630,13 +648,24 @@ WantedBy=timers.target
         # Handles `from foo import bar; bar()` and
         # `from foo import bar as bz; bz()`.
         def _iter_call_scope_post(def_node, enclosing):
-            """Same scope-aware walker as the same-file pass."""
+            """Same scope-aware walker as the same-file pass, with
+            decorator awareness (@decorator counts as a module-scope
+            invocation of the decorator name)."""
             if enclosing == '__module__':
                 for stmt in def_node.body:
                     if isinstance(stmt, (
                         ast.FunctionDef, ast.AsyncFunctionDef,
                         ast.ClassDef,
                     )):
+                        for dec in stmt.decorator_list:
+                            if isinstance(dec, ast.Call):
+                                yield dec
+                            elif isinstance(
+                                dec, (ast.Name, ast.Attribute)
+                            ):
+                                yield ast.Call(
+                                    func=dec, args=[], keywords=[]
+                                )
                         continue
                     for n in ast.walk(stmt):
                         if isinstance(n, ast.Call):
