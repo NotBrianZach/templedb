@@ -1807,6 +1807,45 @@ class TestPythonIngest:
         assert bare == 1, "bare @track decorator call missing"
         assert called == 1, "@track_with(...) decorator call missing"
 
+    def test_python_ingest_tracks_annotation_uses_cross_file(
+            self, populated_env):
+        """def f(x: UserSpec) -> Provider should emit
+        Symbol → uses → Symbol for both annotations, resolved
+        cross-file via imports_map (adapter 1.10)."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/anno_types.py',
+            "class UserSpec:\n    pass\n"
+            "class Provider:\n    pass\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/anno_user.py',
+            "from anno_types import UserSpec, Provider\n"
+            "\n"
+            "def make(x: UserSpec) -> Provider:\n"
+            "    return Provider()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e1.external_ref='testproj:src/anno_user.py:make'
+                  AND r.kind='uses'
+                  AND e2.kind='Symbol'
+                  AND e2.external_ref IN (
+                      'testproj:src/anno_types.py:UserSpec',
+                      'testproj:src/anno_types.py:Provider')"""
+        ).fetchone()['n']
+        conn.close()
+        assert row == 2, \
+            "expected 2 'uses' edges (UserSpec, Provider), got " \
+            f"{row}"
+
     def test_dead_imports_ignores_inheritance_use(
             self, populated_env, capsys):
         """A file that only imports a base class for `class X(Base):`

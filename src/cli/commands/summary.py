@@ -180,7 +180,7 @@ class SummaryCommand(Command):
                 AND fsym.kind = 'Symbol'
               LEFT JOIN relations cr
                 ON cr.from_entity_id = fsym.id
-                AND cr.kind IN ('calls', 'inherits')
+                AND cr.kind IN ('calls', 'inherits', 'uses')
               LEFT JOIN entities tsym
                 ON tsym.id = cr.to_entity_id
                 AND tsym.kind = 'Symbol'

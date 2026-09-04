@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.9',    # 1.9 tracks module-scope decorators
+        'python':  '1.10',   # 1.10 tracks annotation uses
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -552,6 +552,66 @@ WantedBy=timers.target
                             (sym_id, 'calls', target_sym_id)
                         )
 
+            # Annotation-scan pass: type hints are uses, not calls.
+            # `def f(x: UserSpec) -> Provider: ...` uses UserSpec and
+            # Provider without calling them. Emit Symbol → uses →
+            # Symbol for same-file matches; cross-file variant runs
+            # in the post-pass.
+            def _iter_annotation_names(def_node, enclosing):
+                """Yield bare Name / Attribute-root names that appear
+                in type annotations owned by this symbol."""
+                if enclosing == '__module__':
+                    scan_roots = []
+                    for stmt in def_node.body:
+                        if isinstance(stmt, ast.AnnAssign) \
+                                and stmt.annotation:
+                            scan_roots.append(stmt.annotation)
+                    for root in scan_roots:
+                        for n in ast.walk(root):
+                            if isinstance(n, ast.Name):
+                                yield n.id
+                            elif isinstance(n, ast.Attribute) \
+                                    and isinstance(n.value, ast.Name):
+                                yield n.value.id
+                else:
+                    if not hasattr(def_node, 'args'):
+                        return
+                    scan_roots = []
+                    for a in list(getattr(def_node.args, 'args', [])) + \
+                             list(getattr(def_node.args, 'kwonlyargs',
+                                          [])):
+                        if a.annotation:
+                            scan_roots.append(a.annotation)
+                    if getattr(def_node, 'returns', None):
+                        scan_roots.append(def_node.returns)
+                    for sub in ast.walk(def_node):
+                        if isinstance(sub, ast.AnnAssign) \
+                                and sub.annotation:
+                            scan_roots.append(sub.annotation)
+                    for root in scan_roots:
+                        for n in ast.walk(root):
+                            if isinstance(n, ast.Name):
+                                yield n.id
+                            elif isinstance(n, ast.Attribute) \
+                                    and isinstance(n.value, ast.Name):
+                                yield n.value.id
+
+            for name, (sym_id, eref, def_node, enclosing) in \
+                    local_defs.items():
+                for anno_name in _iter_annotation_names(
+                        def_node, enclosing):
+                    if (anno_name in local_defs
+                            and anno_name != name
+                            and anno_name != '__module__'):
+                        target_sym_id = local_defs[anno_name][0]
+                        if self._upsert_relation(
+                            sym_id, 'uses', target_sym_id, 'python'
+                        ):
+                            added_r += 1
+                        touched_relations.add(
+                            (sym_id, 'uses', target_sym_id)
+                        )
+
             # Third pass: extract imports at module level and emit
             # File → imports → File relations. Also populates the
             # imports_map used by the cross-file call-resolution
@@ -743,6 +803,80 @@ WantedBy=timers.target
                         added_r += 1
                     touched_relations.add(
                         (class_sym_id, 'inherits', base_id)
+                    )
+
+        # Cross-file annotation resolution.
+        # For each Symbol, re-scan annotations; for names not in
+        # local_defs but present in imports_map, emit Symbol → uses →
+        # Symbol targeting the imported file's symbol. Same shape as
+        # the calls post-pass, just walking annotations.
+        def _iter_annotation_names_post(def_node, enclosing):
+            if enclosing == '__module__':
+                scan_roots = []
+                for stmt in def_node.body:
+                    if isinstance(stmt, ast.AnnAssign) \
+                            and stmt.annotation:
+                        scan_roots.append(stmt.annotation)
+                for root in scan_roots:
+                    for n in ast.walk(root):
+                        if isinstance(n, ast.Name):
+                            yield n.id
+                        elif isinstance(n, ast.Attribute) \
+                                and isinstance(n.value, ast.Name):
+                            yield n.value.id
+            else:
+                if not hasattr(def_node, 'args'):
+                    return
+                scan_roots = []
+                for a in list(getattr(def_node.args, 'args', [])) + \
+                         list(getattr(def_node.args, 'kwonlyargs',
+                                      [])):
+                    if a.annotation:
+                        scan_roots.append(a.annotation)
+                if getattr(def_node, 'returns', None):
+                    scan_roots.append(def_node.returns)
+                for sub in ast.walk(def_node):
+                    if isinstance(sub, ast.AnnAssign) \
+                            and sub.annotation:
+                        scan_roots.append(sub.annotation)
+                for root in scan_roots:
+                    for n in ast.walk(root):
+                        if isinstance(n, ast.Name):
+                            yield n.id
+                        elif isinstance(n, ast.Attribute) \
+                                and isinstance(n.value, ast.Name):
+                            yield n.value.id
+
+        for (slug, fp), tree in file_trees_by_file.items():
+            local_defs = all_defs_by_file.get((slug, fp), {})
+            imports_map = all_imports_by_file.get((slug, fp), {})
+            if not local_defs or not imports_map:
+                continue
+            for name, (sym_id, eref, def_node, enclosing) in \
+                    local_defs.items():
+                for anno_name in _iter_annotation_names_post(
+                        def_node, enclosing):
+                    if anno_name in local_defs:
+                        continue
+                    imp = imports_map.get(anno_name)
+                    if not imp:
+                        continue
+                    target_slug, target_path, target_symbol_name = imp
+                    target_defs = all_defs_by_file.get(
+                        (target_slug, target_path)
+                    )
+                    if not target_defs:
+                        continue
+                    target = target_defs.get(target_symbol_name)
+                    if not target:
+                        continue
+                    target_sym_id = target[0]
+                    if self._upsert_relation(
+                        sym_id, 'uses', target_sym_id, 'python'
+                    ):
+                        added_r += 1
+                    touched_relations.add(
+                        (sym_id, 'uses', target_sym_id)
                     )
 
         # Pruning: delete python-authority relations from processed
@@ -2097,7 +2231,7 @@ WantedBy=timers.target
                 AND fsym.kind = 'Symbol'
               LEFT JOIN relations cr
                 ON cr.from_entity_id = fsym.id
-                AND cr.kind IN ('calls', 'inherits')
+                AND cr.kind IN ('calls', 'inherits', 'uses')
               LEFT JOIN entities tsym
                 ON tsym.id = cr.to_entity_id
                 AND tsym.kind = 'Symbol'
