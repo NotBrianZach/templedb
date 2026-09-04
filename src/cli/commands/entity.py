@@ -1779,6 +1779,8 @@ WantedBy=timers.target
              self._check_entity_counts_match_sources),
             ('every_entity_has_sync_scope',
              self._check_entities_have_sync_scope),
+            ('no_python_import_cycles',
+             self._check_no_python_import_cycles),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -1907,6 +1909,74 @@ WantedBy=timers.target
         )
         return [f"Commit {r['slug']}/{r['commit_hash'][:12]} not in "
                 f"entities table (run `templedb ingest git`)" for r in rows]
+
+    def _check_no_python_import_cycles(self):
+        """Invariant: the File → imports → File graph has no cycles.
+
+        DFS-based cycle detection. Each cycle reported once as
+        'A → B → C → A'. Cycles are a real code smell in Python
+        (they make module-load order fragile). Catching them
+        mechanically here is much cheaper than tribal knowledge.
+
+        Uses the imports relations from python ingest (v1.3+).
+        Only inspects Files with at least one outbound imports
+        edge; isolated files trivially can't participate."""
+        from db_utils import query_all
+        edges = query_all(
+            """SELECT e1.external_ref AS src,
+                      e2.external_ref AS dst
+                 FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE r.kind = 'imports'
+                  AND e1.kind = 'File'
+                  AND e2.kind = 'File'"""
+        )
+        adj = {}
+        for row in edges:
+            adj.setdefault(row['src'], set()).add(row['dst'])
+
+        # Iterative DFS finding cycles. Track (node, path_so_far).
+        # A back-edge to any node in the current path indicates a
+        # cycle; report the segment.
+        cycles = []
+        seen_cycles = set()  # canonicalize by sorted-tuple to dedup
+        visited = set()
+
+        for start in adj.keys():
+            if start in visited:
+                continue
+            stack = [(start, [start])]
+            path_set = {start}
+            while stack:
+                node, path = stack[-1]
+                neighbors = adj.get(node, set()) - visited
+                unvisited_neighbors = [
+                    n for n in neighbors if n not in path_set
+                ]
+                back_edge = neighbors & path_set
+                if back_edge:
+                    for target in back_edge:
+                        cycle = path[path.index(target):] + [target]
+                        canon = tuple(sorted(cycle[:-1]))
+                        if canon not in seen_cycles:
+                            seen_cycles.add(canon)
+                            cycles.append(cycle)
+                if unvisited_neighbors:
+                    nxt = unvisited_neighbors[0]
+                    path_set.add(nxt)
+                    stack.append((nxt, path + [nxt]))
+                else:
+                    visited.add(node)
+                    path_set.discard(node)
+                    stack.pop()
+            if len(cycles) > 50:
+                break  # avoid unbounded on pathological cases
+
+        return [
+            "Import cycle: " + " → ".join(c[:-1]) + " → " + c[0]
+            for c in cycles[:20]
+        ]
 
     def _check_entities_have_sync_scope(self):
         """Invariant: every entity has a non-NULL sync_scope. New

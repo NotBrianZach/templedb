@@ -1594,6 +1594,35 @@ class TestPythonIngest:
         conn.close()
         assert row['n'] == 1, "alias-imported call not resolved to real symbol"
 
+    def test_import_cycle_invariant_detects_two_file_cycle(self,
+                                                              populated_env,
+                                                              capsys):
+        """Two files that import each other should trigger the
+        no_python_import_cycles doctor invariant."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/a.py',
+            "from b import b_thing\n\n"
+            "def a_thing():\n    return b_thing()\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/b.py',
+            "from a import a_thing\n\n"
+            "def b_thing():\n    return a_thing()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        capsys.readouterr()
+        cmd = EntityCommands()
+        rc = cmd.doctor_entities(argparse.Namespace(
+            check='no_python_import_cycles'
+        ))
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert 'cycle' in out.lower()
+        assert 'a.py' in out and 'b.py' in out
+
     def test_python_ingest_ignores_stdlib_calls(self, populated_env):
         """`import sys; sys.exit()` — no local file matches sys,
         so no relation should fire."""
