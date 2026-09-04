@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.14',   # 1.14 reference tracking (bare-Name refs)
+        'python':  '1.15',   # 1.15 shortest-match for ambiguous imports
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -631,16 +631,33 @@ WantedBy=timers.target
                 either the whole path OR to be preceded by '/'.
                 (Bug caught by the no_python_import_cycles doctor
                 invariant on 2026-09-04: logger.py's 'import os' was
-                resolving to nixos.py under a naive endswith.)"""
+                resolving to nixos.py under a naive endswith.)
+
+                Ambiguous match resolution (1.14 fix): if multiple
+                files end with '/config.py' — e.g. both src/config.py
+                and src/cli/commands/config.py — prefer the shortest
+                path. `import config` from blob.py should resolve
+                to src/config.py (top-level module), not the CLI
+                subcommand that happens to share the leaf name."""
                 parts = mod_name.split('.')
                 cand_a = '/'.join(parts) + '.py'
                 cand_b = '/'.join(parts) + '/__init__.py'
+                exact = None
+                candidates = []
                 for pf in project_pyfiles:
                     if pf == cand_a or pf == cand_b:
-                        return pf
+                        exact = pf
+                        break
                     if pf.endswith('/' + cand_a) or pf.endswith('/' + cand_b):
-                        return pf
-                return None
+                        candidates.append(pf)
+                if exact:
+                    return exact
+                if not candidates:
+                    return None
+                # Prefer the shortest path (fewest '/' separators),
+                # then lexicographic for determinism.
+                candidates.sort(key=lambda p: (p.count('/'), p))
+                return candidates[0]
 
             def _resolve_relative_import(this_path, level, mod_name):
                 """`from .foo import X` at level=1 in this_path:
