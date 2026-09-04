@@ -2359,6 +2359,8 @@ WantedBy=timers.target
              self._check_entities_have_sync_scope),
             ('no_python_import_cycles',
              self._check_no_python_import_cycles),
+            ('hygiene_no_untracked_dead_growth',
+             self._check_hygiene_no_regression),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -2554,6 +2556,64 @@ WantedBy=timers.target
         return [
             "Import cycle: " + " → ".join(c[:-1]) + " → " + c[0]
             for c in cycles[:20]
+        ]
+
+    def _check_hygiene_no_regression(self):
+        """Invariant: dead_candidates for any slug hasn't grown by
+        >=15 in the last 30 days without a python-adapter version
+        change.
+
+        The adapter constraint is important: when 1.7 landed the
+        __module__ symbol, dead counts dropped by ~110 across all
+        slugs — the inverse could happen (a resolver regression that
+        inflates counts). By excluding rows where the adapter
+        differs across the window, we only fire on real code drift.
+
+        Requires >=2 hygiene_snapshots rows per slug in the window.
+        Fresh slugs with only one snapshot don't fire (nothing to
+        compare against yet)."""
+        from db_utils import query_all
+        rows = query_all(
+            """
+            WITH windowed AS (
+              SELECT slug, taken_at, dead_candidates, adapter_version,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY slug ORDER BY taken_at ASC
+                     ) AS r_asc,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY slug ORDER BY taken_at DESC
+                     ) AS r_desc
+                FROM hygiene_snapshots
+               WHERE taken_at >= datetime('now', '-30 days')
+            ),
+            paired AS (
+              SELECT
+                w1.slug AS slug,
+                w1.dead_candidates AS old_dead,
+                w2.dead_candidates AS new_dead,
+                w1.adapter_version AS old_ver,
+                w2.adapter_version AS new_ver,
+                w2.dead_candidates - w1.dead_candidates AS delta
+              FROM windowed w1
+              JOIN windowed w2 ON w1.slug = w2.slug
+             WHERE w1.r_asc  = 1
+               AND w2.r_desc = 1
+               AND w1.taken_at < w2.taken_at
+            )
+            SELECT slug, old_dead, new_dead, delta,
+                   old_ver, new_ver
+              FROM paired
+             WHERE delta >= 15
+               AND (old_ver = new_ver OR old_ver IS NULL
+                    OR new_ver IS NULL)
+            """
+        )
+        return [
+            f"hygiene regression: {r['slug']} dead_candidates "
+            f"grew {r['old_dead']} → {r['new_dead']} (+{r['delta']}) "
+            f"in the last 30 days on adapter "
+            f"{r['old_ver'] or '?'}"
+            for r in rows
         ]
 
     def _check_entities_have_sync_scope(self):

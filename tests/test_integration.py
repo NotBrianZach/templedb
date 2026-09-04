@@ -1944,6 +1944,61 @@ class TestPythonIngest:
         conn.close()
         assert row == 1, "Widget().do() constructor-chain call not resolved"
 
+    def test_hygiene_invariant_fires_on_untracked_regression(
+            self, populated_env):
+        """Seed two hygiene_snapshots for the same slug and same
+        adapter version, with new dead > old dead by >=15. Doctor
+        invariant should flag this as regression."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.executescript(
+            """
+            INSERT INTO hygiene_snapshots
+                (slug, taken_at, total_imports, dead_candidates,
+                 adapter_version)
+              VALUES ('regr_proj', datetime('now', '-14 days'),
+                      100, 20, '1.11'),
+                     ('regr_proj', datetime('now', '-1 hour'),
+                      100, 40, '1.11');
+            -- Clean slug: same adapter, no regression
+            INSERT INTO hygiene_snapshots
+                (slug, taken_at, total_imports, dead_candidates,
+                 adapter_version)
+              VALUES ('clean_proj', datetime('now', '-14 days'),
+                      100, 20, '1.11'),
+                     ('clean_proj', datetime('now', '-1 hour'),
+                      100, 22, '1.11');
+            -- Adapter-bump case: big delta but new adapter — should NOT fire
+            INSERT INTO hygiene_snapshots
+                (slug, taken_at, total_imports, dead_candidates,
+                 adapter_version)
+              VALUES ('bumped_proj', datetime('now', '-14 days'),
+                      100, 20, '1.6'),
+                     ('bumped_proj', datetime('now', '-1 hour'),
+                      100, 80, '1.11');
+            """
+        )
+        conn.commit()
+        conn.close()
+        cmd = EntityCommands()
+        cmd.doctor_entities(argparse.Namespace(check=None))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT status, issue_count, sample_issues_json
+                 FROM invariant_checks
+                WHERE check_name='hygiene_no_untracked_dead_growth'
+                ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['status'] == 'violated'
+        assert row['issue_count'] == 1  # only regr_proj fires
+        assert 'regr_proj' in (row['sample_issues_json'] or '')
+        assert 'clean_proj' not in (row['sample_issues_json'] or '')
+        assert 'bumped_proj' not in (row['sample_issues_json'] or '')
+
     def test_hygiene_snapshot_records_per_slug(
             self, populated_env, capsys):
         """`hygiene snapshot` records one row per slug with real
