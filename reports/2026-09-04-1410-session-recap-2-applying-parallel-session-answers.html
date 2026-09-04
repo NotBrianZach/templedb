@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 2: applying the parallel-session answers</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); color: var(--muted); font-weight: 500; }
+  .dim { color: var(--muted); }
+  .yes { color: var(--pos); font-weight: 600; }
+  .partial { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<h1>Session recap 2: applying the parallel-session answers</h1>
+<p class="lede">
+  Second half of the observer/integrator marathon. Where the
+  <a href="2026-09-03-1530-session-recap-observer-plan-through-phase-3.html">first
+  recap</a> captured Phases 0&ndash;3 shipping, this one captures
+  what happened when a parallel session posted a 5-question
+  answers report (<code>2026-09-03-1947-answers-to-open-questions-*.html</code>)
+  and we spent the next several hours applying them. Also documents
+  the moment the tool caught its own bug &mdash; the observer/
+  integrator vision working against its host codebase.
+</p>
+
+<h2>The one-line summary</h2>
+
+<div class="callout win">
+  <span class="label">Where we landed</span>
+  Four of five parallel-session questions applied (Q5 partial), cross-
+  file Python callgraph shipped end-to-end at 1000+ resolved edges,
+  877 orphan rows swept, and one real bug in the ingest resolver
+  caught by our own <code>no_python_import_cycles</code> doctor
+  invariant. All 13 doctor invariants pass. Automation loop
+  autonomous.
+</div>
+
+<h2>Applied from the parallel-session Q1&ndash;Q5 answers</h2>
+
+<p>
+  The parallel session's ranked summary listed 5 items with priorities.
+  Where the first recap said "past-due" was &lt;none-of-my-business&gt;,
+  this session took them one at a time.
+</p>
+
+<table class="matrix">
+  <tr><th>Q</th><th>Original ask</th><th>Shipped as</th></tr>
+  <tr>
+    <td>Q1</td>
+    <td>Where do views actually live? Recommend log-based
+    projection queue.</td>
+    <td>
+      <span class="partial">spirit</span>: doctor invariant
+      <code>entity_counts_match_source_tables</code>. Catches
+      dual-write drift without building the queue. Full projection
+      queue deferred as ~1 week of work.
+    </td>
+  </tr>
+  <tr>
+    <td>Q2</td>
+    <td>entities/relations gets huge. Ship observations_archive
+    + current-only + sync_scope before SCIP.</td>
+    <td>
+      <span class="yes">✓</span> Migration 097 adds
+      <code>observations_archive</code> with AFTER-UPDATE trigger
+      firing only on label/source_authority changes. CLI:
+      <code>templedb entity observations &lt;kind&gt;/&lt;ref&gt;</code>
+      and <code>entity observations-gc --older-than-days N</code>.
+    </td>
+  </tr>
+  <tr>
+    <td>Q3</td>
+    <td>Adapter rot budget. Contract tests + adapter_version tag.</td>
+    <td>
+      <span class="yes">✓</span> Migration 096 adds
+      <code>adapter_version</code> column on
+      <code>ingestion_runs</code>. Each adapter declares its
+      version constant. <code>ingest history</code> shows it.
+      Enables cross-machine drift queries later.
+    </td>
+  </tr>
+  <tr>
+    <td>Q4</td>
+    <td>Sidecar migration. Dual-write top-2 by row-growth.</td>
+    <td>
+      <span class="yes">✓</span> Empirical audit found the top-4
+      active sidecars; #1 and #2 (<code>vcs_file_states</code>,
+      <code>agent_events</code>) were already covered by other
+      work; shipped dual-write for #3 and #4
+      (<code>vcs_commit_parents</code>, <code>vcs_commit_metadata</code>)
+      via git ingest onto <code>Commit.attributes_json</code>
+      (migration 098 added the column).
+    </td>
+  </tr>
+  <tr>
+    <td>Q5</td>
+    <td>CRSql for entities/relations. Wrap in
+    sync_entities / sync_relations + sync_scope classification.</td>
+    <td>
+      <span class="partial">partial</span>: Migration 099 adds
+      <code>sync_scope</code> column with check constraint on both
+      entities and relations. Per-kind classification set at ingest
+      time (Commit/File/Deployment=fleet; Symbol/ToolCall=
+      machine-local). Backfilled 16k+ rows. Actual
+      sync_entities/sync_relations tables + CRSql __crsql_clock
+      wiring deferred &mdash; existing CRSql machinery has live
+      data (1560 rows on sync_vcs_commits__crsql_clock) and
+      needs careful study to avoid corrupting cross-machine sync.
+    </td>
+  </tr>
+</table>
+
+<h2>Beyond Q1&ndash;Q5: the Python capabilities</h2>
+
+<p>
+  Started the session with Python ingest at v1.3 (defines + calls +
+  methods + imports). By end: v1.6 with cross-file call resolution
+  and stale-relation pruning. Each version bump named a concrete
+  shape change.
+</p>
+
+<ul>
+  <li><strong>1.4 &mdash; cross-file call resolution via ImportFrom.</strong>
+    <code>from foo import bar; bar()</code> now emits
+    <code>Symbol &rarr; calls &rarr; Symbol</code> across files.
+    Alias-aware (<code>from foo import bar as bz</code> uses bz for
+    the local binding, bar for the target lookup). Level-0 imports
+    only. First run added 1,001 cross-file edges.</li>
+  <li><strong>1.5 &mdash; prune stale relations on re-ingest.</strong>
+    Tracks every (from, kind, to) tuple emitted this run; deletes
+    python-authority relations from processed files whose tuples
+    weren't touched. Removes phantom edges from prior ingest bugs.
+    First run pruned 45 edges.</li>
+  <li><strong>1.6 &mdash; path-segment-aware import resolver.</strong>
+    Fixed <code>pf.endswith('os.py')</code> false-matching
+    <code>nixos.py</code>. See "the bug we caught" below. Pruning
+    then removed 141 additional phantom edges.</li>
+</ul>
+
+<h2>The bug we caught</h2>
+
+<p>
+  Mid-session I shipped the <code>no_python_import_cycles</code>
+  doctor invariant &mdash; DFS over the File-imports graph. It
+  fired on the very first run with a specific cycle:
+</p>
+
+<pre>Import cycle: templedb/src/logger.py
+   &rarr; templedb/src/cli/commands/nixos.py
+   &rarr; templedb/src/logger.py</pre>
+
+<p>
+  Investigation showed <code>logger.py</code> only imports stdlib.
+  The reverse edge shouldn't exist. Tracing through:
+</p>
+
+<ol>
+  <li>Ran <code>templedb file cat</code> on logger.py &mdash;
+    confirmed only <code>import logging, os, sys</code> and stdlib
+    <code>from</code> statements.</li>
+  <li>Queried the graph for what logger.py "imports" &mdash;
+    <code>cli/commands/nixos.py</code>.</li>
+  <li>Queried for any project file suffix-matching one of logger.py's
+    imports. <code>nixos.py</code> ends with the string
+    <code>os.py</code>.</li>
+  <li>Bug found in my resolver: <code>pf.endswith('os.py')</code>
+    greedy-matched <code>nixos.py</code>. Every <code>import os</code>
+    in the codebase was resolving to <code>cli/commands/nixos.py</code>.</li>
+</ol>
+
+<p>
+  Fix: require the match to be either the whole path OR
+  <code>/</code>-prefixed. Segment-boundary aware.
+</p>
+
+<div class="callout win">
+  <span class="label">The pattern worth naming</span>
+  A stdlib <code>import os</code> in a leaf module claiming an edge
+  to a downstream CLI command is <em>structurally impossible</em>.
+  The graph substrate makes structural impossibilities visible.
+  I could have stared at logger.py all day and never seen the bug
+  in my resolver; the doctor invariant surfaced it in one query.
+  This is the observer/integrator vision working against its host
+  codebase &mdash; the tool catching its own implementation bugs
+  when its substrate reveals impossibilities.
+</div>
+
+<h2>What else shipped</h2>
+
+<h3>Automation loop closed</h3>
+
+<ul>
+  <li><code>templedb reconcile schedule install</code> &mdash; systemd
+    user timer, daily at 03:00 (randomized ±15m). Probes every
+    fleet machine, records to <code>reconcile_runs</code>.</li>
+  <li><code>templedb ingest schedule install</code> &mdash; hourly
+    (randomized ±5m). Refreshes the entity graph without manual
+    invocation.</li>
+  <li>Both timers armed on this host. The hourly ingest actually
+    fired mid-session and picked up my recent commits without prompt
+    &mdash; a quietly satisfying moment of the automation working.</li>
+</ul>
+
+<h3>Cleanup swept</h3>
+
+<ul>
+  <li>877 orphan <code>project_files</code> rows (from deleted
+    projects IDs 12, 13, 15&ndash;17 &mdash; old aider-chat and
+    euler cruft) hard-deleted along with their 877 companion
+    <code>file_contents</code> rows. Blast radius verified clean
+    (zero rows in vcs_*, code_*, file_metadata) before the DELETE.</li>
+  <li>141 phantom python-authority edges pruned by the v1.5/v1.6
+    ingest reruns.</li>
+</ul>
+
+<h3>Query surface widened</h3>
+
+<ul>
+  <li><code>templedb provenance callers &lt;symbol&gt;</code> and
+    <code>callees</code> &mdash; presets over
+    <code>entity trace --via calls</code> for the callgraph. All 5
+    workflows from the walkthrough report now have a one-command
+    answer.</li>
+  <li><code>templedb entity search &lt;query&gt;</code> &mdash;
+    substring search across label + external_ref. Live query for
+    <code>class Command</code> across the codebase demonstrates
+    the cross-file semantic search.</li>
+  <li><code>templedb entity forget &lt;kind&gt;/&lt;ref&gt;</code>
+    &mdash; controlled delete with cascade, --dry-run,
+    safety guard requiring --force for authoritative kinds.</li>
+  <li><code>templedb entity observations &lt;kind&gt;/&lt;ref&gt;</code>
+    &mdash; history from observations_archive.</li>
+  <li>GUI <code>/entities</code>, <code>/entities/&lt;kind&gt;</code>,
+    <code>/entity/&lt;kind&gt;/&lt;ref&gt;</code>,
+    <code>/entities/search</code>, <code>/summary</code> &mdash;
+    browseable graph in the web UI.</li>
+  <li><code>templedb summary</code> &mdash; CLI health at a glance
+    aggregating the reconcile-story trio + entity graph + handoff
+    inbox.</li>
+</ul>
+
+<h3>Documentation refresh</h3>
+
+<ul>
+  <li>Root <code>CLAUDE.md</code> updated with "Where the plan landed"
+    section, entity graph vocabulary, reconcile workflow, handoff
+    section, GUI pointers, and softened "What NOT to do" list
+    (git commands are fine again in checkouts; only
+    <code>checkouts/</code> directly-editing and <code>grep -r</code>
+    remain forbidden).</li>
+  <li><code>docs/ENTITY_GRAPH_DESIGN.md</code> updated to reference
+    the schema report and Q1&ndash;Q5 answers report as
+    authoritative for the target shape.</li>
+</ul>
+
+<h2>Final numbers</h2>
+
+<table class="matrix">
+  <tr><th>Metric</th><th>Start of session 2</th><th>End of session 2</th></tr>
+  <tr><td>Migrations</td><td>085</td><td>099</td></tr>
+  <tr><td>CLI namespaces</td><td>10</td><td>10 (+many subcmds)</td></tr>
+  <tr><td>Doctor invariants</td><td>10</td><td>13 (all green)</td></tr>
+  <tr><td>Ingest adapters</td><td>7</td><td>8 (added python)</td></tr>
+  <tr><td>Systemd timers</td><td>1 (reconcile)</td><td>2 (+ ingest)</td></tr>
+  <tr><td>Entities</td><td>~12,000</td><td>16,656</td></tr>
+  <tr><td>Relations</td><td>~5,300</td><td>13,540</td></tr>
+  <tr><td>pytest tests</td><td>~100</td><td>~130</td></tr>
+  <tr><td>Orphan rows</td><td>877</td><td>0</td></tr>
+  <tr><td>Phantom python edges</td><td>~186 (invisible)</td><td>0</td></tr>
+</table>
+
+<h2>What's left, honestly</h2>
+
+<div class="callout">
+  <span class="label">One large item remains</span>
+  Q5 CRSql tables + wiring. The <code>sync_scope</code> classification
+  is done, but the actual <code>sync_entities</code> /
+  <code>sync_relations</code> tables plus the __crsql_clock /
+  __crsql_pks machinery to sync them across machines has not shipped.
+  That's the only genuinely-blocking item from the parallel-session
+  queue.
+</div>
+
+<ul>
+  <li><strong>SCIP for non-Python languages.</strong> The Python-native
+    ingest covers what SCIP would give us for Python. For
+    TypeScript / Rust / Go, the SCIP adapter is the natural next
+    move. Standalone project, weeks of work.</li>
+  <li><strong>Nested-symbol pruning.</strong> Current pruning removes
+    stale relations from processed Files; it doesn't remove stale
+    Symbol <em>entities</em> whose definitions have been renamed or
+    deleted. Would need to track processed_symbol_refs and
+    delete-not-touched at the Symbol level.</li>
+  <li><strong>Attribute-chain call resolution.</strong> Handles
+    <code>self.foo()</code> and <code>LocalClass.foo()</code> but
+    not <code>module.Class.foo()</code> or
+    <code>obj.attribute.method()</code>. Deferred.</li>
+  <li><strong>The Q1 projection queue.</strong> The dual-write drift
+    doctor invariant catches the symptom; the projection queue
+    would remove the failure class. ~1 week of work; not urgent.</li>
+</ul>
+
+<h2>The metacognition bit</h2>
+
+<p>
+  This session had a specific character: it consumed external
+  design work in real time. The parallel-session Q1&ndash;Q5 report
+  landed mid-session; we spent the rest of the day applying it. Two
+  things worth naming about the shape of that.
+</p>
+
+<p>
+  <strong>First, the answers weren't consumed uncritically.</strong>
+  Q4 recommended dual-write for the top-2 sidecars by row growth;
+  the empirical audit found the actual top-2 were already covered
+  by other work (<code>vcs_file_states</code> flagged for Phase 5
+  retirement; <code>agent_events</code> extracted to
+  <code>tool_calls</code>) and shipped for #3 and #4 instead.
+  Q5 recommended the full CRSql wiring; investigation showed the
+  existing machinery has live data and shipping the semantics
+  half (<code>sync_scope</code>) unblocks future work without
+  risking corruption. This is what "coordinator disciplined about
+  what it owns" looks like from inside the loop &mdash; the
+  external design is authoritative for direction, not for tactics.
+</p>
+
+<p>
+  <strong>Second, the tool caught its own bug.</strong> The
+  <code>no_python_import_cycles</code> invariant fired within an
+  hour of shipping. Not on a test project I contrived; on the
+  actual templedb Python codebase, exposing a real defect in my
+  own resolver. The observer/integrator vision has been about
+  making impossibilities visible; today it made an impossibility
+  in its own implementation visible. That's the payoff.
+</p>
+
+<p>
+  If there was any doubt whether Phase 3's graph substrate was
+  worth the complexity: 130 tests, 13 doctor invariants, 8 ingest
+  adapters, 16,656 entities, all in one SQLite file with two
+  systemd timers ticking. Everything is queryable, everything is
+  reconcilable, nothing is silently drifting. The DB is not the
+  authority; it's the fabric. And the fabric works.
+</p>
+
+</body>
+</html>
