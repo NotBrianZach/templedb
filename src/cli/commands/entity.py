@@ -717,13 +717,30 @@ WantedBy=timers.target
 
             for node in ast.iter_child_nodes(tree):
                 if isinstance(node, ast.Import):
-                    # `import foo.bar` — emit File→imports→File but
-                    # don't add to imports_map (attribute-chain calls
-                    # like foo.bar.baz() aren't resolved here).
+                    # `import foo.bar` — emit File→imports→File.
+                    # Also (1.15) bind foo (or `bar` via asname) to
+                    # the target file's __module__ in imports_map so
+                    # references like `foo.CONST` and `foo.func()`
+                    # resolve via the reference-scan pass.
                     for alias in node.names:
-                        _emit_import_file_edge(
-                            _resolve_module_to_path(alias.name)
-                        )
+                        match_path = _resolve_module_to_path(alias.name)
+                        _emit_import_file_edge(match_path)
+                        if match_path:
+                            # 1.15 binding: only bind for simple
+                            # `import X` (no dots) or `import X as Y`.
+                            # For dotted `import foo.bar`, `foo` binds
+                            # to the *package* which is not necessarily
+                            # the file at match_path — skip to avoid
+                            # bad attribute-chain resolution.
+                            if alias.asname:
+                                bound = alias.asname
+                            elif '.' not in alias.name:
+                                bound = alias.name
+                            else:
+                                continue
+                            imports_map[bound] = (
+                                r['slug'], match_path, '__module__',
+                            )
                 elif isinstance(node, ast.ImportFrom):
                     # Absolute: `from foo.bar import X` (level=0)
                     # Relative: `from .bar import X` (level>=1) — new
