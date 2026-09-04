@@ -1352,6 +1352,59 @@ class TestPythonIngest:
         assert 'testproj:src/oop.py:Widget.__init__' in refs
         assert 'testproj:src/oop.py:Widget.render' in refs
 
+    def test_python_ingest_extracts_imports(self, populated_env):
+        """`from cli.core import Command` in one file should emit
+        File → imports → File relation when cli/core.py exists in
+        the same project."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/cli/core.py',
+            "class Command:\n    pass\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/cli/commands/foo.py',
+            "from cli.core import Command\n\n"
+            "def foo():\n    return Command()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.external_ref = 'testproj/src/cli/commands/foo.py'
+                  AND e2.external_ref = 'testproj/src/cli/core.py'
+                  AND r.kind = 'imports'"""
+        ).fetchone()
+        conn.close()
+        assert row['n'] == 1, "File → imports → File not emitted"
+
+    def test_python_ingest_skips_unresolved_imports(self, populated_env):
+        """`import sys` or `import requests` shouldn't fire — those
+        are stdlib/third-party and have no matching File entity."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/stdlib_user.py',
+            "import sys\nimport json\n\n"
+            "def dump():\n    return sys.argv\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                WHERE e1.external_ref = 'testproj/src/stdlib_user.py'
+                  AND r.kind = 'imports'"""
+        ).fetchone()
+        conn.close()
+        assert row['n'] == 0, "stdlib import falsely resolved to a File"
+
     def test_python_ingest_resolves_self_method_calls(self, populated_env):
         """self.foo() inside a method should resolve to Class.foo
         via same-file scope."""

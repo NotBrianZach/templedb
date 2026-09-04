@@ -302,6 +302,15 @@ WantedBy=timers.target
                   AND cb.content_text IS NOT NULL"""
         )
 
+        # Cache: per-project, list of (file_path, entity_id) for .py
+        # files, used for import resolution.
+        py_files_by_project: dict[str, list] = {}
+        for r in rows:
+            slug = r['slug']
+            if slug not in py_files_by_project:
+                py_files_by_project[slug] = []
+            py_files_by_project[slug].append(r['file_path'])
+
         for r in rows:
             try:
                 tree = ast.parse(r['content'] or '')
@@ -394,6 +403,49 @@ WantedBy=timers.target
                         target_sym_id = local_defs[called][0]
                         if self._upsert_relation(
                             sym_id, 'calls', target_sym_id, 'python'
+                        ):
+                            added_r += 1
+
+            # Third pass: extract imports at module level and emit
+            # File → imports → File relations. Resolves the imported
+            # module name against other .py files in the same project
+            # via suffix match (foo.bar → foo/bar.py or
+            # foo/bar/__init__.py). Skips imports that don't resolve
+            # (stdlib, third-party, unresolved). Same-project only —
+            # cross-project imports are rare and would need registry.
+            project_pyfiles = py_files_by_project.get(r['slug'], [])
+            for node in ast.iter_child_nodes(tree):
+                targets = []
+                if isinstance(node, ast.Import):
+                    # `import foo.bar` — foo.bar is the module
+                    for alias in node.names:
+                        targets.append(alias.name)
+                elif isinstance(node, ast.ImportFrom):
+                    # `from foo.bar import baz` — foo.bar is the
+                    # module; baz might be a submodule or a symbol.
+                    # Try module = foo.bar; skip level>0 (relative).
+                    if node.level == 0 and node.module:
+                        targets.append(node.module)
+                for mod in targets:
+                    parts = mod.split('.')
+                    # Candidate file paths: foo/bar.py, foo/bar/__init__.py
+                    cand_a = '/'.join(parts) + '.py'
+                    cand_b = '/'.join(parts) + '/__init__.py'
+                    match_path = None
+                    for pf in project_pyfiles:
+                        if pf.endswith(cand_a) or pf.endswith(cand_b):
+                            match_path = pf
+                            break
+                    if not match_path:
+                        continue
+                    target_file_ref = f"{r['slug']}/{match_path}"
+                    target_file_id = self._entity_id(
+                        'File', target_file_ref
+                    )
+                    if target_file_id and target_file_id != file_id:
+                        if self._upsert_relation(
+                            file_id, 'imports',
+                            target_file_id, 'python'
                         ):
                             added_r += 1
 
