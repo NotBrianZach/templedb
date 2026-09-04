@@ -1374,6 +1374,51 @@ WantedBy=timers.target
                 rows.append({**dict(r), 'dir': 'in'})
         return rows
 
+    def graph_observations(self, args) -> int:
+        """Show observations_archive history for one entity.
+
+        Every time an entity's label or source_authority changed,
+        the archive captured the pre-update state. This surface
+        answers 'when did the label change' and 'was this entity
+        ever attributed to a different authority?'
+        """
+        from db_utils import query_all
+        kind, sep, ref = args.entity.partition('/')
+        if not sep:
+            logger.error(
+                "Expected `<kind>/<ref>` "
+                "(e.g. `Machine/zMothership2`)"
+            )
+            return 1
+        rows = query_all(
+            """SELECT id, observed_at,
+                      label, prior_label,
+                      source_authority, prior_source_authority
+                 FROM observations_archive
+                WHERE entity_kind = ? AND entity_ref = ?
+                ORDER BY observed_at DESC
+                LIMIT ?""",
+            (kind, ref, int(args.limit)),
+        )
+        if not rows:
+            print(f"(no archived observations for {kind}/{ref})")
+            print("  This means the entity hasn't been mutated since "
+                  "migration 097 landed, or doesn't exist.")
+            return 0
+        print(f"Observation history for {kind}/{ref}:")
+        for r in rows:
+            label_change = ""
+            if r['prior_label'] != r['label']:
+                label_change = f" label: {r['prior_label']!r} → {r['label']!r}"
+            auth_change = ""
+            if r['prior_source_authority'] != r['source_authority']:
+                auth_change = (f" authority: "
+                               f"{r['prior_source_authority']!r} → "
+                               f"{r['source_authority']!r}")
+            print(f"  #{r['id']:<5} {r['observed_at']}"
+                  f"{label_change}{auth_change}")
+        return 0
+
     def graph_search(self, args) -> int:
         """Case-insensitive substring search across entity
         label + external_ref.
@@ -1872,6 +1917,16 @@ def register(cli):
         'stats', help='Print entity + relation counts by kind',
     )
     cli.commands['entity.stats'] = cmd.graph_stats
+
+    obs = esub.add_parser(
+        'observations',
+        help='Archive history for one entity — when did label / '
+             'source_authority change (migration 097)',
+    )
+    obs.add_argument('entity', help='<kind>/<external_ref>')
+    obs.add_argument('--limit', default=50,
+                     help='Max rows (default 50)')
+    cli.commands['entity.observations'] = cmd.graph_observations
 
     search = esub.add_parser(
         'search',

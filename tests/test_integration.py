@@ -1989,6 +1989,77 @@ class TestReconcileHistory:
                 assert '✓' not in line, f"violated-only leaked ok line: {line}"
 
 
+# ── Observations Archive (Q2 answer) Tests ───────────────────────────────────
+
+class TestObservationsArchive:
+    """AFTER UPDATE trigger on entities → observations_archive."""
+
+    def test_archive_table_and_trigger_exist(self, temp_env):
+        conn = sqlite3.connect(temp_env["db_path"])
+        row = conn.execute(
+            "SELECT type FROM sqlite_master WHERE name='observations_archive'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 'table'
+        trg = conn.execute(
+            "SELECT type FROM sqlite_master "
+            "WHERE name='trg_entities_archive_on_update'"
+        ).fetchone()
+        assert trg is not None
+        assert trg[0] == 'trigger'
+        conn.close()
+
+    def test_label_change_writes_to_archive(self, populated_env):
+        """Update an entity's label — archive should capture the
+        pre-state."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        # Ingest to create at least one entity
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        eid = conn.execute(
+            "SELECT id FROM entities WHERE kind='File' LIMIT 1"
+        ).fetchone()['id']
+        conn.execute(
+            "UPDATE entities SET label='NEW LABEL' WHERE id = ?",
+            (eid,),
+        )
+        conn.commit()
+        row = conn.execute(
+            """SELECT prior_label, label FROM observations_archive
+                WHERE entity_id = ? ORDER BY id DESC LIMIT 1""",
+            (eid,),
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['label'] == 'NEW LABEL'
+        # prior_label is whatever it was set to (README.md or similar)
+
+    def test_observed_at_only_update_does_not_archive(self, populated_env):
+        """A pure observed_at refresh — same label, same authority —
+        must NOT write to the archive."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        before = conn.execute(
+            "SELECT COUNT(*) AS n FROM observations_archive"
+        ).fetchone()['n']
+        # Re-ingest should refresh observed_at but keep label/authority
+        conn.close()
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        after = conn.execute(
+            "SELECT COUNT(*) AS n FROM observations_archive"
+        ).fetchone()['n']
+        conn.close()
+        assert after == before, \
+            "observed_at refresh incorrectly wrote to archive"
+
+
 # ── Report↔Commit Span (Workflow F) Tests ────────────────────────────────────
 
 class TestReportImplementations:

@@ -3723,3 +3723,38 @@ CREATE INDEX IF NOT EXISTS idx_reconcile_runs_machine_time
 CREATE INDEX IF NOT EXISTS idx_reconcile_runs_status
     ON reconcile_runs(status, ran_at DESC)
     WHERE status IN ('drift', 'unreachable', 'error');
+
+
+-- ============================================================================
+-- Migration 097: observations_archive (audit trail for entities)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS observations_archive (
+    id                INTEGER PRIMARY KEY,
+    entity_kind       TEXT NOT NULL,
+    entity_ref        TEXT NOT NULL,
+    label             TEXT,
+    source_authority  TEXT,
+    observed_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    entity_id         INTEGER,
+    prior_label            TEXT,
+    prior_source_authority TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_observations_archive_entity
+    ON observations_archive(entity_kind, entity_ref, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_observations_archive_time
+    ON observations_archive(observed_at DESC);
+
+CREATE TRIGGER IF NOT EXISTS trg_entities_archive_on_update
+AFTER UPDATE OF label, source_authority ON entities
+WHEN OLD.label IS NOT NEW.label
+  OR OLD.source_authority IS NOT NEW.source_authority
+BEGIN
+    INSERT INTO observations_archive
+        (entity_kind, entity_ref, label, source_authority,
+         entity_id, prior_label, prior_source_authority)
+    VALUES
+        (NEW.kind, NEW.external_ref, NEW.label, NEW.source_authority,
+         NEW.id, OLD.label, OLD.source_authority);
+END;
