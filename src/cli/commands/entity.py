@@ -1728,9 +1728,15 @@ WantedBy=timers.target
              "SELECT COUNT(*) FROM tool_calls", None),
             ('Deployment',
              "SELECT COUNT(*) FROM deployment_history", None),
+            # For File, we count only project_files whose project
+            # still exists — orphan rows (project deleted, file rows
+            # leaked) legitimately have no entity emission because
+            # git ingest INNER JOINs projects.
             ('File',
-             """SELECT COUNT(*) FROM project_files
-                 WHERE status = 'active'""", None),
+             """SELECT COUNT(*)
+                  FROM project_files pf
+                  JOIN projects p ON p.id = pf.project_id
+                 WHERE pf.status = 'active'""", None),
             ('AstBuild',
              "SELECT COUNT(*) FROM ast_builds", None),
         ]
