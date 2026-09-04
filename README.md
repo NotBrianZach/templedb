@@ -15,6 +15,8 @@
 
 TempleDB is a **typed knowledge and provenance graph** over your development world — git repos, nix builds, agent sessions, deployments, machines, and design decisions — held in a single SQLite database with adapters that keep it in sync with the authoritative systems for each fact.
 
+**Every substantive action in your dev world updates that graph.** Commits, deploys, agent edits, tool calls, design reports, symbol scans, config changes — nothing bypasses it. You query the graph to understand and design; you act on it to deploy and manage; you reconcile it against reality; you back the whole thing up as one SQLite file and sync it across your fleet. Understanding, deploying, managing, and preserving your work all run through the same substrate.
+
 It started as an ambitious "database as single source of truth" project. Over 2026 that model met reality: git is much better at bytes than SQLite is, nix owns store paths, filesystems own editable text. TempleDB now takes a different position — **observer of source, owner of the graph** — and this README reflects the current direction (see [Own vs. observe: TempleDB's fork in the road](reports/2026-09-02-0227-own-vs-observe-templedb-identity.html) and the [implementation plan](reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html) for the full pivot rationale).
 
 What that means concretely:
@@ -28,9 +30,26 @@ Or, colloquially: it's fossil-scm + gitnexus + terraform-refresh + a queryable d
 
 ---
 
+## One graph, six ways it's used
+
+Everything TempleDB does either writes to the entity graph, reads from it, or synchronizes it. The six loops:
+
+| # | Role | What it means |
+|---|------|---------------|
+| 1 | **Writes** | Every commit, deploy, agent edit, tool call, report, symbol scan, or config change lands as entities and relations. Adapters do the ingestion; nothing bypasses the graph. |
+| 2 | **Design & understanding** | `graph search`, `who-uses`, `importers`, `callers`, `hygiene dead-imports`, five-hop provenance queries. The graph is how you reason about the codebase without opening every file. Reports are `Report` entities linked to `Commit`s via `motivated`/`implemented-in` — so "which design decisions actually got implemented?" is a two-line query. |
+| 3 | **Deploy** | Fleet operations read `Machine` entities to know targets; deploy runs write `Deployment → installs → StorePath → Machine` provenance. `templedb deploy rollback` walks Deployment history. Reproducible artifacts (`Build`, `Generation`, `Derivation`) are all first-class. |
+| 4 | **Manage** | Config-ast edits, secrets/keys, per-host NixOS overrides, edit-intents, agent sessions — all have entity representations. Managing anything means editing its entity. |
+| 5 | **Reconcile** | `templedb doctor entities` walks the graph and asks each authority (git, nix, SSH probe) "still true?" — drift is measurable, not silent. Invariants like `entity_counts_match_source_tables` catch structural bugs (see [answers report](reports/2026-09-03-1947-answers-to-open-questions-on-the-observer-integrator-schema.html)). |
+| 6 | **Backup & sync** | The graph *is* what backup captures — one SQLite file holds your entire dev world's provenance. `storage backup gcs` and Cathedral packages snapshot it. CRSql sync replicates it across your fleet (log-based projection extends this to entities/relations in the [upcoming migration](reports/2026-09-04-1019-migration-plan-dual-write-to-log-based-projection.html)). |
+
+**The payoff:** these six loops share one vocabulary. A new consumer (say, a search index, an audit dashboard, an external metric publisher) doesn't require schema changes — it drains the same graph. A new authority (a new language server, a new build tool) doesn't grow the schema — it's a new adapter emitting into `entities`/`relations`.
+
+---
+
 ## How it works
 
-TempleDB is a single SQLite database plus a set of **ingestion adapters** that observe authoritative systems and project their state into a typed entity/relation graph:
+TempleDB is a single SQLite database plus a set of **ingestion adapters** that observe authoritative systems and project their state into the typed entity/relation graph:
 
 ```
 authority           adapter                    facts published
@@ -61,6 +80,8 @@ You interact with the graph through several surfaces:
    scripting Code             replica  detect   checkout
 ```
 
+Every surface reads or writes the same underlying graph.
+
 The CLI (`templedb` or `tdb`) is the primary entry point:
 
 ```bash
@@ -83,7 +104,8 @@ command groups:
 
   Entity Graph & Reconcile
     graph              Query the knowledge graph (search, who-uses, importers)
-    entity             Entity graph ops (list, kinds, freshness) [phase 3]
+    entity             Entity graph ops (list, kinds, freshness, paths)
+    hygiene            Dead-imports, dead-code, structural checks
     doctor             Reconcile facts against their authorities
 
   NixOS Integration
@@ -115,9 +137,12 @@ command groups:
 
   Sync & Network
     sync network       Tailscale VPN setup
+    sync serve         Sync server (CRSql replication, port 9420)
 
   Storage & Admin
-    storage backup     Local and cloud (GCS) backups
+    storage backup     Local and cloud (GCS) backups — captures whole graph
+    storage cathedral  Cathedral packages — portable graph bundles per project
+    storage blob       Blob storage
     admin db           Migrations, integrity checks, repair
     admin gitserver    Git server (serves DB-materialized repos)
 ```
@@ -126,7 +151,9 @@ command groups:
 
 ## The daily workflow
 
-### Editing source
+Every step below either writes to the graph, reads from it, or drives an action that produces new entities and relations.
+
+### Editing source (writes → EditIntent, FileSnapshot)
 
 Under the observer model, source bytes live in normal git checkouts. Open a workspace for a project:
 
@@ -147,12 +174,14 @@ templedb intent apply <id>                    # apply to checkout
 templedb intent revert <id>                   # inverse patch
 ```
 
+Each `EditIntent` becomes a graph entity linked to its `AgentSession` (via `proposed`) and its resulting `Commit` (via `applied-to`) — so "which agent's edit ended up in production?" is a graph query.
+
 The **FUSE mount** at `~/temple/` still exists for now (interactive-only, deprecated for scripted use) but is on the way out — Phase 5 of the [observer/integrator plan](reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html) retires it. FUSE-directed writes have known truncation and cache-staleness issues; prefer the workspace + intent flow above.
 
-### Commit and publish
+### Commit and publish (writes → Commit + FileSnapshot entities)
 
 ```bash
-templedb commit bza <workspace> -m "message"     # commit workspace to DB
+templedb commit bza <workspace> -m "message"     # commit workspace to DB → Commit entity
 templedb publish run bza                          # commit + materialize + push to git remote
 ```
 
@@ -171,7 +200,7 @@ templedb vcs switch bza feature-x
 templedb vcs merge bza feature-x [--squash]
 ```
 
-Session-scoped staging means multiple agents can work on the same project without stepping on each other:
+Session-scoped staging (writes → AgentSession, EditIntent entities) means multiple agents can work on the same project without stepping on each other:
 
 ```bash
 eval "$(templedb vcs session start --name my-refactor | grep '^  export')"
@@ -180,7 +209,9 @@ templedb vcs add -p bza src/foo.py
 templedb vcs commit -p bza -m "..."               # only this session's stages
 ```
 
-### Deploy
+The session id itself is an entity; every tool call within it becomes a `ToolCall` entity linked to the session via `invoked`.
+
+### Deploy (writes → Deployment, Generation; reads → Machine, StorePath)
 
 Content-addressed caching, health checks, environment injection:
 
@@ -201,9 +232,9 @@ templedb deploy fleet diff bza prod
 templedb deploy fleet deploy bza prod --on web         # deploy only tagged machines
 ```
 
-Every deploy records `Deployment` and `Generation` entities linked to `Commit`, `StorePath`, and `Machine` — so "which code is running where?" is a graph query, not a spreadsheet.
+Every deploy records a `Deployment` entity linked to `Commit`, `Build`, `StorePath`, `Generation`, and `Machine` — so "which code is running where?", rollback archaeology, and blast-radius analysis are all graph walks, not spreadsheets. `templedb doctor entities --host X` SSH-probes the target and reconciles the recorded facts against reality.
 
-### Query the entity graph
+### Query the entity graph (reads)
 
 ```bash
 templedb graph search supabase                    # cross-project fuzzy search
@@ -211,6 +242,12 @@ templedb graph who-uses STRIPE_SECRET_KEY         # what projects use this?
 templedb graph importers bza frontend/lib/supabase.ts
 templedb graph callers bza uploadDocument
 templedb graph deps bza                           # full dependency map
+
+templedb entity list --kind Deployment            # every Deployment entity
+templedb entity paths --kind Symbol --limit 20    # entity refs by external_ref shape
+templedb entity freshness                         # observed_at lag per kind
+
+templedb hygiene dead-imports bza                 # imports with no references
 ```
 
 Reconcile against authorities:
@@ -224,9 +261,9 @@ Drift is flagged, not silent. This is the reconcile-from-day-one pattern that Te
 
 ---
 
-## Secrets & key management
+## Secrets & key management (writes → Secret, Key entities)
 
-TempleDB uses [age](https://age-encryption.org/) with support for hardware keys (Yubikey), multi-key encryption, and quorum-based key revocation.
+TempleDB uses [age](https://age-encryption.org/) with support for hardware keys (Yubikey), multi-key encryption, and quorum-based key revocation. Every key registration, secret write, and revocation event lands in the graph (audit surface is a graph query, not a log grep).
 
 ### Multi-key architecture
 
@@ -235,7 +272,7 @@ Every secret is encrypted to **all registered keys simultaneously**. Any single 
 ```
 ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
 │  Yubikey 1  │   │  Yubikey 2  │   │  Yubikey 3  │   │ Filesystem  │
-│  (daily)    │   │  (backup)   │   │  (offsite)  │   │ (emergency) │
+│  (daily)    │   │  (backup)   │   │  (offsite)   │   │ (emergency) │
 └──────┬──────┘   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
        └─────────────────┴─────────────────┴─────────────────┘
                                  │
@@ -289,9 +326,9 @@ templedb env key revoke yubikey-daily --reason "lost laptop" --quorum 2
 
 ---
 
-## NixOS: the DB generates the config
+## NixOS: the DB generates the config (writes → ConfigNode, Host, AstBuild entities)
 
-Your NixOS configuration lives in the DB. Import it, edit it, generate nix files:
+Your NixOS configuration lives in the DB — first as key/value config, and increasingly as a parsed AST in `config_nodes`. Each host is a `Host` entity; each config value is owned by one or more projects via `config_node_owners`; each successful build is an `AstBuild` entity bridging `Commit → built-from → StorePath`.
 
 ```bash
 templedb nixos import-config system_config                            # 170+ DB keys from your config
@@ -306,10 +343,10 @@ templedb nixos rebuild system_config
 
 ### AST-based config (Phase 3-ish)
 
-For fine-grained config editing, TempleDB parses NixOS configs into a typed AST stored in `config_nodes` and re-emits them deterministically:
+For fine-grained config editing, TempleDB parses NixOS configs into a typed AST stored in `config_nodes` (each node is an entity) and re-emits them deterministically. `ast_builds` records the `Commit ← Build → StorePath` span with `output_hash`, `timestamp`, and `nix build` verification status.
 
 ```bash
-templedb config-ast import system_config                              # tree-sitter → DB
+templedb config-ast import system_config                              # tree-sitter → entities
 templedb config-ast tree                                              # browse
 templedb config-ast set <path> <value>                                # surgical edit
 templedb ast build --host zMothership2 --nix-build                    # emit + nix-build verify
@@ -329,41 +366,47 @@ templedb nixos host activate zMothership3
 
 # New machine, one command:
 templedb bootstrap --from-gcs my-bucket --username zach --hostname zMothership3
+# → restore DB (whole graph) → migrations → age key → materialize
+#   dotfiles → identity → NixOS generate → verify
 ```
+
+Bootstrap restores the entire graph from backup, so a new machine inherits every project, deployment history, design decision, and agent session ever recorded across the fleet.
 
 ---
 
-## Code intelligence
+## Code intelligence (writes → File, Symbol, Import; reads via graph)
 
-Symbols, imports, and call graphs across projects, feeding the entity graph:
+Symbols, imports, and call graphs across projects, feeding the entity graph. Each `File` entity holds a `defines` edge to every `Symbol` it declares; each `Symbol` holds `calls`/`references` edges to what it uses.
 
 ```bash
 templedb graph build-deps bza                     # scan → File/Symbol entities + defines/calls relations
 templedb graph importers bza frontend/lib/supabase.ts       # 44 files import this
 templedb graph callers bza uploadDocument                    # who calls this function?
 
-# Hygiene commands (2026-09-04):
+# Hygiene (writes → invariant results; reads → graph):
 templedb hygiene dead-imports bza                 # imports with no references
 templedb entity paths --kind Symbol --limit 20    # entity refs by external_ref shape
 ```
 
 Language ingest is currently Python via tree-sitter; SCIP adapters for TypeScript/Rust/Nix are the Phase 4 story (see [proposed schema map](reports/2026-09-03-0843-proposed-schema-after-observer-integrator-plan.html)).
 
+The graph is bug-productive here: doctor invariants have already caught resolver bugs by asserting things that are *structurally impossible* (e.g., "no `calls` relation has stdlib at `from` and user-CLI at `to`"). See [today's session recap](reports/2026-09-04-1410-session-recap-2-applying-parallel-session-answers.html) for a real bug caught this way.
+
 ---
 
-## Web GUI
+## Web GUI (reads the graph, writes edits through it)
 
 ```bash
 templedb gui                                      # launch at :8420
 ```
 
-Pages: Projects · VCS · Env · Nix · Deploy · Audit · Domains · Docs · Code · Graph · Schema · Settings · Status · Systemd · Fleet Sync · Nix Store · Tests · Config-AST · Reports.
+Pages: Projects · VCS · Env · Nix · Deploy · Audit · Domains · Docs · Code · Graph · Schema · Settings · Status · Systemd · Fleet Sync · Nix Store · Tests · Config-AST · Reports · Hygiene.
 
-Features: sortable tables, fuzzy search (press `/`), inline config editing, entity-graph search, schema browser with sample data, daemon status, host management with clone form, project file tree browser, reports index.
+Features: sortable tables, fuzzy search (press `/`), inline config editing, entity-graph search, schema browser with sample data, daemon status, host management with clone form, project file tree browser, reports index, hygiene dashboard.
 
 ---
 
-## MCP server (Claude Code integration)
+## MCP server (Claude Code integration — writes AgentSession, ToolCall)
 
 10 core tools — minimal context footprint (~1000 tokens):
 
@@ -382,6 +425,8 @@ Features: sortable tables, fuzzy search (press `/`), inline config editing, enti
 | `templedb_config_get/set`         | System config                    |
 | `templedb_agent_*`                | Agent-writable sections + notes  |
 
+Every MCP invocation lands as a `ToolCall` entity linked to its `AgentSession`, so agent work is auditable in the same graph as human work.
+
 Temple Agent runtime (Claude Code inside Emacs, session state DB-backed):
 
 ```bash
@@ -390,9 +435,32 @@ templedb ai agent serve --stdio
 
 ---
 
+## Backup & sync (the graph as one portable artifact)
+
+The DB *is* the graph. Backing up the DB backs up your entire dev world's provenance in one file; restoring it reinstates every project, every commit, every deployment, every design decision.
+
+```bash
+templedb storage backup gcs my-bucket                # ship whole DB to GCS
+templedb storage cathedral export bza                # portable project bundle w/ provenance
+templedb storage cathedral import ./bza.cathedral    # rehydrate on another machine
+```
+
+Cross-machine sync via CRSql:
+
+```bash
+templedb sync network setup                          # configure Tailscale
+templedb sync serve                                  # start sync server (port 9420)
+# on the other machine:
+templedb sync sync zMothership2                      # bidirectional
+```
+
+Merges automatically — last-writer-wins for config, append-only for commits. Today CRSql sync targets specific typed tables (`sync_projects`, `sync_vcs_commits`, etc.); extending it to `entities`/`relations` is a Phase 3 dependency worth naming (see Q5 in the [answers report](reports/2026-09-03-1947-answers-to-open-questions-on-the-observer-integrator-schema.html)).
+
+---
+
 ## Reports: the design-decision archive
 
-TempleDB reports live in `reports/` as self-contained HTML with a browsable index:
+TempleDB reports live in `reports/` as self-contained HTML with a browsable index. Each report is a `Report` entity in the graph, linked via `motivated` to the design decisions it drove and via `implemented-in` to the commits that realized them.
 
 ```bash
 templedb reports list                                # newest-first
@@ -401,7 +469,7 @@ templedb reports new "Title of your design note"     # scaffold + template
 templedb reports reindex                             # regenerate index.html
 ```
 
-Reports are snapshots, not living docs. They're the argument-of-record for architecture decisions — every substantive session ends with a metacognition report so the graph knows *why* things are the way they are.
+Reports are snapshots, not living docs. They're the argument-of-record for architecture decisions — every substantive session ends with a metacognition report so the graph knows *why* things are the way they are. "Which reports actually got implemented?" and "Which commit realized decision D?" are graph queries.
 
 Recent design-thread highlights:
 
@@ -417,7 +485,7 @@ Recent design-thread highlights:
 
 The observer/integrator plan is largely landed. What's next, in rough order:
 
-1. **Log-based projection for the entity graph** ([migration plan](reports/2026-09-04-1019-migration-plan-dual-write-to-log-based-projection.html), ~3 weeks). Retire dual-write. Single-writer typed tables + async projection into entities/relations. Kills the drift class entirely.
+1. **Log-based projection for the entity graph** ([migration plan](reports/2026-09-04-1019-migration-plan-dual-write-to-log-based-projection.html), ~3 weeks). Retire dual-write. Single-writer typed tables + async projection into entities/relations. Kills the drift class entirely — writes flow into the graph through one path, projection materializes the derived view.
 2. **CRSql sync for `entities`/`relations`** with per-kind `sync_scope`. Fleet-wide graph convergence.
 3. **SCIP adapters** (TypeScript, Rust, Nix) — external code-facts ingestion. Language coverage grows with the SCIP ecosystem rather than our parser budget.
 4. **Observations archive + current-only semantics** — retention policy so the graph doesn't grow unbounded when SCIP dumps millions of symbol facts.
@@ -505,10 +573,10 @@ use_templedb
 ## Quick start
 
 ```bash
-# 1. Import a project
+# 1. Import a project (writes Project entity + walks git history)
 templedb project import ~/myproject --slug myproject
 
-# 2. Open a workspace and edit
+# 2. Open a workspace and edit (writes EditIntent + Commit on save)
 templedb edit myproject
 # ...edit files in ~/.config/templedb/edit-workspaces/myproject...
 templedb commit myproject ~/.config/templedb/edit-workspaces/myproject -m "initial"
@@ -520,10 +588,10 @@ templedb graph who-uses SOMETHING
 # 4. Publish to git remote
 templedb publish run myproject
 
-# 5. Reconcile
+# 5. Reconcile (asks each authority "still true?")
 templedb doctor entities
 
-# 6. Launch GUI
+# 6. Launch GUI (browser view of the graph)
 templedb gui
 ```
 
@@ -538,7 +606,7 @@ python3 -m pytest tests/ -v
 templedb gui --port 8421
 ```
 
-New design work? Scaffold a report first: `templedb reports new "Your title"`. Reports are the argument-of-record; code + tests are downstream.
+New design work? Scaffold a report first: `templedb reports new "Your title"`. Reports are the argument-of-record; code + tests are downstream. Every commit that implements a report should reference it in the message so the `Report → implemented-in → Commit` edge lands correctly.
 
 ---
 
