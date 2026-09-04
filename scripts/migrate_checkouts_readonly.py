@@ -15,7 +15,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 # Import after path setup
-from db_utils import get_connection
 from sync import SyncManager, make_readonly
 from repositories.project_repository import ProjectRepository
 from repositories.checkout_repository import CheckoutRepository

@@ -8,7 +8,6 @@ import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from repositories import ProjectRepository
 from cli.core import Command
 from logger import get_logger
 

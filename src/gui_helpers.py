@@ -12,8 +12,6 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from db_utils import execute, query_all, query_one
-from config import FUSE_MOUNT_PATH
 from fastapi.responses import HTMLResponse
 
 CSS = """

@@ -27,9 +27,7 @@ from dulwich.web import (
     HTTPGitApplication
 )
 
-from .object_mapper import ObjectMapper
 from .repository import TempleDBRepo
-from db_utils import get_connection
 from logger import get_logger
 
 logger = get_logger(__name__)

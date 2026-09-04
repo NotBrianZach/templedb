@@ -32,8 +32,6 @@ import sys
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from services.symbol_extraction_service import extract_symbols_for_project
-from services.dependency_graph_service import build_dependency_graph_for_project
 from services.impact_analysis_service import (
     analyze_symbol_impact,
     precompute_impact_for_project

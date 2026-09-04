@@ -3791,5 +3791,83 @@ class TestDirenvGenerator:
             assert branch is not None
 
 
+# ── Commit intent-ahead conflict detection ──────────────────────────────────
+
+class TestCommitIntentAhead:
+    """When `templedb file set X` has written to the DB but the on-disk
+    workspace copy of X is stale, a subsequent `templedb commit
+    <slug> <workspace>` should detect the mismatch and NOT silently
+    overwrite the file-set write."""
+
+    def test_commit_detects_intent_ahead_of_workspace(
+            self, populated_env, tmp_path, capsys):
+        import argparse
+        import hashlib
+        from cli.commands.commit import CommitCommand
+
+        # Prep a workspace directory containing the file at v1
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "src").mkdir()
+        (ws / "src" / "main.py").write_text("def main():\n    print('hello')\n")
+
+        # Simulate `templedb file set` having landed a v2 for main.py
+        # by writing directly to DB.
+        conn = sqlite3.connect(populated_env["db_path"])
+        v2 = "def main():\n    print('WORLD')\n"
+        v2_hash = hashlib.sha256(v2.encode()).hexdigest()
+        conn.execute(
+            "INSERT OR IGNORE INTO content_blobs "
+            "(hash_sha256, content_text, content_type, encoding, "
+            " file_size_bytes) VALUES (?, ?, 'text', 'utf-8', ?)",
+            (v2_hash, v2, len(v2)),
+        )
+        file_row = conn.execute(
+            "SELECT pf.id FROM project_files pf "
+            "JOIN projects p ON p.id = pf.project_id "
+            "WHERE p.slug='testproj' AND pf.file_path='src/main.py'"
+        ).fetchone()
+        file_id = file_row[0]
+        conn.execute(
+            "DELETE FROM file_contents WHERE file_id=? AND is_current=1",
+            (file_id,),
+        )
+        conn.execute(
+            "INSERT INTO file_contents (file_id, content_hash, "
+            "file_size_bytes, is_current) VALUES (?, ?, ?, 1)",
+            (file_id, v2_hash, len(v2)),
+        )
+        # Applied EditIntent that matches the current hash
+        conn.execute(
+            "INSERT INTO edit_intents (project_id, file_path, "
+            "base_revision, new_content_hash, status, author, "
+            "created_at, applied_at, description) "
+            "VALUES (?, 'src/main.py', 'current', ?, 'applied', "
+            "'test', datetime('now'), datetime('now'), "
+            "'test intent')",
+            (populated_env["project_id"], v2_hash),
+        )
+        conn.commit()
+        conn.close()
+
+        args = argparse.Namespace(
+            project_slug="testproj",
+            workspace_dir=str(ws),
+            message="try to commit stale workspace",
+            force=False,
+            strategy=None,
+        )
+        # Non-TTY test env → conflict prompt should auto-abort (from
+        # the earlier no-TTY fix). rc=1 = aborted.
+        rc = CommitCommand().commit(args)
+        out = capsys.readouterr().out
+        assert rc == 1, (
+            f"commit should abort on stale workspace; got rc={rc}\n"
+            f"stdout: {out}"
+        )
+        assert "workspace is behind DB" in out or \
+               "intent" in out.lower(), out
+
+
 # ── Sync Engine Tests ─────────────────────────────────────────────────────────
 

@@ -9,7 +9,6 @@ from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
-from db_utils import DB_PATH
 
 
 class PromptCommands(Command):

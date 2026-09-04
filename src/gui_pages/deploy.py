@@ -23,7 +23,6 @@ _search_bar = _search_bar
 _msg = _msg
 _status_badge = _status_badge
 _run = _run
-from config import FUSE_MOUNT_PATH
 
 @router.get("/deploy/validate/{slug}", response_class=HTMLResponse)
 def deploy_validate(slug: str):

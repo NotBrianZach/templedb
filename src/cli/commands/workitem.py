@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
 from repositories import ProjectRepository
 from logger import get_logger
-from config import DB_PATH
 import db_utils
 
 logger = get_logger(__name__)

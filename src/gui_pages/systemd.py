@@ -13,7 +13,6 @@ from fastapi import APIRouter, Form, Query
 from fastapi.responses import HTMLResponse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from db_utils import execute, query_all, query_one
 
 router = APIRouter()
 

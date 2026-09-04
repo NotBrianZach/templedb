@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from cli.core import Command
 from cli.commands.checkout import CheckoutCommand
 from cli.commands.commit import CommitCommand
-from repositories import ProjectRepository, FileRepository
 from project_context import ProjectContext, get_project_context
 from logger import get_logger
 

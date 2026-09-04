@@ -19,7 +19,6 @@ from repositories import ProjectRepository, FileRepository, CheckoutRepository, 
 from importer.content import ContentStore, FileContent
 from importer.scanner import FileScanner
 from logger import get_logger
-from config import DB_PATH
 
 logger = get_logger(__name__)
 
@@ -233,8 +232,10 @@ class CommitCommand:
                     print(f"   {conflict['file_path']}")
                     print(f"      Your version: {conflict['your_version']}")
                     print(f"      Current version: {conflict['current_version']}")
-                    if conflict['changed_by']:
+                    if conflict.get('changed_by'):
                         print(f"      Changed by: {conflict['changed_by']} at {conflict['changed_at']}")
+                    if conflict.get('reason'):
+                        print(f"      Reason: {conflict['reason']}")
 
                 # Determine resolution strategy
                 strategy = getattr(args, 'strategy', None)
@@ -633,18 +634,33 @@ class CommitCommand:
         return file_type['id'] if file_type else 1
 
     def _detect_conflicts(self, project_id: int, workspace_dir: Path, modified_files: List[FileChange]) -> List[Dict]:
-        """Detect version conflicts for modified files"""
+        """Detect version conflicts for modified files.
+
+        Two independent checks:
+
+        1. Version-based (via checkout snapshot): the classic case
+           where another session committed while this workspace was
+           editing.
+
+        2. Intent-based (2026-09-04): the `file set` case. A prior
+           `templedb file set X` records an EditIntent + updates the
+           DB blob, but the on-disk workspace copy of X is now
+           stale. When the user then runs
+           `templedb commit <slug> <workspace>`, the scan sees
+           workspace_hash != db_hash and calls it "modified" —
+           which would silently overwrite the file-set write with
+           the stale workspace bytes. Instead, we look for applied
+           EditIntents whose new_content_hash equals the current DB
+           hash but does NOT equal the workspace hash. That signals
+           "DB is ahead of workspace" and we abort.
+        """
         conflicts = []
 
-        # Get checkout info
+        # Get checkout info (used for version-based check only)
         checkout = self.checkout_repo.get_by_path(project_id, str(workspace_dir))
 
-        if not checkout:
-            # No checkout record, can't detect conflicts
-            return []
-
         for change in modified_files:
-            # Get current version in database (still need raw query for join with commits)
+            # Get current DB blob + version
             current = self.file_repo.query_one("""
                 SELECT
                     fc.version,
@@ -657,11 +673,48 @@ class CommitCommand:
                 WHERE fc.file_id = ? AND fc.is_current = 1
             """, (change.file_id,))
 
-            # Get version at checkout
-            snapshot = self.checkout_repo.get_snapshot(checkout['id'], change.file_id)
+            # ------ Check 2 (intent-based): file set silently ahead? ------
+            # Look up any applied EditIntent whose new_content_hash
+            # matches the current DB blob for this file. If the
+            # workspace hash doesn't match either the DB blob OR the
+            # intent's new hash, the workspace is stale and about to
+            # revert a `file set` write.
+            intent_ahead = self.file_repo.query_one("""
+                SELECT id, applied_at, new_content_hash
+                  FROM edit_intents
+                 WHERE project_id = ?
+                   AND file_path = ?
+                   AND status = 'applied'
+                   AND new_content_hash = ?
+                 ORDER BY applied_at DESC
+                 LIMIT 1
+            """, (project_id, change.file_path,
+                  current['content_hash'] if current else None))
+            if intent_ahead and current \
+                    and change.content.hash_sha256 != current['content_hash']:
+                conflicts.append({
+                    'file_path': change.file_path,
+                    'file_id': change.file_id,
+                    'your_version': 'workspace (stale)',
+                    'current_version': f"DB (via intent #{intent_ahead['id']})",
+                    'changed_by': f"file set intent applied {intent_ahead['applied_at']}",
+                    'changed_at': intent_ahead['applied_at'],
+                    'reason': (
+                        "workspace is behind DB — a `templedb file set` "
+                        "wrote this file after the workspace was last "
+                        "synced. Committing would revert that write. "
+                        "Refresh with `templedb file cat <slug> "
+                        f"{change.file_path}` > workspace-path, or "
+                        "pass --strategy force to overwrite."
+                    ),
+                })
+                continue  # don't double-report via version check below
 
+            # ------ Check 1 (version-based, classic) ------
+            if not checkout:
+                continue
+            snapshot = self.checkout_repo.get_snapshot(checkout['id'], change.file_id)
             if snapshot and current:
-                # Check for version mismatch
                 if current['version'] != snapshot['version']:
                     conflicts.append({
                         'file_path': change.file_path,
