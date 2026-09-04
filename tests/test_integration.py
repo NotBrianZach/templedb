@@ -1984,6 +1984,23 @@ class TestPythonIngest:
         assert row == 1, \
             "call chased through re-export not resolved"
 
+        # File-level bridge check: dead-imports needs the caller to
+        # have SOME edge landing on symbols IN pkg/__init__.py, not
+        # just the ultimate pkg/internal.py. Verify the reexport
+        # bridge (uses → __module__) got emitted.
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        bridge = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e1.external_ref='testproj:src/pkg_user.py:run'
+                  AND e2.external_ref='testproj:src/pkg/__init__.py:__module__'
+                  AND r.kind='uses'"""
+        ).fetchone()['n']
+        conn.close()
+        assert bridge == 1, "re-export __module__ bridge not emitted"
+
     def test_hygiene_invariant_fires_on_untracked_regression(
             self, populated_env):
         """Seed two hygiene_snapshots for the same slug and same

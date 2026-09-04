@@ -735,7 +735,8 @@ WantedBy=timers.target
                     if isinstance(n, ast.Call):
                         yield n
 
-        def _chase_reexport(t_slug, t_path, t_name, depth=3):
+        def _chase_reexport(t_slug, t_path, t_name, depth=3,
+                            intermediates=None):
             """Chase re-exports through __init__ shims.
 
             Common Python pattern: `repositories/__init__.py` does
@@ -745,22 +746,46 @@ WantedBy=timers.target
             but that file never *defines* BaseRepository, so the
             resolver misses the connection.
 
-            This helper starts at (t_slug, t_path, t_name) and, if
-            the target file doesn't define t_name, checks whether
-            its own imports_map has t_name (i.e. the target file
-            re-exports it). If so, chase to the source. Bounded
-            depth to avoid pathological cycles."""
+            Returns (final_slug, final_path, final_name, intermediates)
+            where `intermediates` is a list of (slug, path) files
+            we passed through — used by callers to also emit a
+            file-level bridge (uses → __module__ of each stop) so
+            dead-imports sees the target-file connection."""
+            if intermediates is None:
+                intermediates = []
             if depth <= 0:
                 return None
             tf_defs = all_defs_by_file.get((t_slug, t_path), {})
             if t_name in tf_defs:
-                return (t_slug, t_path, t_name)
+                return (t_slug, t_path, t_name, intermediates)
             tf_imports = all_imports_by_file.get((t_slug, t_path), {})
             if t_name in tf_imports:
+                intermediates.append((t_slug, t_path))
                 nx_slug, nx_path, nx_name = tf_imports[t_name]
                 return _chase_reexport(nx_slug, nx_path, nx_name,
-                                       depth - 1)
+                                       depth - 1, intermediates)
             return None
+
+        def _emit_reexport_bridges(from_sym_id, intermediates):
+            """For each intermediate re-export file we chased through,
+            emit `from_sym → uses → intermediate:__module__` so the
+            dead-imports File-level bridge check sees the connection.
+            (The actual calls/inherits/uses lands on the ultimate
+            source file, not the intermediate one.)"""
+            nonlocal added_r
+            for (int_slug, int_path) in intermediates:
+                int_module_ref = (f"{int_slug}:{int_path}:__module__")
+                int_module_id = self._entity_id(
+                    'Symbol', int_module_ref)
+                if not int_module_id:
+                    continue
+                if self._upsert_relation(
+                    from_sym_id, 'uses', int_module_id, 'python'
+                ):
+                    added_r += 1
+                touched_relations.add(
+                    (from_sym_id, 'uses', int_module_id)
+                )
 
         for (slug, fp), tree in file_trees_by_file.items():
             local_defs = all_defs_by_file.get((slug, fp), {})
@@ -799,6 +824,7 @@ WantedBy=timers.target
                     if imp_root and imp_root in local_defs:
                         continue  # local class attribute call
 
+                    chase_ints = []
                     if called_name:
                         imp = imports_map.get(called_name)
                         if not imp:
@@ -807,23 +833,22 @@ WantedBy=timers.target
                          target_symbol_name) = imp
                         chased = _chase_reexport(
                             target_slug, target_path,
-                            target_symbol_name)
+                            target_symbol_name, intermediates=[])
                         if not chased:
                             continue
-                        target_slug, target_path, target_symbol_name = chased
+                        (target_slug, target_path,
+                         target_symbol_name, chase_ints) = chased
                     else:
                         imp = imports_map.get(imp_root)
                         if not imp:
                             continue
                         target_slug, target_path, root_symbol_name = imp
-                        # First chase the root to its real defining file
-                        # (e.g. `from repositories import BaseRepository;
-                        # BaseRepository.method()` — chase root, then
-                        # look up `<root>.<attr>` there).
                         chased = _chase_reexport(
-                            target_slug, target_path, root_symbol_name)
+                            target_slug, target_path, root_symbol_name,
+                            intermediates=[])
                         if chased:
-                            target_slug, target_path, root_symbol_name = chased
+                            (target_slug, target_path,
+                             root_symbol_name, chase_ints) = chased
                         target_symbol_name = f"{root_symbol_name}.{method_attr}"
 
                     target_defs = all_defs_by_file.get(
@@ -842,6 +867,7 @@ WantedBy=timers.target
                     touched_relations.add(
                         (sym_id, 'calls', target_sym_id)
                     )
+                    _emit_reexport_bridges(sym_id, chase_ints)
 
         # Cross-file inheritance resolution.
         # For each ClassDef with base names, if a base isn't defined
@@ -861,10 +887,12 @@ WantedBy=timers.target
                         continue
                     target_slug, target_path, target_symbol_name = imp
                     chased = _chase_reexport(
-                        target_slug, target_path, target_symbol_name)
+                        target_slug, target_path, target_symbol_name,
+                        intermediates=[])
                     if not chased:
                         continue
-                    target_slug, target_path, target_symbol_name = chased
+                    (target_slug, target_path,
+                     target_symbol_name, chase_ints) = chased
                     target_defs = all_defs_by_file.get(
                         (target_slug, target_path)
                     )
@@ -881,6 +909,7 @@ WantedBy=timers.target
                     touched_relations.add(
                         (class_sym_id, 'inherits', base_id)
                     )
+                    _emit_reexport_bridges(class_sym_id, chase_ints)
 
         # Cross-file annotation resolution.
         # For each Symbol, re-scan annotations; for names not in
@@ -940,10 +969,12 @@ WantedBy=timers.target
                         continue
                     target_slug, target_path, target_symbol_name = imp
                     chased = _chase_reexport(
-                        target_slug, target_path, target_symbol_name)
+                        target_slug, target_path, target_symbol_name,
+                        intermediates=[])
                     if not chased:
                         continue
-                    target_slug, target_path, target_symbol_name = chased
+                    (target_slug, target_path,
+                     target_symbol_name, chase_ints) = chased
                     target_defs = all_defs_by_file.get(
                         (target_slug, target_path)
                     )
@@ -960,6 +991,7 @@ WantedBy=timers.target
                     touched_relations.add(
                         (sym_id, 'uses', target_sym_id)
                     )
+                    _emit_reexport_bridges(sym_id, chase_ints)
 
         # Pruning: delete python-authority relations from processed
         # Files (and their Symbols) whose tuples weren't touched this
