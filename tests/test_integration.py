@@ -1944,6 +1944,46 @@ class TestPythonIngest:
         conn.close()
         assert row == 1, "Widget().do() constructor-chain call not resolved"
 
+    def test_python_ingest_chases_reexports(self, populated_env):
+        """`from pkg import Y` where `pkg/__init__.py` re-exports Y
+        from `.internal` should still resolve Y calls to the
+        original definition (adapter 1.12)."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/pkg/internal.py',
+            "class Widget:\n"
+            "    @staticmethod\n"
+            "    def do():\n        return 1\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/pkg/__init__.py',
+            "from internal import Widget\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/pkg_user.py',
+            "from pkg import Widget\n"
+            "\n"
+            "def run():\n"
+            "    return Widget.do()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python',
+                                                   limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e1.external_ref='testproj:src/pkg_user.py:run'
+                  AND e2.external_ref='testproj:src/pkg/internal.py:Widget.do'
+                  AND r.kind='calls'"""
+        ).fetchone()['n']
+        conn.close()
+        assert row == 1, \
+            "call chased through re-export not resolved"
+
     def test_hygiene_invariant_fires_on_untracked_regression(
             self, populated_env):
         """Seed two hygiene_snapshots for the same slug and same

@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.11',   # 1.11 imported.attr / imported().attr
+        'python':  '1.12',   # 1.12 chases re-exports through __init__
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -735,6 +735,33 @@ WantedBy=timers.target
                     if isinstance(n, ast.Call):
                         yield n
 
+        def _chase_reexport(t_slug, t_path, t_name, depth=3):
+            """Chase re-exports through __init__ shims.
+
+            Common Python pattern: `repositories/__init__.py` does
+            `from .base import BaseRepository`. A caller does
+            `from repositories import BaseRepository` and uses it.
+            The direct target lookup finds `repositories/__init__.py`
+            but that file never *defines* BaseRepository, so the
+            resolver misses the connection.
+
+            This helper starts at (t_slug, t_path, t_name) and, if
+            the target file doesn't define t_name, checks whether
+            its own imports_map has t_name (i.e. the target file
+            re-exports it). If so, chase to the source. Bounded
+            depth to avoid pathological cycles."""
+            if depth <= 0:
+                return None
+            tf_defs = all_defs_by_file.get((t_slug, t_path), {})
+            if t_name in tf_defs:
+                return (t_slug, t_path, t_name)
+            tf_imports = all_imports_by_file.get((t_slug, t_path), {})
+            if t_name in tf_imports:
+                nx_slug, nx_path, nx_name = tf_imports[t_name]
+                return _chase_reexport(nx_slug, nx_path, nx_name,
+                                       depth - 1)
+            return None
+
         for (slug, fp), tree in file_trees_by_file.items():
             local_defs = all_defs_by_file.get((slug, fp), {})
             imports_map = all_imports_by_file.get((slug, fp), {})
@@ -778,12 +805,25 @@ WantedBy=timers.target
                             continue
                         (target_slug, target_path,
                          target_symbol_name) = imp
+                        chased = _chase_reexport(
+                            target_slug, target_path,
+                            target_symbol_name)
+                        if not chased:
+                            continue
+                        target_slug, target_path, target_symbol_name = chased
                     else:
                         imp = imports_map.get(imp_root)
                         if not imp:
                             continue
                         target_slug, target_path, root_symbol_name = imp
-                        # Look up `<root>.<attr>` in that file
+                        # First chase the root to its real defining file
+                        # (e.g. `from repositories import BaseRepository;
+                        # BaseRepository.method()` — chase root, then
+                        # look up `<root>.<attr>` there).
+                        chased = _chase_reexport(
+                            target_slug, target_path, root_symbol_name)
+                        if chased:
+                            target_slug, target_path, root_symbol_name = chased
                         target_symbol_name = f"{root_symbol_name}.{method_attr}"
 
                     target_defs = all_defs_by_file.get(
@@ -820,6 +860,11 @@ WantedBy=timers.target
                     if not imp:
                         continue
                     target_slug, target_path, target_symbol_name = imp
+                    chased = _chase_reexport(
+                        target_slug, target_path, target_symbol_name)
+                    if not chased:
+                        continue
+                    target_slug, target_path, target_symbol_name = chased
                     target_defs = all_defs_by_file.get(
                         (target_slug, target_path)
                     )
@@ -894,6 +939,11 @@ WantedBy=timers.target
                     if not imp:
                         continue
                     target_slug, target_path, target_symbol_name = imp
+                    chased = _chase_reexport(
+                        target_slug, target_path, target_symbol_name)
+                    if not chased:
+                        continue
+                    target_slug, target_path, target_symbol_name = chased
                     target_defs = all_defs_by_file.get(
                         (target_slug, target_path)
                     )
