@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 5: relative imports, re-export chase, below-green</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); font-weight: 600; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+  .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<h1>Session recap 5: relative imports and below-green</h1>
+<p class="lede">
+  Post-recap-4 continuation. Started by adding <em>re-export
+  chase</em> (1.12), which barely moved the needle — because the
+  resolver had been silently dropping every relative import since
+  it was born. Fixed that. Then found <code>__init__.py</code>
+  re-exports needed their own use edge (1.13), and finally that
+  bare-Name references to imported constants weren't tracked at
+  all (1.14). Went from <strong>21% → 8%</strong> dead in one
+  session-arc.
+</p>
+
+<h2>The bug hunt that made this session interesting</h2>
+
+<p>
+  Recap 4 stopped at 21% saying "diminishing returns; remaining
+  candidates need type inference." Turns out that was true for
+  <em>some</em> candidates, but three separate systemic bugs were
+  hiding behind them:
+</p>
+
+<h3>1.12a — re-export chase (planned)</h3>
+<p>
+  <code>from repositories import BaseRepository</code> where
+  <code>repositories/__init__.py</code> does
+  <code>from .base import BaseRepository</code>. Direct lookup on
+  the __init__ file fails; needed to chase transitively.
+  Implemented <code>_chase_reexport(t_slug, t_path, t_name, depth=3)</code>
+  called at all three post-pass sites (calls / inherits / uses).
+</p>
+
+<h3>1.12b — relative imports never resolved (unplanned)</h3>
+<p>
+  After shipping 1.12a, the delta was disappointing (88 → 85). I
+  spot-checked <code>blob.py imports repositories</code> and found
+  the call from <code>BlobCommands.__init__</code> to
+  <code>BaseRepository()</code> still wasn't resolving. The chase
+  ran, but the ultimate target file's <code>local_defs</code>
+  didn't have <code>BaseRepository</code> either — because the
+  chase started from <code>__init__.py</code> whose
+  <code>imports_map</code> was empty. Because:
+</p>
+<pre>elif isinstance(node, ast.ImportFrom):
+    if node.level != 0 or not node.module:
+        continue  # ← every relative import silently dropped</pre>
+<p>
+  Every <code>from .base import X</code> in the entire codebase
+  had been going into the void since the resolver was written.
+  Added <code>_resolve_relative_import(this_path, level, mod_name)</code>
+  that handles <code>__init__.py</code>'s package-is-directory
+  rule, walks up <code>level - 1</code> directories, and appends
+  the module name.
+</p>
+<div class="callout warn">
+  <span class="label">Lesson</span>
+  A resolver that silently skips syntax it doesn't handle is worse
+  than one that errors. The old code had <code>continue</code>
+  where it should have had an <code>_resolve_relative_import</code>
+  call. Silent skip means: (a) the graph has a systematic hole
+  nobody notices, (b) the metrics understate coverage, (c)
+  everyone treats the tool's output as "the number you get" rather
+  than "the number the tool would report if it weren't dropping
+  edges." Doctor invariants can't help because there's no
+  ambient signal that a code path is dead.
+</div>
+
+<h3>1.13 — __init__ files with only re-exports</h3>
+<p>
+  <code>backup/__init__.py</code> imports <code>.base</code> and
+  <code>.local_provider</code> just to expose them — it never
+  <em>calls</em> them itself. So dead-imports flagged both as
+  unused. Semantically wrong: the re-export IS the use, since
+  callers depend on the composition.
+</p>
+<p>
+  1.13 adds a post-pass for every <code>__init__.py</code> file:
+  each import becomes
+  <code>&lt;init&gt;:__module__ → uses → &lt;target&gt;:&lt;name&gt;</code>.
+  Chases through further re-exports for long chains.
+</p>
+
+<h3>1.14 — bare-Name references (the biggest single win)</h3>
+<p>
+  <code>from db_utils import DB_PATH; sqlite3.connect(DB_PATH)</code>
+  — <code>DB_PATH</code> is a bare Name, never a Call. Every
+  db_utils import that used constants (many, many of them) looked
+  dead.
+</p>
+<p>
+  1.14 adds a reference-scan post-pass. For each symbol's body,
+  walk every <code>ast.Name</code> and Attribute-root Name. If in
+  imports_map, emit <code>Symbol → uses → Symbol</code> — or,
+  for module-level constants that don't have a Symbol entity,
+  fall back to <code>&lt;target&gt;:__module__</code>. Deduplicates
+  per (symbol, ref) so a CONSTANT used 20 times doesn't spam
+  20 uses edges.
+</p>
+
+<h2>The full curve</h2>
+
+<table class="matrix">
+  <tr><th>Adapter</th><th>Dead</th><th>Total imports</th><th>%</th><th>What changed</th></tr>
+  <tr><td>1.6</td>  <td class="num">282</td><td class="num">446</td><td class="neg num">63%</td><td>baseline</td></tr>
+  <tr><td>1.7</td>  <td class="num">172</td><td class="num">446</td><td class="warn num">39%</td><td>__module__ synthetic</td></tr>
+  <tr><td>1.8</td>  <td class="num"> 92</td><td class="num">446</td><td class="warn num">21%</td><td>inherits edges</td></tr>
+  <tr><td>1.9</td>  <td class="num"> 92</td><td class="num">446</td><td class="warn num">21%</td><td>decorators</td></tr>
+  <tr><td>1.10</td> <td class="num"> 88</td><td class="num">446</td><td class="warn num">20%</td><td>annotation uses</td></tr>
+  <tr><td>1.11</td> <td class="num"> 85</td><td class="num">446</td><td class="warn num">19%</td><td>Cls.method(), Cls().method()</td></tr>
+  <tr><td>1.12</td> <td class="num"> 77</td><td class="num">476</td><td class="warn num">16%</td><td>relative + re-export chase</td></tr>
+  <tr><td>1.13</td> <td class="num"> 55</td><td class="num">476</td><td class="warn num">12%</td><td>__init__ imports → self-use</td></tr>
+  <tr><td>1.14</td> <td class="num pos"> 36</td><td class="num">476</td><td class="pos num">8%</td><td>bare-Name reference tracking</td></tr>
+</table>
+
+<p>
+  The 446 → 476 total jump in 1.12 is the fix-for-the-fix: those 30
+  imports weren't <em>appearing</em> and disappearing under a
+  refactor. They had never existed in the graph at all until
+  relative imports started resolving.
+</p>
+
+<div class="callout win">
+  <span class="label">Below green</span>
+  8% clears the summary's "green" threshold (&lt; 10%). templedb's
+  own hygiene is now visibly healthy in <code>templedb summary</code>.
+</div>
+
+<h2>Operational note: a real commit hang</h2>
+<p>
+  Mid-session, <code>templedb commit</code> deadlocked on a
+  README.md conflict — silently, without prompting. Two commit
+  processes stacked up, both waiting on stdin that the harness
+  wasn't feeding. Kill required. On retry with an interactive
+  terminal, the conflict prompt appeared normally and I resolved
+  by taking the DB version. Root cause is that
+  <code>templedb commit</code>'s interactive prompt path doesn't
+  degrade to a non-interactive default when stdin is closed. Worth
+  a follow-up.
+</p>
+<p>
+  Also noticed <code>templedb vcs session list --active</code>
+  shows <strong>9 sessions</strong> from today, all from this
+  single-user session. That's session leakage — an
+  <code>ended_at IS NULL</code> row per invocation that never
+  closes. Not blocking anything today, but worth a follow-up
+  because session-count is a proxy for lock-fanout.
+</p>
+
+<h2>The remaining 36 candidates</h2>
+<p>
+  Spot-check says most are legitimately dead — legacy scripts in
+  <code>examples/</code>, old debug commands, imports that outlived
+  their callers. That's the tool doing its job: <em>correctly</em>
+  flagging code we should actually delete. Turning the tool inward
+  for a real cleanup pass is a natural next step.
+</p>
+
+<h2>Handoff snapshot</h2>
+<ul>
+  <li>Python ingest at <strong>1.14</strong>. See
+      <a href="/home/zach/.claude/projects/-home-zach/memory/code-intelligence-hygiene.md">
+      the memory file</a> — updated same time as this recap.</li>
+  <li>14 doctor invariants, all green.</li>
+  <li>Hygiene snapshot daily via reconcile.timer; first live snapshot
+      recorded around 15:16.</li>
+  <li>Session inbox has broadcast handoff #3 (from recap 4).</li>
+</ul>
+
+<h2>What's honestly next</h2>
+<ol>
+  <li><strong>Delete the 36 truly-dead imports</strong> from templedb
+      source. Use our own tool on our own codebase.</li>
+  <li><strong>Fix the commit hang</strong> — either force
+      non-interactive default when stdin closed, or auto-abort on
+      conflict when TTY is absent.</li>
+  <li><strong>Clean up the 9 stale vcs_sessions</strong> — write a
+      session-GC command and wire to the daily timer.</li>
+  <li><strong>CRSql fleet sync</strong> — Q5 remainder. Big rock.</li>
+  <li><strong>SCIP for non-Python</strong> — Phase 4. Big rock.</li>
+</ol>
+
+<p>
+  (1) and (2) are user-facing polish. (3) is infrastructure
+  hygiene. (4) and (5) each want their own session.
+</p>
+
+</body>
+</html>

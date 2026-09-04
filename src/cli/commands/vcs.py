@@ -1766,6 +1766,29 @@ class VCSCommands(Command):
             print("\nNo staged files.")
         return 0
 
+    def session_gc(self, args) -> int:
+        """End active-but-idle sessions that never wrote anything.
+
+        Complements `session prune` (which deletes ENDED sessions
+        older than N days). This one CLOSES active sessions that
+        have been dormant.
+        """
+        hours = int(getattr(args, 'older_than_hours', 24))
+        dry_run = bool(getattr(args, 'dry_run', False))
+        result = self.service.gc_stale_sessions(
+            older_than_hours=hours, dry_run=dry_run)
+        ended = result['ended']
+        if not ended:
+            print(f"No active sessions idle > {hours}h with no "
+                  f"staged rows.")
+            return 0
+        verb = "Would end" if dry_run else "Ended"
+        print(f"{verb} {len(ended)} idle session(s):")
+        for s in ended:
+            print(f"  #{s['id']:<5} {(s.get('name') or 'unnamed'):<40} "
+                  f"started {s['started_at']}")
+        return 0
+
     def session_prune(self, args) -> int:
         days = getattr(args, 'older_than', None)
         if days is None:
@@ -1867,6 +1890,16 @@ def register(cli):
     ss_show = session_sub.add_parser('show', help='Show details of a session and its staged files')
     ss_show.add_argument('id', help='Session ID to show')
     cli.commands['vcs.session.show'] = cmd.session_show
+
+    ss_gc = session_sub.add_parser(
+        'gc',
+        help='End active-but-idle sessions that never wrote anything '
+             '(agents fanning out spawn one session per subshell)')
+    ss_gc.add_argument('--older-than-hours', type=int, default=24,
+                       help='Age threshold in hours (default: 24)')
+    ss_gc.add_argument('--dry-run', action='store_true',
+                       help='Show what would be ended without acting')
+    cli.commands['vcs.session.gc'] = cmd.session_gc
 
     ss_prune = session_sub.add_parser('prune', help='Delete old ended sessions with no lingering staged rows')
     ss_prune.add_argument('--older-than', type=int, default=30,

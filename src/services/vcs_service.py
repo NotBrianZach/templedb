@@ -275,6 +275,52 @@ class VCSService(BaseService):
             'dry_run': dry_run,
         }
 
+    def gc_stale_sessions(
+        self, older_than_hours: int = 24, dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """Auto-end sessions with no staged rows that haven't been
+        touched in `older_than_hours` hours.
+
+        Complements `prune_sessions` (which deletes ENDED sessions):
+        this closes active-but-stale sessions so they don't
+        accumulate. Agents that spawn short-lived shells create a
+        new session per invocation (SID differs per subshell), so
+        without this the vcs_sessions table grows unbounded.
+
+        A session is stale when:
+          - ended_at IS NULL (still active)
+          - started_at < older_than_hours ago
+          - no vcs_working_state row references it
+
+        Sessions with pending staged work are LEFT ACTIVE — user
+        might commit later. This function only reclaims sessions
+        that never wrote anything.
+        """
+        candidates = self.vcs_repo.query_all(
+            """
+            SELECT vs.id, vs.name, vs.started_at
+              FROM vcs_sessions vs
+             WHERE vs.ended_at IS NULL
+               AND vs.started_at < datetime('now', ?)
+               AND NOT EXISTS (
+                   SELECT 1 FROM vcs_working_state ws
+                    WHERE ws.staged_by_session_id = vs.id
+               )
+            """,
+            (f'-{int(older_than_hours)} hours',),
+        )
+        ended = [dict(r) for r in candidates]
+        if not dry_run and ended:
+            ids = [int(s['id']) for s in ended]
+            self.vcs_repo.execute(
+                f"""UPDATE vcs_sessions
+                       SET ended_at = datetime('now'),
+                           ended_reason = 'gc-stale'
+                     WHERE id IN ({','.join('?' for _ in ids)})""",
+                tuple(ids),
+            )
+        return {'ended': ended, 'dry_run': dry_run}
+
     def stage_files(
         self,
         project_slug: str,

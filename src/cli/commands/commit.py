@@ -675,11 +675,23 @@ class CommitCommand:
         return conflicts
 
     def _prompt_resolution_strategy(self) -> str:
-        """Prompt user for conflict resolution strategy"""
+        """Prompt user for conflict resolution strategy.
+
+        If stdin isn't a TTY (scripted / agent invocation), skip the
+        prompt entirely and default to 'abort'. This prevents the
+        commit from hanging forever when running under a subprocess
+        or automation harness — the caller gets a clear failure with
+        the standard 'here's what to do next' message.
+        """
         print(f"\nHow would you like to resolve?")
         print(f"  [a] Abort commit (recommended)")
         print(f"  [f] Force commit (overwrite other changes)")
         print(f"  [r] Attempt auto-rebase (not yet implemented)")
+
+        if not sys.stdin.isatty():
+            print("Choice: (no TTY — auto-abort; pass --strategy force "
+                  "to override)")
+            return 'abort'
 
         while True:
             try:

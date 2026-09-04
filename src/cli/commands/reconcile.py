@@ -315,6 +315,10 @@ ExecStart={templedb_bin} reconcile machine all
 # SQL, records dead-import counts to hygiene_snapshots (mig 100)
 # so `templedb hygiene diff` can flag regressions.
 ExecStart={templedb_bin} hygiene snapshot
+# Session GC: close idle vcs_sessions from short-lived agent
+# subshells (SID differs per bash invocation → one session per
+# call → unbounded table growth without this).
+ExecStart={templedb_bin} vcs session gc --older-than-hours 12
 # Non-zero exit = drift or unreachable; that's information, not an error
 SuccessExitStatus=0 1 2
 """

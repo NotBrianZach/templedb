@@ -73,6 +73,11 @@ def _register_top_level_aliases():
     commit_parser.add_argument('workspace_dir', help='Workspace directory')
     commit_parser.add_argument('-m', '--message', required=True, help='Commit message')
     commit_parser.add_argument('--force', action='store_true', help='Force commit (ignore conflicts)')
+    commit_parser.add_argument('--strategy',
+                               choices=['abort', 'force'],
+                               help='Auto-resolve conflicts non-interactively '
+                                    '(bypasses the interactive prompt; '
+                                    'no-TTY invocations auto-abort by default)')
     cli.commands['commit'] = commit_cmd.commit
 
     # templedb build <slug>  →  deploy nix build
