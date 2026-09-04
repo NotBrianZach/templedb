@@ -115,6 +115,35 @@ class ProvenanceCommands(Command):
             limit=args.limit,
         ))
 
+    def callers(self, args):
+        """Who calls this Symbol? Inbound walk over 'calls' relations.
+
+        Accepts either 'Symbol/ref' or just 'ref' for convenience.
+        """
+        import argparse
+        entity = (args.symbol if args.symbol.startswith('Symbol/')
+                  else f"Symbol/{args.symbol}")
+        return self._ent.graph_trace(argparse.Namespace(
+            entity=entity,
+            depth=args.depth,
+            direction='in',
+            via='calls',
+            limit=args.limit,
+        ))
+
+    def callees(self, args):
+        """What does this Symbol call? Outbound walk over 'calls'."""
+        import argparse
+        entity = (args.symbol if args.symbol.startswith('Symbol/')
+                  else f"Symbol/{args.symbol}")
+        return self._ent.graph_trace(argparse.Namespace(
+            entity=entity,
+            depth=args.depth,
+            direction='out',
+            via='calls',
+            limit=args.limit,
+        ))
+
     def intent(self, args):
         """Workflow A: what did this edit intent lead to?
 
@@ -175,3 +204,23 @@ def register(cli):
     i.add_argument('--depth', default=3)
     i.add_argument('--limit', default=15)
     cli.commands['provenance.intent'] = cmd.intent
+
+    ca = sub.add_parser('callers',
+                        help='Who calls this Python Symbol? '
+                             '(inbound walk via calls)')
+    ca.add_argument('symbol',
+                    help='Symbol/<slug>:<file>:<name> or bare '
+                         '<slug>:<file>:<name>')
+    ca.add_argument('--depth', default=2)
+    ca.add_argument('--limit', default=20)
+    cli.commands['provenance.callers'] = cmd.callers
+
+    ce = sub.add_parser('callees',
+                        help='What does this Python Symbol call? '
+                             '(outbound walk via calls)')
+    ce.add_argument('symbol',
+                    help='Symbol/<slug>:<file>:<name> or bare '
+                         '<slug>:<file>:<name>')
+    ce.add_argument('--depth', default=2)
+    ce.add_argument('--limit', default=20)
+    cli.commands['provenance.callees'] = cmd.callees
