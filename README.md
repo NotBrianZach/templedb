@@ -21,12 +21,12 @@ It started as an ambitious "database as single source of truth" project. Over 20
 
 What that means concretely:
 
-- **Authority per fact.** Every stored fact carries `source_authority` (git, nix, ssh-probe, agent, scip, human) and `observed_at`. Git commits are git's truth. Nix store paths are nix's truth. Agent sessions and design decisions are DB-native. Bytes belong to whoever knows them best.
+- **Gluing algebras rather than owning bytes.** Think of each authority as a local coordinate chart on your dev world: git parametrizes commit-space, nix parametrizes store-path- and derivation-space, agent runtimes parametrize session- and intent-space, human authors parametrize decision-space. Each chart is locally the right coordinate system for its domain and says nothing about the others. TempleDB's job is to hold the **transition maps** — the typed relations (`built-from`, `installs`, `motivated`, `applied-to`) that translate between charts — plus `source_authority` and `observed_at` tags that keep the atlas honest. The entity graph is the atlas; adapters are the coordinate readouts; `doctor entities` is the consistency check that every transition-map commutes.
 - **Entities and relations as the substrate.** ~12,000 entities across 13 kinds (Commit, File, Symbol, StorePath, Deployment, Machine, Report, AgentSession, ...) and ~11,000 typed relations (`defines`, `calls`, `built-by`, `contains`, `installed`, `motivated`, ...) form a queryable graph across every project on every machine.
 - **Cross-cutting queries.** The five-hop provenance query — *which store path is running on this machine, from which deployment, from which commit, from which agent-session-and-intent-chain, motivated by which report?* — is one traversal.
 - **Reconcile from day one.** `templedb doctor entities` walks the graph and asks each authority whether its facts are still current. Drift is measurable, not mysterious.
 
-Or, colloquially: it's fossil-scm + gitnexus + terraform-refresh + a queryable design-decision archive + fleet deploy + sops, held together by a knowledge graph that traces every fact to its ingesting authority.
+Or, in existing-tool shorthand: **Sourcegraph** (cross-repo code intelligence via SCIP) + **Terraform-refresh** (state vs. reality reconcile loop) + **Datomic/XTDB** (bitemporal typed entity graph) + **Backstage** (software catalog with ownership and design docs) + **Colmena/Morph** (NixOS fleet deploy) + **age/sops** (secrets) — but stitched together by transition maps between each system's native coordinates, so a five-hop provenance query is one traversal rather than five separate tool switches.
 
 ---
 
