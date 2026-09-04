@@ -3599,6 +3599,7 @@ CREATE INDEX IF NOT EXISTS idx_report_impls_confidence
 CREATE TABLE IF NOT EXISTS ingestion_runs (
     id                INTEGER PRIMARY KEY,
     adapter           TEXT NOT NULL,
+    adapter_version   TEXT,
     started_at        TEXT NOT NULL DEFAULT (datetime('now')),
     finished_at       TEXT,
     status            TEXT NOT NULL DEFAULT 'running'
@@ -3614,6 +3615,9 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_runs_adapter_started
     ON ingestion_runs(adapter, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ingestion_runs_status
     ON ingestion_runs(status) WHERE status IN ('running', 'error');
+CREATE INDEX IF NOT EXISTS idx_ingestion_runs_adapter_version
+    ON ingestion_runs(adapter, adapter_version, started_at DESC)
+    WHERE adapter_version IS NOT NULL;
 
 
 -- ============================================================================

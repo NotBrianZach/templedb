@@ -104,6 +104,7 @@ MIGRATION_SEQUENCE = [
     "093_handoff_notes.sql",
     "094_tool_calls.sql",
     "095_reconcile_runs.sql",
+    "096_adapter_version.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",

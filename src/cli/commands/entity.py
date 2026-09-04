@@ -38,6 +38,22 @@ logger = get_logger(__name__)
 class EntityCommands(Command):
     """Entity graph ingest + query + reconcile."""
 
+    # Per-adapter declared version. Bump when the adapter's emitted
+    # shape changes (new entity kinds, new relations, resolution
+    # semantics). Recorded on every ingestion_runs row so cross-machine
+    # drift shows up as a queryable divergence, not silent noise.
+    # See docs/ENTITY_GRAPH_DESIGN.md; recommended by parallel-session
+    # report 2026-09-03-1947-answers-to-open-questions-*.html Q3.
+    _ADAPTER_VERSIONS = {
+        'git':     '1.0',
+        'agent':   '1.1',    # 1.1 emits ToolCall entities too
+        'intent':  '1.0',
+        'reports': '1.0',
+        'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
+        'deploy':  '1.0',
+        'python':  '1.3',    # 1.3 = defines + calls + methods + imports
+    }
+
     # ==== INGEST ==============================================================
 
     def ingest(self, args) -> int:
@@ -80,9 +96,11 @@ class EntityCommands(Command):
         returning (a dict with e/r/x keys)."""
         from db_utils import execute
         self._last_counts = None
+        version = self._ADAPTER_VERSIONS.get(adapter_name)
         run_id = execute(
-            "INSERT INTO ingestion_runs (adapter) VALUES (?)",
-            (adapter_name,),
+            """INSERT INTO ingestion_runs (adapter, adapter_version)
+                 VALUES (?, ?)""",
+            (adapter_name, version),
         )
         try:
             rc = fn(args)
@@ -241,7 +259,8 @@ WantedBy=timers.target
         adapter last see updates?' questions."""
         from db_utils import query_all
         rows = query_all(
-            """SELECT id, adapter, started_at, finished_at, status,
+            """SELECT id, adapter, adapter_version, started_at,
+                      finished_at, status,
                       entities_added, relations_added, extra_added,
                       notes
                  FROM ingestion_runs
@@ -258,8 +277,9 @@ WantedBy=timers.target
             counts = (f"+{r['entities_added']}e "
                       f"+{r['relations_added']}r "
                       f"+{r['extra_added']}x")
+            ver = f" v{r['adapter_version']}" if r['adapter_version'] else ""
             note = f"  — {r['notes']}" if r['notes'] else ""
-            print(f"  {m} #{r['id']:<4} {r['adapter']:<9} "
+            print(f"  {m} #{r['id']:<4} {r['adapter']:<9}{ver:<6} "
                   f"{r['started_at']}  {r['status']:<7}  {counts}{note}")
         return 0
 
