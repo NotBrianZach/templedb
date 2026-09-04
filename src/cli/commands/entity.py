@@ -74,9 +74,9 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.5',    # 1.5 = 1.4 + prunes stale python-authority
-                             # relations on re-ingest (removes phantom
-                             # edges from prior ingest bugs)
+        'python':  '1.6',    # 1.6 = 1.5 + path-segment-aware import
+                             # resolver (fixes 'import os' matching
+                             # nixos.py via naive endswith)
     }
 
     # ==== INGEST ==============================================================
@@ -484,12 +484,21 @@ WantedBy=timers.target
 
             def _resolve_module_to_path(mod_name):
                 """foo.bar → foo/bar.py or foo/bar/__init__.py within
-                this project's .py files, or None if no match."""
+                this project's .py files, or None if no match.
+
+                Path-segment-aware match: 'os' must not match
+                'cli/commands/nixos.py'. We require the match to be
+                either the whole path OR to be preceded by '/'.
+                (Bug caught by the no_python_import_cycles doctor
+                invariant on 2026-09-04: logger.py's 'import os' was
+                resolving to nixos.py under a naive endswith.)"""
                 parts = mod_name.split('.')
                 cand_a = '/'.join(parts) + '.py'
                 cand_b = '/'.join(parts) + '/__init__.py'
                 for pf in project_pyfiles:
-                    if pf.endswith(cand_a) or pf.endswith(cand_b):
+                    if pf == cand_a or pf == cand_b:
+                        return pf
+                    if pf.endswith('/' + cand_a) or pf.endswith('/' + cand_b):
                         return pf
                 return None
 
