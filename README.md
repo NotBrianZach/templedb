@@ -4,7 +4,7 @@
 
 </div>
 
-> *"God's temple is everything."* - Terry A. Davis
+> *"God's temple is everything."* — Terry A. Davis
 
 
 ---
@@ -12,23 +12,56 @@
 ## What is TempleDB?
 
 <img src="assets/logo.svg" align="right" width="150" alt="TempleDB Logo"/>
-  TempleDB is a project management and version control system that create a clean and introspectable environment for AI-assisted development and deployment by cramming everything it can into sql.
 
-Files and environment variables are denormalized and heretical... make your codebase instead a temple - a sacred, organized space where every line, every change is normalized, versioned, and queryable.
+TempleDB is a **typed knowledge and provenance graph** over your development world — git repos, nix builds, agent sessions, deployments, machines, and design decisions — held in a single SQLite database with adapters that keep it in sync with the authoritative systems for each fact.
 
-Or, it's like a normalized version of fossil-scm (sqlite, relational version of git) + claude mcp&stored procedures (api tuned for AI agent interactions) + superpowers (hierarchical agent dispatch&contextualization) + gitnexus (dependency graph/clustering for AI contextualization) + fleet deploy (native multi-machine NixOS deployment with magic rollback) + sops (secret management).
+It started as an ambitious "database as single source of truth" project. Over 2026 that model met reality: git is much better at bytes than SQLite is, nix owns store paths, filesystems own editable text. TempleDB now takes a different position — **observer of source, owner of the graph** — and this README reflects the current direction (see [Own vs. observe: TempleDB's fork in the road](reports/2026-09-02-0227-own-vs-observe-templedb-identity.html) and the [implementation plan](reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html) for the full pivot rationale).
 
-We throw out of the temple those that would lend us technical debt in the form of state duplication. (though in the case of git it's loitering just outside the temple both for legacy compatibility reasons and also due to our affinity for nixos to tide us over until the day we can make some much more radical changes to operating systems).
+What that means concretely:
 
-**Read [DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md) for the complete rationale.**
+- **Authority per fact.** Every stored fact carries `source_authority` (git, nix, ssh-probe, agent, scip, human) and `observed_at`. Git commits are git's truth. Nix store paths are nix's truth. Agent sessions and design decisions are DB-native. Bytes belong to whoever knows them best.
+- **Entities and relations as the substrate.** ~12,000 entities across 13 kinds (Commit, File, Symbol, StorePath, Deployment, Machine, Report, AgentSession, ...) and ~11,000 typed relations (`defines`, `calls`, `built-by`, `contains`, `installed`, `motivated`, ...) form a queryable graph across every project on every machine.
+- **Cross-cutting queries.** The five-hop provenance query — *which store path is running on this machine, from which deployment, from which commit, from which agent-session-and-intent-chain, motivated by which report?* — is one traversal.
+- **Reconcile from day one.** `templedb doctor entities` walks the graph and asks each authority whether its facts are still current. Drift is measurable, not mysterious.
+
+Or, colloquially: it's fossil-scm + gitnexus + terraform-refresh + a queryable design-decision archive + fleet deploy + sops, held together by a knowledge graph that traces every fact to its ingesting authority.
 
 ---
 
-## How It Works
+## How it works
 
-TempleDB is a single SQLite database that stores everything: your project files, version history, secrets, environment variables, NixOS configuration, deployment state, and cross-project relationships.
+TempleDB is a single SQLite database plus a set of **ingestion adapters** that observe authoritative systems and project their state into a typed entity/relation graph:
 
-You interact with it through multiple interfaces — a CLI, a FUSE filesystem, a web GUI, an MCP server for AI agents, a git daemon for nix, and a sync engine for multi-machine replication. The `templedb` CLI (or `tdb` for short) is the primary way to manage it:
+```
+authority           adapter                    facts published
+git                 commit walker              Commit, FileSnapshot, contains, parent-of
+nix                 nix-store queries          Derivation, StorePath, built-by, produces
+NixOS (per host)    SSH probe                  Generation, running-on, deployed-at
+agent runtime       direct DB write            AgentSession, ToolCall, EditIntent, proposed
+tree-sitter / SCIP  language ingest            Symbol, defines, calls, references
+human               reports/decision markup    Report, Decision, motivated, implemented-in
+```
+
+Each adapter is small (<500 LOC), isolated (schema changes hurt one adapter at a time), and version-tagged (`adapter_version` on every `ingestion_runs` row so drift between machines is visible).
+
+You interact with the graph through several surfaces:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                       SQLite database                            │
+│  entities · relations · content_blobs · vcs_* · fleet_* · ...    │
+└──────┬────────┬────────┬────────┬────────┬────────┬──────────────┘
+       │        │        │        │        │        │
+   ┌───▼──┐ ┌──▼───┐ ┌──▼────┐ ┌─▼────┐ ┌─▼─────┐ ┌▼─────────┐
+   │ CLI  │ │ MCP  │ │ GUI   │ │Sync  │ │Doctor │ │  edit    │
+   │ tdb  │ │      │ │:8420  │ │:9420 │ │Recon  │ │workspace │
+   └──────┘ └──────┘ └───────┘ └──────┘ └───────┘ └──────────┘
+       │        │        │        │        │        │
+   Human    Claude  Dashboard  Fleet   Drift    Normal git
+   scripting Code             replica  detect   checkout
+```
+
+The CLI (`templedb` or `tdb`) is the primary entry point:
 
 ```bash
 $ templedb --help
@@ -41,360 +74,296 @@ command groups:
     status             System overview
 
   Projects & Files
-    project            Import, list, show, sync, checkout
-    vcs                Version control (status, add, commit, log, diff)
-    mount              Mount DB as FUSE filesystem at ~/temple/
-    git-export         Export VCS history as a git repo
+    project            Import, list, show, attach, checkout
+    edit               Open a workspace for interactive editing (replaces FUSE)
+    source             Read-only observations of source state (snapshots)
+    intent             EditIntent — proposed edits, dry-run, apply, revert
+    vcs                Version control (status, add, commit, log, diff, session)
+    file               File-level ops (cat, set, ls, checkout, where, rm)
+
+  Entity Graph & Reconcile
+    graph              Query the knowledge graph (search, who-uses, importers)
+    entity             Entity graph ops (list, kinds, freshness) [phase 3]
+    doctor             Reconcile facts against their authorities
 
   NixOS Integration
     nixos              Generate modules, rebuild, doctor, hosts, dotfiles
+    config-ast         AST-based system config (tree, set, generate, host)
+    ast                AST-based NixOS config builds (build, diff, promote)
 
   Secrets & Environment
     env secret         Encrypted secrets (age/sops)
     env var            Environment variables per project
-    env key            Key management
+    var                Unified env-var + secret interface with scope hierarchy
+    env key            Key management (Yubikey, multi-key, quorum revoke)
     env direnv         Direnv integration
 
   Deployment & Publishing
     deploy run         Deploy project (FHS isolation, caching, health checks)
-    deploy trigger     Auto-deploy on commit (branch->target rules)
-    deploy notify      Webhook/command notifications on deploy events
-    deploy targets     Deployment targets
-    deploy migration   Database migrations
-    deploy rollback    Roll back to previous successful deployment
+    deploy trigger     Auto-deploy on commit (branch → target rules)
     deploy fleet       Multi-machine NixOS deployment with magic rollback
     publish            Commit + push to GitHub mirrors
 
-  Knowledge Graph
-    graph              Cross-project search, dependency maps, impact analysis
-
-  Search
-    search query       Query project files
-    search query-open  Query and open in editor
+  Reports & Design Archive
+    reports            List, view, scaffold, reindex design reports
 
   AI & Tooling
     ai claude          Claude integration
-    ai vibe            Vibe coding quizzes
-    ai prompt          Prompt management
-    ai mcp             MCP server
+    ai vibe            Vibe coding sessions
+    ai agent           Temple Agent native AI interface (JSON-lines over stdio)
+    ai mcp             MCP server for Claude Code / other MCP clients
 
   Sync & Network
     sync network       Tailscale VPN setup
 
-  Storage
+  Storage & Admin
     storage backup     Local and cloud (GCS) backups
-    storage cathedral  Cathedral packages
-    storage blob       Blob storage
-
-  Admin
-    admin db           Migrations, integrity checks
-    admin cache        Cache management
-    admin schema       Schema operations
-    admin gitserver    Git server
-```
-
-The database is the single source of truth. Everything else — the FUSE mount, the git daemon, the NixOS config files — is derived from it.
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    SQLite Database                            │
-│  projects · files · VCS · secrets · config · NixOS · deploys │
-└──────┬──────────┬──────────┬──────────┬──────────┬───────────┘
-       │          │          │          │          │
-  ┌────▼───┐ ┌───▼────┐ ┌───▼──┐ ┌────▼───┐ ┌───▼────────┐
-  │~/temple│ │ Daemon │ │10tool│ │ :8420  │ │   sync     │
-  │  r/w   │ │ :9419  │ │      │ │        │ │            │
-  └────────┘ └────────┘ └──────┘ └────────┘ └────────────┘
-       │          │          │         │           │
-  Edit files  Nix flake  Claude    Settings    Tailscale
-  directly    inputs     sessions  Dashboard    peers
-                                    View
+    admin db           Migrations, integrity checks, repair
+    admin gitserver    Git server (serves DB-materialized repos)
 ```
 
 ---
 
-## The Daily Workflow
+## The daily workflow
 
-### Edit files through the FUSE mount
+### Editing source
 
-TempleDB mounts its database as a real filesystem. Edit files there — writes go straight to the DB and auto-stage for version control:
+Under the observer model, source bytes live in normal git checkouts. Open a workspace for a project:
 
 ```bash
-templedb mount ~/temple                  # mount the database as a filesystem
-ls ~/temple/bza/frontend/                # browse project files
-vim ~/temple/bza/frontend/lib/queries.ts # edit directly — auto-stages in VCS
+templedb edit bza                             # opens ~/.config/templedb/edit-workspaces/bza
+# ...edit files with your normal editor...
+templedb commit bza ~/.config/templedb/edit-workspaces/bza -m "fix"
+# → diffs workspace against DB, creates VCS commit, updates entity graph
 ```
 
-See [FUSE + VCS Integration](docs/FUSE_VCS_INTEGRATION.md) for details on the write pipeline, auto-staging, and content-addressable storage.
+For scripted / agent edits, use `EditIntent`:
+
+```bash
+templedb intent create bza src/foo.py --from-file /tmp/new.py --describe "refactor"
+templedb intent list bza                      # see pending
+templedb intent dry-run <id>                  # preview effect
+templedb intent apply <id>                    # apply to checkout
+templedb intent revert <id>                   # inverse patch
+```
+
+The **FUSE mount** at `~/temple/` still exists for now (interactive-only, deprecated for scripted use) but is on the way out — Phase 5 of the [observer/integrator plan](reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html) retires it. FUSE-directed writes have known truncation and cache-staleness issues; prefer the workspace + intent flow above.
 
 ### Commit and publish
 
-When you're done editing, commit to the database and push to GitHub in one step:
-
 ```bash
-templedb publish run bza -m "fix query pagination"
-# → VCS commit to DB
-# → materialize to git repo
-# → push to github mirror
+templedb commit bza <workspace> -m "message"     # commit workspace to DB
+templedb publish run bza                          # commit + materialize + push to git remote
 ```
 
-Or do it step by step:
+Or step-by-step VCS:
 
 ```bash
-templedb vcs status bza --refresh        # see what changed
-templedb vcs add -p bza --all            # stage changes
-templedb vcs commit -p bza -m "fix"      # commit to DB
+templedb vcs status bza --refresh
+templedb vcs add -p bza --all
+templedb vcs commit -p bza -m "..."
+templedb vcs log bza
+templedb vcs diff bza --staged
 
-# Branch operations
-templedb vcs branch bza feature-x        # create branch from current
-templedb vcs switch bza feature-x        # switch (FUSE updates instantly)
-templedb vcs merge bza feature-x         # merge into current branch
-templedb vcs merge bza feature-x --squash # squash into single commit
-templedb vcs branch bza -d feature-x     # delete merged branch
+# Branches
+templedb vcs branch bza feature-x
+templedb vcs switch bza feature-x
+templedb vcs merge bza feature-x [--squash]
+```
+
+Session-scoped staging means multiple agents can work on the same project without stepping on each other:
+
+```bash
+eval "$(templedb vcs session start --name my-refactor | grep '^  export')"
+# All subsequent templedb calls in this shell use $TEMPLEDB_SESSION_ID
+templedb vcs add -p bza src/foo.py
+templedb vcs commit -p bza -m "..."               # only this session's stages
 ```
 
 ### Deploy
 
-Deploy from the database with content-addressable caching, health checks, and environment injection:
+Content-addressed caching, health checks, environment injection:
 
 ```bash
-templedb deploy run bza --target production       # deploy current state
-templedb deploy run bza --commit abc123f           # deploy specific commit
-templedb deploy run bza --branch release/v2        # deploy branch head
-templedb deploy run bza --all-targets              # deploy to all targets
-templedb deploy run bza --targets staging,prod     # deploy to specific targets
-```
-
-Set up auto-deploy — commits to matching branches trigger deployment automatically:
-
-```bash
-templedb deploy trigger add bza main production              # main → production
-templedb deploy trigger add bza "release/*" staging --auto-rollback  # with safety net
-templedb deploy trigger list
-```
-
-Get notified on deploy success/failure:
-
-```bash
-templedb deploy notify add "deploy.*" --webhook https://hooks.slack.com/...
-templedb deploy notify add deploy.failure --command "notify-send 'Deploy failed'"
-```
-
-Roll back to a previous successful deployment (restores env vars + re-deploys):
-
-```bash
+templedb deploy run bza --target production
+templedb deploy run bza --commit abc123f
+templedb deploy trigger add bza main production
 templedb deploy rollback bza --target production --yes
 ```
 
-Fleet deployment for multi-machine NixOS infrastructure:
+Fleet deployment for multi-machine NixOS:
 
 ```bash
 templedb deploy fleet network create bza prod --flake-uri .#
 templedb deploy fleet machine add bza prod webserver --host 10.0.0.1 --tags web
 templedb deploy fleet deploy bza prod                  # parallel deploy with magic rollback
-templedb deploy fleet diff bza prod                    # show what would change
-templedb deploy fleet check bza prod                   # health check all machines
+templedb deploy fleet diff bza prod
 templedb deploy fleet deploy bza prod --on web         # deploy only tagged machines
-templedb deploy fleet ssh bza prod webserver           # SSH into machine
 ```
 
-### Query the knowledge graph
+Every deploy records `Deployment` and `Generation` entities linked to `Commit`, `StorePath`, and `Machine` — so "which code is running where?" is a graph query, not a spreadsheet.
 
-Ask questions across all your projects:
+### Query the entity graph
 
 ```bash
-templedb graph search supabase           # fuzzy search everything
-templedb graph who-uses STRIPE_SECRET_KEY # what projects use this secret?
-templedb graph deps bza                  # full dependency map
-templedb graph importers bza frontend/lib/supabase.ts  # 44 files import this
+templedb graph search supabase                    # cross-project fuzzy search
+templedb graph who-uses STRIPE_SECRET_KEY         # what projects use this?
+templedb graph importers bza frontend/lib/supabase.ts
+templedb graph callers bza uploadDocument
+templedb graph deps bza                           # full dependency map
 ```
+
+Reconcile against authorities:
+
+```bash
+templedb doctor entities                          # walk graph, ask each authority "still true?"
+templedb doctor entities --host zMothership3      # SSH-probe drift on a specific host
+```
+
+Drift is flagged, not silent. This is the reconcile-from-day-one pattern that Terraform (`refresh`), Kubernetes controllers, and every mature metastore learned the hard way to build in early.
 
 ---
 
-## Secrets & Key Management
+## Secrets & key management
 
-TempleDB uses [age](https://age-encryption.org/) encryption with support for hardware keys (Yubikey), multi-key encryption, and quorum-based key revocation.
+TempleDB uses [age](https://age-encryption.org/) with support for hardware keys (Yubikey), multi-key encryption, and quorum-based key revocation.
 
 ### Multi-key architecture
 
-Every secret is encrypted to **all registered keys simultaneously**. Any single key can decrypt. This means you can lose a key and still access your secrets with any remaining key.
+Every secret is encrypted to **all registered keys simultaneously**. Any single key can decrypt. Lose one, keep going.
 
 ```
 ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-│  Yubikey 1   │   │  Yubikey 2   │   │  Yubikey 3   │   │  Filesystem  │
-│  (daily)     │   │  (backup)    │   │  (offsite)   │   │  (emergency) │
-└──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
-       │                  │                  │                  │
-       └──────────────────┴──────────────────┴──────────────────┘
-                          │
-                   age -r key1 -r key2 -r key3 -r key4
-                          │
-                    ┌─────▼─────┐
-                    │  Encrypted │
-                    │   Secret   │
-                    └───────────┘
+│  Yubikey 1  │   │  Yubikey 2  │   │  Yubikey 3  │   │ Filesystem  │
+│  (daily)    │   │  (backup)   │   │  (offsite)  │   │ (emergency) │
+└──────┬──────┘   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
+       └─────────────────┴─────────────────┴─────────────────┘
+                                 │
+                     age -r key1 -r key2 -r key3 -r key4
+                                 │
+                          ┌──────▼──────┐
+                          │  Encrypted  │
+                          │   secret    │
+                          └─────────────┘
 ```
 
 ### Yubikey setup
 
 ```bash
-# 1. Generate age identity on Yubikey
-templedb env key setup-yubikey
-
-# 2. Register it (auto-adds to all existing secrets via "lazy mode")
-templedb env key add yubikey --name yubikey-daily --location "keychain"
-
-# 3. Add backup keys
-templedb env key add yubikey --name yubikey-safe --location "fireproof-safe"
-templedb env key add filesystem --name emergency --path /mnt/usb/age-key.txt --location "usb-in-safe"
-
-# 4. Test decryption
+templedb env key setup-yubikey                                             # generate on Yubikey
+templedb env key add yubikey --name yubikey-daily --location "keychain"    # register + auto-add to secrets
+templedb env key add yubikey --name yubikey-safe --location "fireproof"
 templedb env key test yubikey-daily
-
-# 5. List all keys
-templedb env key list
-templedb env key info yubikey-daily
+templedb env key list / info yubikey-daily
 ```
 
 ### Managing secrets
 
 ```bash
-# Set a secret (encrypted to all active keys)
 templedb env secret set myproject API_KEY "sk-..." --keys yubikey-daily
-
-# Get (decrypts with any available key)
 templedb env secret get myproject API_KEY
+templedb env secret export myproject --format dotenv
 
-# Unified var interface (--secret flag for encrypted storage)
+# Unified var interface
 templedb env var set myproject DB_PASSWORD "hunter2" --secret --keys yubikey-daily
 templedb env var get myproject DB_PASSWORD --secret
-
-# Export for deployment
-templedb env secret export myproject --format dotenv
 ```
 
-### Quorum-based key revocation
+### Quorum-based revocation
 
-Revoking a key requires approval from multiple other keys (2-of-N by default). This prevents a stolen key from being used to lock you out:
+Revoking a key requires approval from N other keys (2-of-N default) — a stolen key can't be used to lock you out.
 
 ```bash
-# Revoke a lost key (prompts for 2 other keys to approve)
 templedb env key revoke yubikey-daily --reason "lost laptop" --quorum 2
-
-# All secrets are re-encrypted without the revoked key
-# The revoked key can no longer decrypt anything
+# All secrets re-encrypted without the revoked key.
 ```
 
 ### Recommended key setup
 
-| Key | Location | Purpose |
-|-----|----------|---------|
-| `yubikey-daily` | Keychain | Day-to-day decryption |
-| `yubikey-backup` | Fireproof safe | Recovery if daily key lost |
-| `yubikey-offsite` | Safety deposit box | Disaster recovery |
-| `emergency-fs` | Encrypted USB in safe | Paper-key-level last resort |
-
-See [Key Revocation Guide](docs/KEY_REVOCATION_GUIDE.md) and [Multi-Key Setup](docs/MULTI_YUBIKEY_SETUP.md) for detailed walkthroughs.
+| Key             | Location            | Purpose                       |
+|-----------------|---------------------|-------------------------------|
+| `yubikey-daily` | Keychain            | Day-to-day decryption         |
+| `yubikey-backup`| Fireproof safe      | Recovery if daily key lost    |
+| `yubikey-offsite`| Safety deposit box | Disaster recovery             |
+| `emergency-fs`  | Encrypted USB       | Paper-key-level last resort   |
 
 ---
 
-## NixOS: DB Generates Everything
+## NixOS: the DB generates the config
 
-Your entire NixOS configuration lives in the database. Import it, edit it, generate nix files:
+Your NixOS configuration lives in the DB. Import it, edit it, generate nix files:
 
 ```bash
-# Import existing nix config → 170+ DB keys
-templedb nixos import-config system_config
+templedb nixos import-config system_config                            # 170+ DB keys from your config
 
-# Edit via CLI — config-set is host-scoped by default (uses active host)
-templedb nixos config-set nixos.pkg.user.vpn.tailscale true     # → zMothership2.nixos.pkg...
-templedb nixos config-set nixos.service.system.tailscale true   # → zMothership2.nixos.service...
+templedb nixos config-set nixos.pkg.user.vpn.tailscale true           # host-scoped by default
+templedb nixos config-set --global nixos.username zach                # applies to all hosts
+templedb nixos config-set --host zStation videoDriver modesetting     # override for one host
 
-# Use --global for keys that apply to all hosts
-templedb nixos config-set --global nixos.username zach
-templedb nixos config-set --global nixos.flake.input.nixpkgs "github:NixOS/nixpkgs/nixos-25.11"
-
-# Or target a specific host
-templedb nixos config-set --host zStation videoDriver modesetting
-
-# Generate nix files from DB (packages, aliases, services, firewall, flake inputs)
-templedb nixos generate-all system_config
-
-# Apply
+templedb nixos generate-all system_config                             # DB → nix files
 templedb nixos rebuild system_config
 ```
 
-### Host scoping
+### AST-based config (Phase 3-ish)
 
-Every machine has an active host identity set via `nixos.flake_output`. Config keys are scoped:
+For fine-grained config editing, TempleDB parses NixOS configs into a typed AST stored in `config_nodes` and re-emits them deterministically:
 
-- **Host-scoped** (default): `config-set key value` → stored as `<hostname>.key`
-- **Global**: `config-set --global key value` → stored as `key`, inherited by all hosts
-- **Host override**: `config-set --host zStation key value` → stored as `zStation.key`
+```bash
+templedb config-ast import system_config                              # tree-sitter → DB
+templedb config-ast tree                                              # browse
+templedb config-ast set <path> <value>                                # surgical edit
+templedb ast build --host zMothership2 --nix-build                    # emit + nix-build verify
+templedb ast diff <hash1> <hash2>                                     # diff two builds
+templedb ast promote <hash>                                           # future: symlink-flip for deploy
+```
 
-`generate-all` merges global keys with host-specific overrides for the active host.
+Deep-merge resolver honors NixOS module semantics (list concat, attrset deep-merge, `with pkgs; []` same-callee concat). See [AST_MERGE_SEMANTICS.md](docs/AST_MERGE_SEMANTICS.md).
 
-### Multi-host management
-
-Clone host configs for new machines. Each host gets its own overrides (GPU driver, boot loader, hostname):
+### Multi-host and bootstrap
 
 ```bash
 templedb nixos host list
 templedb nixos host clone zMothership2 zMothership3
 templedb nixos config-set --host zMothership3 videoDriver modesetting
 templedb nixos host activate zMothership3
-```
 
-### New machine in one command
-
-```bash
+# New machine, one command:
 templedb bootstrap --from-gcs my-bucket --username zach --hostname zMothership3
-# 9 steps: restore DB → migrations → age key → materialize →
-#          dotfiles → identity → NixOS generate → FUSE mount → verify
 ```
 
 ---
 
+## Code intelligence
 
-
-```bash
-templedb sync network setup               # configure Tailscale
-templedb sync serve                      # start sync server (port 9420)
-
-# On the other machine:
-templedb sync sync zMothership2          # bidirectional sync
-```
-
-Changes merge automatically — last-writer-wins for config, append-only for commits.
-
-
----
-
-## Code Intelligence
-
-TempleDB extracts symbols and file dependencies, connecting them to the knowledge graph:
+Symbols, imports, and call graphs across projects, feeding the entity graph:
 
 ```bash
-templedb graph build-deps bza            # build import graph (427 dependencies)
-templedb graph importers bza frontend/lib/supabase.ts  # who imports this? (44 files)
-templedb graph callers bza uploadDocument # who calls this function?
+templedb graph build-deps bza                     # scan → File/Symbol entities + defines/calls relations
+templedb graph importers bza frontend/lib/supabase.ts       # 44 files import this
+templedb graph callers bza uploadDocument                    # who calls this function?
+
+# Hygiene commands (2026-09-04):
+templedb hygiene dead-imports bza                 # imports with no references
+templedb entity paths --kind Symbol --limit 20    # entity refs by external_ref shape
 ```
+
+Language ingest is currently Python via tree-sitter; SCIP adapters for TypeScript/Rust/Nix are the Phase 4 story (see [proposed schema map](reports/2026-09-03-0843-proposed-schema-after-observer-integrator-plan.html)).
 
 ---
 
 ## Web GUI
 
 ```bash
-templedb gui                             # launch at :8420
+templedb gui                                      # launch at :8420
 ```
 
-Pages: Projects | VCS | Env | Nix | Deploy | Audit | Domains | Docs | Code | Graph | Schema | Settings | Status
+Pages: Projects · VCS · Env · Nix · Deploy · Audit · Domains · Docs · Code · Graph · Schema · Settings · Status · Systemd · Fleet Sync · Nix Store · Tests · Config-AST · Reports.
 
-Features: sortable tables, fuzzy search (press /), inline config editing, knowledge graph search, schema browser with sample data, daemon status, host management with clone form, project file tree browser.
+Features: sortable tables, fuzzy search (press `/`), inline config editing, entity-graph search, schema browser with sample data, daemon status, host management with clone form, project file tree browser, reports index.
 
 ---
 
-## MCP Server (Claude Code Integration)
+## MCP server (Claude Code integration)
 
 10 core tools — minimal context footprint (~1000 tokens):
 
@@ -402,15 +371,58 @@ Features: sortable tables, fuzzy search (press /), inline config editing, knowle
 {"mcpServers": {"templedb": {"command": "templedb", "args": ["ai", "mcp", "serve"]}}}
 ```
 
-| Tool | Purpose |
-|------|---------|
-| `templedb_cli` | Run any CLI command (universal) |
-| `templedb_query` | Direct SQL |
-| `templedb_project_list/show` | Project info |
-| `templedb_vcs_status/commit` | Version control |
-| `templedb_context_generate` | Session context |
-| `templedb_graph_search` | Cross-project search |
-| `templedb_config_get/set` | System config |
+| Tool                              | Purpose                          |
+|-----------------------------------|----------------------------------|
+| `templedb_cli`                    | Run any CLI command (universal)  |
+| `templedb_query`                  | Direct SQL                       |
+| `templedb_project_list/show`      | Project info                     |
+| `templedb_vcs_commit`             | Session-scoped commit            |
+| `templedb_context_generate`       | Session context                  |
+| `templedb_graph_search`           | Cross-project graph search       |
+| `templedb_config_get/set`         | System config                    |
+| `templedb_agent_*`                | Agent-writable sections + notes  |
+
+Temple Agent runtime (Claude Code inside Emacs, session state DB-backed):
+
+```bash
+templedb ai agent serve --stdio
+```
+
+---
+
+## Reports: the design-decision archive
+
+TempleDB reports live in `reports/` as self-contained HTML with a browsable index:
+
+```bash
+templedb reports list                                # newest-first
+templedb reports view <filename>                     # extract + open in browser
+templedb reports new "Title of your design note"     # scaffold + template
+templedb reports reindex                             # regenerate index.html
+```
+
+Reports are snapshots, not living docs. They're the argument-of-record for architecture decisions — every substantive session ends with a metacognition report so the graph knows *why* things are the way they are.
+
+Recent design-thread highlights:
+
+- [Own vs. observe: TempleDB's fork in the road](reports/2026-09-02-0227-own-vs-observe-templedb-identity.html) — the observer/integrator pivot
+- [From observer to integrator: implementation plan](reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html) — the phased execution plan
+- [Proposed schema after observer/integrator plan](reports/2026-09-03-0843-proposed-schema-after-observer-integrator-plan.html) — table-by-table disposition
+- [Answers to open questions on the observer/integrator schema](reports/2026-09-03-1947-answers-to-open-questions-on-the-observer-integrator-schema.html) — the five risks resolved
+- [Migration plan: dual-write to log-based projection](reports/2026-09-04-1019-migration-plan-dual-write-to-log-based-projection.html) — concrete next-step migration
+
+---
+
+## Roadmap / upcoming
+
+The observer/integrator plan is largely landed. What's next, in rough order:
+
+1. **Log-based projection for the entity graph** ([migration plan](reports/2026-09-04-1019-migration-plan-dual-write-to-log-based-projection.html), ~3 weeks). Retire dual-write. Single-writer typed tables + async projection into entities/relations. Kills the drift class entirely.
+2. **CRSql sync for `entities`/`relations`** with per-kind `sync_scope`. Fleet-wide graph convergence.
+3. **SCIP adapters** (TypeScript, Rust, Nix) — external code-facts ingestion. Language coverage grows with the SCIP ecosystem rather than our parser budget.
+4. **Observations archive + current-only semantics** — retention policy so the graph doesn't grow unbounded when SCIP dumps millions of symbol facts.
+5. **Sidecar-column migration** (expand/contract) — move `vcs_commit_metadata`, `vcs_file_change_metadata`, etc. onto `entities.attributes_json`.
+6. **Retire FUSE mount** (Phase 5). Editing is workspace-based; agent edits go through EditIntent. Cross-session handoff via `templedb handoff {send,list,pop,ack}` (design in [cross-session handoff semantics](reports/2026-09-03-0826-cross-session-handoff-semantics.html)).
 
 ---
 
@@ -426,7 +438,7 @@ git clone https://github.com/NotBrianZach/templedb.git ~/templeDB
 cd ~/templeDB && nix build .#templedb --no-update-lock-file
 ```
 
-### Home-Manager Module
+### Home-Manager module
 
 Add TempleDB as a flake input and import the module:
 
@@ -437,48 +449,40 @@ Add TempleDB as a flake input and import the module:
   inputs.templedb.inputs.nixpkgs.follows = "nixpkgs";
 
   outputs = { nixpkgs, templedb, ... }: {
-    # Import the home-manager module
     homeManagerModules = [ templedb.homeManagerModules.default ];
   };
 }
 ```
 
-Then configure in your home-manager config:
+Then in your home-manager config:
 
 ```nix
 programs.templedb = {
   enable = true;
   package = templedb.packages.${pkgs.system}.templedb;
 
-  # FUSE mount: auto-mount database as ~/temple on login (systemd user service)
-  mount.enable = true;
+  mount.enable = true;       # FUSE at ~/temple (deprecated — Phase 5 retires it)
+  sync.enable = true;        # sync systemd user service
+  sync.port = 9420;
 
-  sync.enable = true;        # starts systemd user service
-  sync.port = 9420;          # default port
+  claude.enable = true;      # ~/.claude/settings.json hooks
+  claude.mcp = true;         # ~/.mcp.json registers TempleDB MCP tools
 
-  # Claude Code: hooks that block raw git in TempleDB-managed projects
-  claude.enable = true;      # generates ~/.claude/settings.json
-
-  # MCP: register TempleDB tools globally for all Claude Code sessions
-  claude.mcp = true;         # (default when claude.enable) creates ~/.mcp.json
-
-  # Age key path for secret decryption
-  ageKeyFile = "~/.config/sops/age/keys.txt";  # default
+  ageKeyFile = "~/.config/sops/age/keys.txt";
 };
 ```
 
-### What the module provides
-
-| Option | What it does |
-|--------|-------------|
-| `enable` | Installs `templedb` and `tdb` (alias) to PATH |
-| `mount.enable` | Systemd user service: FUSE mount at `~/temple` with auto-restart |
-| `claude.enable` | Generates `~/.claude/settings.json` with PreToolUse/PostToolUse hooks |
-| `claude.mcp` | Creates `~/.mcp.json` so TempleDB MCP tools work in every Claude Code session, not just the templeDB project |
+| Option           | What it does                                              |
+|------------------|-----------------------------------------------------------|
+| `enable`         | Installs `templedb` + `tdb` alias to PATH                 |
+| `mount.enable`   | FUSE mount systemd service (deprecated for scripted use)  |
+| `claude.enable`  | Generates `~/.claude/settings.json` with hooks            |
+| `claude.mcp`     | Creates `~/.mcp.json` — MCP tools in every Claude session |
+| `sync.enable`    | CRSql sync server, port 9420                              |
 
 ### Direnv integration
 
-TempleDB provides a direnv helper. Add to `~/.config/direnv/direnvrc`:
+Add to `~/.config/direnv/direnvrc`:
 
 ```bash
 use_templedb() {
@@ -490,44 +494,36 @@ Then in any project's `.envrc`:
 
 ```bash
 use_templedb
-# or: eval "$(templedb env direnv)"
 ```
-
-This loads the project's environment variables, secrets, and Nix environment automatically when you `cd` into the directory.
 
 ### Shell tips
 
-The nix package installs both `templedb` and `tdb` (symlink). Some useful aliases for your shell:
-
-```bash
-# Recent activity across all projects
-alias tdb-reflog='tdb graph search --recent'
-
-# Quick project status
-alias tdb-ls='tdb project list'
-```
+`nix` installs both `templedb` and `tdb` (alias). `TEMPLEDB_DEV_MODE=1` in your shell makes `file set` edits take effect immediately without a rebuild (dev mode, use only when hacking on templedb itself).
 
 ---
 
-## Quick Start
+## Quick start
 
 ```bash
 # 1. Import a project
 templedb project import ~/myproject --slug myproject
 
-# 2. Mount and edit
-templedb mount ~/temple
-vim ~/temple/myproject/src/main.py
+# 2. Open a workspace and edit
+templedb edit myproject
+# ...edit files in ~/.config/templedb/edit-workspaces/myproject...
+templedb commit myproject ~/.config/templedb/edit-workspaces/myproject -m "initial"
 
-# 3. Commit
-templedb vcs status myproject --refresh
-templedb vcs add -p myproject --all
-templedb vcs commit -p myproject -m "initial"
-
-# 4. Search across everything
+# 3. Query the graph
 templedb graph search "database"
+templedb graph who-uses SOMETHING
 
-# 5. Launch GUI
+# 4. Publish to git remote
+templedb publish run myproject
+
+# 5. Reconcile
+templedb doctor entities
+
+# 6. Launch GUI
 templedb gui
 ```
 
@@ -537,10 +533,12 @@ templedb gui
 
 ```bash
 cd ~/templeDB
-nix develop                              # enter dev shell
-python3 -m pytest tests/test_integration.py -v  # run tests (29 pass)
-templedb gui --port 8421                 # test GUI
+nix develop
+python3 -m pytest tests/ -v
+templedb gui --port 8421
 ```
+
+New design work? Scaffold a report first: `templedb reports new "Your title"`. Reports are the argument-of-record; code + tests are downstream.
 
 ---
 
