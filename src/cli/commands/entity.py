@@ -642,6 +642,47 @@ WantedBy=timers.target
                         return pf
                 return None
 
+            def _resolve_relative_import(this_path, level, mod_name):
+                """`from .foo import X` at level=1 in this_path:
+                resolve foo relative to this_path's package.
+
+                For this_path='src/repositories/__init__.py' at level=1:
+                  parent package = 'src/repositories/'
+                  mod='base' → 'src/repositories/base.py' or
+                                'src/repositories/base/__init__.py'
+                For this_path='src/foo.py' at level=1:
+                  parent = 'src/'
+                For level=2: strip one more directory.
+
+                Returns the resolved path (matched against
+                project_pyfiles) or None."""
+                # Package containing this_path
+                if this_path.endswith('/__init__.py'):
+                    # __init__.py: its package IS its directory
+                    pkg = this_path[:-len('/__init__.py')]
+                else:
+                    # regular module: its package is its parent dir
+                    if '/' in this_path:
+                        pkg = this_path.rsplit('/', 1)[0]
+                    else:
+                        pkg = ''
+                # level=1 stays in pkg; level=2 goes up one; level=3 up two
+                for _ in range(level - 1):
+                    if '/' in pkg:
+                        pkg = pkg.rsplit('/', 1)[0]
+                    else:
+                        pkg = ''
+                        break
+                base = pkg + '/' if pkg else ''
+                parts = mod_name.split('.') if mod_name else []
+                cand_a = base + '/'.join(parts) + '.py' if parts else None
+                cand_b = base + '/'.join(parts) + '/__init__.py' \
+                    if parts else base + '__init__.py'
+                for pf in project_pyfiles:
+                    if pf == cand_a or pf == cand_b:
+                        return pf
+                return None
+
             def _emit_import_file_edge(target_path):
                 nonlocal added_r
                 if not target_path:
@@ -667,14 +708,21 @@ WantedBy=timers.target
                             _resolve_module_to_path(alias.name)
                         )
                 elif isinstance(node, ast.ImportFrom):
-                    if node.level != 0 or not node.module:
-                        continue
-                    match_path = _resolve_module_to_path(node.module)
+                    # Absolute: `from foo.bar import X` (level=0)
+                    # Relative: `from .bar import X` (level>=1) — new
+                    #          in 1.12 so re-export chase works
+                    #          through pkg/__init__.py.
+                    if node.level == 0:
+                        if not node.module:
+                            continue
+                        match_path = _resolve_module_to_path(node.module)
+                    else:
+                        match_path = _resolve_relative_import(
+                            r['file_path'], node.level, node.module)
                     _emit_import_file_edge(match_path)
                     if match_path:
                         for alias in node.names:
                             imported_name = alias.asname or alias.name
-                            # Target symbol name is the original.
                             imports_map[imported_name] = (
                                 r['slug'], match_path, alias.name,
                             )
