@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.12',   # 1.12 chases re-exports through __init__
+        'python':  '1.13',   # 1.13 __init__ imports auto-count as uses
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -726,6 +726,15 @@ WantedBy=timers.target
                             imports_map[imported_name] = (
                                 r['slug'], match_path, alias.name,
                             )
+                            # 1.13: For __init__.py files, treat every
+                            # import as an implicit re-export use.
+                            # backup/__init__.py's `from .base import X`
+                            # is EXACTLY a use of base.py — the __init__
+                            # is a proxy for it. Without this, __init__
+                            # files that do nothing but re-export show
+                            # every import as dead.
+                            # Deferred to the post-pass because we need
+                            # target_defs populated (target Symbol id).
 
             # Same-file inheritance resolution: emit Symbol → inherits
             # → Symbol for base classes defined in this file.
@@ -1040,6 +1049,45 @@ WantedBy=timers.target
                         (sym_id, 'uses', target_sym_id)
                     )
                     _emit_reexport_bridges(sym_id, chase_ints)
+
+        # 1.13 __init__.py re-export pass. For every __init__.py
+        # file with resolved imports, emit
+        #   <init>:__module__ → uses → <target>:<imported_symbol>
+        # so that dead-imports doesn't flag purely-composing shims
+        # (backup/__init__.py, agent/__init__.py, cli/__init__.py)
+        # as importing dead code.
+        for (slug, fp), imports_map in all_imports_by_file.items():
+            if not fp.endswith('__init__.py'):
+                continue
+            init_module_ref = f"{slug}:{fp}:__module__"
+            init_module_id = self._entity_id('Symbol', init_module_ref)
+            if not init_module_id:
+                continue
+            for imp_name, (t_slug, t_path, t_sym) in imports_map.items():
+                target_defs = all_defs_by_file.get((t_slug, t_path), {})
+                target = target_defs.get(t_sym)
+                if not target:
+                    # Chase through further re-exports for chains
+                    chased = _chase_reexport(
+                        t_slug, t_path, t_sym, intermediates=[])
+                    if not chased:
+                        continue
+                    (t_slug, t_path, t_sym, _) = chased
+                    target_defs = all_defs_by_file.get(
+                        (t_slug, t_path), {})
+                    target = target_defs.get(t_sym)
+                    if not target:
+                        continue
+                target_sym_id = target[0]
+                if target_sym_id == init_module_id:
+                    continue
+                if self._upsert_relation(
+                    init_module_id, 'uses', target_sym_id, 'python'
+                ):
+                    added_r += 1
+                touched_relations.add(
+                    (init_module_id, 'uses', target_sym_id)
+                )
 
         # Pruning: delete python-authority relations from processed
         # Files (and their Symbols) whose tuples weren't touched this

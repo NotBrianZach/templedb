@@ -2001,6 +2001,38 @@ class TestPythonIngest:
         conn.close()
         assert bridge == 1, "re-export __module__ bridge not emitted"
 
+    def test_python_ingest_init_reexports_count_as_uses(
+            self, populated_env):
+        """`__init__.py` files that do nothing but re-export should
+        have their imports counted as uses (via __module__), so
+        dead-imports doesn't flag them (adapter 1.13)."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/mypkg/base.py',
+            "class Widget:\n    pass\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/mypkg/__init__.py',
+            "from base import Widget\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python',
+                                                   limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e1.external_ref='testproj:src/mypkg/__init__.py:__module__'
+                  AND e2.external_ref='testproj:src/mypkg/base.py:Widget'
+                  AND r.kind='uses'"""
+        ).fetchone()['n']
+        conn.close()
+        assert row == 1, \
+            "__init__ re-export should emit __module__ -> uses -> target"
+
     def test_hygiene_invariant_fires_on_untracked_regression(
             self, populated_env):
         """Seed two hygiene_snapshots for the same slug and same
