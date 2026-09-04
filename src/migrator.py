@@ -106,6 +106,7 @@ MIGRATION_SEQUENCE = [
     "095_reconcile_runs.sql",
     "096_adapter_version.sql",
     "097_observations_archive.sql",
+    "098_entities_attributes_json.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",

@@ -3537,6 +3537,7 @@ CREATE TABLE IF NOT EXISTS entities (
     external_ref      TEXT,
     source_authority  TEXT NOT NULL,
     label             TEXT,
+    attributes_json   TEXT,
     observed_at       TEXT NOT NULL DEFAULT (datetime('now')),
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(kind, external_ref)

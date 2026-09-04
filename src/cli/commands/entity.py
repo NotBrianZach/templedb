@@ -45,7 +45,8 @@ class EntityCommands(Command):
     # See docs/ENTITY_GRAPH_DESIGN.md; recommended by parallel-session
     # report 2026-09-03-1947-answers-to-open-questions-*.html Q3.
     _ADAPTER_VERSIONS = {
-        'git':     '1.0',
+        'git':     '1.1',    # 1.1 dual-writes Commit.attributes_json
+                             # from vcs_commit_parents + metadata (Q4)
         'agent':   '1.1',    # 1.1 emits ToolCall entities too
         'intent':  '1.0',
         'reports': '1.0',
@@ -584,6 +585,67 @@ WantedBy=timers.target
             summary = (c['commit_message'] or '').split('\n', 1)[0][:80]
             if self._upsert_entity('Commit', eref, 'git', label=summary):
                 added_e += 1
+
+        # Q4 dual-write: backfill Commit.attributes_json from the two
+        # sidecar tables vcs_commit_parents and vcs_commit_metadata.
+        # Both are still the write-of-record; this is stage 1 of the
+        # expand/read-migrate/contract pattern proposed in the parallel-
+        # session Q4 answer. New consumers can read attributes_json
+        # instead of joining sidecar tables.
+        import json
+        sidecar_data = {}
+        parents = query_all(
+            """SELECT cp.commit_id,
+                      parent.commit_hash AS parent_hash,
+                      cp.parent_order
+                 FROM vcs_commit_parents cp
+                 JOIN vcs_commits parent
+                   ON parent.id = cp.parent_commit_id
+                ORDER BY cp.commit_id, cp.parent_order"""
+        )
+        for p in parents:
+            sd = sidecar_data.setdefault(p['commit_id'], {})
+            sd.setdefault('parents', []).append(p['parent_hash'])
+
+        metadata = query_all(
+            """SELECT commit_id, intent, change_type, scope,
+                      is_breaking, breaking_change_description
+                 FROM vcs_commit_metadata"""
+        )
+        for m in metadata:
+            sd = sidecar_data.setdefault(m['commit_id'], {})
+            meta = {}
+            if m['intent']:      meta['intent'] = m['intent']
+            if m['change_type']: meta['change_type'] = m['change_type']
+            if m['scope']:       meta['scope'] = m['scope']
+            if m['is_breaking']:
+                meta['is_breaking'] = bool(m['is_breaking'])
+                if m['breaking_change_description']:
+                    meta['breaking_change_description'] = \
+                        m['breaking_change_description']
+            if meta:
+                sd['metadata'] = meta
+
+        if sidecar_data:
+            # We keep a commit_id → external_ref map for the update pass
+            commit_id_to_ref = {
+                c['id']: f"{c['slug']}/{c['commit_hash']}" for c in commits
+            }
+            from db_utils import execute
+            for cid, attrs in sidecar_data.items():
+                ref = commit_id_to_ref.get(cid)
+                if not ref:
+                    continue
+                # Only update if it changes anything — the archive
+                # trigger doesn't fire on attributes_json changes
+                # (trigger watches label/source_authority only),
+                # so unconditional updates would be silent.
+                execute(
+                    """UPDATE entities
+                          SET attributes_json = ?
+                        WHERE kind = 'Commit' AND external_ref = ?""",
+                    (json.dumps(attrs, sort_keys=True), ref),
+                )
 
         # Commit -> contains -> File edges via vcs_file_states
         contains = query_all(

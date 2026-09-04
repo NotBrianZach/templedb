@@ -1989,6 +1989,109 @@ class TestReconcileHistory:
                 assert '✓' not in line, f"violated-only leaked ok line: {line}"
 
 
+# ── Q4 sidecar dual-write Tests ──────────────────────────────────────────────
+
+class TestSidecarDualWrite:
+    """git ingest fills Commit.attributes_json from
+    vcs_commit_parents and vcs_commit_metadata (Q4 stage 1
+    of expand/read-migrate/contract)."""
+
+    def test_git_ingest_writes_parents_to_attributes_json(self,
+                                                          populated_env):
+        import argparse, json
+        from cli.commands.entity import EntityCommands
+        conn = sqlite3.connect(populated_env["db_path"])
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        bid = conn.execute(
+            "SELECT id FROM vcs_branches WHERE project_id=?", (pid,)
+        ).fetchone()[0]
+        # Parent + child commits
+        conn.execute(
+            """INSERT INTO vcs_commits (project_id, branch_id,
+                                        commit_hash, commit_message,
+                                        author, commit_timestamp)
+                 VALUES (?, ?, 'parent111111', 'p', 'x', datetime('now'))""",
+            (pid, bid),
+        )
+        parent_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO vcs_commits (project_id, branch_id,
+                                        commit_hash, commit_message,
+                                        author, commit_timestamp)
+                 VALUES (?, ?, 'child2222222', 'c', 'x', datetime('now'))""",
+            (pid, bid),
+        )
+        child_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # Parent link
+        conn.execute(
+            """INSERT INTO vcs_commit_parents
+                   (commit_id, parent_commit_id, parent_order)
+                 VALUES (?, ?, 0)""",
+            (child_id, parent_id),
+        )
+        conn.commit()
+        conn.close()
+
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT attributes_json FROM entities
+                WHERE kind='Commit'
+                  AND external_ref = 'testproj/child2222222'"""
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['attributes_json'] is not None
+        attrs = json.loads(row['attributes_json'])
+        assert attrs.get('parents') == ['parent111111']
+
+    def test_git_ingest_writes_metadata_to_attributes_json(self,
+                                                           populated_env):
+        import argparse, json
+        from cli.commands.entity import EntityCommands
+        conn = sqlite3.connect(populated_env["db_path"])
+        pid = conn.execute(
+            "SELECT id FROM projects WHERE slug='testproj'"
+        ).fetchone()[0]
+        bid = conn.execute(
+            "SELECT id FROM vcs_branches WHERE project_id=?", (pid,)
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO vcs_commits (project_id, branch_id,
+                                        commit_hash, commit_message,
+                                        author, commit_timestamp)
+                 VALUES (?, ?, 'metatest0001', 'm', 'x', datetime('now'))""",
+            (pid, bid),
+        )
+        cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO vcs_commit_metadata
+                   (commit_id, intent, change_type, scope, is_breaking)
+                 VALUES (?, 'auth cleanup', 'refactor', 'auth', 1)""",
+            (cid,),
+        )
+        conn.commit()
+        conn.close()
+
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT attributes_json FROM entities
+                WHERE kind='Commit'
+                  AND external_ref = 'testproj/metatest0001'"""
+        ).fetchone()
+        conn.close()
+        attrs = json.loads(row['attributes_json'])
+        assert 'metadata' in attrs
+        assert attrs['metadata']['intent'] == 'auth cleanup'
+        assert attrs['metadata']['change_type'] == 'refactor'
+        assert attrs['metadata']['is_breaking'] is True
+
+
 # ── Observations Archive (Q2 answer) Tests ───────────────────────────────────
 
 class TestObservationsArchive:
