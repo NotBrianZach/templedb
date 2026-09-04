@@ -1874,6 +1874,76 @@ class TestPythonIngest:
         assert 'base_lib.py' not in out, \
             "Inheritance-only import must NOT be flagged (adapter 1.8)"
 
+    def test_python_ingest_resolves_imported_attr_call(
+            self, populated_env):
+        """`Cls.method()` where Cls is imported → Symbol -> calls ->
+        Symbol targeting `Cls.method` in the source file.
+        Adapter 1.11 addition."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/svc.py',
+            "class Service:\n"
+            "    @staticmethod\n"
+            "    def do_thing():\n        return 1\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/user_attr.py',
+            "from svc import Service\n"
+            "\n"
+            "def run():\n"
+            "    return Service.do_thing()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python',
+                                                   limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e1.external_ref='testproj:src/user_attr.py:run'
+                  AND e2.external_ref='testproj:src/svc.py:Service.do_thing'
+                  AND r.kind='calls'"""
+        ).fetchone()['n']
+        conn.close()
+        assert row == 1, "imported Service.do_thing() call not resolved"
+
+    def test_python_ingest_resolves_imported_ctor_attr_call(
+            self, populated_env):
+        """`Cls().method()` — same but instance-constructor form
+        (adapter 1.11)."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/svc2.py',
+            "class Widget:\n"
+            "    def do(self):\n        return 1\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/user_ctor.py',
+            "from svc2 import Widget\n"
+            "\n"
+            "def go():\n"
+            "    return Widget().do()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python',
+                                                   limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e1.external_ref='testproj:src/user_ctor.py:go'
+                  AND e2.external_ref='testproj:src/svc2.py:Widget.do'
+                  AND r.kind='calls'"""
+        ).fetchone()['n']
+        conn.close()
+        assert row == 1, "Widget().do() constructor-chain call not resolved"
+
     def test_hygiene_snapshot_records_per_slug(
             self, populated_env, capsys):
         """`hygiene snapshot` records one row per slug with real

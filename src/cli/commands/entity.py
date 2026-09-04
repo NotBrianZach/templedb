@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.10',   # 1.10 tracks annotation uses
+        'python':  '1.11',   # 1.11 imported.attr / imported().attr
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -743,17 +743,49 @@ WantedBy=timers.target
             for name, (sym_id, eref, def_node, enclosing) in \
                     local_defs.items():
                 for sub in _iter_call_scope_post(def_node, enclosing):
+                    # Three call shapes we can cross-file resolve:
+                    #   foo()             — bare Name; check imports_map[foo]
+                    #   Cls.method()      — Attribute(Name(Cls), 'method')
+                    #                       imports_map[Cls] → target file,
+                    #                       look up 'Cls.method' there
+                    #   Cls().method()    — same but wrapped in a Call ctor
                     called_name = None
+                    imp_root = None       # imports_map key
+                    method_attr = None    # for attribute-chain shapes
                     if isinstance(sub.func, ast.Name):
                         called_name = sub.func.id
-                    if not called_name:
+                    elif isinstance(sub.func, ast.Attribute):
+                        func = sub.func
+                        # case 2: Cls.method()
+                        if isinstance(func.value, ast.Name):
+                            imp_root = func.value.id
+                            method_attr = func.attr
+                        # case 3: Cls().method()
+                        elif isinstance(func.value, ast.Call) and \
+                                isinstance(func.value.func, ast.Name):
+                            imp_root = func.value.func.id
+                            method_attr = func.attr
+                    if not (called_name or (imp_root and method_attr)):
                         continue
-                    if called_name in local_defs:
-                        continue  # already resolved same-file
-                    imp = imports_map.get(called_name)
-                    if not imp:
-                        continue
-                    target_slug, target_path, target_symbol_name = imp
+                    if called_name and called_name in local_defs:
+                        continue  # same-file already resolved
+                    if imp_root and imp_root in local_defs:
+                        continue  # local class attribute call
+
+                    if called_name:
+                        imp = imports_map.get(called_name)
+                        if not imp:
+                            continue
+                        (target_slug, target_path,
+                         target_symbol_name) = imp
+                    else:
+                        imp = imports_map.get(imp_root)
+                        if not imp:
+                            continue
+                        target_slug, target_path, root_symbol_name = imp
+                        # Look up `<root>.<attr>` in that file
+                        target_symbol_name = f"{root_symbol_name}.{method_attr}"
+
                     target_defs = all_defs_by_file.get(
                         (target_slug, target_path)
                     )
