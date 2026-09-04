@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 4: closing the hygiene loop (snapshot → invariant)</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); font-weight: 600; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+  .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<h1>Session recap 4: closing the hygiene loop</h1>
+<p class="lede">
+  Continuation of 2026-09-04. Started with red noise in
+  <code>templedb summary</code>, ended with a persistent snapshot
+  table + a doctor invariant that watches for real drift while
+  ignoring resolver-driven flicker. Also chipped python ingest to
+  <strong>1.11</strong>.
+</p>
+
+<h2>What was open at the start of this stretch</h2>
+<p>
+  Recap 3 left the tool in a good place: dead-imports false-positive
+  rate at 21%, GUI browsable, ambient hygiene block in
+  <code>templedb summary</code>. Four items were flagged as
+  actionable follow-ups; this stretch cleared three of them
+  (fleet noise, GUI page, historical tracking) and picked away at
+  the fourth (attribute-chain calls).
+</p>
+
+<h2>What shipped</h2>
+
+<h3>1. Fleet noise cleanup</h3>
+<p>
+  Four <code>fleet_machines</code> rows had
+  <code>deployment_status='new'</code> and no
+  <code>last_deployed_at</code> — legacy setup entries that were
+  never deployed via templedb. Their reconcile probes failed with
+  SSH auth errors or missing target_host, painting the summary red
+  for state that isn't really broken.
+</p>
+<ul>
+  <li><code>reconcile machine all</code> now skips machines without
+      a <code>last_deployed_at</code>. One-line notice, opt in with
+      <code>--include-undeployed</code>.</li>
+  <li><code>summary</code> shows them as a muted single line
+      instead of four red rows.</li>
+</ul>
+
+<h3>2. GUI <code>/hygiene</code> page</h3>
+<p>
+  Mirrors <code>templedb entity dead-imports</code> and the summary
+  block. Two routes:
+</p>
+<pre>/hygiene              rollup by slug
+/hygiene?slug=&lt;slug&gt;  every File→imports pair without a bridge</pre>
+<p>
+  Same CTE that the CLI and summary use — updating the bridge kinds
+  in one place changes all three surfaces. Sidebar entry added
+  (<code>, H</code>).
+</p>
+
+<h3>3. Historical hygiene tracking (mig 100)</h3>
+<p>
+  <code>hygiene_snapshots</code> table + a CLI:
+</p>
+<pre>templedb hygiene snapshot   [--slug S]
+templedb hygiene history    [--slug S]
+templedb hygiene diff SLUG  [--days D]</pre>
+<p>
+  Each row stamps the <code>adapter_version</code> so
+  <code>hygiene diff</code> can distinguish real code drift from
+  resolver-driven flicker. The daily
+  <code>reconcile.timer</code> now records a snapshot too — same
+  cadence, one <code>ExecStart</code>.
+</p>
+
+<h3>4. Python ingest 1.10 → 1.11 (attribute chains)</h3>
+<p>
+  Two new call shapes get cross-file resolved:
+</p>
+<pre>Cls.method()       Attribute(Name(Cls), 'method')
+Cls().method()     Attribute(Call(Name(Cls)), 'method')</pre>
+<p>
+  If <code>Cls</code> is in <code>imports_map</code>, we look up
+  <code>&lt;target_file&gt;:Cls.method</code> and emit the calls
+  edge. Added 59 new relations on the templedb graph; only shrunk
+  dead-candidates by 3 (from 88 to 85), meaning most attribute-chain
+  calls in this codebase are either same-file or use assignment
+  (<code>svc = get_svc(); svc.method()</code>).
+</p>
+
+<h3>5. Doctor invariant: <code>hygiene_no_untracked_dead_growth</code></h3>
+<p>
+  Ambient signal. Fires when a slug's <code>dead_candidates</code>
+  grew by ≥15 in the last 30 days <em>and</em> the adapter version
+  didn't change across the window. The adapter constraint matters:
+  the 1.6 → 1.7 <code>__module__</code> landing shifted counts by
+  ~110 across all slugs; without the constraint, every resolver
+  improvement would look like regression.
+</p>
+<p>
+  Test suite has three fixtures per this invariant: regression (fires),
+  clean-delta (doesn't fire), and adapter-bump (doesn't fire despite
+  a 60-row delta).
+</p>
+<p>
+  Now <strong>14 invariants tracked</strong>, all green.
+</p>
+
+<h2>Metrics</h2>
+
+<table class="matrix">
+  <tr><th>Adapter</th><th>Dead candidates (templedb)</th><th>% dead</th></tr>
+  <tr><td>1.6 (recap 3 start)</td><td class="num">282</td><td class="neg num">63%</td></tr>
+  <tr><td>1.7 (<code>__module__</code>)</td><td class="num">172</td><td class="warn num">39%</td></tr>
+  <tr><td>1.8 (inherits)</td><td class="num">92</td><td class="warn num">21%</td></tr>
+  <tr><td>1.9 (decorators)</td><td class="num">92</td><td class="warn num">21%</td></tr>
+  <tr><td>1.10 (annotation uses)</td><td class="num">88</td><td class="warn num">20%</td></tr>
+  <tr><td>1.11 (attribute chains)</td><td class="num">85</td><td class="warn num">19%</td></tr>
+</table>
+
+<div class="callout">
+  <span class="label">Decision</span>
+  Stopping the python-resolver march here. Remaining 85
+  candidates need deeper machinery (assignment tracking, deep type
+  inference) with real complexity cost. The metric is now
+  self-monitoring — the invariant will surface if anything shifts,
+  and <code>hygiene diff</code> gives a diagnostic.
+</div>
+
+<h2>Handoff to future sessions</h2>
+
+<h3>Current state</h3>
+<ul>
+  <li>Python ingest at <strong>1.11</strong> — attribute-chain
+      <code>Cls.method()</code> and constructor-chain
+      <code>Cls().method()</code> both resolve cross-file.</li>
+  <li>Hygiene snapshots recording daily via
+      <code>reconcile.timer</code>. First live snapshots taken
+      <code>2026-09-04 15:16</code>; expect one per day per slug.</li>
+  <li>All 14 doctor invariants green (probe with
+      <code>templedb doctor entities</code>).</li>
+  <li>Session-3 fleet noise: 4 machines showing red have been
+      addressed by skipping never-deployed; not deleted (kept for
+      onboarding).</li>
+</ul>
+
+<h3>Genuinely on the shelf</h3>
+<ul>
+  <li><strong>Assignment-tracked call resolution</strong> — the
+      biggest remaining false-positive class.
+      <code>svc = get_svc(); svc.method()</code> requires tracking
+      what <code>svc</code> was bound to at that point. Non-trivial
+      even with pure static analysis. Would drop the remaining 85
+      candidates a lot.</li>
+  <li><strong>CRSql for fleet sync</strong> — Q5 remainder. Deep
+      <code>__crsql_clock</code> / <code>__crsql_pks</code>
+      machinery. Its own session.</li>
+  <li><strong>SCIP for non-Python languages</strong> — Phase 4.
+      Wide surface (indexer per language + protocol translation).</li>
+  <li><strong>Log-based projection queue</strong> — Q1 recommended
+      replacement for the dual-write pattern. Only the spirit is
+      shipped (via invariant); the real queue is future work.</li>
+</ul>
+
+<h3>Small polish still available</h3>
+<ul>
+  <li><strong>Deeper attribute chains</strong>
+      (<code>a.b.c()</code>) — currently deferred.</li>
+  <li><strong>Star imports</strong> — rare in modern Python but
+      still not resolved.</li>
+  <li><strong>Class-body decorators for methods</strong> —
+      module-scope decorators land on <code>__module__</code>;
+      method-body decorators (e.g. FastAPI
+      <code>@app.route</code> inside a class) are currently
+      unclaimed.</li>
+  <li><strong><code>templedb ship</code> alias</strong> — the
+      seven-command publish recipe I've run ~40 times could be
+      one command. Recommended against in recap 3 for
+      visibility reasons; reconsider if the pattern feels
+      truly stable.</li>
+</ul>
+
+<h2>Shipping cadence</h2>
+<p>
+  This stretch: <strong>6 publish cycles</strong>, all following
+  the recap-3 macro. Backups on GCS at every step:
+</p>
+<pre>83ce964  (gui hygiene)
+eb74b1a  (mig 100 + hygiene CLI)
+e23e0d1  (adapter 1.11)
+d243222  (hygiene invariant)</pre>
+
+<h2>What the recap-3 → recap-4 continuum proves</h2>
+<p>
+  The observer/integrator plan was primarily about
+  <em>representing knowledge</em>. Recap 3 showed we could ask new
+  questions of the graph (paths, dead-imports). Recap 4 shows we
+  can <em>watch the graph itself change over time</em> — with
+  built-in defenses (the adapter-version check) against our own
+  measurement improvements getting mistaken for reality
+  regressions.
+</p>
+<p>
+  That's what an integrator system looks like when it's stable:
+  facts flow in, invariants watch them, drift produces a signal
+  rather than silently accumulating. Nothing dramatic. That's
+  the point.
+</p>
+
+</body>
+</html>
