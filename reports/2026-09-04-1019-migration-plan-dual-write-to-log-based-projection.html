@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Migration plan: dual-write to log-based projection</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --neg: #e97070;
+    --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 860px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  h4 { color: #a0a0c0; font-size: 0.92rem; margin: 1.2rem 0 0.4rem;
+       text-transform: uppercase; letter-spacing: 0.05em; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); color: var(--muted); font-weight: 500; }
+  .phase {
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 0.9rem 1.15rem; margin: 1.2rem 0; background: var(--panel);
+  }
+  .phase h3 { margin-top: 0; color: var(--pos); }
+  .phase .duration { color: var(--muted); font-size: 0.82em; font-weight: 500; }
+  .reversible { color: var(--pos); font-weight: 500; }
+  .irreversible { color: var(--warn); font-weight: 500; }
+</style>
+</head>
+<body>
+
+<h1>Migration plan: dual-write to log-based projection</h1>
+<p class="lede">
+  Concrete migration for the recommendation in Q1 of <a href="2026-09-03-1947-answers-to-open-questions-on-the-observer-integrator-schema.html">the answers report</a>. Today&rsquo;s <code>entity_counts_match_source_tables</code> invariant (from <a href="2026-09-04-1410-session-recap-2-applying-parallel-session-answers.html">the session recap that shipped it</a>) catches dual-write drift; this report specifies how to <em>eliminate</em> the drift class entirely by moving to a single-write log-and-project pattern. Four phases (A introduce log, B shadow projection, C cut over, D replay/rebuild), ~2 weeks of focused work, reversible up to Phase C, zero adapter-code churn until then. Uses the existing invariant as the migration-time guardrail.
+</p>
+
+<h2>Where we are and what we&rsquo;re moving to</h2>
+
+<h3>Current state: dual-write</h3>
+<p>
+  Every ingestion adapter writes twice, in one transaction:
+</p>
+<pre>with tx:
+    upsert vcs_commits (id=..., message=..., parents=..., ...)
+    upsert entities (kind='Commit', external_ref=..., source_authority='git')
+    upsert relations (from=commit, kind='parent-of', to=parent)</pre>
+<p>
+  This works but is exactly the shape of failure that produced the <code>file_contents</code> orphaning bug seen twice this week: same content in multiple places, competing write paths, one path dropping the other&rsquo;s row. The Q1 invariant catches drift after it happens. Fine as a guardrail; wrong as an architecture.
+</p>
+
+<h3>Target state: log-and-project</h3>
+<p>
+  Adapters write once, to the typed table:
+</p>
+<pre>with tx:
+    upsert vcs_commits (id=..., message=..., parents=..., ...)
+    -- AFTER trigger enqueues a projection job automatically
+
+async worker:
+    for each job in entity_projection_queue where processed_at is null:
+        row = read source_table where id = source_row_id
+        upsert entities / relations to match
+        mark job processed</pre>
+<p>
+  Typed table is authoritative. Entities/relations are a projection. Failed projections retry; the queue is durable. New consumers (search index, GUI, audit trail) can be added by draining the same queue without touching adapter code.
+</p>
+
+<h2>The four phases</h2>
+
+<div class="phase">
+<h3>Phase A &mdash; introduce the log alongside dual-write <span class="duration">(~1 day)</span></h3>
+
+<p>Adds infrastructure without changing behavior. Fully reversible.</p>
+
+<pre>CREATE TABLE entity_projection_queue (
+    id            INTEGER PRIMARY KEY,   -- monotonic ordering
+    source_table  TEXT NOT NULL,
+    source_row_id INTEGER NOT NULL,
+    operation     TEXT NOT NULL CHECK(operation IN ('insert','update','delete')),
+    enqueued_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    processed_at  TEXT,
+    error         TEXT
+);
+CREATE INDEX epq_unprocessed
+  ON entity_projection_queue(id) WHERE processed_at IS NULL;</pre>
+
+<p>Add <code>AFTER INSERT/UPDATE/DELETE</code> triggers on the typed tables that already have <code>entities</code> counterparts: <code>vcs_commits</code>, <code>edit_intents</code>, <code>ast_builds</code>, <code>deployment_history</code>, <code>agent_sessions</code>, <code>project_files</code>, <code>nix_store_paths</code>, <code>nix_generations</code>, <code>fleet_machines</code>. Each trigger writes one row to the queue.</p>
+
+<p>Nothing else changes. Dual-write continues. But every write also produces an ordered log entry, giving us:</p>
+
+<ul>
+  <li>An audit trail immediately.</li>
+  <li>A safety net for reconstructing entities/relations if they ever get corrupted.</li>
+  <li>The substrate the next three phases build on.</li>
+</ul>
+
+<p><strong>Reversibility:</strong> <span class="reversible">Fully reversible.</span> Drop the triggers and the queue table; adapters continue working.</p>
+</div>
+
+<div class="phase">
+<h3>Phase B &mdash; shadow projection <span class="duration">(~1 week)</span></h3>
+
+<p>Build the projection worker; run it in parallel with dual-write; validate by diffing.</p>
+
+<pre>CREATE TABLE entities_shadow AS SELECT * FROM entities WHERE 0;
+CREATE TABLE relations_shadow AS SELECT * FROM relations WHERE 0;
+-- indexes matching entities/relations</pre>
+
+<p>The projection worker (<code>src/services/entity_projector.py</code>) reads unprocessed queue rows in <code>id</code> order, dispatches to per-table projection functions, writes to <code>*_shadow</code>. One projector per source table:</p>
+
+<pre>def project_vcs_commit(row) -&gt; List[EntityOp | RelationOp]:
+    # returns intended operations against the shadow tables
+    yield UpsertEntity(kind='Commit', external_ref=row['commit_hash'], ...)
+    if row['parent_commit_id']:
+        yield UpsertRelation(from_ref=..., kind='parent-of', to_ref=...)
+    ...</pre>
+
+<p>Run continuously. Every hour, diff <code>entities</code> vs <code>entities_shadow</code> (and relations). Anything that doesn&rsquo;t match is either:</p>
+
+<ul>
+  <li><strong>A projection bug</strong> &mdash; the projector didn&rsquo;t reproduce what dual-write did. Fix the projector.</li>
+  <li><strong>A dual-write bug</strong> &mdash; adapters wrote to entities in a way the projector correctly rejected. Fix the adapter. (This is the exercise finding real bugs; we should expect a few.)</li>
+</ul>
+
+<p>The existing Q1 invariant (<code>entity_counts_match_source_tables</code>) is the top-level metric for this diff. Add finer-grained diffs per kind (<code>entities_shadow_diff</code> as a view) so we know which projector is lagging.</p>
+
+<p>Iterate until the diff is empty for N consecutive days (suggest N=7). Longer is safer; the failure mode of &ldquo;we cut over too early&rdquo; is worse than the failure mode of &ldquo;we ran validation longer than needed.&rdquo;</p>
+
+<p><strong>Reversibility:</strong> <span class="reversible">Fully reversible.</span> Drop the shadow tables and the worker; nothing has changed in the live path.</p>
+</div>
+
+<div class="phase">
+<h3>Phase C &mdash; cut over <span class="duration">(~1 day)</span></h3>
+
+<p>The one irreversible step. Do it once the shadow diff has been empty for a week.</p>
+
+<ol>
+  <li><strong>Rebuild entities/relations from scratch</strong> using the Phase D machinery below (which we build first &mdash; see next section on ordering). Truncate <code>entities</code> / <code>relations</code>, walk every typed table, enqueue everything, drain. This validates that the projection covers every existing row, not just new writes. Takes ~30 seconds at current 12K entity scale.</li>
+  <li><strong>Rip entity/relation writes out of every adapter.</strong> Adapters now write only to typed tables. This is a mechanical edit &mdash; delete the paired <code>upsert entities</code> / <code>upsert relations</code> calls, keep the typed-table <code>upsert</code> and the trigger fires automatically.</li>
+  <li><strong>Retire the shadow tables.</strong> They served their purpose. Drop <code>entities_shadow</code> / <code>relations_shadow</code>.</li>
+  <li><strong>Keep <code>entities_prev</code> as a snapshot</strong> for one week. If a subtle bug surfaces, we can diff against the pre-cutover state to identify what changed.</li>
+</ol>
+
+<p><strong>Reversibility:</strong> <span class="irreversible">Only via git revert of the adapter changes.</span> Not truly irreversible &mdash; adapters can be reverted to dual-write &mdash; but doing so is a real deploy, not a config toggle. Hence the demand for empty diff for a week beforehand.</p>
+</div>
+
+<div class="phase">
+<h3>Phase D &mdash; replay/rebuild capability <span class="duration">(~2 days, built before Phase C)</span></h3>
+
+<p>The acid test that the projection is truly log-based.</p>
+
+<pre>templedb entity rebuild --from-scratch [--kind Commit,Symbol,...] [--dry-run]</pre>
+
+<p>Steps:</p>
+
+<ol>
+  <li>Truncate <code>entities</code> and <code>relations</code> (or the specified kinds).</li>
+  <li>Walk each typed table, enqueue every row as an <code>insert</code> operation.</li>
+  <li>Drain the queue via the projection worker.</li>
+  <li>Report timing, row counts, any projection errors.</li>
+</ol>
+
+<p>If this command works cleanly and produces the same entities/relations as dual-write did, the projection is complete. If not, we&rsquo;ve discovered a place where derived state depended on order-of-events beyond what&rsquo;s captured in the log &mdash; fix by encoding that dependency in the projection function itself.</p>
+
+<p>Ships <em>before</em> Phase C because Phase C uses it. Order of implementation is A → B → D → C.</p>
+
+<p><strong>Reversibility:</strong> <span class="reversible">Always available.</span> After Phase C, <code>entity rebuild --from-scratch</code> is also the fastest recovery path if entities/relations ever get corrupted.</p>
+</div>
+
+<h2>Handling the existing 12K entities / 11K relations</h2>
+
+<p>Two options for what to do with the graph rows that dual-write built up over the past months:</p>
+
+<table class="matrix">
+  <tr><th>Option</th><th>Approach</th><th>Trade-off</th></tr>
+  <tr><td>A. Trust dual-write history</td><td>Leave existing rows. Only apply projection to new writes.</td><td>Fast but you never validate the projection covers what&rsquo;s already there. Subtle historical bugs stay hidden.</td></tr>
+  <tr><td>B. Rebuild from scratch at cutover</td><td>Truncate and rebuild via Phase D during Phase C. All 12K entities and 11K relations get re-derived from typed tables.</td><td>Slower (~30 sec) but guarantees the projection is complete. Validates the code path Phase D formalizes. <strong>Recommended.</strong></td></tr>
+</table>
+
+<div class="callout win">
+  <span class="label">Why B is the right choice</span>
+  Phase D&rsquo;s <code>entity rebuild --from-scratch</code> has to work anyway &mdash; it&rsquo;s the recovery path for corrupted derived state and the confidence check that the projection is complete. Using it as the cutover mechanism means we exercise it under real conditions before we depend on it in an emergency. Same code, better tested.
+</div>
+
+<h2>Migration-time gotchas</h2>
+
+<h3>Ordering</h3>
+
+<p>If <code>contains(Commit, FileSnapshot)</code> requires both endpoints to already exist as entities, the projection must process events in order. SQLite&rsquo;s single-writer nature helps: enqueue order = commit order, so a monotonic <code>id</code> PK on the queue is enough. Worker processes strictly ascending.</p>
+
+<p>Edge case: a relation from row R may reference an entity from row R (self-contained), row R&minus;1 (dependency), or row R+1 (forward reference that arrives shortly). If forward references happen, either (a) the projector defers the relation and retries on the next queue drain, or (b) upsert the relation with a placeholder entity ref that gets resolved when the target lands. (a) is simpler; (b) is faster. Start with (a).</p>
+
+<h3>Idempotence</h3>
+
+<p>Every projection must be safe to apply twice. Use <code>INSERT ... ON CONFLICT (kind, external_ref) DO UPDATE SET ...</code> patterns. Then a crashed worker replaying its last batch is harmless. This is the same pattern the observation adapters already use for typed tables; extend to entities/relations.</p>
+
+<h3>Queue growth</h3>
+
+<p>Append-only means it grows forever. Retention policy: keep processed rows for 7 days as audit; then move to <code>observations_archive</code> (from Q2 of the answers report). Never delete outright &mdash; the queue is also the audit log of every fact-producing event, useful for &ldquo;when did this entity change?&rdquo; queries.</p>
+
+<h3>Trigger reliability</h3>
+
+<p>SQLite triggers fire in the same transaction as the source write. If enqueue fails (schema bug in the queue, disk full, etc.), the source write also fails &mdash; good for consistency, bad if it happens unexpectedly. Deploy the queue table well before the triggers; run trigger deployment behind a feature flag so it can be disabled without a code push if it causes problems.</p>
+
+<h3>Two adapters producing the same fact</h3>
+
+<p>Shouldn&rsquo;t happen if the fact model is right, but if it does: <code>ON CONFLICT (kind, external_ref) DO UPDATE SET observed_at=excluded.observed_at, source_authority=excluded.source_authority</code>. Last-writer-wins with observation timestamp preserved. Divergence between adapters becomes visible via the <code>adapter_version</code> from Q3 of the answers report.</p>
+
+<h3>Long-running projections</h3>
+
+<p>Big changes (Phase D full rebuild, or a schema migration that touches many rows) can produce huge queue drains. Worker should process in batches with intermediate commits so it can resume after interruption. <code>LIMIT 1000</code> per batch, commit, repeat until <code>processed_at IS NULL</code> count is zero.</p>
+
+<h2>Rollout timeline</h2>
+
+<table class="matrix">
+  <tr><th>Day</th><th>What ships</th><th>Reversibility</th></tr>
+  <tr><td>1</td><td>Phase A: queue table + triggers on all dual-write typed tables</td><td class="reversible">Fully reversible</td></tr>
+  <tr><td>2&ndash;8</td><td>Phase B: projection worker, shadow tables, diff checker running hourly</td><td class="reversible">Fully reversible</td></tr>
+  <tr><td>9&ndash;10</td><td>Phase D: <code>entity rebuild --from-scratch</code> command</td><td class="reversible">Fully reversible</td></tr>
+  <tr><td>11&ndash;17</td><td>Phase B validation: shadow diff must be empty for 7 consecutive days</td><td class="reversible">Fully reversible</td></tr>
+  <tr><td>18</td><td>Phase C cutover: rebuild via Phase D, rip dual-write from adapters, promote shadow, keep <code>entities_prev</code></td><td class="irreversible">Requires deploy to revert</td></tr>
+  <tr><td>25</td><td>Drop <code>entities_prev</code>. Migration complete.</td><td>&nbsp;</td></tr>
+</table>
+
+<p>~3.5 weeks calendar time, of which ~2 weeks is focused development and 1 week is validation-with-monitoring.</p>
+
+<h2>What this closes and what it opens</h2>
+
+<h3>Closes</h3>
+
+<ul>
+  <li><strong>The dual-write drift class.</strong> Q1&rsquo;s primary concern. After Phase C, there is exactly one write path for any given fact; drift becomes structurally impossible for entity/relation content.</li>
+  <li><strong>The &ldquo;how do we add a new consumer&rdquo; problem.</strong> Once the queue is the log, new consumers (search index, GUI, audit trail, external metric publishing) drain the same queue independently. No adapter changes required.</li>
+  <li><strong>The &ldquo;how do we rebuild if corrupted&rdquo; problem.</strong> Phase D&rsquo;s <code>entity rebuild --from-scratch</code> means derived state is always recoverable from typed tables. Same command handles corruption recovery, cutover, and validation.</li>
+  <li><strong>The <code>file_contents</code> family of orphaning bugs</strong> &mdash; not directly, but the pattern is now established. <code>file_contents</code> and its blob layer could adopt the same log-and-project shape in a follow-up.</li>
+</ul>
+
+<h3>Opens</h3>
+
+<ul>
+  <li><strong>Projection worker as a new service.</strong> Something has to run continuously. Options: cron via systemd timer (simple, adds latency), long-running daemon (low latency, needs process supervision), inline on-request drain (no lag but adds request latency). Start with systemd timer at 1min interval; move to daemon if lag ever becomes user-visible.</li>
+  <li><strong>The freshness telemetry surface.</strong> Once projections have <code>observed_at</code> lag, users will want to see it. <code>templedb entity freshness</code> or a widget in the GUI. Small work but worth doing before the lag becomes silently confusing.</li>
+  <li><strong>Applying the pattern to <code>file_contents</code>.</strong> If <code>file_contents</code> becomes a projection over <code>content_blobs</code> and adapter observations, the cross-contamination bug family goes away entirely. Separate migration, same pattern.</li>
+</ul>
+
+<h2>Ordering vs the answers report&rsquo;s other four questions</h2>
+
+<p>This report only implements Q1. The other four questions still stand:</p>
+
+<table class="matrix">
+  <tr><th>Q</th><th>Question</th><th>Interaction with this migration</th></tr>
+  <tr><td>2</td><td>Growth of entities/relations</td><td>Independent. Retention policy can be applied before or after this migration.</td></tr>
+  <tr><td>3</td><td>Adapter rot budget</td><td>Improved by this migration. Adapters shrink (no more entity-write code), which reduces the surface area that can rot.</td></tr>
+  <tr><td>4</td><td>Sidecar-column migration</td><td>Independent but similar shape (also expand/contract). Could reuse Phase B&rsquo;s shadow-diff pattern.</td></tr>
+  <tr><td>5</td><td>CRSql for entities/relations</td><td>Depends on this. Cross-machine sync of a dual-write graph is a nightmare; sync of a log-projected graph is straightforward &mdash; sync the queue, replay per-machine.</td></tr>
+</table>
+
+<p>
+  Q5 in particular gets much easier after this. Syncing the queue via CRSql and letting each machine drain its own projection means fleet-wide entities converge naturally, and per-machine <code>sync_scope</code> becomes a filter on the projection input instead of a per-row flag.
+</p>
+
+<h2>Total budget and next step</h2>
+
+<p>~2 weeks focused development + 1 week monitored validation = 3 weeks calendar. Reversible at every step until Phase C. First concrete next step: land the Phase A migration (queue table + triggers) &mdash; it&rsquo;s a single small PR, ships value immediately (audit trail), and unblocks Phase B without committing to anything downstream.</p>
+
+<p>
+  The Q1 invariant that landed today is the guardrail this migration was waiting for. Building the projection without a way to check it against dual-write would be dangerous; building it after the check is in place is straightforward. Good sequencing.
+</p>
+
+</body>
+</html>
