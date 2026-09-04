@@ -1524,6 +1524,76 @@ WantedBy=timers.target
                 rows.append({**dict(r), 'dir': 'in'})
         return rows
 
+    def graph_forget(self, args) -> int:
+        """Delete an entity + its relations + observations_archive.
+
+        Cascades via FK on relations. observations_archive rows for
+        this entity are also removed (no FK, so manual).
+
+        Safety guards:
+          - Refuses without --force for kinds that are source-of-truth
+            authoritative (Commit, Deployment, Machine, Report,
+            EditIntent) — those should be corrected in the source
+            table, not via graph forget.
+          - --dry-run prints what would go without acting.
+        """
+        from db_utils import query_one, execute
+        kind, sep, ref = args.entity.partition('/')
+        if not sep:
+            logger.error(
+                "Expected `<kind>/<ref>` "
+                "(e.g. `Symbol/foo:bar.py:baz`)"
+            )
+            return 1
+        row = query_one(
+            "SELECT id, label FROM entities WHERE kind=? AND external_ref=?",
+            (kind, ref),
+        )
+        if not row:
+            logger.error(f"Entity not found: {kind}/{ref}")
+            return 2
+
+        AUTHORITATIVE = {'Commit', 'Deployment', 'Machine',
+                         'Report', 'EditIntent'}
+        if kind in AUTHORITATIVE and not args.force:
+            logger.error(
+                f"Refusing to forget {kind} entity without --force. "
+                f"This kind is authoritative for its source table; "
+                f"correct at the source, not in the graph."
+            )
+            return 3
+
+        eid = row['id']
+        n_out = query_one(
+            "SELECT COUNT(*) AS n FROM relations WHERE from_entity_id=?",
+            (eid,),
+        )['n']
+        n_in = query_one(
+            "SELECT COUNT(*) AS n FROM relations WHERE to_entity_id=?",
+            (eid,),
+        )['n']
+        n_arch = query_one(
+            "SELECT COUNT(*) AS n FROM observations_archive WHERE entity_id=?",
+            (eid,),
+        )['n']
+
+        summary = (f"{kind}/{ref} — label {row['label']!r}, "
+                   f"{n_out} outbound, {n_in} inbound, "
+                   f"{n_arch} archive rows")
+
+        if args.dry_run:
+            print(f"Would delete: {summary}")
+            return 0
+
+        execute(
+            "DELETE FROM observations_archive WHERE entity_id=?",
+            (eid,),
+        )
+        # relations CASCADE via FK
+        execute("DELETE FROM entities WHERE id=?", (eid,))
+        print(f"✓ Forgot: {summary}")
+        return 0
+
     def graph_observations_gc(self, args) -> int:
         """Delete observations_archive rows older than the cutoff.
 
@@ -2194,6 +2264,20 @@ def register(cli):
         'stats', help='Print entity + relation counts by kind',
     )
     cli.commands['entity.stats'] = cmd.graph_stats
+
+    forget = esub.add_parser(
+        'forget',
+        help='Delete an entity + its relations + archive rows. '
+             '--dry-run to preview. --force for authoritative kinds.',
+    )
+    forget.add_argument('entity', help='<kind>/<external_ref>')
+    forget.add_argument('--force', action='store_true',
+                        help='Required for authoritative kinds '
+                             '(Commit, Deployment, Machine, Report, '
+                             'EditIntent)')
+    forget.add_argument('--dry-run', action='store_true',
+                        help='Preview what would go without acting')
+    cli.commands['entity.forget'] = cmd.graph_forget
 
     obs = esub.add_parser(
         'observations',

@@ -895,6 +895,107 @@ class TestReconcile:
         assert any('no-such-host' in r.message for r in caplog.records)
 
 
+# ── Entity Forget Tests ──────────────────────────────────────────────────────
+
+class TestEntityForget:
+    """templedb entity forget — delete + cascade."""
+
+    def test_forget_deletes_entity_and_relations(self, populated_env):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        # Insert a Symbol entity + a relation pointing at it
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.execute(
+            """INSERT INTO entities
+                   (kind, external_ref, source_authority, label, sync_scope)
+                 VALUES ('Symbol', 'x/y.py:z', 'python',
+                         'def z', 'machine-local')"""
+        )
+        sym_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO entities
+                   (kind, external_ref, source_authority, label, sync_scope)
+                 VALUES ('File', 'x/y.py', 'git', 'y.py', 'fleet')"""
+        )
+        file_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO relations
+                   (from_entity_id, kind, to_entity_id, source_authority)
+                 VALUES (?, 'defines', ?, 'python')""",
+            (file_id, sym_id),
+        )
+        conn.commit()
+        conn.close()
+
+        rc = EntityCommands().graph_forget(argparse.Namespace(
+            entity='Symbol/x/y.py:z', force=False, dry_run=False,
+        ))
+        assert rc == 0
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        # Entity gone
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM entities WHERE id=?", (sym_id,),
+        ).fetchone()['n'] == 0
+        # Relation cascade-deleted
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM relations WHERE to_entity_id=?",
+            (sym_id,),
+        ).fetchone()['n'] == 0
+        conn.close()
+
+    def test_forget_refuses_authoritative_without_force(self,
+                                                        populated_env,
+                                                        caplog):
+        import argparse, logging
+        from cli.commands.entity import EntityCommands
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.execute(
+            """INSERT INTO entities
+                   (kind, external_ref, source_authority, label, sync_scope)
+                 VALUES ('Commit', 'testproj/aaaa', 'git',
+                         'msg', 'fleet')"""
+        )
+        conn.commit()
+        conn.close()
+        with caplog.at_level(logging.ERROR):
+            rc = EntityCommands().graph_forget(argparse.Namespace(
+                entity='Commit/testproj/aaaa',
+                force=False, dry_run=False,
+            ))
+        assert rc == 3
+        assert any('Refusing to forget Commit' in r.message
+                   for r in caplog.records)
+
+    def test_forget_dry_run_leaves_entity(self, populated_env, capsys):
+        import argparse
+        from cli.commands.entity import EntityCommands
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.execute(
+            """INSERT INTO entities
+                   (kind, external_ref, source_authority, label, sync_scope)
+                 VALUES ('Symbol', 'dry/run.py:foo', 'python',
+                         'def foo', 'machine-local')"""
+        )
+        conn.commit()
+        conn.close()
+        rc = EntityCommands().graph_forget(argparse.Namespace(
+            entity='Symbol/dry/run.py:foo',
+            force=False, dry_run=True,
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert 'Would delete' in out
+        # Still present
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM entities WHERE external_ref=?",
+            ('dry/run.py:foo',),
+        ).fetchone()['n'] == 1
+        conn.close()
+
+
 # ── Ingest Schedule (systemd timer) Tests ────────────────────────────────────
 
 class TestIngestSchedule:
