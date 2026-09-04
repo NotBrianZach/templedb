@@ -1433,19 +1433,21 @@ class TestPythonIngest:
         conn.close()
         assert row['n'] == 1, "self.helper() → Doer.helper not resolved"
 
-    def test_python_ingest_ignores_cross_file_calls(self, populated_env):
-        """Cross-file calls aren't resolved (needs import tracking)
-        so no relation is emitted. Test guards against accidental
-        false-positive relations."""
+    def test_python_ingest_resolves_cross_file_import_calls(self,
+                                                              populated_env):
+        """`from foo import bar; bar()` should now resolve
+        cross-file (v1.4). Requires the import to be a
+        recognizable ImportFrom."""
         import argparse
         from cli.commands.entity import EntityCommands
         self._seed_python_file(
-            populated_env, 'src/other.py',
-            "def other_helper():\n    return 1\n"
+            populated_env, 'src/target.py',
+            "def target_helper():\n    return 'x'\n"
         )
         self._seed_python_file(
-            populated_env, 'src/caller.py',
-            "def uses_helper():\n    return other_helper()\n"
+            populated_env, 'src/user.py',
+            "from target import target_helper\n\n"
+            "def uses():\n    return target_helper()\n"
         )
         EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
         EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
@@ -1455,14 +1457,65 @@ class TestPythonIngest:
             """SELECT COUNT(*) AS n FROM relations r
                  JOIN entities e1 ON e1.id = r.from_entity_id
                  JOIN entities e2 ON e2.id = r.to_entity_id
-                WHERE e1.kind = 'Symbol'
-                  AND e2.kind = 'Symbol'
-                  AND r.kind = 'calls'
-                  AND (e1.external_ref LIKE '%caller.py:%'
-                       OR e2.external_ref LIKE '%other.py:%')"""
+                WHERE e1.external_ref = 'testproj:src/user.py:uses'
+                  AND e2.external_ref = 'testproj:src/target.py:target_helper'
+                  AND r.kind = 'calls'"""
         ).fetchone()
         conn.close()
-        assert row['n'] == 0, "cross-file call falsely resolved"
+        assert row['n'] == 1, "cross-file call via ImportFrom not resolved"
+
+    def test_python_ingest_resolves_import_alias(self, populated_env):
+        """`from foo import bar as bz; bz()` — alias makes the
+        local name bz but the target symbol is still bar."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/aliased_target.py',
+            "def real_name():\n    return 42\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/aliased_user.py',
+            "from aliased_target import real_name as fake_name\n\n"
+            "def caller():\n    return fake_name()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                 JOIN entities e2 ON e2.id = r.to_entity_id
+                WHERE e1.external_ref = 'testproj:src/aliased_user.py:caller'
+                  AND e2.external_ref = 'testproj:src/aliased_target.py:real_name'
+                  AND r.kind = 'calls'"""
+        ).fetchone()
+        conn.close()
+        assert row['n'] == 1, "alias-imported call not resolved to real symbol"
+
+    def test_python_ingest_ignores_stdlib_calls(self, populated_env):
+        """`import sys; sys.exit()` — no local file matches sys,
+        so no relation should fire."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/sys_user.py',
+            "import sys\n\n"
+            "def go():\n    return sys.argv\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python', limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        # No spurious cross-file relations should exist from sys_user.py
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id = r.from_entity_id
+                WHERE e1.external_ref = 'testproj:src/sys_user.py:go'
+                  AND r.kind = 'calls'"""
+        ).fetchone()
+        conn.close()
+        assert row['n'] == 0
 
     def test_python_ingest_skips_unparseable(self, populated_env, capsys):
         import argparse

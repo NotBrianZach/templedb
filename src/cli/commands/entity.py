@@ -74,7 +74,8 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.3',    # 1.3 = defines + calls + methods + imports
+        'python':  '1.4',    # 1.4 adds cross-file call resolution
+                             # via ImportFrom (bare from x import y; y())
     }
 
     # ==== INGEST ==============================================================
@@ -332,6 +333,13 @@ WantedBy=timers.target
         from db_utils import query_all
         added_e, added_r, skipped = 0, 0, 0
 
+        # Accumulators for the cross-file resolution post-pass.
+        # Keyed by (slug, file_path) so the same file across projects
+        # doesn't collide.
+        all_defs_by_file = {}  # → dict[name → (sym_id, ast_node, enclosing)]
+        all_imports_by_file = {}  # → dict[imported_name → (slug, target_path)]
+        file_trees_by_file = {}  # → (ast.Module, py_file_list_for_project)
+
         rows = query_all(
             """SELECT p.slug AS slug, pf.file_path AS file_path,
                       cb.content_text AS content
@@ -450,47 +458,105 @@ WantedBy=timers.target
                             added_r += 1
 
             # Third pass: extract imports at module level and emit
-            # File → imports → File relations. Resolves the imported
-            # module name against other .py files in the same project
-            # via suffix match (foo.bar → foo/bar.py or
-            # foo/bar/__init__.py). Skips imports that don't resolve
-            # (stdlib, third-party, unresolved). Same-project only —
-            # cross-project imports are rare and would need registry.
+            # File → imports → File relations. Also populates the
+            # imports_map used by the cross-file call-resolution
+            # post-pass.
+            #
+            # Match: foo.bar → foo/bar.py or foo/bar/__init__.py
+            # (suffix match, same-project only).
             project_pyfiles = py_files_by_project.get(r['slug'], [])
+            imports_map = {}  # imported_name → (slug, target_path, sym_name)
+
+            def _resolve_module_to_path(mod_name):
+                """foo.bar → foo/bar.py or foo/bar/__init__.py within
+                this project's .py files, or None if no match."""
+                parts = mod_name.split('.')
+                cand_a = '/'.join(parts) + '.py'
+                cand_b = '/'.join(parts) + '/__init__.py'
+                for pf in project_pyfiles:
+                    if pf.endswith(cand_a) or pf.endswith(cand_b):
+                        return pf
+                return None
+
+            def _emit_import_file_edge(target_path):
+                nonlocal added_r
+                if not target_path:
+                    return
+                target_file_ref = f"{r['slug']}/{target_path}"
+                target_file_id = self._entity_id('File', target_file_ref)
+                if target_file_id and target_file_id != file_id:
+                    if self._upsert_relation(
+                        file_id, 'imports', target_file_id, 'python'
+                    ):
+                        added_r += 1
+
             for node in ast.iter_child_nodes(tree):
-                targets = []
                 if isinstance(node, ast.Import):
-                    # `import foo.bar` — foo.bar is the module
+                    # `import foo.bar` — emit File→imports→File but
+                    # don't add to imports_map (attribute-chain calls
+                    # like foo.bar.baz() aren't resolved here).
                     for alias in node.names:
-                        targets.append(alias.name)
+                        _emit_import_file_edge(
+                            _resolve_module_to_path(alias.name)
+                        )
                 elif isinstance(node, ast.ImportFrom):
-                    # `from foo.bar import baz` — foo.bar is the
-                    # module; baz might be a submodule or a symbol.
-                    # Try module = foo.bar; skip level>0 (relative).
-                    if node.level == 0 and node.module:
-                        targets.append(node.module)
-                for mod in targets:
-                    parts = mod.split('.')
-                    # Candidate file paths: foo/bar.py, foo/bar/__init__.py
-                    cand_a = '/'.join(parts) + '.py'
-                    cand_b = '/'.join(parts) + '/__init__.py'
-                    match_path = None
-                    for pf in project_pyfiles:
-                        if pf.endswith(cand_a) or pf.endswith(cand_b):
-                            match_path = pf
-                            break
-                    if not match_path:
+                    if node.level != 0 or not node.module:
                         continue
-                    target_file_ref = f"{r['slug']}/{match_path}"
-                    target_file_id = self._entity_id(
-                        'File', target_file_ref
+                    match_path = _resolve_module_to_path(node.module)
+                    _emit_import_file_edge(match_path)
+                    if match_path:
+                        for alias in node.names:
+                            imported_name = alias.asname or alias.name
+                            # Target symbol name is the original.
+                            imports_map[imported_name] = (
+                                r['slug'], match_path, alias.name,
+                            )
+
+            # Save state for the cross-file post-pass.
+            all_defs_by_file[(r['slug'], r['file_path'])] = local_defs
+            all_imports_by_file[(r['slug'], r['file_path'])] = imports_map
+            file_trees_by_file[(r['slug'], r['file_path'])] = tree
+
+        # Cross-file call resolution post-pass.
+        # For each Symbol's body, walk Call nodes; if the callable is
+        # a bare Name not in local_defs but present in imports_map,
+        # look up the target Symbol in the imported file's local_defs.
+        # Handles `from foo import bar; bar()` and
+        # `from foo import bar as bz; bz()`.
+        for (slug, fp), tree in file_trees_by_file.items():
+            local_defs = all_defs_by_file.get((slug, fp), {})
+            imports_map = all_imports_by_file.get((slug, fp), {})
+            if not local_defs or not imports_map:
+                continue
+            for name, (sym_id, eref, def_node, enclosing) in \
+                    local_defs.items():
+                for sub in ast.walk(def_node):
+                    if not isinstance(sub, ast.Call):
+                        continue
+                    called_name = None
+                    if isinstance(sub.func, ast.Name):
+                        called_name = sub.func.id
+                    if not called_name:
+                        continue
+                    if called_name in local_defs:
+                        continue  # already resolved same-file
+                    imp = imports_map.get(called_name)
+                    if not imp:
+                        continue
+                    target_slug, target_path, target_symbol_name = imp
+                    target_defs = all_defs_by_file.get(
+                        (target_slug, target_path)
                     )
-                    if target_file_id and target_file_id != file_id:
-                        if self._upsert_relation(
-                            file_id, 'imports',
-                            target_file_id, 'python'
-                        ):
-                            added_r += 1
+                    if not target_defs:
+                        continue
+                    target = target_defs.get(target_symbol_name)
+                    if not target:
+                        continue
+                    target_sym_id = target[0]
+                    if self._upsert_relation(
+                        sym_id, 'calls', target_sym_id, 'python'
+                    ):
+                        added_r += 1
 
         print(f"✓ ingest python: +{added_e} symbols, +{added_r} relations, "
               f"{skipped} unparseable")
