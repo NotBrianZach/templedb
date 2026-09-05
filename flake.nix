@@ -22,7 +22,6 @@
             fastapi
             uvicorn
             python-multipart
-            fusepy
             tree-sitter
             tree-sitter-python
             tree-sitter-javascript
@@ -40,8 +39,9 @@
             runHook preInstall
 
             # Drift check: `src = ./.;` uses only git-tracked files. TempleDB's
-            # source of truth is the DB (edited via ~/temple/templedb/ FUSE
-            # mount); git is only updated by `templedb publish run templedb`.
+            # source of truth is the DB (edited via `templedb file set` or
+            # `templedb edit <slug>` workspaces); git is only updated by
+            # `templedb publish run templedb`.
             # If someone edits through the DB and never publishes, whole modules
             # silently disappear from the build. Fail early with a clear pointer
             # instead of shipping a broken package that errors at runtime with
@@ -97,7 +97,7 @@
             makeWrapper ${pythonEnv}/bin/python3 "$out/bin/templedb" \
               --add-flags "$SITE/_launcher.py" \
               --set PYTHONPATH "$SITE" \
-              --prefix PATH : "${pkgs.swi-prolog}/bin:${pkgs.callPackage ./nix/scip-typescript.nix {}}/bin:${pkgs.scip}/bin"
+              --prefix PATH : "${pkgs.swi-prolog}/bin"
 
             ln -s "$out/bin/templedb" "$out/bin/tdb"
 
@@ -127,18 +127,6 @@
               type = lib.types.str;
               default = "${config.home.homeDirectory}/.config/sops/age/keys.txt";
               description = "Path to the age key file used for secret decryption.";
-            };
-
-            mount.enable = lib.mkOption {
-              type = lib.types.bool;
-              default = false;
-              description = "Auto-mount TempleDB FUSE filesystem on login.";
-            };
-
-            mount.path = lib.mkOption {
-              type = lib.types.str;
-              default = "${config.home.homeDirectory}/temple";
-              description = "FUSE mount point for TempleDB filesystem.";
             };
 
             sync.enable = lib.mkOption {
@@ -196,31 +184,6 @@
               programs.templedb.claude.hookCommand = lib.mkDefault "${templedb-bin} ai claude hook";
             })
 
-            (lib.mkIf cfg.mount.enable {
-              home.activation.createTempleMount = lib.hm.dag.entryAfter ["writeBoundary"] ''
-                mkdir -p ${cfg.mount.path}
-              '';
-
-              systemd.user.services.templedb-mount = {
-                Unit = {
-                  Description = "TempleDB FUSE Mount";
-                  After = [ "default.target" ];
-                };
-                Service = {
-                  Type = "simple";
-                  ExecStart = "${templedb-bin} mount ${cfg.mount.path} --foreground";
-                  ExecStop = "/run/wrappers/bin/fusermount -u ${cfg.mount.path}";
-                  Restart = "on-failure";
-                  RestartSec = 5;
-                  Environment = [ "PYTHONUNBUFFERED=1" ]
-                    ++ lib.optionals (cfg.devWrapper != null) [
-                      "PATH=/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin"
-                    ];
-                };
-                Install.WantedBy = [ "default.target" ];
-              };
-            })
-
             (lib.mkIf cfg.claude.enable {
               # Generate ~/.claude/settings.json with templedb hooks + optional MCP
               home.file.".claude/settings.json".text = builtins.toJSON ({
@@ -270,7 +233,6 @@
                     "Bash(nix-shell:*)"
                     "Bash(npm:*)"
                     "Bash(ls:*)"
-                    "Bash(fusermount:*)"
                     "Bash(systemctl:*)"
                     "Bash(journalctl:*)"
                     "Bash(gh:*)"
@@ -330,10 +292,6 @@
         packages = {
           templedb = mkPackage pkgs;
           default = mkPackage pkgs;
-          # Exposed so `nix build .#scip-typescript` can be used to
-          # re-derive hashes if the pin ever bumps. Also used by the
-          # templedb wrapper's PATH prefix above.
-          scip-typescript = pkgs.callPackage ./nix/scip-typescript.nix {};
         };
 
         devShells.default = pkgs.mkShell {
@@ -346,15 +304,10 @@
             git
             just
             google-cloud-sdk
-            # SCIP toolchain for `templedb ingest scip` when running
-            # in dev mode (TEMPLEDB_DEV_MODE=1 bypasses the nix
-            # wrapper's PATH prefix).
-            scip
-            (pkgs.callPackage ./nix/scip-typescript.nix {})
 
             # Python env with all templedb dependencies
             (python3.withPackages (ps: with ps; [
-              pyyaml rich requests cryptography fastapi uvicorn python-multipart fusepy
+              pyyaml rich requests cryptography fastapi uvicorn python-multipart
               tree-sitter tree-sitter-python tree-sitter-javascript
             ]))
           ];

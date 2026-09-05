@@ -40,7 +40,7 @@ git via ingest adapters. The workflow:
 
 ```bash
 # Read files (snapshot from DB — populated by ingest)
-templedb file cat templedb src/temple_fuse.py
+templedb file cat templedb src/services/vcs_service.py
 templedb file ls  templedb src/cli/ -l                  # with line counts
 
 # Read at a specific revision (source_snapshots view — Phase 1)
