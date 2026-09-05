@@ -92,6 +92,37 @@ SYNC_SHADOW_SCHEMA = {
             created_at TEXT DEFAULT ''
         )
     """,
+    # Q5 fleet-scope entity graph. UNIQUE, FK, and CHECK constraints
+    # from the main tables are dropped — CRSql prohibits UNIQUE on
+    # CRRs, and delete propagation is handled separately from SQLite's
+    # FK cascade. Populated only for rows with sync_scope='fleet';
+    # machine-local kinds (Symbol, StorePath, Derivation, ToolCall,
+    # AgentSession) stay out of the CRR.
+    "sync_entities": """
+        CREATE TABLE IF NOT EXISTS sync_entities (
+            id INTEGER PRIMARY KEY NOT NULL,
+            kind TEXT DEFAULT '',
+            external_ref TEXT DEFAULT '',
+            source_authority TEXT DEFAULT '',
+            label TEXT DEFAULT '',
+            observed_at TEXT DEFAULT '',
+            created_at TEXT DEFAULT '',
+            attributes_json TEXT DEFAULT '',
+            sync_scope TEXT DEFAULT ''
+        )
+    """,
+    "sync_relations": """
+        CREATE TABLE IF NOT EXISTS sync_relations (
+            id INTEGER PRIMARY KEY NOT NULL,
+            from_entity_id INTEGER DEFAULT 0,
+            kind TEXT DEFAULT '',
+            to_entity_id INTEGER DEFAULT 0,
+            source_authority TEXT DEFAULT '',
+            observed_at TEXT DEFAULT '',
+            attributes_json TEXT DEFAULT '',
+            sync_scope TEXT DEFAULT ''
+        )
+    """,
 }
 
 # Mapping from shadow table → (main table, key columns for upsert)
@@ -102,6 +133,8 @@ SHADOW_TO_MAIN = {
     "sync_vcs_commits": ("vcs_commits", "commit_hash"),
     "sync_nixos_config": ("system_config", "key"),
     "sync_vcs_branches": ("vcs_branches", "project_id, branch_name"),
+    "sync_entities": ("entities", "kind, external_ref"),
+    "sync_relations": ("relations", "from_entity_id, kind, to_entity_id"),
 }
 
 def _find_crsqlite():
@@ -246,6 +279,49 @@ class SyncEngine:
             WHERE key LIKE '%.%'
         """)
 
+        # entities → sync_entities (scope-filtered: fleet only)
+        # ~10% of the graph today; keeps CRSql overhead proportional
+        # to real fleet traffic. See docs/NEXT_SESSION_PICKUPS.md item 1.
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_entities (
+                id, kind, external_ref, source_authority, label,
+                observed_at, created_at, attributes_json, sync_scope
+            )
+            SELECT id, kind,
+                   COALESCE(external_ref, ''),
+                   source_authority,
+                   COALESCE(label, ''),
+                   observed_at, created_at,
+                   COALESCE(attributes_json, ''),
+                   sync_scope
+              FROM entities
+             WHERE sync_scope = 'fleet'
+        """)
+
+        # relations → sync_relations (scope-filtered: fleet only)
+        # relations.sync_scope column exists (mig 099) but isn't
+        # populated by ingest yet. Derive scope from endpoints: a
+        # relation is fleet iff both endpoint entities are fleet.
+        # Machine-local endpoints mean the relation is meaningless
+        # off-host, so it stays local too. Once ingest starts
+        # populating relations.sync_scope, this can switch to a
+        # direct filter for consistency.
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_relations (
+                id, from_entity_id, kind, to_entity_id, source_authority,
+                observed_at, attributes_json, sync_scope
+            )
+            SELECT r.id, r.from_entity_id, r.kind, r.to_entity_id,
+                   r.source_authority, r.observed_at,
+                   COALESCE(r.attributes_json, ''),
+                   'fleet'
+              FROM relations r
+              JOIN entities ef ON ef.id = r.from_entity_id
+              JOIN entities et ON et.id = r.to_entity_id
+             WHERE ef.sync_scope = 'fleet'
+               AND et.sync_scope = 'fleet'
+        """)
+
         conn.commit()
 
     def reconcile_to_main(self):
@@ -270,6 +346,63 @@ class SyncEngine:
                     "UPDATE projects SET name=?, repo_url=?, project_type=?, is_nix_project=?, project_category=? WHERE slug=?",
                     (r["name"], r["repo_url"], r["project_type"], r["is_nix_project"], r["project_category"], r["slug"])
                 )
+
+        # sync_entities → entities. Natural key is (kind, external_ref);
+        # the shadow's rowid came from the peer and may collide with
+        # local IDs. Upsert by natural key preserves local IDs and
+        # cascades correctly to local relations.
+        # LWW is per-column via CRSql's clock, so by the time a row
+        # lands in the shadow it already represents the merged state.
+        conn.execute("""
+            INSERT INTO entities (
+                kind, external_ref, source_authority, label,
+                observed_at, created_at, attributes_json, sync_scope
+            )
+            SELECT kind, external_ref, source_authority, label,
+                   observed_at, created_at, attributes_json, sync_scope
+              FROM sync_entities
+             WHERE kind != ''
+            ON CONFLICT(kind, external_ref) DO UPDATE SET
+                source_authority = excluded.source_authority,
+                label            = excluded.label,
+                observed_at      = excluded.observed_at,
+                attributes_json  = excluded.attributes_json,
+                sync_scope       = excluded.sync_scope
+             WHERE excluded.observed_at > entities.observed_at
+        """)
+
+        # sync_relations → relations. Natural key is (from_entity_id,
+        # kind, to_entity_id), but from/to IDs come from the peer's
+        # ID space. For hosts that diverged from a common ancestor
+        # most IDs align; new-only IDs may collide.
+        # MVP: translate endpoint IDs through the (kind, external_ref)
+        # natural key using sync_entities as the join. Rows whose
+        # endpoints don't resolve locally are skipped.
+        # Follow-up (see docs/NEXT_SESSION_PICKUPS.md): a first-class
+        # ID-remap layer if this JOIN proves too slow on large graphs.
+        conn.execute("""
+            INSERT INTO relations (
+                from_entity_id, kind, to_entity_id,
+                source_authority, observed_at, attributes_json, sync_scope
+            )
+            SELECT ef_local.id, sr.kind, et_local.id,
+                   sr.source_authority, sr.observed_at,
+                   sr.attributes_json, sr.sync_scope
+              FROM sync_relations sr
+              JOIN sync_entities sef ON sef.id = sr.from_entity_id
+              JOIN sync_entities set_ ON set_.id = sr.to_entity_id
+              JOIN entities ef_local ON ef_local.kind = sef.kind
+                                    AND ef_local.external_ref = sef.external_ref
+              JOIN entities et_local ON et_local.kind = set_.kind
+                                    AND et_local.external_ref = set_.external_ref
+             WHERE sr.kind != ''
+            ON CONFLICT(from_entity_id, kind, to_entity_id) DO UPDATE SET
+                source_authority = excluded.source_authority,
+                observed_at      = excluded.observed_at,
+                attributes_json  = excluded.attributes_json,
+                sync_scope       = excluded.sync_scope
+             WHERE excluded.observed_at > relations.observed_at
+        """)
 
         conn.commit()
         logger.info("Reconciled shadow tables to main tables")

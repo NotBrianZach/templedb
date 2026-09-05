@@ -49,7 +49,7 @@ from cli.commands import (
     domain, nixos, config_compiler, ast,
     file, tutorial, dev, deploy_history,
     reports, edit, source, intent, entity, handoff, tool, provenance,
-    reconcile, summary, hygiene,
+    reconcile, summary, hygiene, sync,
 )
 from cli.core import cli
 
@@ -261,6 +261,7 @@ def main():
     reconcile.register(cli)
     summary.register(cli)
     hygiene.register(cli)
+    sync.register(cli)
 
     # Lazy imports for optional modules
     try:
