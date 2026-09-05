@@ -77,13 +77,13 @@ class EntityCommands(Command):
         'python':  '1.17',   # 1.17 bare method-body decorators
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
-        'scip':    '1.1',    # 1.1 walks Occurrences[]: emits Symbol→
-                             # uses→Symbol edges (source = enclosing
-                             # def or __module__, resolved via
-                             # enclosing_range). Cross-file resolved
-                             # via global scip_symbol → entity map.
-                             # Prune scope expanded to 'defines'+'uses'.
-                             # 1.0 was defines-only.
+        'scip':    '1.2',    # 1.2 emits File→imports→File from Import
+                             # role bit (symbol_roles & 2). Unblocks
+                             # dead-imports doctor coverage for TS.
+                             # Also polishes labels (strip trailing
+                             # .()/. descriptor cruft) without breaking
+                             # eref stability. Prune scope now covers
+                             # defines+uses+imports. 1.1 was uses only.
     }
 
     # ==== INGEST ==============================================================
@@ -1336,24 +1336,33 @@ WantedBy=timers.target
         the code-intelligence surface to TypeScript, and via other SCIP
         emitters (scip-go, scip-java, ...) to any language with an indexer.
 
-        v1.1: two-pass adapter.
+        v1.2: two-pass adapter.
           Pass 1 emits File→defines→Symbol (mirrors python's discipline:
             per-file __module__ synthetic, colon-delimited external_ref).
-            Also builds a `scip_sym → entity_id` map for globals.
-          Pass 2 walks Document.occurrences[]. For each reference
-            (symbol_roles bit 0 clear), resolves target via the global
-            map (or per-file lookup for `local N` scoped symbols), finds
-            the source symbol by finding the innermost definition whose
-            enclosing_range contains the reference's range (defaults to
-            the file's __module__ when no def encloses), and emits
-            Symbol→uses→Symbol.
+            Also builds scip_sym → sym_id AND scip_sym → target_file_id
+            maps for cross-file resolution in pass 2.
+          Pass 2 walks Document.occurrences[]. For each occurrence with
+            symbol_roles bit 1 (Import) set, emits File→imports→File
+            from the doc's File to the target's File. For all other
+            non-Definition occurrences, emits Symbol→uses→Symbol —
+            target resolved via the global map (or per-file lookup for
+            `local N` scoped symbols), source = innermost def whose
+            enclosing_range contains the ref (defaults to the file's
+            __module__ when no def encloses).
 
-        We emit only `uses` in v1.1, not `calls`/`inherits`. SCIP's
-        symbol_roles bitfield doesn't distinguish call sites from other
-        references reliably in scip-typescript@0.4.0, so a single edge
-        kind is honest. The dead-imports doctor already treats `uses` as
-        a bridge kind alongside `calls`/`inherits`, so TS files stop
-        being over-flagged after this.
+        We emit `uses` for non-Definition occurrences and `imports`
+        when the Import bit is present. Not `calls` or `inherits` —
+        scip-typescript@0.4.0's symbol_roles doesn't distinguish call
+        sites from other reads reliably, so a single generic edge kind
+        is honest. The dead-imports doctor accepts `uses` as a bridge
+        kind alongside `calls`/`inherits`, and the new `imports` edges
+        make dead-imports work for TS the same way it works for python.
+
+        Labels get trailing SCIP descriptor cruft (`.`, `()`, `().`)
+        stripped for display — but external_refs keep the cruft as-is
+        to preserve idempotency across ingest runs. Migrating erefs
+        would require a rename dance every runtime updates the display
+        format.
 
         Requires:
             --project SLUG        templedb project to index
@@ -1499,6 +1508,11 @@ WantedBy=timers.target
         # references. `local N` symbols are per-file scoped — kept
         # in per-doc dicts (see doc_ctx).
         scip_sym_to_sym_id = {}
+        # Global scip_symbol → File entity id. Same lifecycle as above
+        # but tracks the File that defines each symbol, so v1.2's
+        # File→imports→File emission can resolve Import-role occurrences
+        # to their target File without a reverse walk.
+        scip_sym_to_file_id = {}
         # Per-doc context for pass 2:
         #   (doc, file_id, project_relative, module_sym_id, file_defs,
         #    local_sym_to_id)
@@ -1599,7 +1613,10 @@ WantedBy=timers.target
                     eref = f"{slug}:{project_relative}:{display}#{h}"
                 seen_erefs_this_file.add(eref)
 
-                label = f"scip {display}"
+                # Strip SCIP descriptor cruft for display only. Erefs
+                # keep the raw display to remain idempotent across runs.
+                label_display = display.rstrip('.').rstrip(')').rstrip('(')
+                label = f"scip {label_display}" if label_display else "scip (anonymous)"
                 if self._upsert_entity(
                     'Symbol', eref, authority, label=label
                 ):
@@ -1616,6 +1633,10 @@ WantedBy=timers.target
                         local_sym_to_id[scip_sym] = sym_id
                     else:
                         scip_sym_to_sym_id[scip_sym] = sym_id
+                        # v1.2: also record which File defines this
+                        # symbol so Import-role occurrences can resolve
+                        # to the target File without a reverse walk.
+                        scip_sym_to_file_id[scip_sym] = file_id
 
             # Build file_defs from Definition occurrences (need
             # enclosing_range for pass 2's containment test).
@@ -1646,9 +1667,25 @@ WantedBy=timers.target
                 module_sym_id, file_defs, local_sym_to_id,
             ))
 
-        # --- Pass 2: emit Symbol→uses→Symbol from reference occurrences ---
+        # --- Pass 2: emit File→imports→File and Symbol→uses→Symbol ---
+        # For each doc's occurrences:
+        #   symbol_roles bit 0 (Definition, value 1) — already handled
+        #     in pass 1 via Document.symbols[].
+        #   All other non-Definition occurrences — emit
+        #     Symbol(enclosing def or __module__) → uses → Symbol(target).
+        # In addition, ANY cross-file reference (target defined in
+        # another File in this index) implies a File→imports→File edge.
+        # scip-typescript@0.4.0 doesn't populate the Import role bit —
+        # it emits symbol_roles=0 for every reference — so we can't use
+        # that as a filter. Instead we infer: if a file references a
+        # symbol whose definition lives in another file, that's a
+        # static dependency, which is what dead-imports doctor needs.
+        # This is a superset of pure `import` statements (also catches
+        # inline uses like `foo.bar` where foo is imported), but for
+        # dead-imports purposes that's the desired semantics.
         for (doc, file_id, project_relative, module_sym_id,
              file_defs, local_sym_to_id) in doc_ctx:
+            emitted_imports_this_file = set()  # dedupe within-doc
             for occ in doc.get('occurrences', []):
                 roles = occ.get('symbol_roles', 0)
                 if roles & 1:
@@ -1656,6 +1693,23 @@ WantedBy=timers.target
                 target_scip = occ.get('symbol')
                 if not target_scip:
                     continue
+
+                # v1.2: infer File→imports→File edge from any cross-file
+                # reference. Locals never cross files; skip. Only fire
+                # if we resolved the target to a File in this index.
+                if not target_scip.startswith('local '):
+                    target_file_id = scip_sym_to_file_id.get(target_scip)
+                    if (target_file_id
+                            and target_file_id != file_id
+                            and target_file_id not in emitted_imports_this_file):
+                        if self._upsert_relation(
+                            file_id, 'imports', target_file_id, authority
+                        ):
+                            added_r += 1
+                        touched_relations.add(
+                            (file_id, 'imports', target_file_id)
+                        )
+                        emitted_imports_this_file.add(target_file_id)
 
                 # Resolve target — locals are file-scoped, globals via
                 # the cross-file map.
@@ -1715,7 +1769,7 @@ WantedBy=timers.target
                               r.to_entity_id
                          FROM relations r
                         WHERE r.from_entity_id IN ({placeholders})
-                          AND r.kind IN ('defines', 'uses')
+                          AND r.kind IN ('defines', 'uses', 'imports')
                           AND r.source_authority = ?""",
                     tuple(batch) + (authority,),
                 )
