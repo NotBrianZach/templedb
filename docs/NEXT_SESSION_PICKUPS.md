@@ -1,135 +1,204 @@
 # Next-session pickups
 
-Prep notes for the two big rocks that haven't started yet. Read
-these first if you're picking one of them up cold — they capture
-what has already been decided, what's unknown, and where to start
-digging.
+Prep notes for what's actually next. Corrected 2026-09-05 after
+finishing SCIP (items 1.0 → 1.2 all shipped) and discovering the
+original CRSql section was empirically wrong about what's built.
 
-## 1. CRSql for fleet sync (Q5 remainder)
+Read whichever section matches what you're picking up. The "where
+things stand" line at the top of each is the current-state check —
+verify it hasn't moved before assuming.
 
-### Where things stand
+## 1. CRSql for entities/relations (Q5 remainder)
 
-- `sync_scope` column exists on entities and relations (mig 099).
-  Values: `fleet` | `machine-local` | `none`. Populated for all
-  new entities via `_SYNC_SCOPES` dict in `src/cli/commands/entity.py`.
-- Doctor invariant `every_entity_has_sync_scope` is green — every
-  entity is tagged.
-- **CRSql itself is not enabled anywhere.** No `__crsql_clock`
-  or `__crsql_pks` tables exist. The design is spec'd (see the
-  parallel-session Q5 answer report referenced in
-  `reports/2026-09-02-*-implementation-plan.html`); the plumbing
-  hasn't been built.
+### Where things stand (verified 2026-09-05)
 
-### First steps
+- `sync_scope` column exists on `entities` and `relations` (mig 099).
+  Values: `fleet` | `machine-local` | `none`. Populated for every
+  new entity via `_SYNC_SCOPES` dict in `src/cli/commands/entity.py`.
+- Doctor invariant `every_entity_has_sync_scope` is green.
+- **CRSql extension IS loaded and 6 shadow tables actively sync.**
+  This contradicts what the earlier version of this doc said. Live
+  shadow tables: `sync_projects`, `sync_vcs_commits`,
+  `sync_vcs_branches`, `sync_system_config`, `sync_nixos_config`,
+  `sync_environment_variables` — each with the standard
+  `__crsql_clock` / `__crsql_pks` + `itrig`/`utrig`/`dtrig`
+  machinery.
+- Sync engine (`src/sync_engine.py`, ~470 LOC) has full
+  `get_changes` / `apply_changes` / `reconcile_to_main` plumbing
+  plus a socket-based `SyncServer`.
+- CLI: `templedb sync {init, status, serve, pull, push, do-sync, peers}`.
 
-1. Enable CRSql on a copy of the DB in a scratch dir. This is the
-   ONLY way to iterate safely — CRSql adds triggers and shadow
-   tables that are hard to remove.
-2. Pick ONE `fleet`-scope entity kind to start with (probably
-   `Machine` — small cardinality, well-understood identity).
-3. Verify that `INSERT INTO entities (kind='Machine', ...)`
-   produces the expected `__crsql_clock` row.
-4. Add a second machine (either another zMothership host in the DB,
-   or a real second box) and try `apply_changes`.
-5. Only after single-kind works: expand to `Commit`, `Deployment`,
-   `Report` (the other `fleet`-scope kinds per `_SYNC_SCOPES`).
+### What's actually missing
 
-### Known gotchas
+- Two shadow tables: `sync_entities`, `sync_relations`, each with
+  the standard `__crsql_*` companion set.
+- Scope-filtered population (only `sync_scope='fleet'` rows enter
+  the CRR — 3,021 of 30,436 total entities today, so ~10% of
+  the graph replicates).
+- Write-through trigger keeping shadow in sync with adapter writes
+  to the main tables. Alternative: dual-write in adapters (worse).
+- Extend `reconcile_to_main` for the two new tables (INSERT OR
+  REPLACE on shadow→main, resolves UNIQUE conflicts as last-write-wins).
+- Two-instance test harness (currently only zMothership2 has
+  templedb deployed; zMothership3 is in `fleet_machines` but
+  never-deployed).
 
-- CRSql needs a per-column merge policy for anything more nuanced
-  than last-write-wins. We haven't decided per-kind semantics.
-- `entities.attributes_json` (mig 098) is a TEXT blob — CRSql
-  handles this fine as LWW, but conflict resolution is coarse.
-- Any table with FK cascades (like `relations` → `entities`) needs
-  care because CRSql's delete propagation is separate from
-  SQLite's cascade.
+### Concrete first steps
 
-### What NOT to do first
+Full 10-step checklist in
+`reports/2026-09-05-2230-crsql-prep-notes.html`. Highlights:
 
-- Don't try to enable CRSql on the live DB. Get it working on a
-  scratch copy end-to-end first.
-- Don't try to sync `machine-local` scope entities. They're
-  machine-local for a reason (e.g. `AgentSession`, `ToolCall`
-  are tied to the machine running the agent).
-- Don't touch `nix_generations`, `deployment_history`,
-  `agent_events` — these are `machine-local` and shouldn't sync.
+1. Snapshot the DB (`cp ...sqlite /tmp/backup.sqlite`). CRSql
+   triggers are hard to remove cleanly.
+2. Iterate on `/tmp/scratch.sqlite` with
+   `TEMPLEDB_PATH=/tmp/scratch.sqlite`, not production.
+3. Add DDLs to `SYNC_SHADOW_SCHEMA`. Drop `UNIQUE` constraints
+   (CRSql prohibits them on CRRs).
+4. Extend `_populate_shadow_tables` with the scope filter.
+5. `templedb sync init` on scratch. Verify 12 new tables + row
+   counts match `WHERE sync_scope='fleet'`.
+6. Test single-write cycle (insert Machine, verify shadow +
+   `__crsql_clock` populated).
+7. Write-through trigger migration (`AFTER INSERT/UPDATE ON entities
+   WHEN NEW.sync_scope='fleet'`).
+8. Extend `reconcile_to_main` for the two new tables.
+9. Two-instance sync test in a Python script.
+10. Only then: apply migration to production DB (with snapshot).
 
-### Where to start reading
-
-- `_SYNC_SCOPES` dict at top of `src/cli/commands/entity.py`
-- Migration 099 (`migrations/099_sync_scope.sql`)
-- Recap 4 (`reports/2026-09-04-1555-*.html`) for the "why we
-  stopped" context
-
-## 2. SCIP for non-Python languages
-
-### Where things stand
-
-- Python ingest is at adapter 1.15b, ~5% dead-import candidates.
-  Solid.
-- No other language has ingest — the graph is Python-only for
-  code intelligence.
-- SCIP (Source Code Index Protocol, from Sourcegraph) is designed
-  to be exactly this bridge: per-language indexers emit a common
-  proto, we translate proto → entities+relations.
-
-### First steps
-
-1. Pick ONE language to prove the pattern. Bash is tempting
-   (templedb has plenty of shell in scripts/) but has no good
-   SCIP indexer. **TypeScript is the pragmatic pick** — bza uses
-   it heavily, `scip-typescript` is mature.
-2. Install `scip-typescript` and run it on `bza`. Get a
-   `.scip` file out.
-3. Parse the proto in Python (scip has published .proto files;
-   use `protoc` to generate the Python stubs).
-4. Write a `_ingest_scip(args)` adapter mirroring
-   `_ingest_python(args)`:
-   - Occurrences → File→defines→Symbol edges
-   - Uses → Symbol→calls|uses→Symbol
-   - Include per-language `source_authority` (`scip-typescript`,
-     `scip-go`, etc.)
-5. Register in `_ADAPTER_VERSIONS` and add to the ingest CLI.
+Estimate: ~3-5 hours for the whole thing. Much smaller than the
+"big rock" framing suggested — the CRSql extension is already
+loaded, the pattern is proven for 6 tables, and the sync engine
+speaks the protocol correctly.
 
 ### Known gotchas
 
-- SCIP symbol IDs are per-language and don't collide across langs —
-  a `pyfunc:foo` and a `tsfunc:foo` are legitimately different.
-- SCIP has richer information than we currently track (hover text,
-  documentation, monikers). Start by ignoring these; add them
-  only if downstream queries want them.
-- `scip-typescript` needs `node_modules/` to be present; make sure
-  the invocation happens after `pnpm install` or equivalent.
+- **CRSql prohibits `UNIQUE` on CRR tables.** Shadow tables must
+  drop `UNIQUE(kind, external_ref)` and
+  `UNIQUE(from_entity_id, kind, to_entity_id)`. Uniqueness enforced
+  by CRSql's PK tracking + LWW instead. Confirmed pattern by
+  inspecting `sync_projects` (main has `UNIQUE(slug)`; shadow
+  doesn't).
+- **FK cascade + CRSql delete propagation are separate.** Deleting
+  an entity on machine A cascades to its relations on A immediately,
+  but on B the entity delete arrives via CRSql while relations
+  still exist until their own delete events arrive. May need to
+  disable FK checks during `apply_changes` + run a cleanup pass.
+- **`attributes_json` is opaque to CRSql.** Last-writer-wins on
+  the full JSON blob; no field-level merge. Fine for most cases.
+- **Symbol churn must stay machine-local.** 16,960 rows here now,
+  ADD/DELETE cycles on every python/SCIP ingest. Don't flag it
+  fleet during any refactor.
 
-### What NOT to do first
+### Where to read
 
-- Don't try to unify Python and SCIP symbol IDs. Let them be
-  separate — a doctor invariant can compare cross-language calls
-  later if needed.
-- Don't try to write your own indexer. SCIP has canonical
-  implementations for most languages.
-- Don't add SCIP-specific tables. Reuse `entities` and `relations`
-  with a distinct `source_authority`.
+- `src/sync_engine.py` — whole pattern in one file.
+- `src/cli/commands/sync.py` — CLI, useful for status probes.
+- `migrations/099_sync_scope.sql` — classification design.
+- `_SYNC_SCOPES` at top of `src/cli/commands/entity.py` —
+  per-kind default scopes.
+- `reports/2026-09-03-1947-answers-to-open-questions-*.html` —
+  original Q5 design rationale.
+- `reports/2026-09-05-2230-crsql-prep-notes.html` — this section
+  in more depth with the 10-step checklist.
 
-### Where to start reading
+## 2. SCIP for non-Python — DONE 2026-09-05
 
-- Python ingest as a reference: `src/cli/commands/entity.py`
-  `_ingest_python` around line 320
-- Adapter registration: `_ADAPTER_VERSIONS` dict at top of
-  `EntityCommands`
-- Bridge kinds for hygiene: `('calls', 'inherits', 'uses')` —
-  same relations will apply to SCIP symbols
-- SCIP protocol: https://github.com/sourcegraph/scip (public)
+Shipped `1.0 → 1.1 → 1.2` across commits `F1D0C4CA`, `66838F85`,
+`0F6BC1F9`. All live in the installed templedb (no dev-mode
+required).
 
-## 3. Smaller items still on the shelf
+- **1.0**: `File→defines→Symbol` adapter. `scip-typescript` and
+  `pkgs.scip` packaged in templedb's flake as
+  `writeShellApplication` wrappers on the templedb binary's
+  `--prefix PATH` (no global pollution).
+- **1.1**: `Symbol→uses→Symbol` from occurrences. Two-pass adapter,
+  cross-file resolution via `scip_symbol → entity_id` map, source
+  = innermost def whose `enclosing_range` contains the reference
+  (fallback to file's `__module__`).
+- **1.2**: `File→imports→File` inferred from cross-file references
+  (verified empirically that scip-typescript@0.4.0 doesn't populate
+  the Import role bit — 0 of 52,406 non-def occurrences carry it).
+  Label polish (strip trailing SCIP descriptor cruft, erefs kept
+  stable).
 
-- **Fleet_sync GUI page** — the CLI's `templedb fleet sync` exists
+Final on bza/frontend: 12,428 Symbol entities, 12,428 defines,
+10,149 uses (1,859 cross-file), 329 imports. Python authority
+totally untouched.
+
+See `reports/2026-09-05-2200-session-recap-8-scip-arc.html` for
+the full arc + three unrelated bugs that surfaced along the way
+(scanner false-positives, stale-blob commits, FUSE zombie
+retirement).
+
+### v1.3 candidates (small, non-urgent)
+
+- Switch imports predicate from "any cross-file reference" to
+  `symbol_roles & 2` when scip-typescript starts populating the
+  Import bit. One-line change; will be a quality upgrade.
+- `calls` vs `uses` distinction — would need AST info SCIP
+  doesn't cleanly provide. Deferred until useful.
+- Eref-stable rename migration if labels-in-erefs cleanup ever
+  becomes worth the churn (right now the trailing `().` cruft
+  is cosmetic-only, labels are already polished).
+
+## 3. Second SCIP language (opportunistic)
+
+The `_ingest_scip` adapter is language-agnostic. Adding another
+indexer is: package the indexer in nix, wire onto templedb
+wrapper's `--prefix PATH`, run the CLI with that project. Adapter
+code unchanged.
+
+Candidates (in priority order):
+
+- **scip-python** — dual-run with the native Python adapter to
+  cross-validate. Would catch drift between the two adapters and
+  suggest which is authoritative per kind.
+- **scip-go** — trig-navigator-godot has Godot script; no other
+  Go projects in the fleet right now, so low ROI.
+- **scip-java** — no Java projects.
+- **scip-rust** — no Rust projects.
+
+Each is a ~30-line addition to `nix/` + one line in the flake
+wrapper. Adapter code unchanged.
+
+## 4. Smaller items still on the shelf
+
+- **Fleet_sync GUI page** — the CLI `templedb fleet sync` exists
   but the GUI is thin. Would benefit from the same treatment
-  `/hygiene` got.
-- **Deeper attribute chains** — `a.b.c()` where each level needs
-  type inference. Bigger lift, small payoff.
-- **Assignment-tracked calls** — `svc = get_svc(); svc.foo()`.
-  Would need mini-type-inference. Would push python 1.16 to
-  ~2% dead but complexity cost is real.
-- **`templedb ship` alias** — the 7-command publish recipe. Still
-  recommended against for now, reconsider after another 20 uses.
+  `/hygiene` got in recap 6.
+- **Real drift cleanup** — 25-ish rows in `vcs_working_state`
+  still represent real uncommitted work / real removals not yet
+  committed (mostly reports whose workspace copies got removed,
+  a few files DB has that workspace doesn't). Not urgent (doctor
+  invariants green, fleet hygiene green), but a shakeout pass
+  would tidy things.
+- **Deeper attribute chains** in Python ingest — `a.b.c()` where
+  each level needs type inference. Small dead-imports improvement,
+  real effort.
+- **Assignment-tracked calls** — the python 1.16 tracker handles
+  depth-2 only. Depth-3+ + tuple unpacks deferred.
+- **`templedb ship` alias** — the 7-command publish+rebuild
+  recipe. Still recommended against for now; reconsider after
+  another 20 uses (currently at ~10 uses, all this session).
+
+## 5. Fully retired (don't restart)
+
+- **FUSE mount** — killed 2026-09-05. `src/temple_fuse.py` gone,
+  `mount` CLI subcommand gone, `mount.enable`/`mount.path` option
+  block gone from `homeManagerModule` in flake.nix, `fusepy` dep
+  gone from pythonEnv and devShell, `Bash(fusermount:*)`
+  permission gone, systemd service gone. Zombie process from
+  Aug 25 that had been serving stale mounts (with the buggy
+  write-path propagation) is killed. See commit `54D87C3A` and
+  `reports/2026-08-29-post-fuse-editing-ux-alternatives-and-recommendation.html`.
+
+  Use `templedb edit <slug>` for session-edit workflow — opens
+  `$EDITOR` in `~/.config/templedb/edit-workspaces/<slug>/`.
+  For one-shots: `templedb file edit <slug> <path>`.
+
+- **vcs-status scanner false positives** — fixed 2026-09-05 in
+  commit `6D6D1B55` / `4537FDB3`. `_refresh_working_state` was
+  reading from `project['repo_url']` (a legacy path) instead of
+  the operational checkout. Now routes through
+  `SyncManager.get_checkout_path()`. Went from ~145 spurious
+  rows per scan → 0.

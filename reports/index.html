@@ -44,6 +44,26 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-09-05-2230-crsql-prep-notes.html">
+  <div class="row">
+    <span class="date">2026-09-05 22:30</span>
+    <span class="title">CRSql prep: current state and concrete first steps</span>
+  </div>
+  <div class="summary">
+    Item 1 from docs/NEXT_SESSION_PICKUPS.md: "CRSql for fleet sync (Q5 remainder)". The pickup notes said "CRSql itself is not enabled anywhere. No __crsql_clock or __crsql_pks tables exist. The design is spec'd... the plumbing hasn't been built." Empirically wrong. CRSql is fully loaded and 6 shadow tables are actively syncing. What's missing is smaller than advertised: two shadow tables (sync_entities, sync_relations) plus scope-filtered population. Report captures actual current state + concrete next-actions so the next session can start with the right premises.
+  </div>
+</a>
+
+<a class="report" href="2026-09-05-2200-session-recap-8-scip-arc.html">
+  <div class="row">
+    <span class="date">2026-09-05 22:00</span>
+    <span class="title">Session recap 8: SCIP v1.0→1.2 end-to-end, FUSE retired, scanner fixed</span>
+  </div>
+  <div class="summary">
+    Picked up item 2 from docs/NEXT_SESSION_PICKUPS.md (SCIP for non-Python) and drove it through three released adapter versions. Along the way, three unrelated bugs surfaced and got fixed: the vcs-status scanner was reading from a stale directory, two commits shipped older blobs than the actual work (FUSE-write path bug), and FUSE itself turned out to be dead code kept alive only by an 11-day-old zombie process. Nine commits pushed to main, four publish/rebuild cycles, fleet still running the latest.
+  </div>
+</a>
+
 <a class="report" href="2026-09-05-1200-session-recap-7-scip-thin-slice.html">
   <div class="row">
     <span class="date">2026-09-05 12:00</span>

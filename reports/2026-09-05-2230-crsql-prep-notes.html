@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CRSql prep: current state and concrete first steps</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); font-weight: 600; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+  .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<h1>CRSql prep: what's actually built, what's missing</h1>
+<p class="lede">
+  Item 1 from <code>docs/NEXT_SESSION_PICKUPS.md</code>: "CRSql for
+  fleet sync (Q5 remainder)". The pickup notes said "CRSql itself is
+  not enabled anywhere. No <code>__crsql_clock</code> or
+  <code>__crsql_pks</code> tables exist. The design is spec'd... the
+  plumbing hasn't been built." <strong>Empirically wrong.</strong>
+  CRSql is fully loaded and 6 shadow tables are actively syncing.
+  What's missing is smaller than advertised: two shadow tables
+  (<code>sync_entities</code>, <code>sync_relations</code>) plus
+  scope-filtered population. Report captures actual current state
+  + concrete next-actions so the next session can start with the
+  right premises.
+</p>
+
+<h2>What's actually running today</h2>
+
+<h3>CRSql extension: loaded and live</h3>
+<p>
+  <code>sync_engine.py::_find_crsqlite()</code> resolves the
+  crsqlite <code>.so</code> and loads it via
+  <code>conn.load_extension()</code>.
+  <code>SELECT crsql_site_id()</code> works. Six control tables
+  present in the live DB:
+</p>
+<pre>crsql_master
+crsql_site_id
+crsql_tracked_peers</pre>
+
+<h3>Six shadow tables + full trigger machinery</h3>
+<p>
+  Each shadow follows the CRSql-standard 7-object layout:
+  <code>sync_X</code> + <code>sync_X__crsql_clock</code> +
+  <code>sync_X__crsql_pks</code> + <code>sync_X__crsql_pks_pks</code>
+  + <code>sync_X__crsql_clock_dbv_idx</code> +
+  <code>_dtrig</code>/<code>_itrig</code>/<code>_utrig</code>
+  triggers.
+</p>
+<pre>sync_system_config          (mirrors system_config)
+sync_projects               (mirrors projects)
+sync_environment_variables  (mirrors environment_variables)
+sync_vcs_commits            (mirrors vcs_commits)
+sync_vcs_branches           (mirrors vcs_branches)
+sync_nixos_config           (mirrors host-scoped system_config)</pre>
+
+<h3>Sync engine has full protocol plumbing</h3>
+<p>
+  <code>src/sync_engine.py::SyncEngine</code> (~470 lines):
+</p>
+<ul>
+  <li><code>initialize()</code> — creates shadow tables, marks as CRRs,
+      populates from main tables. Idempotent.</li>
+  <li><code>get_changes(since_version)</code> — returns changes newer
+      than a version + the current DB version.</li>
+  <li><code>apply_changes(changes)</code> — applies a peer's changes.</li>
+  <li><code>reconcile_to_main()</code> — projects shadow-table state
+      back into the main tables (INSERT OR REPLACE).</li>
+  <li><code>get_site_id()</code>, <code>get_db_version()</code>.</li>
+</ul>
+<p>
+  <code>SyncServer</code> class (in the same file) speaks a
+  socket-based sync protocol on the configured port (default 9420 per
+  <code>programs.templedb.sync.port</code> in the homeManagerModule).
+</p>
+
+<h3>CLI: <code>templedb sync {init, status, serve, pull, push, do-sync, peers}</code></h3>
+<p>
+  Six subcommands wired in <code>src/cli/commands/sync.py</code>.
+  Not exercised in single-host use (which is what zMothership2 is),
+  but there.
+</p>
+
+<h3>sync_scope column: shipped in migration 099</h3>
+<p>
+  <code>entities</code> and <code>relations</code> both have
+  <code>sync_scope</code> with a CHECK constraint on
+  <code>('fleet' | 'machine-local' | 'none')</code>. Populated on
+  every insert by <code>_upsert_entity</code> per the
+  <code>_SYNC_SCOPES</code> classification dict. Doctor invariant
+  <code>every_entity_has_sync_scope</code> is green.
+</p>
+
+<h3>Live scope distribution (right now, this host)</h3>
+<table class="matrix">
+  <tr><th>Scope</th><th>Kind</th><th>Count</th></tr>
+  <tr><td class="pos">fleet</td>          <td>File</td>         <td class="num">1,809</td></tr>
+  <tr><td class="pos">fleet</td>          <td>Commit</td>       <td class="num">  714</td></tr>
+  <tr><td class="pos">fleet</td>          <td>Deployment</td>   <td class="num">  242</td></tr>
+  <tr><td class="pos">fleet</td>          <td>Generation</td>   <td class="num">  107</td></tr>
+  <tr><td class="pos">fleet</td>          <td>EditIntent</td>   <td class="num">   85</td></tr>
+  <tr><td class="pos">fleet</td>          <td>Report</td>       <td class="num">   32</td></tr>
+  <tr><td class="pos">fleet</td>          <td>AstBuild</td>     <td class="num">   27</td></tr>
+  <tr><td class="pos">fleet</td>          <td>Machine</td>      <td class="num">    5</td></tr>
+  <tr><td class="warn">machine-local</td> <td>Symbol</td>       <td class="num">16,960</td></tr>
+  <tr><td class="warn">machine-local</td> <td>StorePath</td>    <td class="num"> 7,150</td></tr>
+  <tr><td class="warn">machine-local</td> <td>Derivation</td>   <td class="num"> 2,031</td></tr>
+  <tr><td class="warn">machine-local</td> <td>ToolCall</td>     <td class="num">   993</td></tr>
+  <tr><td class="warn">machine-local</td> <td>AgentSession</td> <td class="num">   281</td></tr>
+  <tr><td colspan="2"><strong>Total fleet-scope</strong></td>   <td class="num pos"><strong>3,021</strong></td></tr>
+  <tr><td colspan="2"><strong>Total machine-local</strong></td> <td class="num warn"><strong>27,415</strong></td></tr>
+</table>
+<p>
+  Fleet-scope: 10% of entities (3k of 30k). Machine-local dominates
+  because Symbol + Nix store paths are huge sets, and neither
+  benefits from replication. Post-SCIP 1.2, the SCIP Symbols are
+  in machine-local too (+12k), so the local:fleet ratio is even
+  more skewed. That's a feature — CRSql overhead grows with fleet
+  rows.
+</p>
+
+<h2>What's missing (the real Q5 work)</h2>
+
+<h3>1. Two shadow tables + CRR registration</h3>
+<pre>sync_entities
+sync_entities__crsql_{clock,pks,dtrig,itrig,utrig}
+sync_relations
+sync_relations__crsql_{clock,pks,dtrig,itrig,utrig}</pre>
+<p>
+  Follow the exact pattern in <code>SYNC_SHADOW_SCHEMA</code>. The
+  DDLs strip UNIQUE constraints (CRSql prohibits them on CRRs) and
+  DEFAULT-init every column (CRSql prefers non-NULL).
+</p>
+
+<h3>2. Scope-filtered population</h3>
+<p>
+  <code>_populate_shadow_tables</code> currently does unconditional
+  <code>SELECT ... FROM main_table</code>. For entities/relations,
+  add a scope filter:
+</p>
+<pre>INSERT OR IGNORE INTO sync_entities (id, kind, external_ref,
+                                     source_authority, label,
+                                     sync_scope, observed_at,
+                                     attributes_json)
+SELECT id, kind, external_ref, source_authority, label,
+       sync_scope, observed_at, attributes_json
+  FROM entities
+ WHERE sync_scope = 'fleet';</pre>
+<p>
+  Same shape for <code>sync_relations</code>. Result: only 3,021
+  entity rows enter the CRR (not 30k), keeping the CRSql overhead
+  proportional to real fleet traffic.
+</p>
+
+<h3>3. Write-time trigger: keep shadow in sync with main</h3>
+<p>
+  The existing shadows use one-shot population + peer-driven writes.
+  For entities/relations, adapters continuously write to
+  <code>entities</code> — the shadow needs to receive those writes
+  too. Options:
+</p>
+<ul>
+  <li><strong>SQLite trigger on main tables</strong>: <code>AFTER
+      INSERT/UPDATE OF sync_scope ON entities WHEN NEW.sync_scope
+      = 'fleet'</code> → INSERT/UPDATE the shadow. Zero adapter
+      code changes. Preferred.</li>
+  <li><strong>Adapter-side dual-write</strong>: adapters explicitly
+      touch shadow when scope='fleet'. More code, more places for
+      drift.</li>
+</ul>
+
+<h3>4. Reconcile-to-main direction</h3>
+<p>
+  When a peer's changes arrive via <code>apply_changes</code>, they
+  land in shadow. <code>reconcile_to_main()</code> currently handles
+  the existing 6 tables. Extend it to project
+  <code>sync_entities</code> → <code>entities</code> +
+  <code>sync_relations</code> → <code>relations</code>. UNIQUE
+  constraint conflict on <code>(kind, external_ref)</code> resolved
+  by INSERT OR REPLACE (last-writer-wins per Q5).
+</p>
+
+<h3>5. Multi-machine test harness</h3>
+<p>
+  Currently the only "fleet member" is zMothership2. To validate
+  sync empirically, need either:
+</p>
+<ul>
+  <li>A second templedb DB on the same host (different db_path env),
+      with a socket-based sync between them.</li>
+  <li>zMothership3 provisioned with templedb (currently in
+      fleet_machines as target but not deployed).</li>
+</ul>
+
+<h2>Concrete first-session checklist</h2>
+
+<ol>
+  <li><strong>Snapshot the DB first.</strong>
+      <code>cp ~/.local/share/templedb/templedb.sqlite
+      /tmp/templedb-backup-2026-09-05.sqlite</code>. CRSql triggers
+      are hard to remove cleanly if something goes wrong.</li>
+  <li><strong>Iterate on a scratch DB copy.</strong>
+      <code>cp .../templedb.sqlite /tmp/scratch.sqlite; export
+      TEMPLEDB_PATH=/tmp/scratch.sqlite</code>. Every experiment
+      runs against the scratch until the pattern's proven.</li>
+  <li><strong>Add DDLs to <code>SYNC_SHADOW_SCHEMA</code></strong>
+      in <code>src/sync_engine.py</code>. Two entries:
+      <code>sync_entities</code> and <code>sync_relations</code>.
+      Column set matches main tables minus UNIQUE constraints.</li>
+  <li><strong>Extend <code>_populate_shadow_tables</code></strong>
+      with the two new INSERT OR IGNORE queries, filtered by
+      <code>sync_scope='fleet'</code>.</li>
+  <li><strong>Run <code>templedb sync init</code></strong>
+      against the scratch DB. Verify: 12 new tables created
+      (2 shadows × 6 companion tables each), row counts match the
+      fleet-scope filter, no errors.</li>
+  <li><strong>Test one write cycle end-to-end.</strong> Insert a
+      Machine entity manually, check it landed in
+      <code>sync_entities</code>. Verify
+      <code>__crsql_clock</code> got a row.</li>
+  <li><strong>Add write-through trigger</strong>. New migration
+      100 or 101 creating <code>AFTER INSERT/UPDATE ON entities
+      WHEN NEW.sync_scope='fleet'</code> → shadow write. Same for
+      relations. Test again: adapter writes propagate.</li>
+  <li><strong>Extend <code>reconcile_to_main</code></strong> for
+      the shadow→main direction. Test: pretend a peer's changes
+      arrived (INSERT into shadow), reconcile, verify main table
+      has the row.</li>
+  <li><strong>Two-instance test.</strong> Create a second scratch
+      DB, exchange changes via
+      <code>get_changes</code>/<code>apply_changes</code> in a
+      script, verify convergence.</li>
+  <li><strong>Only after all of the above works on scratch</strong>:
+      apply migration to production DB. Snapshot again just in
+      case.</li>
+</ol>
+
+<h2>Known gotchas</h2>
+
+<div class="callout warn">
+  <span class="label">CRSql constraint: no UNIQUE</span>
+  <p>
+    <code>entities</code> has <code>UNIQUE(kind, external_ref)</code>.
+    <code>relations</code> has
+    <code>UNIQUE(from_entity_id, kind, to_entity_id)</code>. The
+    shadow tables cannot carry these. Uniqueness in shadows is
+    enforced by CRSql's PK tracking + last-writer-wins semantics.
+    Confirmed pattern by inspecting <code>sync_projects</code>
+    (main has <code>UNIQUE(slug)</code>, shadow doesn't).
+  </p>
+</div>
+
+<div class="callout warn">
+  <span class="label">FK cascade + CRSql delete propagation</span>
+  <p>
+    <code>relations.from_entity_id</code>/<code>to_entity_id</code>
+    reference <code>entities.id</code> with ON DELETE CASCADE.
+    CRSql's delete propagation is separate from SQLite's cascade.
+    Deleting an entity on machine A cascades to its relations on
+    A immediately, but on B the entity delete arrives via CRSql
+    while the relations are still-there until they get their own
+    delete events. Order-of-arrival edge case. May need to
+    disable FK checks during <code>apply_changes</code> and
+    re-run a cleanup pass after.
+  </p>
+</div>
+
+<div class="callout warn">
+  <span class="label">attributes_json as opaque TEXT</span>
+  <p>
+    <code>entities.attributes_json</code> (mig 098) is TEXT.
+    CRSql treats it as opaque — no field-level merge; last full
+    JSON blob wins. Fine for most cases. If per-field merge ever
+    needed, that's a much bigger change (custom CRSql column
+    types).
+  </p>
+</div>
+
+<div class="callout warn">
+  <span class="label">Symbol churn is machine-local for a reason</span>
+  <p>
+    Don't accidentally flag Symbol as fleet-scope during any
+    refactor. 16,960 rows here now, and re-ingest churns them
+    (ADD/DELETE cycles on every python or SCIP run). Syncing
+    that thrash across machines would be pointless — each machine
+    can re-derive from source.
+  </p>
+</div>
+
+<h2>Where to start reading</h2>
+<ul>
+  <li><strong><code>src/sync_engine.py</code></strong> — the whole
+      pattern is ~470 lines. Read
+      <code>SYNC_SHADOW_SCHEMA</code>,
+      <code>initialize()</code>,
+      <code>_populate_shadow_tables()</code>,
+      <code>get_changes()</code>,
+      <code>apply_changes()</code>,
+      <code>reconcile_to_main()</code>. Everything you need to
+      mirror is in one file.</li>
+  <li><strong><code>src/cli/commands/sync.py</code></strong> — CLI
+      wiring, useful for probing the current state
+      (<code>templedb sync status</code>).</li>
+  <li><strong><code>migrations/099_sync_scope.sql</code></strong> —
+      the classification landed here.</li>
+  <li><strong><code>src/cli/commands/entity.py::_SYNC_SCOPES</code></strong>
+      — per-kind default scopes; source of truth for the
+      classification.</li>
+  <li><strong>Q5 answer at
+      <code>reports/2026-09-03-1947-answers-to-open-questions-on-the-observer-integrator-schema.html</code></strong>
+      — original design rationale.</li>
+</ul>
+
+<h2>Time estimate</h2>
+<p>
+  With the concrete first-session checklist above, ~3-5 hours to
+  land steps 1-9 (scratch-DB, shadow tables, populate, write
+  triggers, reconcile, two-instance validation). Step 10 (production
+  migration) is another ~30 min including snapshot + verification.
+  The whole rock is much smaller than "big rock" suggested in the
+  pickup notes because so much infrastructure already exists.
+</p>
+
+</body>
+</html>
