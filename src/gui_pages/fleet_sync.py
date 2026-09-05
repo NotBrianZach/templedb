@@ -104,6 +104,67 @@ def fleet_sync_page():
         'padding:4px 12px;border-radius:4px;cursor:pointer;font-family:monospace;'
         'font-size:0.85rem;margin-bottom:1rem">Probe All Machines</button>')
 
+    # Reconcile summary (mig 095): last run per machine, drift/error rate
+    recon_rows_data = query_all("""
+        SELECT machine_name,
+               MAX(ran_at) AS last_run,
+               (SELECT status FROM reconcile_runs r2
+                 WHERE r2.machine_name = r.machine_name
+                 ORDER BY r2.ran_at DESC LIMIT 1) AS last_status,
+               SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok_ct,
+               SUM(CASE WHEN status='drift' THEN 1 ELSE 0 END) AS drift_ct,
+               SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS err_ct,
+               SUM(CASE WHEN status='unreachable' THEN 1 ELSE 0 END) AS unr_ct
+          FROM reconcile_runs r
+         GROUP BY machine_name
+         ORDER BY machine_name
+    """)
+    recon_rows = []
+    for r in recon_rows_data:
+        st = r["last_status"] or "?"
+        col = ("#4a9a6a" if st == "ok"
+               else "#e94560" if st == "drift"
+               else "#e0c060")
+        recon_rows.append([
+            f'<strong>{html.escape(r["machine_name"])}</strong>',
+            f'<span style="color:{col}">{st}</span>',
+            f'<span class="muted">{html.escape((r["last_run"] or "")[:19])}</span>',
+            f'{r["ok_ct"]}',
+            (f'<span style="color:#e94560">{r["drift_ct"]}</span>'
+             if r["drift_ct"] else '0'),
+            (f'<span style="color:#e0c060">{r["err_ct"]}</span>'
+             if r["err_ct"] else '0'),
+            (f'<span style="color:#e0c060">{r["unr_ct"]}</span>'
+             if r["unr_ct"] else '0'),
+        ])
+    recon_table = _table(
+        ["Machine", "Last Status", "Last Run", "OK", "Drift", "Error",
+         "Unreachable"],
+        recon_rows, "No reconcile runs yet — `templedb reconcile machine all`",
+        "fleet-sync-recon")
+
+    # sync_scope entity distribution (mig 099): what would sync vs. stay local
+    scope_rows_data = query_all("""
+        SELECT sync_scope, COUNT(*) AS n
+          FROM entities
+         WHERE sync_scope IS NOT NULL
+         GROUP BY sync_scope
+         ORDER BY n DESC
+    """)
+    scope_rows = []
+    for r in scope_rows_data:
+        col = ("#4a9a6a" if r["sync_scope"] == "fleet"
+               else "#e0c060" if r["sync_scope"] == "machine-local"
+               else "#606080")
+        scope_rows.append([
+            f'<span style="color:{col}">{html.escape(r["sync_scope"])}</span>',
+            f'<strong>{r["n"]:,}</strong>',
+        ])
+    scope_table = _table(
+        ["Sync Scope", "Entity Count"],
+        scope_rows, "No entities with sync_scope tagged",
+        "fleet-sync-scope")
+
     body = f"""
 <h2>Fleet Sync Dashboard</h2>
 <p class="muted" style="margin-bottom:1rem">
@@ -112,6 +173,22 @@ def fleet_sync_page():
 </p>
 <h3>This Machine (Local Reference)</h3>
 {ref_table}
+
+<h3 style="margin-top:2rem">Reconcile Health</h3>
+<p class="muted" style="margin-bottom:0.5rem">
+  Passive drift detection — <code>templedb reconcile machine all</code> runs
+  daily via systemd timer. Shows accumulated OK/drift/error/unreachable counts
+  per machine plus last outcome.
+</p>
+{recon_table}
+
+<h3 style="margin-top:2rem">Sync Scope Distribution</h3>
+<p class="muted" style="margin-bottom:0.5rem">
+  What CRSql would sync (fleet) vs. what stays local (machine-local).
+  Per <code>_SYNC_SCOPES</code> in <code>src/cli/commands/entity.py</code>.
+</p>
+{scope_table}
+
 <h3 style="margin-top:2rem">Machines</h3>
 {probe_all}
 <div id="probe-all-results"></div>

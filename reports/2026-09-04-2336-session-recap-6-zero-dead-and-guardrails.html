@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 6: zero-dead, guardrails, and fleet-sync visibility</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); font-weight: 600; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+  .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<h1>Session recap 6: zero-dead, guardrails, and fleet-sync visibility</h1>
+<p class="lede">
+  Continuation from recap 5. Started with a bug the user spotted
+  (<code>file set</code> writes silently reverted by
+  <code>commit workspace</code>). Ended with hygiene at
+  <strong>0/582 across the entire fleet</strong>, a commit
+  guardrail that catches the class of bug that got us there, and
+  the fleet-sync dashboard finally showing the reconcile+scope
+  data the graph has been recording all along.
+</p>
+
+<h2>The user's question that started this</h2>
+<div class="callout warn">
+  <span class="label">User</span>
+  "is that a problem with the logic of file set or commit?"
+</div>
+<p>
+  Correct diagnosis: neither command is broken alone, but the
+  interaction is a footgun. <code>file set</code> writes DB and
+  records an intent. <code>commit &lt;workspace&gt;</code> scans the
+  workspace and diffs against DB — but doesn't know about intents,
+  so a stale workspace file looks "modified" from DB and gets
+  committed, silently reverting the <code>file set</code>.
+</p>
+
+<h2>The fix</h2>
+<p>
+  <code>_detect_conflicts</code> in <code>src/cli/commands/commit.py</code>
+  gained a second check. For each modified-in-workspace file, look
+  up applied <code>EditIntents</code> whose <code>new_content_hash</code>
+  matches the current DB blob. If found <em>and</em> the workspace
+  hash doesn't match, flag as a conflict with a distinct
+  <code>reason</code>:
+</p>
+<pre>Your version: workspace (stale)
+Current version: DB (via intent #67)
+Reason: workspace is behind DB — a `templedb file set` wrote
+  this file after the workspace was last synced. Committing
+  would revert that write. Refresh with `templedb file cat
+  &lt;slug&gt; &lt;path&gt;` &gt; workspace-path, or pass --strategy
+  force to overwrite.</pre>
+<p>
+  Combined with the earlier no-TTY auto-abort (recap 5), a
+  scripted commit that would silently revert now aborts with a
+  clear diagnostic instead. End-to-end tested on a fresh
+  checkout with a real <code>file set</code> → <code>commit</code>
+  sequence.
+</p>
+
+<h2>Zero-dead across the fleet</h2>
+
+<table class="matrix">
+  <tr><th>Slug</th><th>Dead</th><th>Total imports</th><th>%</th></tr>
+  <tr><td>templedb</td>              <td class="num pos">0</td><td class="num">453</td><td class="pos num">0%</td></tr>
+  <tr><td>slimevr_fitness_arena</td> <td class="num pos">0</td><td class="num">105</td><td class="pos num">0%</td></tr>
+  <tr><td>oeis-numerical-llm</td>    <td class="num pos">0</td><td class="num">14</td><td class="pos num">0%</td></tr>
+  <tr><td>system_config</td>         <td class="num pos">0</td><td class="num">7</td><td class="pos num">0%</td></tr>
+  <tr><td>woofsledger</td>           <td class="num pos">0</td><td class="num">2</td><td class="pos num">0%</td></tr>
+  <tr><td>trig-navigator-godot</td>  <td class="num pos">0</td><td class="num">1</td><td class="pos num">0%</td></tr>
+  <tr><td><strong>Fleet total</strong></td>
+    <td class="num pos"><strong>0</strong></td>
+    <td class="num"><strong>582</strong></td>
+    <td class="pos num"><strong>0%</strong></td></tr>
+</table>
+
+<p>
+  Two shim resolver improvements got the last false positives:
+</p>
+
+<h3>1.15 — shortest-match for ambiguous imports</h3>
+<p>
+  <code>import config</code> was resolving to the deep
+  <code>src/cli/commands/config.py</code> when the true target was
+  <code>src/config.py</code>. Sort ambiguous matches by depth,
+  prefer shortest.
+</p>
+
+<h3>1.15b — bind bare <code>import X</code></h3>
+<p>
+  <code>from X import Y</code> populated <code>imports_map</code>,
+  but bare <code>import X</code> didn't. Any <code>X.attr</code>
+  reference had nothing to resolve. Now single-name
+  <code>import X</code> and <code>import X as Y</code> bind
+  through to <code>&lt;target&gt;:__module__</code>.
+</p>
+
+<h3>1.16 — same-file assignment tracker</h3>
+<p>
+  <code>svc = SomeClass(); svc.method()</code> resolves through a
+  simple two-scope map: module-scope + per-symbol overlay. Same-file
+  only. Added <strong>+86 relations</strong> to the templedb graph
+  without adding any false-dead flags — richer for
+  <code>entity trace</code>/<code>provenance callers</code> queries.
+</p>
+
+<h2>Cleanup receipts</h2>
+<p>
+  Templedb: 19 files, <strong>~50 imports deleted</strong>. Slimevr:
+  2 files, 2 imports deleted. All 21 files still parse; test suite
+  still 140 passing (same 7 pre-existing failures unrelated to
+  imports). Also caught a real bug during the sweep:
+</p>
+<pre>src/gui.py:455:
+  BEFORE: alerts.append("FUSE mount is down ({FUSE_MOUNT_PATH})")
+  AFTER:  alerts.append(f"FUSE mount is down ({FUSE_MOUNT_PATH})")</pre>
+<p>
+  Missing leading <code>f</code> — the alert had been a literal
+  <code>{FUSE_MOUNT_PATH}</code> string that never interpolated.
+  Dead-imports flagged <code>FUSE_MOUNT_PATH</code> as unused because
+  the reference was inside a plain string, not an f-string. Real
+  bug the tool caught by asking "why is this import dead?"
+</p>
+
+<h2>Fleet-sync dashboard</h2>
+<p>
+  <code>/fleet-sync</code> already had probe/push/pull. It didn't
+  surface the reconcile history (mig 095) or sync_scope
+  distribution (mig 099) — data that has been quietly accumulating.
+  Added two panels:
+</p>
+<ul>
+  <li><strong>Reconcile Health:</strong> per-machine ok/drift/error
+      /unreachable counts + last outcome (colored). Passive drift
+      dashboard at a glance.</li>
+  <li><strong>Sync Scope Distribution:</strong> how many entities
+      are <code>fleet</code> (would replicate via CRSql) vs.
+      <code>machine-local</code> vs. <code>none</code>. Preview of
+      what CRSql work would touch.</li>
+</ul>
+
+<h2>Session GC</h2>
+<p>
+  <code>templedb vcs session list --active</code> was showing 126
+  stale sessions dating back to 2026-08-20 — each Bash tool
+  subprocess forked a new session leader, defeating the reuse cache.
+  Added <code>templedb vcs session gc [--older-than-hours N]</code>,
+  which ends active-but-idle sessions with no staged rows. Wired to
+  the daily <code>reconcile.timer</code>. Immediate cleanup:
+  <strong>126 → 19</strong>.
+</p>
+
+<h2>Full adapter progression</h2>
+
+<table class="matrix">
+  <tr><th>Adapter</th><th>Dead (templedb)</th><th>%</th><th>Change</th></tr>
+  <tr><td>1.6</td>  <td class="num">282</td><td class="neg num">63%</td><td>baseline</td></tr>
+  <tr><td>1.7</td>  <td class="num">172</td><td class="warn num">39%</td><td>__module__ synthetic</td></tr>
+  <tr><td>1.8</td>  <td class="num"> 92</td><td class="warn num">21%</td><td>inherits edges</td></tr>
+  <tr><td>1.9</td>  <td class="num"> 92</td><td class="warn num">21%</td><td>module-scope decorators</td></tr>
+  <tr><td>1.10</td> <td class="num"> 88</td><td class="warn num">20%</td><td>annotation uses</td></tr>
+  <tr><td>1.11</td> <td class="num"> 85</td><td class="warn num">19%</td><td>Cls.method(), Cls().method()</td></tr>
+  <tr><td>1.12</td> <td class="num"> 77</td><td class="warn num">16%</td><td>relative + re-export chase</td></tr>
+  <tr><td>1.13</td> <td class="num"> 55</td><td class="warn num">12%</td><td>__init__ re-exports as uses</td></tr>
+  <tr><td>1.14</td> <td class="num"> 36</td><td class="pos num">8%</td><td>bare-Name reference tracking</td></tr>
+  <tr><td>1.15</td> <td class="num"> 24</td><td class="pos num">5%</td><td>shortest-match imports</td></tr>
+  <tr><td>1.15b</td><td class="num pos">17*</td><td class="pos num">4%*</td><td>bind bare `import X`</td></tr>
+  <tr><td>+ cleanup</td><td class="num pos">0</td><td class="pos num">0%</td><td>19 files edited</td></tr>
+  <tr><td>1.16</td> <td class="num pos">0</td><td class="pos num">0%</td><td>assignment tracker (+86 rel)</td></tr>
+</table>
+
+<p>* estimated; interleaved with the cleanup pass, exact number not recorded.</p>
+
+<h2>State at end of session</h2>
+<ul>
+  <li>Python ingest at <strong>1.16</strong>.</li>
+  <li><strong>14 doctor invariants</strong> all green.</li>
+  <li><strong>Fleet hygiene: 0/582.</strong></li>
+  <li><strong>Active sessions: 19</strong> (was 126).</li>
+  <li>New CLI: <code>templedb vcs session gc</code>.</li>
+  <li>New commit guardrail: intent-ahead detection + no-TTY auto-abort.</li>
+  <li>GUI: <code>/fleet-sync</code> now shows reconcile + sync-scope.</li>
+  <li>Docs: <code>docs/NEXT_SESSION_PICKUPS.md</code> spike notes for CRSql and SCIP.</li>
+</ul>
+
+<h2>Handoff / what's left</h2>
+<ol>
+  <li><strong>CRSql fleet sync</strong> (Q5) — spike notes in
+      <code>docs/NEXT_SESSION_PICKUPS.md</code>. Big rock.</li>
+  <li><strong>SCIP for non-Python</strong> — same doc.</li>
+  <li><strong>The 7 pre-existing test failures</strong> — <code>temple_fuse</code>
+      import errors, <code>nix_codegen</code> rename, materialize
+      regression. Been present all along; worth a triage pass.</li>
+  <li><strong>Deeper attribute chains</strong> (<code>a.b.c()</code>) —
+      still deferred; the 1.16 assignment tracker handles depth-2
+      but not beyond.</li>
+  <li><strong>Method-body decorators</strong> — module-scope
+      decorators land on <code>__module__</code>; class-body
+      <code>@app.route</code> style decorators are still unclaimed.</li>
+</ol>
+
+<h2>Commits shipped this stretch</h2>
+<pre>eda08ca  cleanup: 17 dead imports removed (re-applied)
+6253b52  commit: intent-ahead conflict detection + NEXT_SESSION_PICKUPS
+e51eb72  cleanup: last dead imports + gui f-string
+788fb3e  python ingest 1.16: assignment tracker</pre>
+
+</body>
+</html>
