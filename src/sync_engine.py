@@ -92,36 +92,37 @@ SYNC_SHADOW_SCHEMA = {
             created_at TEXT DEFAULT ''
         )
     """,
-    # Q5 fleet-scope entity graph. UNIQUE, FK, and CHECK constraints
-    # from the main tables are dropped — CRSql prohibits UNIQUE on
-    # CRRs, and delete propagation is handled separately from SQLite's
-    # FK cascade. Populated only for rows with sync_scope='fleet';
-    # machine-local kinds (Symbol, StorePath, Derivation, ToolCall,
-    # AgentSession) stay out of the CRR.
+    # Q5 fleet-scope entity graph. Natural-key composite PKs (mig 102)
+    # so concurrent inserts on different sites don't collide the way
+    # surrogate ROWIDs did (session recap 9). Populated only for
+    # sync_scope='fleet' rows; machine-local kinds (Symbol, StorePath,
+    # Derivation, ToolCall, AgentSession) stay out of the CRR.
     "sync_entities": """
         CREATE TABLE IF NOT EXISTS sync_entities (
-            id INTEGER PRIMARY KEY NOT NULL,
-            kind TEXT DEFAULT '',
-            external_ref TEXT DEFAULT '',
-            source_authority TEXT DEFAULT '',
-            label TEXT DEFAULT '',
-            observed_at TEXT DEFAULT '',
-            created_at TEXT DEFAULT '',
-            attributes_json TEXT DEFAULT '',
-            sync_scope TEXT DEFAULT ''
-        )
+            kind             TEXT NOT NULL,
+            external_ref     TEXT NOT NULL,
+            source_authority TEXT NOT NULL DEFAULT '',
+            label            TEXT NOT NULL DEFAULT '',
+            observed_at      TEXT NOT NULL DEFAULT '',
+            created_at       TEXT NOT NULL DEFAULT '',
+            attributes_json  TEXT NOT NULL DEFAULT '',
+            sync_scope       TEXT NOT NULL DEFAULT 'fleet',
+            PRIMARY KEY (kind, external_ref)
+        ) WITHOUT ROWID
     """,
     "sync_relations": """
         CREATE TABLE IF NOT EXISTS sync_relations (
-            id INTEGER PRIMARY KEY NOT NULL,
-            from_entity_id INTEGER DEFAULT 0,
-            kind TEXT DEFAULT '',
-            to_entity_id INTEGER DEFAULT 0,
-            source_authority TEXT DEFAULT '',
-            observed_at TEXT DEFAULT '',
-            attributes_json TEXT DEFAULT '',
-            sync_scope TEXT DEFAULT ''
-        )
+            from_kind         TEXT NOT NULL,
+            from_external_ref TEXT NOT NULL,
+            kind              TEXT NOT NULL,
+            to_kind           TEXT NOT NULL,
+            to_external_ref   TEXT NOT NULL,
+            source_authority  TEXT NOT NULL DEFAULT '',
+            observed_at       TEXT NOT NULL DEFAULT '',
+            attributes_json   TEXT NOT NULL DEFAULT '',
+            sync_scope        TEXT NOT NULL DEFAULT 'fleet',
+            PRIMARY KEY (from_kind, from_external_ref, kind, to_kind, to_external_ref)
+        ) WITHOUT ROWID
     """,
 }
 
@@ -134,7 +135,7 @@ SHADOW_TO_MAIN = {
     "sync_nixos_config": ("system_config", "key"),
     "sync_vcs_branches": ("vcs_branches", "project_id, branch_name"),
     "sync_entities": ("entities", "kind, external_ref"),
-    "sync_relations": ("relations", "from_entity_id, kind, to_entity_id"),
+    "sync_relations": ("relations", "from_kind, from_external_ref, kind, to_kind, to_external_ref"),
 }
 
 def _find_crsqlite():
@@ -279,39 +280,39 @@ class SyncEngine:
             WHERE key LIKE '%.%'
         """)
 
-        # entities → sync_entities (scope-filtered: fleet only)
-        # ~10% of the graph today; keeps CRSql overhead proportional
-        # to real fleet traffic. See docs/NEXT_SESSION_PICKUPS.md item 1.
+        # entities → sync_entities (fleet-scope, natural-key PK).
+        # Skip rows with NULL external_ref (can't be part of the
+        # natural PK); trigger and adapter conventions treat every
+        # fleet entity as having an external_ref, so this is a safety
+        # filter rather than a data-loss risk.
         conn.execute("""
             INSERT OR IGNORE INTO sync_entities (
-                id, kind, external_ref, source_authority, label,
+                kind, external_ref, source_authority, label,
                 observed_at, created_at, attributes_json, sync_scope
             )
-            SELECT id, kind,
-                   COALESCE(external_ref, ''),
-                   source_authority,
+            SELECT kind, external_ref, source_authority,
                    COALESCE(label, ''),
                    observed_at, created_at,
                    COALESCE(attributes_json, ''),
                    sync_scope
               FROM entities
              WHERE sync_scope = 'fleet'
+               AND external_ref IS NOT NULL
         """)
 
-        # relations → sync_relations (scope-filtered: fleet only)
-        # relations.sync_scope column exists (mig 099) but isn't
-        # populated by ingest yet. Derive scope from endpoints: a
-        # relation is fleet iff both endpoint entities are fleet.
-        # Machine-local endpoints mean the relation is meaningless
-        # off-host, so it stays local too. Once ingest starts
-        # populating relations.sync_scope, this can switch to a
-        # direct filter for consistency.
+        # relations → sync_relations (fleet iff both endpoints fleet).
+        # relations.sync_scope column exists (mig 099) but no ingest
+        # adapter populates it, so scope is derived here from the
+        # endpoints. Endpoint natural keys are read from the JOINed
+        # entities so peer sync doesn't need any local ID translation.
         conn.execute("""
             INSERT OR IGNORE INTO sync_relations (
-                id, from_entity_id, kind, to_entity_id, source_authority,
-                observed_at, attributes_json, sync_scope
+                from_kind, from_external_ref, kind,
+                to_kind, to_external_ref,
+                source_authority, observed_at, attributes_json, sync_scope
             )
-            SELECT r.id, r.from_entity_id, r.kind, r.to_entity_id,
+            SELECT ef.kind, ef.external_ref, r.kind,
+                   et.kind, et.external_ref,
                    r.source_authority, r.observed_at,
                    COALESCE(r.attributes_json, ''),
                    'fleet'
@@ -320,6 +321,8 @@ class SyncEngine:
               JOIN entities et ON et.id = r.to_entity_id
              WHERE ef.sync_scope = 'fleet'
                AND et.sync_scope = 'fleet'
+               AND ef.external_ref IS NOT NULL
+               AND et.external_ref IS NOT NULL
         """)
 
         conn.commit()
@@ -347,12 +350,18 @@ class SyncEngine:
                     (r["name"], r["repo_url"], r["project_type"], r["is_nix_project"], r["project_category"], r["slug"])
                 )
 
-        # sync_entities → entities. Natural key is (kind, external_ref);
-        # the shadow's rowid came from the peer and may collide with
-        # local IDs. Upsert by natural key preserves local IDs and
-        # cascades correctly to local relations.
-        # LWW is per-column via CRSql's clock, so by the time a row
-        # lands in the shadow it already represents the merged state.
+        # sync_entities → entities. Both sides key on (kind,
+        # external_ref) so no ID translation is needed. Local
+        # surrogate IDs are preserved on the ON CONFLICT UPDATE path.
+        #
+        # Limitation: this is INSERT+UPDATE only. Deletes propagated
+        # via CRSql land in the shadow but don't reach main here —
+        # main would need a DELETE-what's-missing pass, which is
+        # dangerous without a first-populated guard (empty shadow
+        # on a new peer would wipe fleet). Delete propagation for
+        # the entity graph is deferred; use explicit admin commands
+        # for entity retirement (rare in practice — fleet kinds
+        # File/Commit/Deployment/Generation are append-only).
         conn.execute("""
             INSERT INTO entities (
                 kind, external_ref, source_authority, label,
@@ -361,7 +370,7 @@ class SyncEngine:
             SELECT kind, external_ref, source_authority, label,
                    observed_at, created_at, attributes_json, sync_scope
               FROM sync_entities
-             WHERE kind != ''
+             WHERE true
             ON CONFLICT(kind, external_ref) DO UPDATE SET
                 source_authority = excluded.source_authority,
                 label            = excluded.label,
@@ -371,31 +380,26 @@ class SyncEngine:
              WHERE excluded.observed_at > entities.observed_at
         """)
 
-        # sync_relations → relations. Natural key is (from_entity_id,
-        # kind, to_entity_id), but from/to IDs come from the peer's
-        # ID space. For hosts that diverged from a common ancestor
-        # most IDs align; new-only IDs may collide.
-        # MVP: translate endpoint IDs through the (kind, external_ref)
-        # natural key using sync_entities as the join. Rows whose
-        # endpoints don't resolve locally are skipped.
-        # Follow-up (see docs/NEXT_SESSION_PICKUPS.md): a first-class
-        # ID-remap layer if this JOIN proves too slow on large graphs.
+        # sync_relations → relations. Shadow stores endpoint natural
+        # keys, so JOIN directly to local entities by (kind,
+        # external_ref) to get the local surrogate IDs. Rows whose
+        # endpoints haven't been reconciled locally yet are skipped;
+        # they land on the next reconcile pass once the entity
+        # projection above catches up.
         conn.execute("""
             INSERT INTO relations (
                 from_entity_id, kind, to_entity_id,
                 source_authority, observed_at, attributes_json, sync_scope
             )
-            SELECT ef_local.id, sr.kind, et_local.id,
+            SELECT ef.id, sr.kind, et.id,
                    sr.source_authority, sr.observed_at,
                    sr.attributes_json, sr.sync_scope
               FROM sync_relations sr
-              JOIN sync_entities sef ON sef.id = sr.from_entity_id
-              JOIN sync_entities set_ ON set_.id = sr.to_entity_id
-              JOIN entities ef_local ON ef_local.kind = sef.kind
-                                    AND ef_local.external_ref = sef.external_ref
-              JOIN entities et_local ON et_local.kind = set_.kind
-                                    AND et_local.external_ref = set_.external_ref
-             WHERE sr.kind != ''
+              JOIN entities ef ON ef.kind = sr.from_kind
+                              AND ef.external_ref = sr.from_external_ref
+              JOIN entities et ON et.kind = sr.to_kind
+                              AND et.external_ref = sr.to_external_ref
+             WHERE true
             ON CONFLICT(from_entity_id, kind, to_entity_id) DO UPDATE SET
                 source_authority = excluded.source_authority,
                 observed_at      = excluded.observed_at,

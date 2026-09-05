@@ -110,6 +110,7 @@ MIGRATION_SEQUENCE = [
     "099_sync_scope.sql",
     "100_hygiene_snapshots.sql",
     "101_sync_entities_relations.sql",
+    "102_sync_natural_key_pks.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",
