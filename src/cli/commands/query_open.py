@@ -46,13 +46,19 @@ class QueryOpenCommands(Command):
         """
         project_paths = {}
 
-        # Get project paths
+        # Get project paths — prefer operational checkouts over legacy
+        # repo_url import paths. Falls back to repo_url if no checkout.
+        from sync.manager import SyncManager
         for project_slug, _ in files:
             if project_slug not in project_paths:
                 project = self.project_repo.get_by_slug(project_slug)
                 if project and project.get('repo_url'):
-                    repo_path = project['repo_url'].replace('file://', '')
-                    project_paths[project_slug] = repo_path
+                    try:
+                        project_paths[project_slug] = str(
+                            SyncManager(project_slug).get_checkout_path()
+                        )
+                    except (ValueError, KeyError):
+                        project_paths[project_slug] = project['repo_url'].replace('file://', '')
 
         # Build full file paths
         full_paths = []
@@ -92,13 +98,19 @@ class QueryOpenCommands(Command):
         """Open files using a generic editor command"""
         project_paths = {}
 
-        # Get project paths
+        # Get project paths — prefer operational checkouts over legacy
+        # repo_url import paths. Falls back to repo_url if no checkout.
+        from sync.manager import SyncManager
         for project_slug, _ in files:
             if project_slug not in project_paths:
                 project = self.project_repo.get_by_slug(project_slug)
                 if project and project.get('repo_url'):
-                    repo_path = project['repo_url'].replace('file://', '')
-                    project_paths[project_slug] = repo_path
+                    try:
+                        project_paths[project_slug] = str(
+                            SyncManager(project_slug).get_checkout_path()
+                        )
+                    except (ValueError, KeyError):
+                        project_paths[project_slug] = project['repo_url'].replace('file://', '')
 
         # Build full file paths
         full_paths = []

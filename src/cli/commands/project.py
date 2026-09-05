@@ -266,12 +266,17 @@ class ProjectCommands(Command):
                 print("   Import with a flake.nix to enable Nix validation")
                 return 1
 
-            # Get project path
-            project_path = Path(project['repo_url'])
+            # Get project path — prefer the operational checkout over
+            # the legacy repo_url import path.
+            from sync.manager import SyncManager
+            try:
+                project_path = SyncManager(args.slug).get_checkout_path()
+            except (ValueError, KeyError):
+                project_path = Path(project['repo_url'])
             if not project_path.exists():
                 raise ValidationError(
                     f"Project path does not exist: {project_path}",
-                    solution="Update project repo_url or check filesystem"
+                    solution="Run: templedb project checkout " + args.slug
                 )
 
             print(f"Validating Nix flake for project: {args.slug}")

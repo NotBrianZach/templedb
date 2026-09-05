@@ -321,6 +321,81 @@ class VCSService(BaseService):
             )
         return {'ended': ended, 'dry_run': dry_run}
 
+    def _refresh_ws_row_from_disk(
+        self, ws_row_id: int, project: dict, file_path: str
+    ) -> Optional[str]:
+        """Re-hash one file from the operational checkout and update its
+        vcs_working_state row before staging.
+
+        Closes the "stale blob" bug: without this, `vcs add file` would
+        stage whatever content_hash the last scanner pass recorded,
+        which may be older than the workspace file (e.g. after an
+        editor write, before any refresh). Result: commits that match
+        their commit *message* but not their intended *diff*.
+
+        Returns the current content_hash (or None if the file was
+        deleted on disk / could not be read / is over the blob size
+        threshold with no fallback path).
+        """
+        from pathlib import Path
+        from importer.content import ContentStore
+        from sync.manager import SyncManager
+
+        try:
+            checkout = SyncManager(project['slug']).get_checkout_path()
+        except (ValueError, KeyError):
+            return None
+
+        disk_path = checkout / file_path
+        if not disk_path.exists():
+            # File removed from disk since last scan. Mark deleted,
+            # clear the stale hash — next commit records a proper
+            # deletion.
+            self.vcs_repo.execute("""
+                UPDATE vcs_working_state
+                SET state = 'deleted', content_hash = NULL,
+                    last_modified = datetime('now')
+                WHERE id = ?
+            """, (ws_row_id,))
+            return None
+
+        fc = ContentStore.read_file_content(disk_path)
+        if fc is None:
+            # Large or binary file — try store_content fallback.
+            store = ContentStore()
+            blob_meta = store.store_content(disk_path)
+            if blob_meta is None:
+                return None  # unreadable; leave row alone
+            new_hash = blob_meta.content_hash
+            # blob_meta path already inserted into content_blobs by store_content
+        else:
+            new_hash = fc.hash_sha256
+            self.vcs_repo.execute("""
+                INSERT OR IGNORE INTO content_blobs
+                (hash_sha256, content_text, content_blob, content_type,
+                 encoding, file_size_bytes)
+                VALUES (?, ?, NULL, ?, ?, ?)
+            """, (fc.hash_sha256, fc.content_text, fc.content_type,
+                  fc.encoding, fc.file_size))
+
+        # Determine new state. If the row was 'added' (never committed)
+        # keep 'added'; otherwise call it 'modified'. Full added/
+        # modified detection against vcs_file_states is the scanner's
+        # job — we just make sure the hash reflects reality.
+        prev = self.vcs_repo.query_one(
+            "SELECT state FROM vcs_working_state WHERE id = ?",
+            (ws_row_id,),
+        )
+        new_state = 'added' if (prev and prev['state'] == 'added') else 'modified'
+
+        self.vcs_repo.execute("""
+            UPDATE vcs_working_state
+            SET content_hash = ?, state = ?,
+                last_modified = datetime('now')
+            WHERE id = ?
+        """, (new_hash, new_state, ws_row_id))
+        return new_hash
+
     def stage_files(
         self,
         project_slug: str,
@@ -355,6 +430,21 @@ class VCSService(BaseService):
         sid = session['id']
 
         if stage_all:
+            # Refresh every non-unmodified row from disk first, so
+            # staged content matches what's actually on disk right
+            # now — not what the last scanner pass recorded.
+            candidates = self.vcs_repo.query_all("""
+                SELECT ws.id, pf.file_path
+                  FROM vcs_working_state ws
+                  JOIN project_files pf ON ws.file_id = pf.id
+                 WHERE ws.project_id = ? AND ws.branch_id = ?
+                   AND ws.state != 'unmodified'
+            """, (project['id'], branch['id']))
+            for c in candidates:
+                self._refresh_ws_row_from_disk(
+                    c['id'], project, c['file_path']
+                )
+
             self.vcs_repo.execute("""
                 UPDATE vcs_working_state
                 SET staged_by_session_id = ?
@@ -380,6 +470,13 @@ class VCSService(BaseService):
                 """, (project['id'], branch['id'], f"%{pattern}%"))
 
                 for file in files:
+                    # Refresh from disk BEFORE recording the stage —
+                    # otherwise the staged hash is whatever the last
+                    # scanner saw, which can silently commit stale
+                    # content when the user edited the workspace since.
+                    self._refresh_ws_row_from_disk(
+                        file['id'], project, file['file_path']
+                    )
                     self.vcs_repo.execute("""
                         UPDATE vcs_working_state
                         SET staged_by_session_id = ?

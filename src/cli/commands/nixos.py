@@ -310,7 +310,13 @@ class NixOSCommand(Command):
             else:
                 # Check if this is a nixos-config project
                 if project['project_type'] == 'nixos-config' and project['repo_url']:
-                    config_path = Path(project['repo_url'])
+                    # Prefer operational checkout over legacy repo_url
+                    # import path — same fix as vcs-status scanner.
+                    from sync.manager import SyncManager
+                    try:
+                        config_path = SyncManager(project_slug).get_checkout_path()
+                    except (ValueError, KeyError):
+                        config_path = Path(project['repo_url'])
                     modules_dir = config_path / 'modules'
                     modules_dir.mkdir(parents=True, exist_ok=True)
                     output_dir = modules_dir

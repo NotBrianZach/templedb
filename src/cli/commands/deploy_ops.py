@@ -508,7 +508,14 @@ class DeployOpsMixin:
 
             print(f"\nInstalling {project_slug} to NixOS config\n")
 
-            project_path = Path(project['repo_url'])
+            # Route through SyncManager so we scan the operational
+            # checkout, not the (possibly stale) legacy repo_url import
+            # path. Same class of bug as the vcs-status scanner had.
+            from sync.manager import SyncManager
+            try:
+                project_path = SyncManager(project_slug).get_checkout_path()
+            except (ValueError, KeyError):
+                project_path = Path(project['repo_url'])
             flake_path = project_path / 'flake.nix'
 
             if not flake_path.exists():

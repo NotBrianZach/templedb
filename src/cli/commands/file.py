@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 """
-File management commands for TempleDB
+File management commands for TempleDB.
 
-These commands read/write directly from the TempleDB database,
-bypassing the FUSE mount. Use these when the FUSE mount is down
-or for programmatic access.
+These commands read/write directly from the TempleDB database.
+Primary write path since FUSE was retired in 2026-08.
+
+  templedb file cat      — read a file's current DB snapshot
+  templedb file set      — write content to DB, mirror to checkout,
+                           record EditIntent (v --verify to fail-loud
+                           on hash mismatch)
+  templedb file edit     — $EDITOR round-trip on the DB blob
+  templedb file checkout — extract a file from DB to disk
+  templedb file rm       — stage deletion
+  templedb file where    — show all mirrors of a file with hashes
+                           (drift diagnosis)
+  templedb file ls       — directory listing from DB
 """
 import sys
 import os
@@ -407,8 +417,9 @@ class FileCommands(Command):
           - DB (via file_contents.is_current)
           - ~/.config/templedb/checkouts/<slug>/<path>       (read-only publish)
           - ~/.config/templedb/edit-workspaces/<slug>/<path> (writable workspace)
-          - ~/temple/<slug>/<path>                            (legacy FUSE)
-          - ~/status/<slug>/<path>                            (legacy status)
+
+        Legacy FUSE mirrors (~/temple/*, ~/status/*) were retired
+        2026-08 alongside the FUSE mount. No longer probed.
 
         Not yet probed (need per-project resolution): nix store paths that
         home-manager symlinks into (e.g. spacemacs layer). Follow-up.
@@ -438,8 +449,6 @@ class FileCommands(Command):
         mirrors = [
             ("checkout ", home / ".config/templedb/checkouts" / slug / path),
             ("edit-work", home / ".config/templedb/edit-workspaces" / slug / path),
-            ("~/temple ", home / "temple" / slug / path),
-            ("~/status ", home / "status" / slug / path),
         ]
 
         # 3. Print header.

@@ -3186,6 +3186,8 @@ WantedBy=timers.target
              self._check_entity_counts_match_sources),
             ('every_entity_has_sync_scope',
              self._check_entities_have_sync_scope),
+            ('machine_local_kinds_never_fleet_scope',
+             self._check_machine_local_scope_boundary),
             ('no_python_import_cycles',
              self._check_no_python_import_cycles),
             ('hygiene_no_untracked_dead_growth',
@@ -3461,6 +3463,36 @@ WantedBy=timers.target
         )
         return [f"{r['kind']}: {r['n']} entities with NULL sync_scope — "
                 f"re-run `templedb ingest all` or bulk-backfill"
+                for r in rows]
+
+    # Kinds that MUST stay machine-local per _SYNC_SCOPES classification.
+    # If any drift to sync_scope='fleet', CRSql (once wired for
+    # entities/relations) would replicate huge per-machine churn
+    # (Symbol re-ingest, tool-call logs, per-host store paths)
+    # pointlessly across the fleet.
+    _MACHINE_LOCAL_ONLY_KINDS = (
+        'Symbol', 'ToolCall', 'AgentSession', 'StorePath', 'Derivation',
+    )
+
+    def _check_machine_local_scope_boundary(self):
+        """Invariant: kinds classified as machine-local in _SYNC_SCOPES
+        never carry sync_scope='fleet'. Guard against accidental
+        reclassification during refactors (would cause CRSql to
+        replicate per-machine churn across the fleet)."""
+        from db_utils import query_all
+        placeholders = ','.join('?' for _ in self._MACHINE_LOCAL_ONLY_KINDS)
+        rows = query_all(
+            f"""SELECT kind, COUNT(*) AS n
+                  FROM entities
+                 WHERE sync_scope = 'fleet'
+                   AND kind IN ({placeholders})
+                 GROUP BY kind
+                 ORDER BY n DESC""",
+            tuple(self._MACHINE_LOCAL_ONLY_KINDS),
+        )
+        return [f"{r['kind']}: {r['n']} entities marked sync_scope='fleet' "
+                f"but this kind is classified machine-local — check "
+                f"_SYNC_SCOPES in entity.py + adapters that emit this kind"
                 for r in rows]
 
     def _check_entity_counts_match_sources(self):

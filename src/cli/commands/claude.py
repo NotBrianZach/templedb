@@ -472,7 +472,7 @@ class ClaudeCommands(Command):
                 "allow": [
                     "Bash(templedb:*)", "Bash(python3:*)", "Bash(nix:*)",
                     "Bash(nix-shell:*)", "Bash(npm:*)", "Bash(ls:*)",
-                    "Bash(fusermount:*)", "Bash(systemctl:*)", "Bash(journalctl:*)",
+                    "Bash(systemctl:*)", "Bash(journalctl:*)",
                     "Bash(gh:*)", "Bash(jq:*)",
                     "Read(//home/**)", "Read(//tmp/**)", "Read(//etc/**)",
                     "Read(//nix/store/**)", "WebSearch",
