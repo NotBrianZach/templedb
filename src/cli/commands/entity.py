@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.16',   # 1.16 same-file assignment tracker
+        'python':  '1.17',   # 1.17 bare method-body decorators
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -487,7 +487,11 @@ WantedBy=timers.target
                 get wrapped in a synthetic Call so the resolver's
                 existing sub.func inspection just works.
 
-                For everything else: walk the entire body.
+                For everything else: walk the entire body. Plus, if
+                this is a ClassDef, also yield its methods'
+                decorator_list — same reason as module scope: bare
+                `@decorator` on class bodies is an ast.Name (not a
+                Call), so `ast.walk` alone would miss it. (1.17)
                 """
                 if enclosing == '__module__':
                     for stmt in def_node.body:
@@ -516,6 +520,22 @@ WantedBy=timers.target
                     for n in ast.walk(def_node):
                         if isinstance(n, ast.Call):
                             yield n
+                    # 1.17: for a class body, also yield bare-Name
+                    # decorators of methods (ast.walk skips them
+                    # because they're Name/Attribute, not Call).
+                    if isinstance(def_node, ast.ClassDef):
+                        for cnode in def_node.body:
+                            if isinstance(cnode, (
+                                ast.FunctionDef, ast.AsyncFunctionDef
+                            )):
+                                for dec in cnode.decorator_list:
+                                    if isinstance(
+                                        dec, (ast.Name, ast.Attribute)
+                                    ):
+                                        yield ast.Call(
+                                            func=dec, args=[],
+                                            keywords=[]
+                                        )
 
             # 1.16 assignment tracker: scan every symbol's body for
             #   var = SomeClass(...)      # simple constructor bind
@@ -862,6 +882,20 @@ WantedBy=timers.target
                 for n in ast.walk(def_node):
                     if isinstance(n, ast.Call):
                         yield n
+                # 1.17: same class-body bare-decorator handling as
+                # the same-file walker.
+                if isinstance(def_node, ast.ClassDef):
+                    for cnode in def_node.body:
+                        if isinstance(cnode, (
+                            ast.FunctionDef, ast.AsyncFunctionDef
+                        )):
+                            for dec in cnode.decorator_list:
+                                if isinstance(
+                                    dec, (ast.Name, ast.Attribute)
+                                ):
+                                    yield ast.Call(
+                                        func=dec, args=[], keywords=[]
+                                    )
 
         def _chase_reexport(t_slug, t_path, t_name, depth=3,
                             intermediates=None):

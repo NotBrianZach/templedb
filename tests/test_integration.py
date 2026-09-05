@@ -137,53 +137,10 @@ class TestMigrationWorkflow:
 
 # ── FUSE Tests ────────────────────────────────────────────────────────────────
 
-class TestFuseOperations:
-    def test_path_parsing(self):
-        try:
-            from temple_fuse import TempleFS
-        except OSError:
-            pytest.skip("libfuse not available")
-
-        fs = TempleFS.__new__(TempleFS)
-        assert fs._parse_path("/") == (None, None)
-        assert fs._parse_path("/proj") == ("proj", None)
-        assert fs._parse_path("/proj/src/main.py") == ("proj", "src/main.py")
-        assert fs._parse_path("/a/b/c/d.txt") == ("a", "b/c/d.txt")
-
-    def test_list_projects(self, populated_env):
-        try:
-            from temple_fuse import TempleFS
-        except OSError:
-            pytest.skip("libfuse not available")
-
-        fs = TempleFS(db_path=populated_env["db_path"])
-        projects = fs._list_projects()
-        slugs = [p["slug"] for p in projects]
-        assert "testproj" in slugs
-
-    def test_read_file(self, populated_env):
-        try:
-            from temple_fuse import TempleFS
-        except OSError:
-            pytest.skip("libfuse not available")
-
-        fs = TempleFS(db_path=populated_env["db_path"])
-        proj = fs._get_project("testproj")
-        content = fs._get_file_content(proj["id"], "README.md")
-        assert content is not None
-        assert b"Test Project" in content
-
-    def test_list_directory(self, populated_env):
-        try:
-            from temple_fuse import TempleFS
-        except OSError:
-            pytest.skip("libfuse not available")
-
-        fs = TempleFS(db_path=populated_env["db_path"])
-        proj = fs._get_project("testproj")
-        entries = fs._list_dir_entries(proj["id"], None)
-        assert "README.md" in entries
-        assert "src" in entries  # directory
+# TestFuseOperations removed 2026-09-05: the temple_fuse module was
+# deleted in 2026-08 (see reports/2026-08-29-post-fuse-editing-ux-*.html).
+# Editing UX moved to `templedb edit <slug>` workspaces. If FUSE ever
+# comes back, the tests are recoverable from git history.
 
 
 # ── Knowledge Graph Tests ─────────────────────────────────────────────────────
@@ -314,15 +271,20 @@ class TestNixCodegen:
 
 
     def test_generate_services(self, temp_env):
-
+        """`generate_services_enable` was folded into `generate_attrs`
+        which handles nixos.attr.* directly (2026-08 refactor)."""
         conn = sqlite3.connect(temp_env["db_path"])
-        conn.execute("DELETE FROM system_config WHERE key LIKE 'nixos.service.%'")
-        conn.execute("INSERT INTO system_config (key, value, updated_at) VALUES ('nixos.service.system.tailscale', 'true', datetime('now'))")
+        conn.execute("DELETE FROM system_config WHERE key LIKE 'nixos.attr.%'")
+        conn.execute(
+            "INSERT INTO system_config (key, value, updated_at) "
+            "VALUES ('nixos.attr.services.tailscale.enable', 'true', "
+            "datetime('now'))"
+        )
         conn.commit()
         conn.close()
 
-        from nix_codegen import generate_services_enable
-        code = generate_services_enable()
+        from nix_codegen import generate_attrs
+        code = generate_attrs()
         assert "services.tailscale.enable = true;" in code
 
 
@@ -364,11 +326,17 @@ class TestNixCodegen:
 # ── Materialize Tests ─────────────────────────────────────────────────────────
 
 class TestMaterialize:
-    def test_materialize_creates_git_repo(self, populated_env):
-
+    def test_materialize_creates_git_repo(self, populated_env, monkeypatch,
+                                          tmp_path):
+        """Materialize into a fresh tmp checkout so the conflict-detect
+        path (which returns None on unexpected on-disk files) doesn't
+        kick in from a real user checkout at the default location."""
         from services.system_service import SystemService
         svc = SystemService()
-        checkout = svc.materialize_from_db("testproj")
+        target = tmp_path / "testproj-checkout"
+        monkeypatch.setattr(svc, "_checkout_dir_for",
+                            lambda slug: target)
+        checkout = svc.materialize_from_db("testproj", force=True)
 
         assert checkout is not None
         assert checkout.exists()
@@ -380,11 +348,14 @@ class TestMaterialize:
         assert "Test Project" in content
 
 
-    def test_materialize_has_git_commit(self, populated_env):
-
+    def test_materialize_has_git_commit(self, populated_env, monkeypatch,
+                                        tmp_path):
         from services.system_service import SystemService
         svc = SystemService()
-        checkout = svc.materialize_from_db("testproj")
+        target = tmp_path / "testproj-checkout"
+        monkeypatch.setattr(svc, "_checkout_dir_for",
+                            lambda slug: target)
+        checkout = svc.materialize_from_db("testproj", force=True)
 
         assert checkout is not None
         result = subprocess.run(
@@ -2000,6 +1971,46 @@ class TestPythonIngest:
         ).fetchone()['n']
         conn.close()
         assert bridge == 1, "re-export __module__ bridge not emitted"
+
+    def test_python_ingest_tracks_class_body_bare_decorators(
+            self, populated_env):
+        """Bare `@some_decorator` on a method inside a class was
+        invisible to the resolver (adapter 1.17 fix). ast.walk yields
+        the Name but the resolver only inspects Call nodes; a
+        parenless decorator IS a Name, not a Call."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/deco_lib.py',
+            "def some_decorator(fn):\n    return fn\n"
+        )
+        self._seed_python_file(
+            populated_env, 'src/deco_class.py',
+            "from deco_lib import some_decorator\n"
+            "\n"
+            "class Foo:\n"
+            "    @some_decorator\n"
+            "    def bar(self):\n"
+            "        return 1\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python',
+                                                   limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e2.external_ref='testproj:src/deco_lib.py:some_decorator'
+                  AND r.kind='calls'
+                  AND e1.external_ref IN (
+                      'testproj:src/deco_class.py:Foo',
+                      'testproj:src/deco_class.py:Foo.bar')"""
+        ).fetchone()['n']
+        conn.close()
+        assert row >= 1, \
+            "class-body bare @some_decorator should emit a calls edge"
 
     def test_python_ingest_resolves_assigned_instance_call(
             self, populated_env):
