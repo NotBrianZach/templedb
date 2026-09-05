@@ -452,7 +452,7 @@ def root():
     except Exception:
         pass
     if not fuse_mounted:
-        alerts.append("FUSE mount is down ({FUSE_MOUNT_PATH})")
+        alerts.append(f"FUSE mount is down ({FUSE_MOUNT_PATH})")
 
     alerts_html = ""
     if alerts:
@@ -487,7 +487,7 @@ Not scattered across <code>.git/</code>, <code>.env</code>, CI YAML, and a dozen
 One artifact. One truth.
 </p>
 <p style="margin-bottom:0.6rem">
-The FUSE mount at <code>{FUSE_MOUNT_PATH}/</code> projects the database back into the
+The DB is the reality, projected back to the filesystem on demand.
 filesystem so legacy tools still work, but the filesystem is the shadow on the
 cave wall &mdash; the database is the reality. Writes through the mount go
 straight to SQLite with ACID guarantees. Version control is native:

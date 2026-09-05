@@ -32,14 +32,6 @@ import sys
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from services.impact_analysis_service import (
-    analyze_symbol_impact,
-    precompute_impact_for_project
-)
-from services.community_detection_service import (
-    detect_communities_for_project,
-    get_clusters_for_project
-)
 from services.code_search_service import (
     index_project_for_search,
     search_code
