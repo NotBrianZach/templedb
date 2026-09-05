@@ -97,7 +97,7 @@
             makeWrapper ${pythonEnv}/bin/python3 "$out/bin/templedb" \
               --add-flags "$SITE/_launcher.py" \
               --set PYTHONPATH "$SITE" \
-              --prefix PATH : "${pkgs.swi-prolog}/bin"
+              --prefix PATH : "${pkgs.swi-prolog}/bin:${pkgs.callPackage ./nix/scip-typescript.nix {}}/bin:${pkgs.scip}/bin"
 
             ln -s "$out/bin/templedb" "$out/bin/tdb"
 
@@ -330,6 +330,10 @@
         packages = {
           templedb = mkPackage pkgs;
           default = mkPackage pkgs;
+          # Exposed so `nix build .#scip-typescript` can be used to
+          # re-derive hashes if the pin ever bumps. Also used by the
+          # templedb wrapper's PATH prefix above.
+          scip-typescript = pkgs.callPackage ./nix/scip-typescript.nix {};
         };
 
         devShells.default = pkgs.mkShell {
@@ -342,6 +346,11 @@
             git
             just
             google-cloud-sdk
+            # SCIP toolchain for `templedb ingest scip` when running
+            # in dev mode (TEMPLEDB_DEV_MODE=1 bypasses the nix
+            # wrapper's PATH prefix).
+            scip
+            (pkgs.callPackage ./nix/scip-typescript.nix {})
 
             # Python env with all templedb dependencies
             (python3.withPackages (ps: with ps; [

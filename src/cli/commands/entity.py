@@ -77,6 +77,10 @@ class EntityCommands(Command):
         'python':  '1.17',   # 1.17 bare method-body decorators
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
+        'scip':    '1.0',    # 1.0 File→defines→Symbol only, one
+                             # language per invocation via --project.
+                             # No calls/uses/inherits yet — occurrences
+                             # walk lands in 1.1.
     }
 
     # ==== INGEST ==============================================================
@@ -99,6 +103,7 @@ class EntityCommands(Command):
             'nix':    self._ingest_nix,
             'deploy': self._ingest_deploy,
             'python': self._ingest_python,
+            'scip':   self._ingest_scip,
             'all':    self._ingest_all,
         }
         adapter = adapters.get(args.source)
@@ -1319,6 +1324,251 @@ WantedBy=timers.target
         prune_suffix = f", {pruned} pruned" if pruned else ""
         print(f"✓ ingest python: +{added_e} symbols, +{added_r} relations, "
               f"{skipped} unparseable{prune_suffix}")
+        self._last_counts = {'e': added_e, 'r': added_r, 'x': skipped}
+        return 0
+
+    def _ingest_scip(self, args) -> int:
+        """Ingest a SCIP index (Sourcegraph Source Code Index Protocol)
+        into the entity graph. First non-Python source authority — bridges
+        the code-intelligence surface to TypeScript, and via other SCIP
+        emitters (scip-go, scip-java, ...) to any language with an indexer.
+
+        v1.0 thin slice: File → defines → Symbol only. Occurrence-based
+        edges (calls/uses/inherits) require walking `symbolRoles` on each
+        Occurrence and land in v1.1. That's why the dead-imports doctor
+        will over-flag TS imports as unused for now — expected.
+
+        Requires:
+            --project SLUG        templedb project to index
+
+        Optional:
+            --subdir PATH         index only this subdir (relative to
+                                  project root). Needed when a monorepo
+                                  has multiple package.json roots and
+                                  scip-typescript must run inside one.
+            --scip-index PATH     use an existing index.scip file and
+                                  skip running scip-typescript. Debug
+                                  and re-ingest scenarios.
+
+        Preconditions (adapter does NOT install these):
+            - `scip-typescript` and `scip` binaries on PATH
+              (packaged in system_config; see docs/SCIP_INGEST_DESIGN.md
+              once written).
+            - Project checkout at ~/.config/templedb/checkouts/<slug>/
+              (`templedb project checkout <slug>` populates it).
+            - node_modules present in the subdir being indexed —
+              scip-typescript needs it. Run `pnpm install` (or npm)
+              first. Adapter does not do this because the right
+              command varies per project.
+
+        Prunes File→defines→Symbol edges with source_authority='scip-
+        typescript' for processed files whose tuples weren't touched
+        this run — mirrors the python adapter's post-pass. Scope-safe:
+        only touches SCIP-authored rows, never python's.
+
+        Does NOT re-upsert File entities (git ingest owns them). Files
+        emitted by scip-typescript but not tracked by templedb (e.g.
+        generated .d.ts stubs, node_modules leaks) are counted as
+        skipped and ignored.
+        """
+        import hashlib
+        import json
+        import subprocess
+        from pathlib import Path
+        from db_utils import query_all, execute
+
+        slug = getattr(args, 'project', None)
+        if not slug:
+            logger.error(
+                "ingest scip requires --project SLUG "
+                "(e.g. templedb ingest scip --project bza --subdir frontend)"
+            )
+            return 1
+        subdir = getattr(args, 'subdir', None) or None
+        existing_index = getattr(args, 'scip_index', None)
+        authority = 'scip-typescript'
+
+        added_e = added_r = skipped = pruned = 0
+        touched_relations = set()  # (from_id, kind, to_id)
+        processed_file_ids = set()
+
+        # --- 1. Locate the checkout the indexer will run against.
+        checkout_dir = Path.home() / '.config' / 'templedb' / 'checkouts' / slug
+        if not checkout_dir.exists():
+            logger.error(
+                f"No checkout at {checkout_dir}. "
+                f"Run: templedb project checkout {slug} {checkout_dir.parent}"
+            )
+            return 1
+        index_root = checkout_dir / subdir if subdir else checkout_dir
+        if not index_root.exists():
+            logger.error(f"Subdir does not exist: {index_root}")
+            return 1
+
+        # --- 2. Run scip-typescript unless the caller passed an index.
+        if existing_index:
+            scip_path = Path(existing_index).expanduser().resolve()
+            if not scip_path.exists():
+                logger.error(f"--scip-index does not exist: {scip_path}")
+                return 1
+        else:
+            scip_path = index_root / 'index.scip'
+            try:
+                subprocess.run(
+                    ['scip-typescript', 'index', '--cwd', str(index_root)],
+                    check=True, capture_output=True, text=True,
+                )
+            except FileNotFoundError:
+                logger.error(
+                    "scip-typescript not on PATH. Package it in "
+                    "system_config (see docs/SCIP_INGEST_DESIGN.md), "
+                    "or pass --scip-index PATH to skip re-indexing."
+                )
+                return 1
+            except subprocess.CalledProcessError as e:
+                logger.error(
+                    f"scip-typescript failed (exit {e.returncode}). "
+                    f"stderr: {e.stderr[:2000]}"
+                )
+                return 1
+            if not scip_path.exists():
+                logger.error(
+                    f"scip-typescript succeeded but no index.scip at "
+                    f"{scip_path}. Check indexer output."
+                )
+                return 1
+
+        # --- 3. Convert the binary proto to JSON via the `scip` reader.
+        try:
+            result = subprocess.run(
+                ['scip', 'print', '--json', str(scip_path)],
+                check=True, capture_output=True, text=True,
+            )
+        except FileNotFoundError:
+            logger.error(
+                "`scip` CLI not on PATH. Install `scip` from nixpkgs."
+            )
+            return 1
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                f"scip print failed (exit {e.returncode}). "
+                f"stderr: {e.stderr[:2000]}"
+            )
+            return 1
+
+        try:
+            index = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.error(f"`scip print --json` output not JSON: {e}")
+            return 1
+
+        # --- 4. Walk documents. Emit File→defines→Symbol only.
+        # SCIP JSON shape (from scip.proto, snake_case via `scip print --json`):
+        #   Index.documents[*].{ relative_path, symbols[], occurrences[] }
+        #   SymbolInformation.{ symbol, display_name, kind, ... }
+        # `relative_path` is relative to the indexer's cwd (index_root above),
+        # so we prepend subdir to reach the project-relative path used by
+        # File.external_ref = "{slug}/{project_relative}".
+        subdir_prefix = f"{subdir.rstrip('/')}/" if subdir else ""
+        # Per-file collision counter for shared display_names (e.g. overloads).
+        for doc in index.get('documents', []):
+            rel_path = doc.get('relative_path')
+            if not rel_path:
+                skipped += 1
+                continue
+            project_relative = f"{subdir_prefix}{rel_path}"
+            file_ref = f"{slug}/{project_relative}"
+            file_id = self._entity_id('File', file_ref)
+            if not file_id:
+                # File exists in the checkout but templedb doesn't track
+                # it — .d.ts stubs, ignored dirs, or files added after
+                # the last `templedb sync`. Silent skip is fine here.
+                skipped += 1
+                continue
+            processed_file_ids.add(file_id)
+
+            # __module__ synthetic — same convention as python ingest.
+            # Gives the dead-imports doctor a file-level bridge target
+            # (once v1.1 emits uses/calls edges).
+            module_eref = f"{slug}:{project_relative}:__module__"
+            if self._upsert_entity(
+                'Symbol', module_eref, authority, label='module scope'
+            ):
+                added_e += 1
+            module_sym_id = self._entity_id('Symbol', module_eref)
+            if module_sym_id:
+                if self._upsert_relation(
+                    file_id, 'defines', module_sym_id, authority
+                ):
+                    added_r += 1
+                touched_relations.add(
+                    (file_id, 'defines', module_sym_id)
+                )
+
+            seen_erefs_this_file = set()
+            for sym in doc.get('symbols', []):
+                scip_sym = sym.get('symbol')
+                if not scip_sym:
+                    continue
+                display = sym.get('display_name') or scip_sym.rsplit('/', 1)[-1]
+                eref = f"{slug}:{project_relative}:{display}"
+                # Overloaded names in the same file collide on displayName.
+                # Disambiguate with a stable 8-char hash of the SCIP
+                # symbol string. Keeps the primary eref clean while making
+                # collisions distinguishable and idempotent.
+                if eref in seen_erefs_this_file:
+                    h = hashlib.sha1(scip_sym.encode()).hexdigest()[:8]
+                    eref = f"{slug}:{project_relative}:{display}#{h}"
+                seen_erefs_this_file.add(eref)
+
+                label = f"scip {display}"
+                if self._upsert_entity(
+                    'Symbol', eref, authority, label=label
+                ):
+                    added_e += 1
+                sym_id = self._entity_id('Symbol', eref)
+                if sym_id:
+                    if self._upsert_relation(
+                        file_id, 'defines', sym_id, authority
+                    ):
+                        added_r += 1
+                    touched_relations.add((file_id, 'defines', sym_id))
+
+        # --- 5. Prune stale scip-authority `defines` edges. Scoped
+        # to source_authority='scip-typescript' — will not touch
+        # python-authored edges on shared File entities.
+        if processed_file_ids:
+            file_id_list = list(processed_file_ids)
+            for i in range(0, len(file_id_list), 500):
+                batch = file_id_list[i:i+500]
+                placeholders = ','.join('?' for _ in batch)
+                cur_relations = query_all(
+                    f"""SELECT r.id, r.from_entity_id, r.kind,
+                              r.to_entity_id
+                         FROM relations r
+                        WHERE r.from_entity_id IN ({placeholders})
+                          AND r.kind = 'defines'
+                          AND r.source_authority = ?""",
+                    tuple(batch) + (authority,),
+                )
+                for r_row in cur_relations:
+                    tup = (
+                        r_row['from_entity_id'],
+                        r_row['kind'],
+                        r_row['to_entity_id'],
+                    )
+                    if tup not in touched_relations:
+                        execute(
+                            "DELETE FROM relations WHERE id = ?",
+                            (r_row['id'],),
+                        )
+                        pruned += 1
+
+        prune_suffix = f", {pruned} pruned" if pruned else ""
+        print(
+            f"✓ ingest scip: +{added_e} symbols, +{added_r} relations, "
+            f"{skipped} untracked{prune_suffix}"
+        )
         self._last_counts = {'e': added_e, 'r': added_r, 'x': skipped}
         return 0
 
@@ -3276,7 +3526,7 @@ def register(cli):
     ingest_parser.add_argument(
         'source',
         choices=['git', 'agent', 'intent', 'reports', 'nix', 'deploy',
-                 'python', 'all', 'history', 'schedule'],
+                 'python', 'scip', 'all', 'history', 'schedule'],
         help="Which ingestion adapter to run, or 'history'/'schedule' "
              "for meta-commands",
     )
@@ -3294,6 +3544,22 @@ def register(cli):
         '--interval',
         help="For schedule install: systemd OnCalendar spec "
              "(default: 'hourly')",
+    )
+    # SCIP-only args (thin slice v1.0). Harmless when unused.
+    ingest_parser.add_argument(
+        '--project',
+        help="For scip: templedb project slug to index (required).",
+    )
+    ingest_parser.add_argument(
+        '--subdir',
+        help="For scip: index only this subdir (relative to project "
+             "root). Needed for monorepos where scip-typescript is "
+             "invoked in a single package.",
+    )
+    ingest_parser.add_argument(
+        '--scip-index',
+        help="For scip: use an existing index.scip file instead of "
+             "re-running scip-typescript. Debug/reuse.",
     )
 
     def _ingest_dispatch(args):

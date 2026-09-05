@@ -61,15 +61,30 @@ class VCSCommands(Command):
         return "unknown"
 
     def _refresh_working_state(self, project: dict):
-        """Refresh VCS working state by detecting changes"""
-        from importer import WorkingStateDetector
+        """Refresh VCS working state by detecting changes.
 
-        repo_url = project.get('repo_url')
-        if not repo_url:
-            print("   Error: Project path not set", file=sys.stderr)
+        Scans the operational checkout dir (via SyncManager), NOT the
+        legacy `project.repo_url` — those diverge for any project that
+        was imported from one path but has since been re-materialized
+        to ~/.config/templedb/checkouts/<slug>/. Scanning the stale
+        repo_url produces false-positive 'modified' rows for every
+        file whose old-clone content differs from the current DB blob.
+        """
+        from importer import WorkingStateDetector
+        from sync import SyncManager
+
+        try:
+            workspace = SyncManager(project['slug']).get_checkout_path()
+        except ValueError as e:
+            print(f"   Error: {e}", file=sys.stderr)
             return
 
-        detector = WorkingStateDetector(project['slug'], repo_url)
+        if not workspace.exists():
+            print(f"   Error: checkout path does not exist: {workspace}",
+                  file=sys.stderr)
+            return
+
+        detector = WorkingStateDetector(project['slug'], str(workspace))
         detector.detect_changes()
 
     def add(self, args) -> int:
@@ -1766,29 +1781,6 @@ class VCSCommands(Command):
             print("\nNo staged files.")
         return 0
 
-    def session_gc(self, args) -> int:
-        """End active-but-idle sessions that never wrote anything.
-
-        Complements `session prune` (which deletes ENDED sessions
-        older than N days). This one CLOSES active sessions that
-        have been dormant.
-        """
-        hours = int(getattr(args, 'older_than_hours', 24))
-        dry_run = bool(getattr(args, 'dry_run', False))
-        result = self.service.gc_stale_sessions(
-            older_than_hours=hours, dry_run=dry_run)
-        ended = result['ended']
-        if not ended:
-            print(f"No active sessions idle > {hours}h with no "
-                  f"staged rows.")
-            return 0
-        verb = "Would end" if dry_run else "Ended"
-        print(f"{verb} {len(ended)} idle session(s):")
-        for s in ended:
-            print(f"  #{s['id']:<5} {(s.get('name') or 'unnamed'):<40} "
-                  f"started {s['started_at']}")
-        return 0
-
     def session_prune(self, args) -> int:
         days = getattr(args, 'older_than', None)
         if days is None:
@@ -1890,16 +1882,6 @@ def register(cli):
     ss_show = session_sub.add_parser('show', help='Show details of a session and its staged files')
     ss_show.add_argument('id', help='Session ID to show')
     cli.commands['vcs.session.show'] = cmd.session_show
-
-    ss_gc = session_sub.add_parser(
-        'gc',
-        help='End active-but-idle sessions that never wrote anything '
-             '(agents fanning out spawn one session per subshell)')
-    ss_gc.add_argument('--older-than-hours', type=int, default=24,
-                       help='Age threshold in hours (default: 24)')
-    ss_gc.add_argument('--dry-run', action='store_true',
-                       help='Show what would be ended without acting')
-    cli.commands['vcs.session.gc'] = cmd.session_gc
 
     ss_prune = session_sub.add_parser('prune', help='Delete old ended sessions with no lingering staged rows')
     ss_prune.add_argument('--older-than', type=int, default=30,
