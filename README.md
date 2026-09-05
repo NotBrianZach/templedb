@@ -611,3 +611,4 @@ New design work? Scaffold a report first: `templedb reports new "Your title"`. R
 ---
 
 *In honor of Terry Davis.*
+// added by commit-fix test

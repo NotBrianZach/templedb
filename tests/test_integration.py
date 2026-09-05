@@ -2001,6 +2001,37 @@ class TestPythonIngest:
         conn.close()
         assert bridge == 1, "re-export __module__ bridge not emitted"
 
+    def test_python_ingest_resolves_assigned_instance_call(
+            self, populated_env):
+        """`svc = SomeClass(); svc.method()` should resolve
+        svc.method to SomeClass.method (adapter 1.16)."""
+        import argparse
+        from cli.commands.entity import EntityCommands
+        self._seed_python_file(
+            populated_env, 'src/asgn.py',
+            "class Widget:\n"
+            "    def go(self):\n        return 1\n"
+            "\n"
+            "def run():\n"
+            "    w = Widget()\n"
+            "    return w.go()\n"
+        )
+        EntityCommands().ingest(argparse.Namespace(source='git', limit=20))
+        EntityCommands().ingest(argparse.Namespace(source='python',
+                                                   limit=20))
+        conn = sqlite3.connect(populated_env["db_path"])
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM relations r
+                 JOIN entities e1 ON e1.id=r.from_entity_id
+                 JOIN entities e2 ON e2.id=r.to_entity_id
+                WHERE e1.external_ref='testproj:src/asgn.py:run'
+                  AND e2.external_ref='testproj:src/asgn.py:Widget.go'
+                  AND r.kind='calls'"""
+        ).fetchone()['n']
+        conn.close()
+        assert row == 1, "assigned-instance call not resolved"
+
     def test_python_ingest_tracks_bare_name_references(
             self, populated_env):
         """`from db_utils import DB_PATH` where DB_PATH is a module-

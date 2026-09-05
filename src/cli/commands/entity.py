@@ -74,7 +74,7 @@ class EntityCommands(Command):
         'reports': '1.0',
         'nix':     '1.2',    # 1.2 emits Machine + Generation + spans
         'deploy':  '1.0',
-        'python':  '1.15',   # 1.15 shortest-match for ambiguous imports
+        'python':  '1.16',   # 1.16 same-file assignment tracker
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
     }
@@ -517,12 +517,43 @@ WantedBy=timers.target
                         if isinstance(n, ast.Call):
                             yield n
 
+            # 1.16 assignment tracker: scan every symbol's body for
+            #   var = SomeClass(...)      # simple constructor bind
+            # and remember `var → SomeClass`. Enables resolving
+            # `svc.method()` where `svc = SomeClass()` earlier in
+            # scope. Same-file only; only same-file classes tracked.
+            # Two scopes: per-symbol locals AND module-scope globals
+            # (visible to all symbols in this file).
+            def _scan_assignments(scope_node):
+                """Return {var_name: class_name} for `x = ClassName(...)`
+                assignments within scope_node's direct statements."""
+                m = {}
+                body = (scope_node.body
+                        if isinstance(scope_node, (
+                            ast.Module, ast.FunctionDef,
+                            ast.AsyncFunctionDef, ast.ClassDef))
+                        else [])
+                for stmt in body:
+                    if isinstance(stmt, ast.Assign) \
+                            and isinstance(stmt.value, ast.Call) \
+                            and isinstance(stmt.value.func, ast.Name):
+                        cls_name = stmt.value.func.id
+                        for tgt in stmt.targets:
+                            if isinstance(tgt, ast.Name):
+                                m[tgt.id] = cls_name
+                return m
+
+            module_assigns = _scan_assignments(tree)
+
             # Second pass: for each locally-defined symbol, walk its
             # body for Call nodes and emit Symbol → calls → Symbol
             # for same-file matches. Attribute access is resolved for
             # self.foo() and Class.foo().
             for name, (sym_id, eref, def_node, enclosing) in \
                     local_defs.items():
+                local_assigns = dict(module_assigns)
+                if enclosing != '__module__':
+                    local_assigns.update(_scan_assignments(def_node))
                 for sub in _iter_call_scope(def_node, enclosing):
                     called = None
                     if isinstance(sub.func, ast.Name):
@@ -541,6 +572,12 @@ WantedBy=timers.target
                                 # Class.method or foo.attr where foo is
                                 # a local def (rare but honest)
                                 called = f"{root}.{attr}"
+                            elif root in local_assigns:
+                                # 1.16: svc = SomeClass(); svc.method()
+                                # → SomeClass.method (same-file only)
+                                cls = local_assigns[root]
+                                if cls in local_defs:
+                                    called = f"{cls}.{attr}"
                         # Deeper chains (a.b.c.foo) deferred.
                     if called and called in local_defs and called != name:
                         target_sym_id = local_defs[called][0]
