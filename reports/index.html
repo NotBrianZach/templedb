@@ -64,6 +64,16 @@
   </div>
 </a>
 
+<a class="report" href="2026-09-05-1827-session-recap-10-natural-key-pks-fix-collision.html">
+  <div class="row">
+    <span class="date">2026-09-05 18:27</span>
+    <span class="title">Session recap 10: natural-key PKs fix the shadow.id collision</span>
+  </div>
+  <div class="summary">
+    Follow-up to recap 9. Landed migration 102 which drops the surrogate INTEGER PRIMARY KEY on sync_entities and sync_relations in favor of composite natural-key PKs. The two-instance convergence test that failed in recap 9 (with colliding autoincrement IDs on both sites) now converges cleanly. Committed as 81625C44, applied to prod.
+  </div>
+</a>
+
 <a class="report" href="2026-09-05-1808-session-recap-9-crsql-shadows-for-entity-graph.html">
   <div class="row">
     <span class="date">2026-09-05 18:08</span>

@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 10: natural-key PKs fix the shadow.id collision</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --warn: #e0c060; --neg: #e97070;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+             font-size: 0.93em; }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.neg { border-left-color: var(--neg); }
+  .callout .label { display: block; font-size: 0.7rem;
+                    text-transform: uppercase; letter-spacing: 0.1em;
+                    margin-bottom: 0.3rem; color: var(--accent); }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  .callout.neg .label { color: var(--neg); }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<h1>Session recap 10: natural-key PKs fix the shadow.id collision</h1>
+<p class="lede">
+  Follow-up to recap 9. Landed migration 102 which drops the surrogate
+  <code>INTEGER PRIMARY KEY</code> on <code>sync_entities</code> and
+  <code>sync_relations</code> in favor of composite natural-key PKs.
+  The two-instance convergence test that failed in recap 9 (with
+  colliding autoincrement IDs on both sites) now converges cleanly.
+  Committed as <code>81625C44</code>, applied to prod.
+</p>
+
+<h2>What changed</h2>
+
+<h3>Migration 102</h3>
+<p>
+  Drops the mig-101 shadows + their triggers + any CRSql companion
+  tables (in case <code>sync init</code> had been run). Recreates
+  the shadows with:
+</p>
+<pre>sync_entities   PRIMARY KEY (kind, external_ref)
+sync_relations  PRIMARY KEY (from_kind, from_external_ref,
+                              kind,
+                              to_kind, to_external_ref)</pre>
+<p>
+  Both tables marked <code>WITHOUT ROWID</code> since the composite
+  PK already provides identity and skipping the rowid removes a
+  redundant b-tree.
+</p>
+
+<h3>Rewritten write-through triggers</h3>
+<p>
+  The entities triggers are straightforward — <code>NEW.kind</code>
+  and <code>NEW.external_ref</code> are directly available. Relations
+  triggers need a JOIN because relations carry surrogate endpoint IDs;
+  the trigger looks up both endpoints via
+  <code>SELECT ef.kind, ef.external_ref, ... FROM entities ef,
+  entities et WHERE ef.id = NEW.from_entity_id AND et.id =
+  NEW.to_entity_id</code>. The SELECT returns 0 rows if either
+  endpoint is missing, non-fleet, or has a NULL <code>external_ref</code>,
+  so the INSERT is a no-op in those cases.
+</p>
+<p>
+  The <code>entities_sync_del</code> trigger now also cleans
+  <code>sync_relations</code> where either endpoint matches the
+  deleted entity's natural key. This handles FK cascade: when an
+  entity is deleted, SQLite fires the child (relations) DELETE
+  trigger before it can look up the parent's natural key through
+  the now-orphaned surrogate id. The parent-side trigger does the
+  cleanup while <code>OLD.kind</code> / <code>OLD.external_ref</code>
+  are still available.
+</p>
+
+<h3>Reconcile simplified</h3>
+<p>
+  Both sides now key on natural keys, so <code>reconcile_to_main</code>
+  no longer needs any ID translation. Entities: straight upsert on
+  <code>(kind, external_ref)</code>. Relations: JOIN local entities
+  by natural key to get local surrogate IDs, then upsert on
+  <code>(from_entity_id, kind, to_entity_id)</code>.
+</p>
+
+<h3>SQLite gotcha found the hard way</h3>
+<div class="callout warn">
+  <span class="label">SQLite 3.35+ upsert-with-SELECT</span>
+  <p>
+    <code>INSERT INTO t SELECT ... FROM x ON CONFLICT ...</code>
+    parses ambiguously — is <code>ON</code> the start of a JOIN or of
+    <code>ON CONFLICT</code>? SQLite requires <code>WHERE true</code>
+    between the SELECT and the ON CONFLICT to disambiguate. Even when
+    the SELECT has no JOIN. Documented in
+    <a href="https://www.sqlite.org/lang_upsert.html">the SQLite docs</a>
+    but easy to miss. Cost about 5 minutes and a confused
+    <em>near "DO": syntax error</em>.
+  </p>
+</div>
+
+<h2>Validation</h2>
+
+<h3>Convergence with colliding IDs</h3>
+<p>
+  The exact test that failed in recap 9. Two scratch DBs
+  (<code>/tmp/scratch.sqlite</code>, <code>/tmp/scratch2.sqlite</code>),
+  each initialized to a distinct <code>crsql_site_id</code>, each
+  performs one <code>INSERT INTO entities</code> with no explicit
+  id. Both SQLite instances independently allocate ROWID
+  <code>30460</code>.
+</p>
+<pre>Before mig 102:
+  A: [('conv-A', 'from-A'), ('conv-B', 'from-B')]
+  B: [('conv-B', 'from-B')]                        &lt;-- conv-A lost
+
+After mig 102:
+  A: [('conv-A', 'from-A'), ('conv-B', 'from-B')]
+  B: [('conv-A', 'from-A'), ('conv-B', 'from-B')]  &lt;-- converged</pre>
+<p>
+  Same test, same collision, different outcome. Natural PKs
+  disambiguate the shadow rows entirely from the surrogate ID space.
+</p>
+
+<h3>Also verified</h3>
+<ul>
+  <li>
+    <strong>Idempotent reconcile.</strong> Running
+    <code>reconcile_to_main()</code> twice on the same scratch
+    produces zero drift (entity count delta = 0).
+  </li>
+  <li>
+    <strong>Relation sync across peers.</strong> A creates a
+    relation between an existing Machine and its new
+    <code>conv-A</code> entity; ships to B; B's reconcile projects
+    it into main with locally-correct endpoint IDs. Shadow carries
+    endpoint natural keys, so no ID translation table is needed.
+  </li>
+  <li>
+    <strong>Shadow-side delete propagation.</strong> Delete an
+    entity on A, sync to B — B's <code>sync_entities</code> row
+    disappears. Confirmed via row count.
+  </li>
+</ul>
+
+<h2>Known limitation: main-side delete propagation</h2>
+
+<p>
+  Deletes reach the peer's shadow correctly (via CRSql tombstones)
+  but <code>reconcile_to_main</code> is INSERT+UPDATE only, so the
+  peer's main <code>entities</code> row doesn't get deleted. Adds
+  and updates converge fine; deletes don't fully propagate.
+</p>
+<p>
+  A DELETE-what's-missing reconcile pass would fix this, but it needs
+  a first-populated guard — otherwise an empty shadow on a fresh
+  peer (before its own <code>sync init</code> populates) would delete
+  every fleet entity in main. Deferred as a follow-up task; fleet
+  kinds (File, Commit, Deployment, Generation) are append-only in
+  practice, so this is low urgency.
+</p>
+
+<h2>Prod state after this session</h2>
+
+<ul>
+  <li>Migration 101 applied (recap 9)</li>
+  <li>Migration 102 applied (this session)</li>
+  <li>Snapshots at <code>/tmp/templedb-preflight-mig10{1,2}-2026-09-05.sqlite</code></li>
+  <li>Both shadows exist with natural-key PKs, all 7 triggers wired</li>
+  <li>Shadow row counts: <strong>0</strong> (pre-init)</li>
+  <li>Main table counts unchanged: 30,459 entities, 40,727 relations</li>
+  <li><code>templedb sync init</code> not yet run on prod &mdash;
+      semi-persistent, held until zMothership3 is provisioned</li>
+</ul>
+
+<h2>Metacognition</h2>
+
+<p>
+  <strong>What worked:</strong> reading the failure mode from recap 9
+  literally — "shadow.id collides on concurrent inserts" points
+  directly at using a non-surrogate PK. Two of the three options
+  in recap 9 were workarounds; option 3 (natural keys) removed the
+  problem class entirely rather than working around it. Testing
+  the exact same test that failed before, without changing the
+  test itself, is the cleanest way to prove the fix — no risk of
+  "test rot" hiding a regression under different scenarios.
+</p>
+<p>
+  <strong>What I should watch for next time:</strong> I initially
+  reached for <code>INSERT OR REPLACE</code> in the write-through
+  triggers, which caused the earlier UNIQUE-on-id failure that
+  drove me toward <code>ON CONFLICT DO UPDATE</code> in recap 9.
+  With natural PKs I could have simplified further and used
+  <code>INSERT OR REPLACE</code> again (the CRR concerns were
+  specific to the surrogate ID shape), but by then the pattern
+  was ingrained and I didn't reconsider. Not a bug, just a small
+  local cleanup opportunity I could have taken.
+</p>
+<p>
+  <strong>Also worth noting:</strong> the <code>WHERE true</code>
+  syntax requirement for upsert-with-SELECT was a solid 5-min
+  detour that I would not have found without reading the SQLite
+  docs. Old assumption "if it parses on VALUES it parses on
+  SELECT" was wrong. Pattern for future: any UPSERT bug on a
+  SELECT source, check the docs first.
+</p>
+
+</body>
+</html>

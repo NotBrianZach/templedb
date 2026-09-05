@@ -8,30 +8,42 @@ Read whichever section matches what you're picking up. The "where
 things stand" line at the top of each is the current-state check —
 verify it hasn't moved before assuming.
 
-## 1. CRSql for entities/relations (Q5 remainder) — MOSTLY LANDED 2026-09-05
+## 1. CRSql for entities/relations (Q5 remainder) — DONE 2026-09-05
 
-**Migration 101 + write-through triggers + reconcile + orphan-CLI fix
-landed in commit `2F54B2E7`.** Session recap at
-`reports/2026-09-05-1808-session-recap-9-crsql-shadows-for-entity-graph.html`.
-Not yet applied to production DB.
+**Both migrations applied to prod, plus the collision fix.**
 
-What's left before this rock is fully finished:
+- `2F54B2E7` — mig 101 + write-through triggers + reconcile + orphan-CLI wire
+- `81625C44` — mig 102 natural-key PKs (fixes shadow.id collision)
 
-- **Apply migration 101 to prod DB.** Safe on its own (only adds
-  tables + triggers, no mutation of existing rows), but conditional
-  on the design gap below.
-- **`shadow.id` collision on concurrent inserts across sites.**
-  Two DBs' SQLite ROWID counters advance independently, so two
-  machines making concurrent entity inserts both get the same
-  shadow `id` → CRSql LWW silently drops one on sync. Blocks safe
-  fleetwide `sync do-sync`. Three options in the recap
-  (site-prefixed IDs, UUID column, or natural-key PKs).
-  Recommended: natural-key PKs on shadows.
-- **`relations.sync_scope` back-fill / adapter population.** Column
-  exists (mig 099) but no ingest adapter writes to it. Current
-  shadow population derives scope from endpoints via JOIN; would be
-  simpler if adapters set it directly. Doctor invariant for
-  "every relation has non-NULL sync_scope" is a good follow-up.
+Migrations 101 and 102 both applied to production DB. Snapshots at
+`/tmp/templedb-preflight-mig101-2026-09-05.sqlite` and
+`/tmp/templedb-preflight-mig102-2026-09-05.sqlite`. Shadow tables
+present, empty (pre-init).
+
+Session recaps:
+- `reports/2026-09-05-1808-session-recap-9-crsql-shadows-for-entity-graph.html`
+- `reports/2026-09-05-1830-session-recap-10-natural-key-pks-fix-collision.html`
+  (upcoming)
+
+What's left before multi-host sync can be enabled fleetwide:
+
+- **Run `templedb sync init` on prod.** Marks the shadows as CRRs
+  and populates them from `entities`/`relations`. Semi-persistent
+  (CRR machinery is hard to fully unwind), so hold until zMothership3
+  is provisioned and multi-host sync is imminent.
+- **Entity delete propagation to main.** CRSql-propagated deletes
+  land in the peer's shadow but `reconcile_to_main` is INSERT+UPDATE
+  only — deletes don't reach main. Adds/updates converge fine.
+  Fleet kinds (File, Commit, Deployment, Generation) are append-only
+  in practice, so low urgency. A DELETE-what's-missing reconcile
+  pass would fix it but needs a first-populated guard (empty shadow
+  on a fresh peer would otherwise wipe fleet).
+- **`relations.sync_scope` adapter population.** Column exists (mig
+  099) but no ingest adapter writes to it. Current shadow trigger
+  derives fleet-ness from endpoints via JOIN; adapter population
+  would let the trigger use a direct scope check instead of the
+  subquery. Doctor invariant "every relation has non-NULL sync_scope"
+  is a good gating follow-up.
 - **Doctor invariant: no orphan CLI modules.** `templedb sync` was
   orphaned (register() defined but never called) — same shape as
   the `templedb ast` and `templedb nix` orphans. A doctor check
