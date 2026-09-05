@@ -15,22 +15,28 @@ verify it hasn't moved before assuming.
 - `2F54B2E7` — mig 101 + write-through triggers + reconcile + orphan-CLI wire
 - `81625C44` — mig 102 natural-key PKs (fixes shadow.id collision)
 
-Migrations 101 and 102 both applied to production DB. Snapshots at
-`/tmp/templedb-preflight-mig101-2026-09-05.sqlite` and
-`/tmp/templedb-preflight-mig102-2026-09-05.sqlite`. Shadow tables
-present, empty (pre-init).
+Migrations 101 and 102 both applied to production DB, and
+`templedb sync init` has run. Snapshots at
+`/tmp/templedb-preflight-mig10{1,2}-2026-09-05.sqlite`. Shadows
+populated: 3,042 fleet entities + 3,209 fleet relations, matching
+`entities`/`relations` fleet-scope counts exactly.
 
 Session recaps:
 - `reports/2026-09-05-1808-session-recap-9-crsql-shadows-for-entity-graph.html`
-- `reports/2026-09-05-1830-session-recap-10-natural-key-pks-fix-collision.html`
-  (upcoming)
+- `reports/2026-09-05-1827-session-recap-10-natural-key-pks-fix-collision.html`
 
-What's left before multi-host sync can be enabled fleetwide:
+What's left before multi-host sync actually happens:
 
-- **Run `templedb sync init` on prod.** Marks the shadows as CRRs
-  and populates them from `entities`/`relations`. Semi-persistent
-  (CRR machinery is hard to fully unwind), so hold until zMothership3
-  is provisioned and multi-host sync is imminent.
+- **NixOS rebuild to pick up the new templedb.** The bundled nix
+  templedb wrapper still hardreferences the pre-sync-fix build, so
+  `templedb sync ...` prints "Unknown command" unless invoked with
+  `TEMPLEDB_DEV_MODE=1 TEMPLEDB_CRSQLITE_PATH=/nix/store/jxsmcf2kpj9f1wwmmybgr6y0ri4ypjqn-crsqlite-0.16.3/lib/crsqlite`.
+  Next `nixos-rebuild switch` after advancing the templedb flake
+  input will fix both (bundled sync CLI + bundled crsqlite.so at
+  the expected relative path).
+- **zMothership3 provisioning.** Currently the only "peer" in
+  `fleet_machines`. Multi-host sync is meaningless until a second
+  templedb-carrying host exists.
 - **Entity delete propagation to main.** CRSql-propagated deletes
   land in the peer's shadow but `reconcile_to_main` is INSERT+UPDATE
   only — deletes don't reach main. Adds/updates converge fine.
