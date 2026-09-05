@@ -8,9 +8,40 @@ Read whichever section matches what you're picking up. The "where
 things stand" line at the top of each is the current-state check —
 verify it hasn't moved before assuming.
 
-## 1. CRSql for entities/relations (Q5 remainder)
+## 1. CRSql for entities/relations (Q5 remainder) — MOSTLY LANDED 2026-09-05
 
-### Where things stand (verified 2026-09-05)
+**Migration 101 + write-through triggers + reconcile + orphan-CLI fix
+landed in commit `2F54B2E7`.** Session recap at
+`reports/2026-09-05-1808-session-recap-9-crsql-shadows-for-entity-graph.html`.
+Not yet applied to production DB.
+
+What's left before this rock is fully finished:
+
+- **Apply migration 101 to prod DB.** Safe on its own (only adds
+  tables + triggers, no mutation of existing rows), but conditional
+  on the design gap below.
+- **`shadow.id` collision on concurrent inserts across sites.**
+  Two DBs' SQLite ROWID counters advance independently, so two
+  machines making concurrent entity inserts both get the same
+  shadow `id` → CRSql LWW silently drops one on sync. Blocks safe
+  fleetwide `sync do-sync`. Three options in the recap
+  (site-prefixed IDs, UUID column, or natural-key PKs).
+  Recommended: natural-key PKs on shadows.
+- **`relations.sync_scope` back-fill / adapter population.** Column
+  exists (mig 099) but no ingest adapter writes to it. Current
+  shadow population derives scope from endpoints via JOIN; would be
+  simpler if adapters set it directly. Doctor invariant for
+  "every relation has non-NULL sync_scope" is a good follow-up.
+- **Doctor invariant: no orphan CLI modules.** `templedb sync` was
+  orphaned (register() defined but never called) — same shape as
+  the `templedb ast` and `templedb nix` orphans. A doctor check
+  that greps for `def register(cli):` in `src/cli/commands/*.py`
+  and verifies each has a matching call in `src/cli/__init__.py`
+  would catch this class of bug proactively.
+
+Original section preserved below for context.
+
+### Where things stand (verified 2026-09-05, before the work landed)
 
 - `sync_scope` column exists on `entities` and `relations` (mig 099).
   Values: `fleet` | `machine-local` | `none`. Populated for every
