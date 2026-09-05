@@ -77,10 +77,13 @@ class EntityCommands(Command):
         'python':  '1.17',   # 1.17 bare method-body decorators
                              # resolver (fixes 'import os' matching
                              # nixos.py via naive endswith)
-        'scip':    '1.0',    # 1.0 File→defines→Symbol only, one
-                             # language per invocation via --project.
-                             # No calls/uses/inherits yet — occurrences
-                             # walk lands in 1.1.
+        'scip':    '1.1',    # 1.1 walks Occurrences[]: emits Symbol→
+                             # uses→Symbol edges (source = enclosing
+                             # def or __module__, resolved via
+                             # enclosing_range). Cross-file resolved
+                             # via global scip_symbol → entity map.
+                             # Prune scope expanded to 'defines'+'uses'.
+                             # 1.0 was defines-only.
     }
 
     # ==== INGEST ==============================================================
@@ -1333,10 +1336,24 @@ WantedBy=timers.target
         the code-intelligence surface to TypeScript, and via other SCIP
         emitters (scip-go, scip-java, ...) to any language with an indexer.
 
-        v1.0 thin slice: File → defines → Symbol only. Occurrence-based
-        edges (calls/uses/inherits) require walking `symbolRoles` on each
-        Occurrence and land in v1.1. That's why the dead-imports doctor
-        will over-flag TS imports as unused for now — expected.
+        v1.1: two-pass adapter.
+          Pass 1 emits File→defines→Symbol (mirrors python's discipline:
+            per-file __module__ synthetic, colon-delimited external_ref).
+            Also builds a `scip_sym → entity_id` map for globals.
+          Pass 2 walks Document.occurrences[]. For each reference
+            (symbol_roles bit 0 clear), resolves target via the global
+            map (or per-file lookup for `local N` scoped symbols), finds
+            the source symbol by finding the innermost definition whose
+            enclosing_range contains the reference's range (defaults to
+            the file's __module__ when no def encloses), and emits
+            Symbol→uses→Symbol.
+
+        We emit only `uses` in v1.1, not `calls`/`inherits`. SCIP's
+        symbol_roles bitfield doesn't distinguish call sites from other
+        references reliably in scip-typescript@0.4.0, so a single edge
+        kind is honest. The dead-imports doctor already treats `uses` as
+        a bridge kind alongside `calls`/`inherits`, so TS files stop
+        being over-flagged after this.
 
         Requires:
             --project SLUG        templedb project to index
@@ -1462,15 +1479,72 @@ WantedBy=timers.target
             logger.error(f"`scip print --json` output not JSON: {e}")
             return 1
 
-        # --- 4. Walk documents. Emit File→defines→Symbol only.
+        # --- 4. Two-pass walk of documents.
+        #   Pass 1: emit File→defines→Symbol + __module__ (mirrors v1.0
+        #           shape), and build scip_symbol → entity_id lookup
+        #           tables (one global, one per-file for `local N`).
+        #   Pass 2: walk Document.occurrences[], emit Symbol→uses→Symbol.
         # SCIP JSON shape (from scip.proto, snake_case via `scip print --json`):
         #   Index.documents[*].{ relative_path, symbols[], occurrences[] }
         #   SymbolInformation.{ symbol, display_name, kind, ... }
-        # `relative_path` is relative to the indexer's cwd (index_root above),
-        # so we prepend subdir to reach the project-relative path used by
-        # File.external_ref = "{slug}/{project_relative}".
+        #   Occurrence.{ range, symbol, symbol_roles, enclosing_range }
+        # symbol_roles bit 0 = Definition. All other occurrences are refs.
+        # `relative_path` is relative to the indexer's cwd (index_root
+        # above); we prepend subdir to reach the project-relative path
+        # used by File.external_ref = "{slug}/{project_relative}".
         subdir_prefix = f"{subdir.rstrip('/')}/" if subdir else ""
-        # Per-file collision counter for shared display_names (e.g. overloads).
+
+        # Global scip_symbol → sym_id. Populated from every doc's
+        # Symbol[] in pass 1. Used in pass 2 to resolve cross-file
+        # references. `local N` symbols are per-file scoped — kept
+        # in per-doc dicts (see doc_ctx).
+        scip_sym_to_sym_id = {}
+        # Per-doc context for pass 2:
+        #   (doc, file_id, project_relative, module_sym_id, file_defs,
+        #    local_sym_to_id)
+        # file_defs = [(scip_sym, def_range, enclosing_range, sym_id), ...]
+        doc_ctx = []
+
+        # SCIP ranges are 3-element [line, start_col, end_col] (single-
+        # line) or 4-element [start_line, start_col, end_line, end_col].
+        # Normalize to 4-tuple for containment tests.
+        def _norm_range(r):
+            if not r:
+                return None
+            if len(r) == 3:
+                return (r[0], r[1], r[0], r[2])
+            return (r[0], r[1], r[2], r[3])
+
+        def _range_contains(outer, inner):
+            o = _norm_range(outer)
+            i = _norm_range(inner)
+            if not o or not i:
+                return False
+            if (o[0], o[1]) > (i[0], i[1]):
+                return False
+            if (i[2], i[3]) > (o[2], o[3]):
+                return False
+            return True
+
+        def _find_enclosing_sym_id(file_defs, ref_range):
+            """Innermost def whose enclosing_range contains ref_range.
+            Innermost = smallest span. Returns sym_id or None."""
+            if not ref_range:
+                return None
+            best_id = None
+            best_size = None
+            for (_, _, enclosing, sym_id) in file_defs:
+                if not _range_contains(enclosing, ref_range):
+                    continue
+                n = _norm_range(enclosing)
+                # Approximate size: line_diff * BIG + col_diff.
+                size = (n[2] - n[0]) * 100000 + (n[3] - n[1])
+                if best_size is None or size < best_size:
+                    best_id = sym_id
+                    best_size = size
+            return best_id
+
+        # --- Pass 1: definitions + cross-file lookup ---
         for doc in index.get('documents', []):
             rel_path = doc.get('relative_path')
             if not rel_path:
@@ -1488,8 +1562,8 @@ WantedBy=timers.target
             processed_file_ids.add(file_id)
 
             # __module__ synthetic — same convention as python ingest.
-            # Gives the dead-imports doctor a file-level bridge target
-            # (once v1.1 emits uses/calls edges).
+            # Fallback source symbol in pass 2 when a reference isn't
+            # inside any function/class body.
             module_eref = f"{slug}:{project_relative}:__module__"
             if self._upsert_entity(
                 'Symbol', module_eref, authority, label='module scope'
@@ -1506,16 +1580,20 @@ WantedBy=timers.target
                 )
 
             seen_erefs_this_file = set()
+            # `local N` symbols never appear in another file's
+            # occurrences, so tracked here instead of the global map.
+            local_sym_to_id = {}
+
             for sym in doc.get('symbols', []):
                 scip_sym = sym.get('symbol')
                 if not scip_sym:
                     continue
                 display = sym.get('display_name') or scip_sym.rsplit('/', 1)[-1]
                 eref = f"{slug}:{project_relative}:{display}"
-                # Overloaded names in the same file collide on displayName.
+                # Overloaded names in the same file collide on display.
                 # Disambiguate with a stable 8-char hash of the SCIP
-                # symbol string. Keeps the primary eref clean while making
-                # collisions distinguishable and idempotent.
+                # symbol string. Keeps the primary eref clean while
+                # making collisions distinguishable and idempotent.
                 if eref in seen_erefs_this_file:
                     h = hashlib.sha1(scip_sym.encode()).hexdigest()[:8]
                     eref = f"{slug}:{project_relative}:{display}#{h}"
@@ -1533,21 +1611,111 @@ WantedBy=timers.target
                     ):
                         added_r += 1
                     touched_relations.add((file_id, 'defines', sym_id))
+                    # Track for pass 2 target resolution.
+                    if scip_sym.startswith('local '):
+                        local_sym_to_id[scip_sym] = sym_id
+                    else:
+                        scip_sym_to_sym_id[scip_sym] = sym_id
 
-        # --- 5. Prune stale scip-authority `defines` edges. Scoped
-        # to source_authority='scip-typescript' — will not touch
-        # python-authored edges on shared File entities.
+            # Build file_defs from Definition occurrences (need
+            # enclosing_range for pass 2's containment test).
+            file_defs = []
+            for occ in doc.get('occurrences', []):
+                roles = occ.get('symbol_roles', 0)
+                if not (roles & 1):
+                    continue
+                occ_sym = occ.get('symbol')
+                if not occ_sym:
+                    continue
+                occ_sym_id = (
+                    local_sym_to_id.get(occ_sym)
+                    or scip_sym_to_sym_id.get(occ_sym)
+                )
+                if not occ_sym_id:
+                    continue
+                # Some defs have no enclosing_range (top-level consts,
+                # module-scope decorators). Fall back to the def's own
+                # range so it can at least contain itself.
+                enclosing = occ.get('enclosing_range') or occ.get('range')
+                file_defs.append(
+                    (occ_sym, occ.get('range'), enclosing, occ_sym_id)
+                )
+
+            doc_ctx.append((
+                doc, file_id, project_relative,
+                module_sym_id, file_defs, local_sym_to_id,
+            ))
+
+        # --- Pass 2: emit Symbol→uses→Symbol from reference occurrences ---
+        for (doc, file_id, project_relative, module_sym_id,
+             file_defs, local_sym_to_id) in doc_ctx:
+            for occ in doc.get('occurrences', []):
+                roles = occ.get('symbol_roles', 0)
+                if roles & 1:
+                    continue  # definitions already handled in pass 1
+                target_scip = occ.get('symbol')
+                if not target_scip:
+                    continue
+
+                # Resolve target — locals are file-scoped, globals via
+                # the cross-file map.
+                if target_scip.startswith('local '):
+                    target_id = local_sym_to_id.get(target_scip)
+                else:
+                    target_id = scip_sym_to_sym_id.get(target_scip)
+                if not target_id:
+                    # External to the index (npm dep, DOM lib, etc.) or
+                    # forward ref before its file processed. Silent skip.
+                    continue
+
+                # Find the innermost defining symbol whose enclosing_range
+                # contains this reference. Falls back to file's __module__
+                # for module-scope refs (imports, top-level statements).
+                source_id = _find_enclosing_sym_id(
+                    file_defs, occ.get('range')
+                ) or module_sym_id
+                if not source_id or source_id == target_id:
+                    continue
+
+                if self._upsert_relation(
+                    source_id, 'uses', target_id, authority
+                ):
+                    added_r += 1
+                touched_relations.add((source_id, 'uses', target_id))
+
+        # --- 5. Prune stale scip-authority edges (defines + uses).
+        # Two-pass, mirrors python adapter's discipline:
+        #   1. Find every Symbol we defined this run (via defines edges
+        #      from processed Files).
+        #   2. Delete any defines/uses edge from a processed File or
+        #      Symbol whose (from, kind, to) tuple wasn't touched.
+        # Scoped to source_authority='scip-typescript' — cannot touch
+        # python-authored edges on shared entities.
         if processed_file_ids:
             file_id_list = list(processed_file_ids)
+            processed_sym_ids = set()
             for i in range(0, len(file_id_list), 500):
                 batch = file_id_list[i:i+500]
+                placeholders = ','.join('?' for _ in batch)
+                sym_rows = query_all(
+                    f"""SELECT DISTINCT r.to_entity_id AS sid
+                          FROM relations r
+                         WHERE r.from_entity_id IN ({placeholders})
+                           AND r.kind = 'defines'
+                           AND r.source_authority = ?""",
+                    tuple(batch) + (authority,),
+                )
+                processed_sym_ids.update(row['sid'] for row in sym_rows)
+            all_from_ids = list(processed_file_ids | processed_sym_ids)
+            for i in range(0, len(all_from_ids), 500):
+                batch = all_from_ids[i:i+500]
                 placeholders = ','.join('?' for _ in batch)
                 cur_relations = query_all(
                     f"""SELECT r.id, r.from_entity_id, r.kind,
                               r.to_entity_id
                          FROM relations r
                         WHERE r.from_entity_id IN ({placeholders})
-                          AND r.kind = 'defines'
+                          AND r.kind IN ('defines', 'uses')
                           AND r.source_authority = ?""",
                     tuple(batch) + (authority,),
                 )
