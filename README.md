@@ -176,7 +176,7 @@ templedb intent revert <id>                   # inverse patch
 
 Each `EditIntent` becomes a graph entity linked to its `AgentSession` (via `proposed`) and its resulting `Commit` (via `applied-to`) — so "which agent's edit ended up in production?" is a graph query.
 
-The **FUSE mount** at `~/temple/` still exists for now (interactive-only, deprecated for scripted use) but is on the way out — Phase 5 of the [observer/integrator plan](reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html) retires it. FUSE-directed writes have known truncation and cache-staleness issues; prefer the workspace + intent flow above.
+The **FUSE mount** at `~/temple/` was retired 2026-09-05 (Phase 5 of the [observer/integrator plan](reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html)). Interactive editing goes through `templedb edit <slug>` (workspace under `~/.config/templedb/edit-workspaces/<slug>/`); single-file tweaks use `templedb file edit <slug> <path>` or `templedb file set <slug> <path>`. Analysis and alternatives considered: [`reports/2026-08-29-post-fuse-editing-ux-alternatives-and-recommendation.html`](reports/).
 
 ### Commit and publish (writes → Commit + FileSnapshot entities)
 
@@ -490,7 +490,7 @@ The observer/integrator plan is largely landed. What's next, in rough order:
 3. **SCIP adapters** (TypeScript, Rust, Nix) — external code-facts ingestion. Language coverage grows with the SCIP ecosystem rather than our parser budget.
 4. **Observations archive + current-only semantics** — retention policy so the graph doesn't grow unbounded when SCIP dumps millions of symbol facts.
 5. **Sidecar-column migration** (expand/contract) — move `vcs_commit_metadata`, `vcs_file_change_metadata`, etc. onto `entities.attributes_json`.
-6. **Retire FUSE mount** (Phase 5). Editing is workspace-based; agent edits go through EditIntent. Cross-session handoff via `templedb handoff {send,list,pop,ack}` (design in [cross-session handoff semantics](reports/2026-09-03-0826-cross-session-handoff-semantics.html)).
+6. **Retire FUSE mount** (Phase 5) — **done 2026-09-05**. `src/temple_fuse.py`, the `mount` CLI subcommand, `mount.enable`/`mount.path` in the home-manager module, `fusepy` from `pythonEnv`/`devShell`, and the FUSE systemd service are all gone. Editing goes through `templedb edit <slug>`; agent edits go through EditIntent. Cross-session handoff via `templedb handoff {send,list,pop,ack}` (design in [cross-session handoff semantics](reports/2026-09-03-0826-cross-session-handoff-semantics.html)).
 
 ---
 
@@ -529,7 +529,6 @@ programs.templedb = {
   enable = true;
   package = templedb.packages.${pkgs.system}.templedb;
 
-  mount.enable = true;       # FUSE at ~/temple (deprecated — Phase 5 retires it)
   sync.enable = true;        # sync systemd user service
   sync.port = 9420;
 
@@ -543,7 +542,6 @@ programs.templedb = {
 | Option           | What it does                                              |
 |------------------|-----------------------------------------------------------|
 | `enable`         | Installs `templedb` + `tdb` alias to PATH                 |
-| `mount.enable`   | FUSE mount systemd service (deprecated for scripted use)  |
 | `claude.enable`  | Generates `~/.claude/settings.json` with hooks            |
 | `claude.mcp`     | Creates `~/.mcp.json` — MCP tools in every Claude session |
 | `sync.enable`    | CRSql sync server, port 9420                              |

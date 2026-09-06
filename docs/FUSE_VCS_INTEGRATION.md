@@ -1,6 +1,35 @@
-# FUSE + VCS Integration
+# FUSE + VCS Integration — RETIRED 2026-09-05
 
-**Source**: `src/temple_fuse.py`, `src/repositories/vcs_repository.py`, `src/services/vcs_service.py`
+> **This document describes an interface that no longer exists.** The
+> FUSE mount at `~/temple/` was removed 2026-09-05 (see [session recap 8
+> — SCIP arc](../reports/2026-09-05-2200-session-recap-8-scip-arc.html)
+> and the [post-FUSE editing UX analysis](../reports/2026-08-29-post-fuse-editing-ux-alternatives-and-recommendation.html)).
+> `src/temple_fuse.py` is gone from the tree; the `mount` CLI
+> subcommand is unregistered; `mount.enable`/`mount.path` are no
+> longer valid options on the home-manager module; `fusepy` is out of
+> `pythonEnv` and `devShell`. The retired FUSE surface had known write
+> truncation and cache-staleness issues.
+>
+> **Use these instead:**
+>
+> - Session editing: `templedb edit <slug>` — opens `$EDITOR` in a
+>   writable workspace under `~/.config/templedb/edit-workspaces/<slug>/`,
+>   commit back with `templedb commit <slug> <workspace> -m "..."`.
+> - Single-file tweak: `templedb file edit <slug> <path>` (opens
+>   `$EDITOR` on the DB blob) or `templedb file set <slug> <path>` /
+>   `cat file | templedb file set <slug> <path>` for scripted writes.
+> - Auto-staging: `templedb file set --stage` (or plain `templedb vcs
+>   add`) rather than the FUSE-save-stages-automatically model.
+>
+> The content below is preserved as an historical description of what
+> the FUSE integration used to do. Do not rely on any of it for
+> current behavior.
+
+---
+
+# FUSE + VCS Integration (historical)
+
+**Source (removed)**: `src/temple_fuse.py`, `src/repositories/vcs_repository.py`, `src/services/vcs_service.py`
 
 ## Overview
 

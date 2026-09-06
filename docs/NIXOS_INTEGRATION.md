@@ -557,7 +557,7 @@ This loads the project's environment variables, decrypted secrets, and Nix shell
 templedb bootstrap --from-gcs my-bucket --username zach --hostname zMothership3
 ```
 
-This runs 9 steps:
+This runs 8 steps (was 9 pre-2026-09-05, before the FUSE mount was retired):
 1. Restore database from GCS backup
 2. Apply pending migrations
 3. Set up age encryption key
@@ -565,8 +565,10 @@ This runs 9 steps:
 5. Link dotfiles
 6. Set machine identity
 7. Generate NixOS configuration
-8. Mount FUSE filesystem
-9. Verify everything works
+8. Verify everything works
+
+Editing on the new host uses `templedb edit <slug>` (opens `$EDITOR`
+in a writable workspace under `~/.config/templedb/edit-workspaces/`).
 
 ## Benefits of TempleDB + NixOS
 
