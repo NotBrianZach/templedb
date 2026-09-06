@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 11: NixOS rebuild landed the sync CLI (and surfaced 4 latent infrastructure bugs)</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --warn: #e0c060; --neg: #e97070;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 920px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+             font-size: 0.93em; }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.neg { border-left-color: var(--neg); }
+  .callout .label { display: block; font-size: 0.7rem;
+                    text-transform: uppercase; letter-spacing: 0.1em;
+                    margin-bottom: 0.3rem; color: var(--accent); }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  .callout.neg .label { color: var(--neg); }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+  table { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Session recap 11: NixOS rebuild landed the sync CLI (and surfaced 4 latent infrastructure bugs)</h1>
+<p class="lede">
+  Follow-up to recaps 9 and 10. User asked to rebuild NixOS so the
+  new <code>templedb sync</code> CLI would work without dev-mode +
+  env-var overrides. What should have been one command turned into
+  hunting down four separate infrastructure regressions before the
+  rebuild could complete: <code>.authinfo.gpg</code>/<code>flake.lock</code>
+  wiped by <code>templedb publish</code>, bza project missing its
+  <code>flake.nix</code>, <code>templedb file set</code> not un-deleting
+  soft-deleted files, and bza's <code>npmDepsHash</code> gone stale.
+  Also fixed a UNIQUE-constraint crash in <code>templedb ai vibe start</code>
+  along the way. Ended at system-268 with <code>templedb sync status</code>
+  working cleanly.
+</p>
+
+<h2>The ask, and the four yaks</h2>
+
+<p>
+  <strong>Ask:</strong> "rebuild nixos to pick up the new templedb."
+</p>
+
+<p>
+  <strong>What that should be:</strong>
+  <code>templedb nixos rebuild system_config --yes</code>. Done.
+</p>
+
+<p>
+  <strong>What it actually was:</strong>
+</p>
+
+<table>
+  <tr><th>#</th><th>Blocker</th><th>Root cause</th><th>Workaround this session</th><th>Follow-up task</th></tr>
+  <tr>
+    <td>1</td>
+    <td>Every publish wipes <code>.authinfo.gpg</code> + <code>flake.lock</code></td>
+    <td>Neither file is templedb-tracked; materialize sweep removes untracked-but-in-checkout files</td>
+    <td>Restore both from git before each rebuild attempt</td>
+    <td>#18</td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td>bza flake input broken — <code>flake.nix</code> not in bza's git tree</td>
+    <td>bza was never a flake; input contract was aspirational</td>
+    <td>Added minimal <code>writeTextDir</code> stub as bza's <code>packages.default</code></td>
+    <td>#15 done</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td><code>templedb file set bza flake.nix</code> written but not shipped</td>
+    <td><code>project_files.status='deleted'</code> from a prior soft-delete; <code>file set</code> writes <code>file_contents</code> but doesn't restore status</td>
+    <td>Direct SQL: <code>UPDATE project_files SET status='active'</code></td>
+    <td>#17</td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td>bza builds fail with "npmDepsHash is out of date"</td>
+    <td>bza's <code>package-lock.json</code> evolved past both the overlay's <code>packages/bza.cathedral.tar.gz</code> hash and the flake output's assumed shape</td>
+    <td>Dropped <code>pkgs.bza</code> from <code>templedb-managed.nix</code>; kept <code>~/.local/bin/bza</code> wrapper as the on-PATH bza</td>
+    <td>#19</td>
+  </tr>
+</table>
+
+<p>
+  Plus one bonus catch on the same day:
+  <code>templedb ai vibe start bza</code> was failing with
+  <code>UNIQUE constraint failed: project_prompts.project_id,
+  project_prompts.name, project_prompts.version</code>. Root cause:
+  <code>--regenerate</code> soft-deactivates the prior autogen prompt
+  (<code>is_active=0</code>) but the subsequent INSERT hard-coded
+  <code>version=1</code> (default), colliding with the still-present
+  row. Fixed by computing <code>MAX(version) + 1</code> before insert.
+</p>
+
+<h2>The rebuild itself</h2>
+
+<p>
+  After all four yaks were held down, three actual builds landed:
+</p>
+
+<pre>system-266 (17:46 today)      — pre-rebuild, no sync CLI
+system-267 (19:57 today)      — sync CLI wired via templedb 2C3A6D0E
+system-268 (20:03 today)      — crsqlite lookup fix via templedb 1D74CAD5</pre>
+
+<p>
+  Two switches because the first landed the sync CLI but
+  <code>sync_engine._find_crsqlite()</code> only checked
+  <code>Path(__file__).parent.parent / "lib" / "crsqlite"</code>. That
+  path exists in a dev checkout but not for the nix-packaged templedb,
+  since crsqlite.so is shipped via <code>programs.templedb.extraPackages</code>
+  and lands in the home-manager profile's lib/. Broadened the lookup
+  to scan
+  <code>~/.local/state/nix/profiles/home-manager/home-path/lib/</code>
+  and other standard nix profile paths first, with a fallback to bare
+  <code>crsqlite</code> for LD_LIBRARY_PATH cases.
+</p>
+
+<h3>End state</h3>
+
+<pre>$ templedb sync status
+Sync Status
+  Site ID:    5394869e602a4ffc96ec92505af2d6aa
+  DB Version: 9
+  Tables:     8 synced
+  Server:     not running (start with: templedb sync serve)
+
+  Tailscale Peers:
+    No Tailscale peers found</pre>
+
+<p>
+  No dev-mode. No env-var override. Works. All the CRSql shadow work
+  from recaps 9 and 10 is now reachable from a normal shell.
+</p>
+
+<h2>The four latent bugs, restated as memory</h2>
+
+<div class="callout warn">
+  <span class="label">Materialize sweeps eat untracked files</span>
+  <p>
+    <code>templedb publish run system_config</code> removes any file
+    in the checkout that isn't in the DB's active set. Since
+    <code>.authinfo.gpg</code> (binary) can't be sent through
+    <code>templedb file set</code>'s stdin (rejects non-utf8) and
+    <code>flake.lock</code> isn't in the scanner's include list,
+    both die on every publish. Git log shows this has happened at
+    least three times before (<code>b45a7fb</code>, <code>3e38cec</code>,
+    another earlier). Needs a design pass — either binary support in
+    <code>file set</code>, or an "unmanaged files" allowlist per
+    project, or a scanner override that pins specific paths.
+  </p>
+</div>
+
+<div class="callout warn">
+  <span class="label">Soft-delete + re-set silently drops</span>
+  <p>
+    <code>templedb file set</code> writes to <code>file_contents</code>
+    unconditionally but doesn't reset <code>project_files.status</code>.
+    A file that was previously deleted stays deleted — the content
+    lives on but <code>file ls</code>, <code>publish materialize</code>,
+    and every other status-filtered path skips it. Silent failure
+    mode: user thinks they wrote a file; downstream sees nothing.
+    Should either flip status back to <code>'active'</code> on set,
+    or refuse the set and require an explicit undelete first. Task
+    #17.
+  </p>
+</div>
+
+<div class="callout neg">
+  <span class="label">Aspirational flake input</span>
+  <p>
+    <code>bza.url = "git://localhost:9419/bza"</code> in system_config's
+    flake.nix expected bza to be a flake, but bza's git tree has never
+    contained a <code>flake.nix</code> (verified via
+    <code>git log --all --oneline -- flake.nix</code> on the bza bare
+    clone). The last known-working rebuild used a cached nix store
+    path from a rev that's no longer served by the git daemon. So the
+    only reason NixOS rebuilds ever worked was accidental nix cache
+    hits — a rebuild after a nix-store GC would have hit this same
+    wall. Added a minimal stub flake this session; the follow-up is
+    to figure out whether bza should be a real flake or the input
+    contract should change to <code>flake = false</code>.
+  </p>
+</div>
+
+<div class="callout neg">
+  <span class="label">npmDepsHash bit rot</span>
+  <p>
+    <code>my-overlays.nix</code>'s <code>pkgs.bza</code> pins
+    <code>npmDepsHash = "sha256-CjoA4FddI1Y62qGqDABbbM7CorVYUUuZNfHTF2qa8No="</code>.
+    Every time bza's <code>package-lock.json</code> changes, that hash
+    needs updating or every nixos-rebuild fails at the bza build step.
+    This is a general problem with buildNpmPackage pinning source
+    that's actively developed; a CI job that rebuilds the overlay on
+    every bza push and opens a PR with the new hash would prevent
+    the recurring "rebuild broken" surprise. Task #19.
+  </p>
+</div>
+
+<h2>Metacognition</h2>
+
+<p>
+  <strong>What I did right:</strong> stopped and asked the user twice
+  when I hit non-trivial decision points (whether to proceed with prod
+  migration, and how to fix the bza flake gap). Kept the rebuild
+  bounded by scoping down (dropping <code>pkgs.bza</code> rather than
+  trying to fix the whole overlay hash chain in-session). Preserved
+  the working <code>~/.local/bin/bza</code> wrapper so the user's
+  bza usage wasn't affected.
+</p>
+<p>
+  <strong>What I got wrong:</strong> spent too long chasing nix's
+  git ref cache trying to force a fresh HEAD fetch, when the fastest
+  fix was to manually edit flake.lock (which is what I ended up doing).
+  Also over-relied on <code>templedb nixos rebuild</code> wrapper for
+  a while; direct <code>nixos-rebuild</code> would have avoided the
+  materialize-loop that kept wiping my restored files.
+</p>
+<p>
+  <strong>Pattern to internalize:</strong> when a "simple rebuild"
+  fails, the four questions in order should be:
+</p>
+<ol>
+  <li>Is my code even in the built package? (Did I rebuild? Did the flake input update?)</li>
+  <li>Are all the flake inputs actually valid flakes? (Especially locally-served ones)</li>
+  <li>Are all the referenced hashes still current? (npmDepsHash, cargoLock, etc.)</li>
+  <li>Did the last publish/materialize preserve everything nix needs? (dotfiles, unlisted files)</li>
+</ol>
+<p>
+  Each of the four blockers today was one of these categories. If I'd
+  asked all four questions after the first failure, the rebuild would
+  have taken 15 minutes instead of an hour.
+</p>
+
+<h2>Prod state after this session</h2>
+
+<ul>
+  <li>NixOS on generation 268 (<code>f4mg1i03l5h64pvkn9p31w5g06cykx2b</code>)</li>
+  <li>templedb bumped to <code>1D74CAD5</code> in the nix package + on GitHub</li>
+  <li>bza has a stub <code>flake.nix</code> (rev <code>5633805B</code>)</li>
+  <li>system_config's <code>templedb-managed.nix</code> no longer references <code>pkgs.bza</code></li>
+  <li><code>templedb sync status</code> works in a plain shell (all 8 shadows CRR-marked, populated)</li>
+  <li>Snapshots at <code>/tmp/templedb-preflight-mig10{1,2}-2026-09-05.sqlite</code></li>
+  <li>Rollback available: <code>sudo nixos-rebuild switch --rollback</code></li>
+</ul>
+
+</body>
+</html>

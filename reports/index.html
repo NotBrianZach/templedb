@@ -64,6 +64,26 @@
   </div>
 </a>
 
+<a class="report" href="2026-09-05-2006-session-recap-11-nixos-rebuild-bza-flake-infrastructure.html">
+  <div class="row">
+    <span class="date">2026-09-05 20:06</span>
+    <span class="title">Session recap 11: NixOS rebuild landed the sync CLI (and surfaced 4 latent infrastructure bugs)</span>
+  </div>
+  <div class="summary">
+    Follow-up to recaps 9 and 10. User asked to rebuild NixOS so the new templedb sync CLI would work without dev-mode + env-var overrides. What should have been one command turned into hunting down four separate infrastructure regressions before the rebuild could complete: .authinfo.gpg/flake.lock wiped by templedb publish, bza project missing its flake.nix, templedb file set not un-deleting soft-deleted files, and bza's npmDepsHash gone stale. Also fixed a UNIQUE-constraint crash in templedb ai vibe start along the way. Ended at system-268 with templedb sync status working cleanly.
+  </div>
+</a>
+
+<a class="report" href="2026-09-05-1827-session-recap-10-natural-key-pks-fix-collision.html">
+  <div class="row">
+    <span class="date">2026-09-05 18:27</span>
+    <span class="title">Session recap 10: natural-key PKs fix the shadow.id collision</span>
+  </div>
+  <div class="summary">
+    Follow-up to recap 9. Landed migration 102 which drops the surrogate INTEGER PRIMARY KEY on sync_entities and sync_relations in favor of composite natural-key PKs. The two-instance convergence test that failed in recap 9 (with colliding autoincrement IDs on both sites) now converges cleanly. Committed as 81625C44, applied to prod.
+  </div>
+</a>
+
 <a class="report" href="2026-09-05-1808-session-recap-9-crsql-shadows-for-entity-graph.html">
   <div class="row">
     <span class="date">2026-09-05 18:08</span>
