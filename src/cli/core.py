@@ -233,30 +233,40 @@ Use 'templedb <command> --help' for details on any command.
                     # Direct subcommand
                     handler = self.commands.get(args.command)
                 else:
-                    # Check for subcommand in args
-                    subcommand_attr = f"{args.command}_subcommand"
-                    if hasattr(args, subcommand_attr):
-                        subcommand = getattr(args, subcommand_attr)
-                        # Only use subcommand if it's not None (i.e., actually specified)
-                        if subcommand is not None:
-                            # Check for nested subcommands (e.g., env var set, fleet network create)
-                            # Support both _command and _subcommand dest conventions
-                            nested_attr = f"{subcommand}_command"
-                            if not hasattr(args, nested_attr):
-                                nested_attr = f"{subcommand}_subcommand"
-                            if hasattr(args, nested_attr):
-                                nested_command = getattr(args, nested_attr)
-                                if nested_command is not None:
-                                    handler = self.commands.get(f"{args.command}.{subcommand}.{nested_command}")
-                                else:
-                                    handler = self.commands.get(f"{args.command}.{subcommand}")
-                            else:
-                                handler = self.commands.get(f"{args.command}.{subcommand}")
+                    # Walk the subcommand chain. Each level's dest attribute
+                    # can be named either `<prefix>_subcommand` or
+                    # `<prefix>_command` depending on the registrar. We follow
+                    # the chain as deep as it goes so 4+-level commands
+                    # (e.g. `deploy fleet network create`) resolve — the old
+                    # 3-level cap silently produced "Unknown command" errors.
+                    parts = [args.command] if args.command else []
+                    while parts:
+                        prefix = parts[-1]
+                        for suffix in ('_subcommand', '_command'):
+                            attr = f"{prefix}{suffix}"
+                            if hasattr(args, attr):
+                                nxt = getattr(args, attr)
+                                if nxt is not None:
+                                    parts.append(nxt)
+                                    break
+                                # attr exists but None → user didn't supply
+                                # the nested subcommand; stop here so we fall
+                                # back to the closest handler.
+                                attr = None
+                                break
                         else:
-                            # No subcommand specified, use base command handler
-                            handler = self.commands.get(args.command)
-                    else:
-                        handler = self.commands.get(args.command)
+                            # No matching attr at this level; stop walking.
+                            break
+                        if attr is None:
+                            break
+
+                    # Try the deepest key first, then progressively shorter.
+                    handler = None
+                    for i in range(len(parts), 0, -1):
+                        key = ".".join(parts[:i])
+                        handler = self.commands.get(key)
+                        if handler is not None:
+                            break
 
                 if handler is None:
                     # Try to suggest similar commands
