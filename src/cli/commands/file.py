@@ -574,6 +574,17 @@ class FileCommands(Command):
         file_record = self.file_repo.get_file_by_path(project_id, file_path)
         if file_record:
             file_id = file_record.get('id') or file_record.get('file_id')
+            # Un-delete: file set on a soft-deleted row should revive
+            # it. Without this, file_contents gets the new blob but
+            # publish materialize / file ls / everything else that
+            # filters on status='active' silently skips the file.
+            # Discovered during the recap-11 rebuild after `set bza
+            # flake.nix` looked like it succeeded but shipped nothing.
+            if file_record.get('status') != 'active':
+                base.execute(
+                    "UPDATE project_files SET status = 'active' WHERE id = ?",
+                    (file_id,),
+                )
             # Update file_contents
             base.execute("""
                 INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
