@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 12: recap-11 follow-ups landed (mostly)</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --warn: #e0c060; --neg: #e97070;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 920px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+             font-size: 0.93em; }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.neg { border-left-color: var(--neg); }
+  .callout .label { display: block; font-size: 0.7rem;
+                    text-transform: uppercase; letter-spacing: 0.1em;
+                    margin-bottom: 0.3rem; color: var(--accent); }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  .callout.neg .label { color: var(--neg); }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+  table { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Session recap 12: recap-11 follow-ups landed (mostly)</h1>
+<p class="lede">
+  Direct continuation of recap 11. Went through all three follow-up
+  tasks the recap flagged (#17 <code>file set</code> undelete,
+  #18 <code>.authinfo.gpg</code>/<code>flake.lock</code> preservation,
+  #19 bza <code>npmDepsHash</code>) plus a bonus (#20 FUSE mention
+  cleanup in README/docs) and a UNIQUE-constraint fix in
+  <code>templedb ai vibe start</code> caught along the way. Two of the
+  three closed cleanly; #19 got as far as bumping the hash before
+  hitting a deeper source-level v8 API mismatch in bza's
+  <code>better-sqlite3</code>, so bza stays out of <code>home.packages</code>
+  and #21 was filed to fix the binding. System landed on generation
+  270 with everything working from a plain shell.
+</p>
+
+<h2>What actually landed</h2>
+
+<table>
+  <tr><th>#</th><th>Task</th><th>Fix</th><th>Status</th></tr>
+  <tr>
+    <td>17</td>
+    <td><code>templedb file set</code> silently drops on soft-deleted rows</td>
+    <td>
+      <code>_write_content_to_db</code> now flips
+      <code>project_files.status='active'</code> when the target row
+      exists and is non-active. Verified by soft-deleting
+      <code>reports/CLAUDE.md</code>, running <code>file set</code>,
+      seeing status flip back.
+    </td>
+    <td class="pos">done</td>
+  </tr>
+  <tr>
+    <td>18</td>
+    <td>Materialize sweep wipes <code>.authinfo.gpg</code> +
+        <code>flake.lock</code></td>
+    <td>
+      Two-part: (a) added both to system_config's <code>.gitignore</code>
+      so they're candidates for the preservation branch; (b) changed
+      <code>git check-ignore</code> in the sweep to pass
+      <code>--no-index</code> so it evaluates rules even for files
+      that are tracked (like <code>.authinfo.gpg</code>, which needs
+      to be in git so nix's flake fetch can see it). Verified a full
+      publish preserves both without dev-mode override.
+    </td>
+    <td class="pos">done</td>
+  </tr>
+  <tr>
+    <td>19</td>
+    <td>Restore <code>pkgs.bza</code> in <code>templedb-managed.nix</code></td>
+    <td>
+      Refreshed <code>npmDepsHash</code> via a <code>lib.fakeHash</code>
+      probe rebuild — captured
+      <code>sha256-AjPSsodKIrqYldbJUZAvuNpDGQNKj1/+xUyCCn5W8jA=</code>.
+      Fixed-output derivation now validates. <em>But</em> the actual
+      npm install step fails on <code>better-sqlite3</code>'s native
+      module (v8 <code>ObjectTemplate::SetAccessor</code> API changed;
+      <code>AccessControl</code> parameter no longer accepts a
+      <code>PropertyAttribute</code>). Reverted the
+      <code>pkgs.bza</code> add back to a drop, filed <a href="#">#21</a>.
+    </td>
+    <td class="warn">partial</td>
+  </tr>
+  <tr>
+    <td>20</td>
+    <td>README references to the removed FUSE mount</td>
+    <td>
+      README's current-state paragraph rewritten; Phase-5 bullet updated
+      to reflect the 2026-09-05 retirement; <code>mount.enable</code>
+      dropped from home-manager example + options table.
+      <code>docs/FUSE_VCS_INTEGRATION.md</code> got a "RETIRED" banner
+      at top with pointers to the workspace flow; historical content
+      kept below.  <code>docs/NIXOS_INTEGRATION.md</code> bootstrap
+      step list dropped the FUSE step and added a
+      <code>templedb edit</code> pointer.
+    </td>
+    <td class="pos">done</td>
+  </tr>
+</table>
+
+<h3>Bonus: templedb ai vibe start</h3>
+<p>
+  <code>templedb ai vibe start bza</code> was failing with
+  <code>UNIQUE constraint failed: project_prompts.project_id,
+  project_prompts.name, project_prompts.version</code>. Regenerate
+  had deactivated a prior autogen prompt but the INSERT was hard-coded
+  <code>version=1</code>. Fixed by computing <code>MAX(version)+1</code>
+  before the insert. Verified by re-running vibe start against
+  <code>bza</code>, which now creates version=2 cleanly.
+</p>
+
+<h2>Why the sweep-preservation fix needed two commits</h2>
+
+<div class="callout warn">
+  <span class="label">git check-ignore semantics</span>
+  <p>
+    <code>git check-ignore</code> by default treats tracked files as
+    "not subject to exclude rules" — so a file added with
+    <code>git add -f</code> (which is how <code>.authinfo.gpg</code>
+    lands in the tree) returns exit 1 (not ignored) even though
+    <code>.gitignore</code> would match it. That was masking my whole
+    preservation mechanism: sweep called <code>check-ignore</code>,
+    got no matches, deleted the file.
+  </p>
+  <p>
+    <code>--no-index</code> evaluates <code>.gitignore</code> against
+    filesystem paths without consulting the index, so tracked-and-
+    gitignored files come back as ignored. Applied in
+    <code>system_service.py</code>. In hindsight I should have looked
+    at <code>check-ignore</code>'s tracked-file semantics before
+    trusting the "gitignored → preserve" branch in the sweep code —
+    that would have saved a rebuild cycle.
+  </p>
+</div>
+
+<h2>The one that got away: bza better-sqlite3</h2>
+
+<p>
+  bza's <code>default.nix</code> uses <code>buildNpmPackage</code>,
+  which after fetching npm deps runs <code>npm rebuild</code> to
+  compile any native modules against the nix-provided nodejs. bza
+  depends on <code>better-sqlite3</code>, which ships its own
+  <code>binding.gyp</code>. That gyp file targets a nodejs version
+  where <code>v8::ObjectTemplate::SetAccessor</code> had a signature
+  including <code>v8::AccessControl</code>; current nodejs
+  (<code>nodejs_22</code> in the build graph) has dropped that
+  parameter. The compile fails:
+</p>
+<pre>note: candidate: 'void v8::ObjectTemplate::SetAccessor(
+    v8::Local&lt;v8::String&gt;, v8::AccessorGetterCallback,
+    v8::AccessorSetterCallback, v8::Local&lt;v8::Value&gt;,
+    v8::PropertyAttribute, ...)'
+note: no known conversion for argument 5 from
+    'v8::AccessControl' to 'v8::PropertyAttribute'</pre>
+<p>
+  Two ways forward, both out-of-scope for this session:
+</p>
+<ul>
+  <li>Bump <code>better-sqlite3</code> in bza's
+      <code>package-lock.json</code> to a version whose bindings match
+      current nodejs.</li>
+  <li>Pin bza's build to <code>nodejs_20</code> explicitly (bza's
+      default.nix already has <code>nodejs = pkgs.nodejs_20</code>
+      for buildNpmPackage, but the transitive
+      <code>node-gyp</code> ended up picking
+      <code>nodejs_22</code>-source headers from the templedb build
+      graph — that mismatch is what the error is complaining about).</li>
+</ul>
+<p>
+  Filed as task #21. Meanwhile bza stays dropped from
+  <code>home.packages</code>; the <code>~/.local/bin/bza</code>
+  wrapper (which nix-shells its own deps at runtime) continues to
+  work.
+</p>
+
+<h2>Generation ladder</h2>
+
+<pre>system-268   crsqlite lookup fix baked in
+system-269   bza-drop rollback (build had failed with old templedb)
+system-270   final — new templedb (6D3D4982), bza dropped, all fixes live</pre>
+
+<h2>Snapshots</h2>
+
+<ul>
+  <li><code>/tmp/templedb-preflight-mig10{1,2}-2026-09-05.sqlite</code>
+      (from recaps 9-10)</li>
+  <li>Rollback to any of 266–269 via
+      <code>sudo nixos-rebuild switch --rollback</code> or the boot
+      menu</li>
+</ul>
+
+<h2>End state verification</h2>
+
+<pre>$ templedb sync status
+Sync Status
+  Site ID:    5394869e602a4ffc96ec92505af2d6aa
+  DB Version: 9
+  Tables:     8 synced
+
+$ templedb publish run system_config --force   # non-dev-mode
+    Pushed to github/master
+$ ls ~/.config/templedb/checkouts/system_config/{.authinfo.gpg,flake.lock}
+.authinfo.gpg  flake.lock                       # both preserved
+
+$ templedb ai vibe start bza                    # no UNIQUE crash</pre>
+
+<h2>Metacognition</h2>
+
+<p>
+  <strong>Two dev-mode-vs-installed-binary gotchas cost time.</strong>
+  Both #17 and #18 needed multiple attempts before the fix was in the
+  right place at the right time:
+</p>
+<ol>
+  <li>Edited in edit-workspace, ran command, wondered why nothing
+      changed — because dev-mode reads from CHECKOUT, not workspace,
+      so the fix has to publish through before the tools see it.</li>
+  <li>Published the fix, then ran a subcommand — but the subcommand
+      is invoked via the installed nix templedb, which was BUILT
+      pre-fix, so <code>TEMPLEDB_DEV_MODE=1</code> is required to
+      pick up the checkout version until the next NixOS rebuild
+      bakes it in.</li>
+</ol>
+<p>
+  A mnemonic for future me: <em>every templedb-source fix has three
+  visibility gates</em> (edit-workspace → checkout via publish →
+  nix package via NixOS switch), and the reproduction command has
+  to be routed through whichever gate you're testing.
+</p>
+<p>
+  <strong>What went well:</strong> testing #17 by soft-deleting a real
+  file (<code>reports/CLAUDE.md</code>) proved the behavior end-to-end,
+  and having it archived via <code>vcs_file_states</code> meant the
+  overwrite was recoverable. The debug loop for #18 kept getting shorter
+  each iteration because the <code>--no-index</code> mnemonic came from
+  reading the man page carefully instead of guessing.
+</p>
+<p>
+  <strong>What I'd do differently:</strong> for #19, I should have
+  tried actually building bza standalone (<code>nix build .#pkgs.bza</code>
+  from an eval expression, or a targeted <code>nix build</code> against
+  the overlay) instead of running the full nixos-rebuild switch as
+  the probe. Each rebuild took 2-3 minutes and I did 6+ of them across
+  recaps 11 and 12. A tighter probe would have surfaced the v8 issue
+  in 30 seconds.
+</p>
+
+</body>
+</html>
