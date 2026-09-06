@@ -232,8 +232,15 @@ class SystemService:
                         candidates.append(str(rel))
                     if candidates:
                         try:
+                            # --no-index makes check-ignore evaluate .gitignore
+                            # rules even for files that are currently tracked.
+                            # Without it, files added via `git add -f` (e.g.
+                            # .authinfo.gpg, historically) are treated as
+                            # tracked-and-therefore-not-ignored, and the sweep
+                            # below deletes them — regressing the very fix
+                            # this block was written for. See recap 11.
                             result = subprocess.run(
-                                ["git", "check-ignore", "--stdin"],
+                                ["git", "check-ignore", "--stdin", "--no-index"],
                                 cwd=str(checkout_dir),
                                 input="\n".join(candidates),
                                 capture_output=True, text=True, check=False,
