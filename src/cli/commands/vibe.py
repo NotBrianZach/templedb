@@ -197,11 +197,21 @@ templedb nixos generate-all
 What would you like to work on?
 """
 
+            # UNIQUE(project_id, name, version) — an earlier autogen row
+            # deactivated by --regenerate still occupies the natural key,
+            # so we bump version rather than colliding on default=1.
+            cursor.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM project_prompts "
+                "WHERE project_id = ? AND name = ?",
+                (project_id, f"{slug}-autogen"),
+            )
+            next_version = cursor.fetchone()[0]
+
             cursor.execute("""
                 INSERT INTO project_prompts
-                    (project_id, name, prompt_text, format, scope, priority, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (project_id, f"{slug}-autogen", prompt_text, 'markdown', 'session', 50, 1))
+                    (project_id, name, prompt_text, format, scope, priority, is_active, version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (project_id, f"{slug}-autogen", prompt_text, 'markdown', 'session', 50, 1, next_version))
             conn.commit()
             print(f"Generated project context for {slug}", file=sys.stderr)
 
