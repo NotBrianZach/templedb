@@ -27,16 +27,28 @@ Session recaps:
 
 What's left before multi-host sync actually happens:
 
-- **NixOS rebuild to pick up the new templedb.** The bundled nix
-  templedb wrapper still hardreferences the pre-sync-fix build, so
-  `templedb sync ...` prints "Unknown command" unless invoked with
-  `TEMPLEDB_DEV_MODE=1 TEMPLEDB_CRSQLITE_PATH=/nix/store/jxsmcf2kpj9f1wwmmybgr6y0ri4ypjqn-crsqlite-0.16.3/lib/crsqlite`.
-  Next `nixos-rebuild switch` after advancing the templedb flake
-  input will fix both (bundled sync CLI + bundled crsqlite.so at
-  the expected relative path).
 - **zMothership3 provisioning.** Currently the only "peer" in
   `fleet_machines`. Multi-host sync is meaningless until a second
   templedb-carrying host exists.
+- **Refresh bza npmDepsHash + restore `pkgs.bza` in
+  templedb-managed.nix.** During the rebuild `pkgs.bza` (overlay,
+  Cathedral tarball) and `bza.packages.default` (flake) both hit
+  "npmDepsHash is out of date" — bza's package-lock.json evolved
+  past what's pinned. Temporarily dropped bza from home.packages so
+  the rebuild could complete; user's `~/.local/bin/bza` wrapper
+  still works. Fix: bump npmDepsHash in `my-overlays.nix` (build
+  once with `lib.fakeHash`, copy the sha256-... error output back).
+- **bza project has no root package-lock.json.** Only
+  `frontend/package-lock.json` exists. bza's own `default.nix` uses
+  `src = ./.` + `buildNpmPackage`, which requires a root
+  package-lock.json. Consider consolidating (top-level lockfile
+  from monorepo tool) or restructuring the flake output to build
+  from `./frontend` instead. Until then bza's flake output is a
+  `writeTextDir` stub.
+- **flake.lock + .authinfo.gpg not templedb-tracked.** Every
+  `templedb publish run system_config` wipes them. Currently
+  restored via `git checkout` before every rebuild. Real fix in
+  task #18.
 - **Entity delete propagation to main.** CRSql-propagated deletes
   land in the peer's shadow but `reconcile_to_main` is INSERT+UPDATE
   only — deletes don't reach main. Adds/updates converge fine.
