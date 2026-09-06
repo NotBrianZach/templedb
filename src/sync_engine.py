@@ -139,15 +139,51 @@ SHADOW_TO_MAIN = {
 }
 
 def _find_crsqlite():
-    """Find the crsqlite extension — checks env var, then lib/ dir."""
+    """Find the crsqlite extension. Priority:
+
+    1. TEMPLEDB_CRSQLITE_PATH env var (explicit override).
+    2. lib/crsqlite.so relative to the source root (dev checkout layout).
+    3. Nix profile lib dirs (home-manager-path, user profile, etc.) —
+       the nix packaging exposes crsqlite via extraPackages, not in
+       templedb's own lib/, so we scan the profile's lib/ for it.
+    4. Bare 'crsqlite' name (assume it's on the dynamic loader search
+       path — LD_LIBRARY_PATH or a system-wide install).
+
+    conn.load_extension() appends '.so' automatically, so return the
+    path WITHOUT the suffix (SQLite convention).
+    """
     env_path = os.environ.get('TEMPLEDB_CRSQLITE_PATH')
     if env_path:
         return env_path
-    # Fallback: lib/crsqlite.so relative to repo root
+
+    # Dev layout: templedb repo root has lib/crsqlite.so.
     local = Path(__file__).parent.parent / "lib" / "crsqlite"
     if Path(str(local) + ".so").exists():
         return str(local)
-    return "crsqlite"  # hope it's on the search path
+
+    # Nix profile layout: crsqlite.so is shipped via home-manager's
+    # `programs.templedb.extraPackages`, landing in the home-manager
+    # profile's lib/ (NOT the user profile). Scan the standard paths.
+    candidates = [
+        Path.home() / ".local" / "state" / "nix" / "profiles"
+            / "home-manager" / "home-path" / "lib" / "crsqlite.so",
+        Path.home() / ".nix-profile" / "lib" / "crsqlite.so",
+        Path("/run/current-system/sw/lib/crsqlite.so"),
+        Path("/nix/var/nix/profiles/default/lib/crsqlite.so"),
+    ]
+    for c in candidates:
+        try:
+            if c.exists():
+                return str(c)[:-3]  # strip .so, sqlite adds it back
+            # ~/.nix-profile may itself be a symlink; resolve and
+            # search the resolved lib/ directory for any crsqlite.so.
+            if c.parent.exists():
+                for f in c.parent.glob("crsqlite*.so"):
+                    return str(f)[:-3]
+        except OSError:
+            continue
+
+    return "crsqlite"  # last resort — dynamic loader search
 
 CRSQLITE_PATH = _find_crsqlite()
 
