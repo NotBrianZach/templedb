@@ -224,6 +224,16 @@ class SyncCommands(Command):
             print(f"  Failed: {e}")
             return 1
 
+        # Project shadow state back into the main tables. Deletes are
+        # opt-in via --delete-missing; the default INSERT+UPDATE-only
+        # behavior can't shrink the local fleet.
+        delete_missing = getattr(args, 'delete_missing', False)
+        engine.reconcile_to_main(delete_missing=delete_missing)
+        if delete_missing:
+            print(f"  Reconciled to main (with delete propagation)")
+        else:
+            print(f"  Reconciled to main (deletes skipped; pass --delete-missing to propagate)")
+
         engine.close()
         return 0
 
@@ -291,6 +301,13 @@ def register(cli):
     ss = subparsers.add_parser('sync', help='Full bidirectional sync with peer')
     ss.add_argument('peer', help='Peer hostname or IP')
     ss.add_argument('--port', type=int, default=9420)
+    ss.add_argument(
+        '--delete-missing', action='store_true',
+        help=('After applying peer changes, also delete local entities/'
+              'relations whose natural key is no longer in the shadow. '
+              'Opt-in: default reconcile is INSERT+UPDATE only. Guarded '
+              'against empty-shadow wipes.'),
+    )
     cli.commands['sync.sync'] = cmd.do_sync
 
     # sync peers

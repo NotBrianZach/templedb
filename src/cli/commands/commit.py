@@ -408,8 +408,18 @@ class CommitCommand:
                 # Mark as seen
                 db_by_path.pop(rel_path)
 
-        # Remaining files in db_by_path were deleted
+        # Remaining files in db_by_path were deleted — but only if they actually
+        # don't exist on disk. Otherwise the scanner silently skipped them
+        # (e.g. unknown extension not in FILE_TYPE_PATTERNS), and treating that
+        # as a deletion would clobber the DB entry.
         for path, file_info in db_by_path.items():
+            if (workspace_dir / path).exists():
+                logger.warning(
+                    "Skipping phantom delete for %s: file exists on disk but "
+                    "scanner did not track it (likely unknown file type in "
+                    "FILE_TYPE_PATTERNS)", path
+                )
+                continue
             changes['deleted'].append(FileChange(
                 change_type='deleted',
                 file_path=path,

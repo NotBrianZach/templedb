@@ -363,8 +363,19 @@ class SyncEngine:
 
         conn.commit()
 
-    def reconcile_to_main(self):
-        """Apply shadow table changes back to main tables after sync."""
+    def reconcile_to_main(self, delete_missing: bool = False):
+        """Apply shadow table changes back to main tables after sync.
+
+        When ``delete_missing`` is True, also delete main-table rows
+        whose natural key is no longer present in the shadow — i.e.
+        propagate CRSql tombstones through to ``entities`` and
+        ``relations``. Guarded by a non-empty-shadow check so a fresh
+        peer that hasn't run ``sync init`` yet can't accidentally
+        wipe the local fleet with an empty ``sync_entities``.
+
+        Default is False: INSERT+UPDATE only. Callers that want the
+        symmetric "sync means sync" behavior must opt in explicitly.
+        """
         conn = self._connect()
 
         # sync_system_config → system_config
@@ -389,15 +400,7 @@ class SyncEngine:
         # sync_entities → entities. Both sides key on (kind,
         # external_ref) so no ID translation is needed. Local
         # surrogate IDs are preserved on the ON CONFLICT UPDATE path.
-        #
-        # Limitation: this is INSERT+UPDATE only. Deletes propagated
-        # via CRSql land in the shadow but don't reach main here —
-        # main would need a DELETE-what's-missing pass, which is
-        # dangerous without a first-populated guard (empty shadow
-        # on a new peer would wipe fleet). Delete propagation for
-        # the entity graph is deferred; use explicit admin commands
-        # for entity retirement (rare in practice — fleet kinds
-        # File/Commit/Deployment/Generation are append-only).
+        # Delete propagation is opt-in via delete_missing (see below).
         conn.execute("""
             INSERT INTO entities (
                 kind, external_ref, source_authority, label,
@@ -443,6 +446,57 @@ class SyncEngine:
                 sync_scope       = excluded.sync_scope
              WHERE excluded.observed_at > relations.observed_at
         """)
+
+        # Optional: propagate deletes. Only runs when the caller opts
+        # in AND the shadow is non-empty. The non-empty guard is the
+        # safety net for a fresh peer that hasn't run `sync init` — an
+        # empty shadow would otherwise mean "no fleet entities exist
+        # anywhere," and this pass would helpfully wipe the local
+        # graph. Once init has populated sync_entities from main, the
+        # count is 3k+ and the guard passes.
+        if delete_missing:
+            n_shadow = conn.execute(
+                "SELECT COUNT(*) FROM sync_entities"
+            ).fetchone()[0]
+            if n_shadow == 0:
+                logger.warning(
+                    "reconcile_to_main(delete_missing=True): sync_entities "
+                    "is empty; skipping delete pass. Run `templedb sync "
+                    "init` first to populate the shadow."
+                )
+            else:
+                # Relations must go before entities — FK ON DELETE
+                # CASCADE would take care of it if we deleted entities
+                # first, but doing relations explicitly means the
+                # counters below are meaningful.
+                n_rel = conn.execute("""
+                    DELETE FROM relations
+                     WHERE sync_scope = 'fleet'
+                       AND (from_entity_id, kind, to_entity_id) NOT IN (
+                           SELECT ef.id, sr.kind, et.id
+                             FROM sync_relations sr
+                             JOIN entities ef ON ef.kind = sr.from_kind
+                                             AND ef.external_ref = sr.from_external_ref
+                             JOIN entities et ON et.kind = sr.to_kind
+                                             AND et.external_ref = sr.to_external_ref
+                       )
+                """).rowcount
+
+                n_ent = conn.execute("""
+                    DELETE FROM entities
+                     WHERE sync_scope = 'fleet'
+                       AND external_ref IS NOT NULL
+                       AND (kind, external_ref) NOT IN (
+                           SELECT kind, external_ref FROM sync_entities
+                       )
+                """).rowcount
+
+                if n_ent or n_rel:
+                    logger.info(
+                        f"reconcile_to_main(delete_missing=True): "
+                        f"pruned {n_ent} entities, {n_rel} relations "
+                        f"absent from shadow of {n_shadow} rows"
+                    )
 
         conn.commit()
         logger.info("Reconciled shadow tables to main tables")

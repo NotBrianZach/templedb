@@ -204,7 +204,9 @@ FILE_TYPE_PATTERNS = [
 
     # Generic configs (catch-all - must be last)
     (r'\.ya?ml$', 'config_yaml', None),
+    (r'\.jsonc$', 'config_json', None),
     (r'\.json$', 'config_json', None),
+    (r'\.toml$', 'config_toml', None),
 
     # Scripts
     (r'\.sh$', 'shell_script', None),
