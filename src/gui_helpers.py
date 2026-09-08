@@ -465,11 +465,10 @@ templedb nixos dotfiles-add &lt;p&gt; &lt;s&gt; &lt;t&gt;  # add mapping
 templedb nixos dotfiles-remove &lt;p&gt; &lt;s&gt;   # remove mapping
 templedb nixos dotfiles-apply [--force]    # create symlinks</pre>
 
-<h3 style="margin-top:1rem">FUSE Filesystem</h3>
-<pre style="font-size:0.75rem">templedb mount [~/temple]                  # mount DB as filesystem
-templedb mount -r                          # read-only mount
-templedb unmount [~/temple]                # unmount
-templedb mount-status                      # check mount state</pre>
+<h3 style="margin-top:1rem">Interactive editing</h3>
+<pre style="font-size:0.75rem">templedb edit &lt;slug&gt;                      # $EDITOR in writable workspace
+templedb edit &lt;slug&gt; --no-editor           # prepare workspace, no editor
+templedb commit &lt;slug&gt; &lt;workspace&gt; -m …   # diff workspace → DB commit</pre>
 </div>
 
 <div>

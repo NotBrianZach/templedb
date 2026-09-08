@@ -394,7 +394,7 @@ class BootstrapCommand(Command):
         print("\nNext steps:")
         if not age_found:
             print("  1. Copy your age key:   cp /path/to/key.txt ~/.age/key.txt")
-        print(f"  - Edit files via FUSE:  ls {temple_dir}/<project>/")
+        print("  - Edit a project:       templedb edit <project>")
         print("  - Rebuild NixOS:        templedb nixos rebuild system_config")
         print("  - Check backup status:  templedb storage backup cloud status")
         print("  - Launch GUI:           templedb gui")

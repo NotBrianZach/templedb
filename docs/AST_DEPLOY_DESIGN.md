@@ -323,4 +323,3 @@ determinism work since it touches the same neighborhood.
 - Migrate all hosts from flat-KV to AST.
 - Deprecate `materialize_from_db` flat-KV path.
 - GC command for old build dirs.
-- Optional: FUSE-mount build dirs as virtual projects.

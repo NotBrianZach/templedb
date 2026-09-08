@@ -94,17 +94,6 @@ def dotfiles_remove(project: str = Form(...), source: str = Form(...)):
 # ── CRUD: project settings ──────────────────────────────────────────────────
 
 
-@router.post("/mount/toggle", response_class=HTMLResponse)
-def mount_toggle():
-    # FUSE mount was removed in 2026-08; use `templedb edit <slug>` instead.
-    return HTMLResponse(_msg(
-        "FUSE mount removed. Use `templedb edit <slug>` for interactive editing.",
-        ok=False,
-    ))
-
-
-
-
 # ── Routes migrated from nix.py ──
 
 @router.post("/db/migrate", response_class=HTMLResponse)
@@ -172,17 +161,6 @@ def dotfiles_remove(project: str = Form(...), source: str = Form(...)):
 
 
 # ── CRUD: project settings ──────────────────────────────────────────────────
-
-
-@router.post("/mount/toggle", response_class=HTMLResponse)
-def mount_toggle():
-    # FUSE mount was removed in 2026-08; use `templedb edit <slug>` instead.
-    return HTMLResponse(_msg(
-        "FUSE mount removed. Use `templedb edit <slug>` for interactive editing.",
-        ok=False,
-    ))
-
-
 
 
 # ── Routes from gui.py ──

@@ -135,14 +135,6 @@ class TestMigrationWorkflow:
         assert applied2 == 0
 
 
-# ── FUSE Tests ────────────────────────────────────────────────────────────────
-
-# TestFuseOperations removed 2026-09-05: the temple_fuse module was
-# deleted in 2026-08 (see reports/2026-08-29-post-fuse-editing-ux-*.html).
-# Editing UX moved to `templedb edit <slug>` workspaces. If FUSE ever
-# comes back, the tests are recoverable from git history.
-
-
 # ── Knowledge Graph Tests ─────────────────────────────────────────────────────
 
 class TestKnowledgeGraph:

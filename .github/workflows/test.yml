@@ -37,8 +37,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyyaml rich requests cryptography pytest fusepy
-          sudo apt-get install -y libfuse-dev fuse3 2>/dev/null || true
+          pip install pyyaml rich requests cryptography pytest
 
       - name: Run smoke tests
         run: |
@@ -60,7 +59,7 @@ jobs:
             --tb=short -q || true
 
   smoke-test:
-    name: Smoke Test (CLI + DB + FUSE)
+    name: Smoke Test (CLI + DB)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,8 +70,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyyaml rich requests cryptography fusepy
-          sudo apt-get install -y libfuse-dev fuse3 2>/dev/null || true
+          pip install pyyaml rich requests cryptography
 
       - name: Test migration framework
         run: |
@@ -104,39 +102,12 @@ jobs:
           from cli.commands.db import DBCommands
           from cli.commands.nixos import NixOSCommand
           from cli.commands.new_machine import BootstrapCommand
-          from cli.commands.mount import MountCommands
           from cli.commands.graph import GraphCommands
           from cli.commands.sync import SyncCommands
           from knowledge_graph import search_everywhere, cross_project_analysis
-          try:
-              from temple_fuse import TempleFS
-          except OSError:
-              print('FUSE: skipped (no libfuse)')
           from git_export import export_to_git
           from direnv_generator import cmd_direnv, shell_escape
           print('All CLI module imports: OK')
-          "
-
-      - name: Test FUSE operations (unit)
-        run: |
-          cd src
-          python -c "
-          import sys; sys.path.insert(0, '.')
-          import tempfile, os
-          try:
-              from temple_fuse import TempleFS
-              from migrator import Migrator
-              tmp = tempfile.mktemp(suffix='.sqlite')
-              m = Migrator(tmp)
-              m.migrate()
-              fs = TempleFS(db_path=tmp)
-              assert fs._parse_path('/') == (None, None)
-              assert fs._parse_path('/proj') == ('proj', None)
-              assert fs._parse_path('/proj/src/main.py') == ('proj', 'src/main.py')
-              os.unlink(tmp)
-              print('FUSE unit tests: OK')
-          except OSError:
-              print('FUSE: skipped (no libfuse)')
           "
 
       - name: Test knowledge graph (unit)
@@ -189,5 +160,5 @@ jobs:
           result/bin/templedb --help | grep -q "Getting Started"
           result/bin/templedb graph --help | grep -q "search"
           result/bin/templedb sync --help | grep -q "init"
-          result/bin/templedb mount --help | grep -q "mountpoint"
+          result/bin/templedb edit --help | grep -q "workspace"
           echo "CLI help: OK"

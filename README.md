@@ -96,7 +96,7 @@ command groups:
 
   Projects & Files
     project            Import, list, show, attach, checkout
-    edit               Open a workspace for interactive editing (replaces FUSE)
+    edit               Open a workspace for interactive editing
     source             Read-only observations of source state (snapshots)
     intent             EditIntent — proposed edits, dry-run, apply, revert
     vcs                Version control (status, add, commit, log, diff, session)
@@ -176,7 +176,7 @@ templedb intent revert <id>                   # inverse patch
 
 Each `EditIntent` becomes a graph entity linked to its `AgentSession` (via `proposed`) and its resulting `Commit` (via `applied-to`) — so "which agent's edit ended up in production?" is a graph query.
 
-The **FUSE mount** at `~/temple/` was retired 2026-09-05 (Phase 5 of the [observer/integrator plan](reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html)). Interactive editing goes through `templedb edit <slug>` (workspace under `~/.config/templedb/edit-workspaces/<slug>/`); single-file tweaks use `templedb file edit <slug> <path>` or `templedb file set <slug> <path>`. Analysis and alternatives considered: [`reports/2026-08-29-post-fuse-editing-ux-alternatives-and-recommendation.html`](reports/).
+Interactive editing goes through `templedb edit <slug>` (workspace under `~/.config/templedb/edit-workspaces/<slug>/`); single-file tweaks use `templedb file edit <slug> <path>` or `templedb file set <slug> <path>`.
 
 ### Commit and publish (writes → Commit + FileSnapshot entities)
 
@@ -490,7 +490,7 @@ The observer/integrator plan is largely landed. What's next, in rough order:
 3. **SCIP adapters** (TypeScript, Rust, Nix) — external code-facts ingestion. Language coverage grows with the SCIP ecosystem rather than our parser budget.
 4. **Observations archive + current-only semantics** — retention policy so the graph doesn't grow unbounded when SCIP dumps millions of symbol facts.
 5. **Sidecar-column migration** (expand/contract) — move `vcs_commit_metadata`, `vcs_file_change_metadata`, etc. onto `entities.attributes_json`.
-6. **Retire FUSE mount** (Phase 5) — **done 2026-09-05**. `src/temple_fuse.py`, the `mount` CLI subcommand, `mount.enable`/`mount.path` in the home-manager module, `fusepy` from `pythonEnv`/`devShell`, and the FUSE systemd service are all gone. Editing goes through `templedb edit <slug>`; agent edits go through EditIntent. Cross-session handoff via `templedb handoff {send,list,pop,ack}` (design in [cross-session handoff semantics](reports/2026-09-03-0826-cross-session-handoff-semantics.html)).
+6. **Cross-session handoff** via `templedb handoff {send,list,pop,ack}` — carry unfinished threads across sessions and agents without losing state (design in [cross-session handoff semantics](reports/2026-09-03-0826-cross-session-handoff-semantics.html)).
 
 ---
 

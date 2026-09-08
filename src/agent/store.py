@@ -40,7 +40,7 @@ def _retry_on_lock(fn, max_retries=3, base_delay=0.5):
     """Retry a DB operation on OperationalError (database locked).
 
     Uses exponential backoff. Prevents agent sessions from dying
-    when the FUSE mount or GUI holds a brief write lock.
+    when the GUI or a parallel templedb process holds a brief write lock.
     """
     for attempt in range(max_retries + 1):
         try:
@@ -223,7 +223,7 @@ def update_message_content(message_id, content_text):
     """Update message content (for streaming accumulation).
 
     Retries on DB lock since this is called frequently during streaming
-    and is most likely to collide with FUSE/GUI writes.
+    and is most likely to collide with GUI or parallel templedb writes.
     """
     _retry_on_lock(lambda: execute(
         "UPDATE agent_messages SET content_text = ?, updated_at = ? WHERE id = ?",
@@ -495,10 +495,10 @@ def upsert_section_entry(session_id, section, entry_id, entry_dict):
     for indexing but also mirrored inside the JSON payload for convenience.
 
     Wrapped in `_retry_on_lock` because MCP tools invoke this from
-    subprocess writers that race against the agent service, FUSE mount,
-    GUI, and any parallel templedb activity. Without retry, four
-    rapid-fire `templedb_agent_*` calls from Claude reliably lose the
-    lock race and return `database is locked` to the model."""
+    subprocess writers that race against the agent service, the GUI, and
+    any parallel templedb activity. Without retry, four rapid-fire
+    `templedb_agent_*` calls from Claude reliably lose the lock race and
+    return `database is locked` to the model."""
     payload = dict(entry_dict)
     payload["id"] = entry_id
     now = _now()

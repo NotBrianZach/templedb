@@ -1668,7 +1668,6 @@ class NixOSCommand(Command):
         machine = platform.machine()
         system = f"{machine}-linux"
         home_dir = f"/home/{username}"
-        mount_path = args.mount_path or f"{home_dir}/temple"
         timezone = args.timezone or "America/Chicago"
         state_version = args.state_version or "24.11"
 
@@ -1729,8 +1728,6 @@ class NixOSCommand(Command):
             programs.templedb = {{
               enable = true;
               package = templedb.packages.${{pkgs.system}}.templedb;
-              mount.enable = true;
-              mount.path = "{mount_path}";
               claude.enable = true;
               claude.mcp = true;
             }};
@@ -1834,7 +1831,6 @@ let homeDir = "{home_dir}"; in
         print(f"\nScaffolded system_config at {output_dir}")
         print(f"  Host:     {hostname}")
         print(f"  User:     {username}")
-        print(f"  Mount:    {mount_path}")
         print(f"  TempleDB: {templedb_input}")
 
         # Import into templedb
@@ -1856,7 +1852,6 @@ let homeDir = "{home_dir}"; in
                     "nixos.timeZone": timezone,
                     "nixos.let.home.homeDir": home_dir,
                     "nixos.let.configuration.homeDir": home_dir,
-                    "fuse.mount_path": mount_path,
                 }
                 for key, value in db_configs.items():
                     conn.execute(
@@ -2245,7 +2240,6 @@ def register(cli):
         p.add_argument('-o', '--output', help='Output directory (default: /tmp/system_config_scaffold)')
         p.add_argument('--username', help='Username (default: $USER)')
         p.add_argument('--hostname', help='NixOS hostname (default: auto-detect)')
-        p.add_argument('--mount-path', help='FUSE mount path (default: ~/temple)')
         p.add_argument('--timezone', help='Timezone (default: America/Chicago)')
         p.add_argument('--state-version', help='NixOS stateVersion (default: 24.11)')
         p.add_argument('--no-import', action='store_true', help='Do not import into templedb')

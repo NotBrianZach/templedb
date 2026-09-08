@@ -2326,7 +2326,7 @@ Uses sqlite3 directly for speed (no process startup)."
         (vars (or (plist-get stats :vars) 0)))
     (pcase key
       ('project_prompt
-       "Project prompt -- FUSE paths, MCP tools, workflow rules")
+       "Project prompt -- CLI paths, MCP tools, workflow rules")
       ('recent_commits
        (format "Recent commits -- last 5 of %d total" commits))
       ('file_tree
@@ -2394,7 +2394,7 @@ Uses sqlite3 directly for speed (no process startup)."
           (let ((val (alist-get 'project_prompt items)))
             (insert (format "*** %s Project Prompt\n"
                             (if val "ACTIVE" "OFF")))
-            (insert "FUSE paths, MCP tools, workflow rules, vibe-style context.\n")
+            (insert "CLI paths, MCP tools, workflow rules, vibe-style context.\n")
             (insert "Same prompt used by =templedb ai vibe start=.\n\n"))
 
           ;; --- Recent Commits ---

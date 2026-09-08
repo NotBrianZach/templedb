@@ -325,8 +325,7 @@ try:
         # Structured read/write access to the config-compiler AST so
         # agents can grab a focused subtree of NixOS/home config as
         # typed context instead of reading whole .nix files, and can
-        # propose changes as validated AST diffs instead of Edit-through-
-        # FUSE writes (which have historically truncated silently).
+        # propose changes as validated AST diffs instead of raw file edits.
         def tool_ast_subtree(args):
             import json as _json
             try:
@@ -761,8 +760,8 @@ try:
                  "add_list_item {scope,path,value,node_type,host?,project?}, "
                  "enable {node_id}, disable {node_id}, remove {node_id}. "
                  "Returns per-op status. Use this INSTEAD of file editing when changing "
-                 "NixOS config — it sidesteps the FUSE write-path entirely and produces "
-                 "structured changes that flow through the AST-deploy pipeline. "
+                 "NixOS config — it produces structured changes that flow through the "
+                 "AST-deploy pipeline. "
                  "After a successful apply, run `templedb deploy run system_config "
                  "--target <host>` (or `templedb ast build --host <host> --nix-build`) "
                  "to promote and activate.",

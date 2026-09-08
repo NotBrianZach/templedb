@@ -112,9 +112,9 @@ class SystemService:
     def materialize_from_db(self, project_slug: str, force: bool = False) -> Optional[Path]:
         """Write project files from DB to checkout dir for nix evaluation.
 
-        This is the FUSE-first bridge: the DB is the source of truth,
-        but nix needs real files in a git repo. This method materializes
-        the DB content to disk and ensures git tracks it.
+        The DB is the source of truth, but nix needs real files in a git
+        repo. This method materializes the DB content to disk and ensures
+        git tracks it.
 
         Args:
             project_slug: Project to materialize
@@ -413,8 +413,8 @@ class SystemService:
     def lock_checkout(self, project_slug: str):
         """Make checkout files read-only after generate-all.
 
-        DB is the source of truth — edits should go through FUSE (~/ temple/)
-        or the GUI, not the checkout directory.
+        DB is the source of truth — edits should go through
+        `templedb edit <slug>` or the GUI, not the checkout directory.
         """
         checkout_dir = self._checkout_dir_for(project_slug)
 

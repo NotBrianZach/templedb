@@ -177,39 +177,6 @@ def graph_page(q: str = Query(""), view: str = Query("overview"), project: str =
 {recent}
 """
 
-    # FUSE mount status section
-    fuse_html = ""
-    try:
-        fuse_mounts = []
-        with open("/proc/mounts") as fm:
-            for line in fm:
-                if "fuse" in line.lower() and "temple" in line.lower():
-                    fuse_mounts.append(line.split()[1])
-
-        mount_status = (
-            f'<span style="color:#4a9a6a">Mounted at {", ".join(fuse_mounts)}</span>'
-            if fuse_mounts
-            else '<span class="muted">Not mounted</span>'
-        )
-
-        fuse_html = f"""
-<div style="border:1px solid #1e1e3a;border-radius:6px;padding:1rem;margin-bottom:1.5rem">
-  <h3>FUSE Mount
-    <span class="help-tip" style="position:relative">?<span class="tip">Mount the TempleDB database as a real filesystem. Projects appear as directories, files are read from/written to the DB. Writes auto-stage for VCS commit. No sync needed — edits go straight to the DB.</span></span>
-  </h3>
-  <p style="margin:0.5rem 0">Status: {mount_status}</p>
-  <div style="display:flex;gap:0.5rem;margin-top:0.5rem">
-    <button hx-post="/mount/toggle" hx-swap="outerHTML" class="sm">{'Unmount' if fuse_mounts else 'Mount {FUSE_MOUNT_PATH}'}</button>
-  </div>
-  <p class="muted" style="font-size:0.78rem;margin-top:0.5rem">
-    {'Access files at: <code>' + fuse_mounts[0] + '/&lt;project&gt;/</code>' if fuse_mounts else
-     'After mounting, access files at <code>{FUSE_MOUNT_PATH}/&lt;project&gt;/</code>. Writes auto-stage in VCS.'}
-  </p>
-</div>
-"""
-    except Exception:
-        pass
-
     # ── View tabs ────────────────────────────────────────────────────────────
     view_tabs = "".join(
         f'<a href="/graph?view={k}" class="tab{"active" if view == k else ""}">{label}</a>'
@@ -235,7 +202,6 @@ def graph_page(q: str = Query(""), view: str = Query("overview"), project: str =
 
 {search_result}
 <div class="tabs">{view_tabs}</div>
-{fuse_html}
 {overview_html if view == "overview" else ""}
 {symbols_html}
 """

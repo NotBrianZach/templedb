@@ -188,8 +188,8 @@ totally untouched.
 
 See `reports/2026-09-05-2200-session-recap-8-scip-arc.html` for
 the full arc + three unrelated bugs that surfaced along the way
-(scanner false-positives, stale-blob commits, FUSE zombie
-retirement).
+(scanner false-positives, stale-blob commits, and a stale mount-
+service retirement).
 
 ### v1.3 candidates (small, non-urgent)
 
@@ -243,19 +243,6 @@ wrapper. Adapter code unchanged.
   another 20 uses (currently at ~10 uses, all this session).
 
 ## 5. Fully retired (don't restart)
-
-- **FUSE mount** — killed 2026-09-05. `src/temple_fuse.py` gone,
-  `mount` CLI subcommand gone, `mount.enable`/`mount.path` option
-  block gone from `homeManagerModule` in flake.nix, `fusepy` dep
-  gone from pythonEnv and devShell, `Bash(fusermount:*)`
-  permission gone, systemd service gone. Zombie process from
-  Aug 25 that had been serving stale mounts (with the buggy
-  write-path propagation) is killed. See commit `54D87C3A` and
-  `reports/2026-08-29-post-fuse-editing-ux-alternatives-and-recommendation.html`.
-
-  Use `templedb edit <slug>` for session-edit workflow — opens
-  `$EDITOR` in `~/.config/templedb/edit-workspaces/<slug>/`.
-  For one-shots: `templedb file edit <slug> <path>`.
 
 - **vcs-status scanner false positives** — fixed 2026-09-05 in
   commit `6D6D1B55` / `4537FDB3`. `_refresh_working_state` was

@@ -114,10 +114,6 @@ templedb commit <slug> ~/.config/templedb/edit-workspaces/<slug> -m "…"
 For a single-file edit without a full workspace, use
 `templedb file edit <slug> <path>` (opens `$EDITOR` on the DB blob).
 
-The FUSE mount at `~/temple/…` was removed in 2026-08 in favor of this
-workflow (see `reports/2026-08-29-post-fuse-editing-ux-alternatives-and-recommendation.html`
-for the analysis).
-
 ## Dev mode: `TEMPLEDB_DEV_MODE=1`
 
 When you're actively editing templedb source, set `TEMPLEDB_DEV_MODE=1`

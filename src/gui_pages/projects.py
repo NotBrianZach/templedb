@@ -110,7 +110,7 @@ def projects_list():
 <div class="row" style="margin-bottom:0.5rem">
   <form hx-post="/projects/sync-all" hx-target="#sync-all-result" hx-swap="innerHTML">
     <button type="submit">Sync All Projects</button>
-    <span class="help-tip" style="position:relative">?<span class="tip">Re-imports project files from checkout dirs into the database. Only needed if you edited files in ~/.config/templedb/checkouts/ directly. Not needed if you use the FUSE mount ({FUSE_MOUNT_PATH}/) — FUSE writes go straight to the DB.</span></span>
+    <span class="help-tip" style="position:relative">?<span class="tip">Re-imports project files from checkout dirs into the database. Only needed if you edited files in ~/.config/templedb/checkouts/ directly. Not needed if you use <code>templedb edit &lt;slug&gt;</code> + <code>templedb commit</code> — those write straight to the DB.</span></span>
   </form>
   <span id="sync-all-result" class="muted"></span>
 </div>
@@ -1200,7 +1200,7 @@ def projects_list():
 <div class="row" style="margin-bottom:0.5rem">
   <form hx-post="/projects/sync-all" hx-target="#sync-all-result" hx-swap="innerHTML">
     <button type="submit">Sync All Projects</button>
-    <span class="help-tip" style="position:relative">?<span class="tip">Re-imports project files from checkout dirs into the database. Only needed if you edited files in ~/.config/templedb/checkouts/ directly. Not needed if you use the FUSE mount ({FUSE_MOUNT_PATH}/) — FUSE writes go straight to the DB.</span></span>
+    <span class="help-tip" style="position:relative">?<span class="tip">Re-imports project files from checkout dirs into the database. Only needed if you edited files in ~/.config/templedb/checkouts/ directly. Not needed if you use <code>templedb edit &lt;slug&gt;</code> + <code>templedb commit</code> — those write straight to the DB.</span></span>
   </form>
   <span id="sync-all-result" class="muted"></span>
 </div>

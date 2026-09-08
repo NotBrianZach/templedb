@@ -242,7 +242,6 @@ Not all tables participate in cr-sqlite sync. Tables that remain local-only incl
 
 - File content and blob storage (synced via GCS or Cathedral packages instead)
 - Code intelligence / dependency graph data (rebuilt locally)
-- FUSE mount state
 - Session-specific data
 
 The sync layer focuses on **metadata and configuration** that should be consistent across machines, while large content is handled by other mechanisms (GCS backup, Cathedral export/import).

@@ -2,9 +2,8 @@
 """`templedb edit <slug>` — the interactive-editing on-ramp.
 
 Creates or reuses a stable writable checkout for the project and (optionally)
-launches $EDITOR in it. On exit, prints the commit hint. This is the
-recommended replacement for the FUSE mount for session-shaped edits: you get
-a real directory the editor understands, and you commit back with
+launches $EDITOR in it. On exit, prints the commit hint. You get a real
+directory the editor understands, and you commit back with
 `templedb commit <slug> <workspace>`.
 
 Workspace lives at `~/.config/templedb/edit-workspaces/<slug>/` by default so
@@ -89,8 +88,7 @@ def register(cli):
     cmd = EditCommands()
     parser = cli.register_command(
         'edit', None,
-        help_text='Open a project workspace for interactive editing '
-                  '(replaces the FUSE mount workflow)'
+        help_text='Open a project workspace for interactive editing'
     )
     parser.add_argument('project_slug', help='Project slug to edit')
     parser.add_argument('path', nargs='?', default=None,

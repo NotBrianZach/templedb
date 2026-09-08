@@ -15,8 +15,6 @@ from fastapi.responses import HTMLResponse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from db_utils import execute, query_all, query_one
-from config import FUSE_MOUNT_PATH
-
 router = APIRouter()
 
 from gui_helpers import TEMPLEDB, _base, _colorize_diff, _file_link, _highlight_template, _msg, _run, _search_bar, _status_badge, _table
@@ -231,7 +229,6 @@ def system_page(q: str = Query(""), host: str = Query("")):
 <p><strong>Actions</strong></p>
 <table style="margin:0.5rem 0">
 <tr><td style="width:180px"><strong>Sync</strong></td><td>Re-import project files from disk into the database</td></tr>
-<tr><td><strong>Mount {FUSE_MOUNT_PATH}</strong></td><td>Mount the database as a FUSE filesystem (read/write, auto-stages changes)</td></tr>
 <tr><td><strong>Generate NixOS</strong></td><td>Regenerate all NixOS config from DB: let-bindings, templates, modules, flake inputs</td></tr>
 <tr><td><strong>Apply Dotfiles</strong></td><td>Create/update symlinks from checkout files to home directory</td></tr>
 <tr><td><strong>Backup to GCS</strong></td><td>Upload database to Google Cloud Storage bucket</td></tr>
@@ -423,33 +420,14 @@ def system_page(q: str = Query(""), host: str = Query("")):
         checkout_dir = Path.home() / ".config" / "templedb" / "checkouts"
         checkout_count = sum(1 for p in checkout_dir.iterdir() if p.is_dir()) if checkout_dir.exists() else 0
 
-        # FUSE mount status
-        fuse_mounts = []
-        try:
-            with open("/proc/mounts") as fm:
-                for line in fm:
-                    if "fuse" in line.lower() and "temple" in line.lower():
-                        parts = line.split()
-                        fuse_mounts.append(parts[1])
-        except Exception:
-            pass
-
-        fuse_cell = (
-            f'<span style="color:#4a9a6a">mounted at {", ".join(fuse_mounts)}</span>'
-            if fuse_mounts
-            else '<span class="muted">not mounted</span>'
-        )
-
         bootstrap_html = f"""
 <h3 style="margin-top:1.5rem">Bootstrap Readiness</h3>
 <table>
 <tr><td style="width:180px">Age key</td><td>{age_cell}</td></tr>
 <tr><td>Project checkouts</td><td>{checkout_count} checked out</td></tr>
-<tr><td>FUSE mount</td><td>{fuse_cell}</td></tr>
 <tr><td>Database</td><td>{db_info}</td></tr>
 </table>
 <div style="display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap">
-  <button hx-post="/mount/toggle" hx-swap="outerHTML" style="font-size:0.78rem">{'Unmount' if fuse_mounts else 'Mount'} {FUSE_MOUNT_PATH}</button>
   <button hx-post="/db/migrate" hx-swap="outerHTML" style="font-size:0.78rem">Run Migrations</button>
   <button hx-post="/nixos/dotfiles-apply" hx-swap="outerHTML" style="font-size:0.78rem">Apply Dotfiles</button>
   <button hx-post="/nixos/generate-all" hx-swap="outerHTML" style="font-size:0.78rem">Generate NixOS</button>
@@ -613,7 +591,6 @@ def system_page(q: str = Query(""), host: str = Query("")):
 <p class="muted">Database: {db_info}</p>
 
 <div style="display:flex;gap:0.5rem;margin:1rem 0;flex-wrap:wrap">
-  <button hx-post="/mount/toggle" hx-swap="outerHTML" style="font-size:0.78rem">Toggle FUSE Mount</button>
   <button hx-post="/db/migrate" hx-swap="outerHTML" style="font-size:0.78rem">Run Migrations</button>
   <button hx-post="/nixos/dotfiles-apply" hx-swap="outerHTML" style="font-size:0.78rem">Apply Dotfiles</button>
   <button hx-post="/nixos/generate-all" hx-swap="outerHTML" style="font-size:0.78rem">Generate NixOS</button>
@@ -666,7 +643,6 @@ def system_page(q: str = Query(""), host: str = Query("")):
 <tr><td><strong>SQLite</strong></td><td>Core database</td><td><span class="badge green">core</span></td><td><code>~/.local/share/templedb/templedb.sqlite</code></td></tr>
 <tr><td><strong>Git</strong></td><td>Checkout management, git daemon, git-export</td><td><span class="badge green">core</span></td><td>Built-in</td></tr>
 <tr><td><strong>Nix / NixOS</strong></td><td>System config generation, flake inputs</td><td><span class="badge green">core</span></td><td><code>templedb nixos status</code></td></tr>
-<tr><td><strong>FUSE</strong></td><td>Mount DB as filesystem at <code>{FUSE_MOUNT_PATH}/</code></td><td><span class="badge blue">recommended</span></td><td><code>templedb mount {FUSE_MOUNT_PATH}</code></td></tr>
 <tr><td><strong>SOPS / Age</strong></td><td>Secret encryption</td><td><span class="badge blue">recommended</span></td><td><code>~/.age/key.txt</code></td></tr>
 <tr><td><strong>GCS</strong></td><td>Cloud backup</td><td><span class="badge">optional</span></td><td><code>gcs.backup_bucket</code></td></tr>
 <tr><td><strong>Tailscale</strong></td><td>Machine-to-machine sync</td><td><span class="badge">optional</span></td><td><code>templedb sync peers</code></td></tr>

@@ -13,7 +13,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from db_utils import execute, query_all, query_one
-from config import FUSE_MOUNT_PATH
 from logger import get_logger
 from gui_helpers import _status_badge
 
@@ -442,18 +441,6 @@ def root():
     except Exception:
         pass
 
-    fuse_mounted = False
-    try:
-        with open("/proc/mounts") as fm:
-            for line in fm:
-                if "fuse" in line.lower() and "temple" in line.lower():
-                    fuse_mounted = True
-                    break
-    except Exception:
-        pass
-    if not fuse_mounted:
-        alerts.append(f"FUSE mount is down ({FUSE_MOUNT_PATH})")
-
     alerts_html = ""
     if alerts:
         items = "".join(
@@ -467,7 +454,6 @@ def root():
     quick_actions = """
 <div style="display:flex;gap:0.5rem;margin-bottom:1.5rem;flex-wrap:wrap">
   <button hx-post="/backup/gcs" hx-swap="outerHTML" style="font-size:0.78rem">Backup to GCS</button>
-  <button hx-post="/mount/toggle" hx-swap="outerHTML" style="font-size:0.78rem">Toggle FUSE Mount</button>
   <button hx-post="/projects/sync-all" hx-target="#dash-sync-result" hx-swap="innerHTML" style="font-size:0.78rem">Sync All</button>
   <button hx-post="/db/migrate" hx-swap="outerHTML" style="font-size:0.78rem">Run Migrations</button>
   <span id="dash-sync-result" class="muted"></span>
@@ -552,7 +538,7 @@ of your entire digital life as a developer.
   </a>
   <a href="/status" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
     <strong style="color:#e94560">Status</strong><kbd class="keyhint">SPC , i</kbd>
-    <div class="muted" style="margin-top:0.2rem">System health. DB stats, migration status, FUSE mount, bootstrap readiness, daemon status, and active services.</div>
+    <div class="muted" style="margin-top:0.2rem">System health. DB stats, migration status, bootstrap readiness, daemon status, and active services.</div>
   </a>
   <a href="/systemd" style="display:block;background:#13131f;border:1px solid #1e1e3a;border-radius:4px;padding:0.65rem 0.85rem;text-decoration:none">
     <strong style="color:#e94560">Systemd</strong><kbd class="keyhint">SPC , u</kbd>
@@ -624,7 +610,6 @@ of your entire digital life as a developer.
     <div class="muted" style="margin-top:0.3rem;line-height:1.8">
       <kbd class="keyhint">SPC , N</kbd> Nix menu &nbsp;
       <kbd class="keyhint">SPC , S</kbd> Settings &nbsp;
-      <kbd class="keyhint">SPC , M</kbd> FUSE mount &nbsp;
       <kbd class="keyhint">SPC , v</kbd> Variables
     </div>
   </div>

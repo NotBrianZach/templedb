@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from repositories import ProjectRepository
 from llm_context import TempleDBContext
-from config import DB_PATH, PROJECT_ROOT, FUSE_MOUNT_PATH
+from config import DB_PATH, PROJECT_ROOT
 from logger import get_logger
 
 # Configure logging to stderr so stdout is clean for MCP protocol

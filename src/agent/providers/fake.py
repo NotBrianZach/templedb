@@ -19,8 +19,8 @@ CANNED_RESPONSES = {
     "test": "All tests passed. The fake provider is working correctly.",
     "default": (
         "TempleDB stores all project data in SQLite. "
-        "It uses a FUSE mount for transparent file access, "
-        "and tracks VCS history, deployments, environments, and more. "
+        "Edit workspaces (`templedb edit <slug>`) give you a writable checkout, "
+        "and TempleDB tracks VCS history, deployments, environments, and more. "
         "The CLI provides commands like `templedb vcs status`, `templedb deploy`, "
         "and `templedb ai agent` for AI-powered workflows."
     ),

@@ -371,7 +371,6 @@ class ReportsCommands(Command):
             ),
         )
 
-        # Write to a tempfile then set via file set (avoids FUSE)
         tmp = Path(tempfile.mkdtemp()) / filename
         tmp.write_text(content)
         r = subprocess.run(
