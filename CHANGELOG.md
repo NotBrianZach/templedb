@@ -6,8 +6,37 @@ All notable changes to TempleDB are documented in this file.
 
 ## [Unreleased]
 
+### 2026-09-08
+- **`templedb vcs add` no longer overstages files with common basenames.**
+  `services/vcs_service.py::stage_files` (and `unstage_files`) matched on
+  `WHERE pf.file_path LIKE '%<pattern>%'` after the caller had already
+  fuzzy-resolved the pattern to an exact path. Staging root `README.md`
+  swept in every `docs/README.md`, `assets/README.md`, etc. Fix: switch
+  to `pf.file_path = ?`; both callers pass exact paths so no globbing
+  use case was served. (commit `38B39E80`)
+- **`templedb publish run` no longer requires `--force` after every
+  commit.** `materialize_from_db` called `check_checkout_conflicts`
+  before overwriting the checkout, but every just-committed file
+  differs (DB updated, checkout not yet re-materialized), so the check
+  always fired. `publish.py` now calls `materialize_from_db(force=True)`
+  unconditionally — the checkout is chmod'd read-only by
+  `lock_checkout()`, so there's nothing user-authored to protect. The
+  `--force` CLI flag stays for parity but is now a documented no-op.
+  (commit `38B39E80`)
+- **FUSE terminology purged from prompts, CLAUDE.md, GUI, and stale
+  code.** Removed `FUSE_MOUNT_PATH` constant from `src/config.py` and
+  its imports; deleted the FUSE mount panel/toggle button from
+  Dashboard/Settings/Graph GUI pages; dropped the `/mount/toggle` stub
+  endpoint; removed `--mount-path` and `fuse.mount_path`/`mount.enable`
+  from `nixos init-config` scaffolding so the generated flake stops
+  setting nonexistent options; fixed CI (`test.yml`) which was still
+  importing the deleted `temple_fuse` and `cli.commands.mount`
+  modules; deleted the retired `docs/FUSE_VCS_INTEGRATION.md` design
+  doc; refreshed FUSE-first docstrings in `agent/store.py`,
+  `services/system_service.py`, and elsewhere. (commit `954CDCDD`)
+
 ### Fixed
-- **FUSE non-blocking architecture** - TempleFS no longer hangs callers when SQLite is slow
+- **FUSE non-blocking architecture** *(pre-FUSE-retirement — FUSE removed 2026-09-05)* - TempleFS no longer hangs callers when SQLite is slow
   - All FUSE operations (`getattr`, `readdir`, `read`, `open`, `create`, `unlink`, `rename`,
     `release`) are now wrapped in a 3-second timeout — returns `EIO` instead of hanging forever
   - Separate read-only (16 conns, 5s busy_timeout) and read-write (4 conns, 30s busy_timeout)
