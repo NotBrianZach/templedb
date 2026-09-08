@@ -459,6 +459,12 @@ class VCSService(BaseService):
             return result['count'] if result else 0
 
         elif file_patterns:
+            # Callers (cli/commands/vcs.py::add, cli/commands/file.py::set)
+            # pass exact file paths already resolved by fuzzy_match_file.
+            # Match on equality, not LIKE %pattern% — the latter matches
+            # any path that *contains* the pattern as a substring, so a
+            # root-level README.md would sweep in every docs/README.md,
+            # assets/README.md, etc.
             count = 0
             for pattern in file_patterns:
                 files = self.vcs_repo.query_all("""
@@ -466,14 +472,10 @@ class VCSService(BaseService):
                     FROM vcs_working_state ws
                     JOIN project_files pf ON ws.file_id = pf.id
                     WHERE ws.project_id = ? AND ws.branch_id = ?
-                    AND pf.file_path LIKE ?
-                """, (project['id'], branch['id'], f"%{pattern}%"))
+                    AND pf.file_path = ?
+                """, (project['id'], branch['id'], pattern))
 
                 for file in files:
-                    # Refresh from disk BEFORE recording the stage —
-                    # otherwise the staged hash is whatever the last
-                    # scanner saw, which can silently commit stale
-                    # content when the user edited the workspace since.
                     self._refresh_ws_row_from_disk(
                         file['id'], project, file['file_path']
                     )
@@ -625,6 +627,7 @@ class VCSService(BaseService):
             return count
 
         elif file_patterns:
+            # Exact match — see comment in stage_files for why LIKE %..% is wrong.
             count = 0
             for pattern in file_patterns:
                 files = self.vcs_repo.query_all("""
@@ -633,8 +636,8 @@ class VCSService(BaseService):
                     JOIN project_files pf ON ws.file_id = pf.id
                     WHERE ws.project_id = ? AND ws.branch_id = ?
                       AND ws.staged_by_session_id = ?
-                      AND pf.file_path LIKE ?
-                """, (project['id'], branch['id'], sid, f"%{pattern}%"))
+                      AND pf.file_path = ?
+                """, (project['id'], branch['id'], sid, pattern))
 
                 for file in files:
                     self.vcs_repo.execute("""

@@ -74,10 +74,16 @@ class PublishCommands(Command):
         except Exception as e:
             print(f"  VCS commit skipped: {e}")
 
-        # Step 2: Materialize to checkout (git repo for daemon + push)
+        # Step 2: Materialize to checkout (git repo for daemon + push).
+        # Always force: publish IS the authoritative DB→checkout write.
+        # The checkout is chmod'd read-only by lock_checkout(), so the
+        # only files that would be "overwritten" here are the ones the
+        # commit above just changed. Requiring --force in that case
+        # made the flag mandatory on every publish and offered no real
+        # protection.
         print(f"  Materializing to git repo...")
         svc = SystemService()
-        checkout = svc.materialize_from_db(project_slug, force=getattr(args, 'force', False))
+        checkout = svc.materialize_from_db(project_slug, force=True)
         if not checkout:
             print(f"  Failed to materialize", file=sys.stderr)
             return 1
@@ -259,7 +265,8 @@ def register(cli):
     run_p.add_argument('project', help='Project slug')
     run_p.add_argument('-m', '--message', help='Commit message', default='TempleDB publish')
     run_p.add_argument('--force', '-f', action='store_true',
-                       help='Force materialize (overwrite local checkout changes)')
+                       help='Deprecated no-op; publish always overwrites '
+                            'the checkout (DB is authoritative).')
     cli.commands['publish.run'] = cmd.publish
 
     # publish mirror-add
