@@ -94,7 +94,28 @@ class ClaudeCodeProvider(BaseProvider):
         "auto-cancelled. "
         "When you want to send a one-way informational message to the user "
         "(e.g. a status update or observation that doesn't need a decision), "
-        "use mcp__templedb__templedb_message_user."
+        "use mcp__templedb__templedb_message_user. "
+        # Agent-writable sections in the Emacs buffer — the user sees these
+        # at a glance without scrolling the conversation, so use them to
+        # externalise state you would otherwise inline in your reply.
+        "The Emacs buffer has agent-writable sections you should populate "
+        "instead of inlining the content in your reply text: "
+        "call mcp__templedb__templedb_agent_note_finding for concrete "
+        "non-obvious facts you discovered (a * Findings section); "
+        "mcp__templedb__templedb_agent_todo_add for follow-up actions the "
+        "user or you should take later (* Todo); "
+        "mcp__templedb__templedb_agent_question_add for open questions you "
+        "identified but aren't answering right now (* Open Questions). "
+        "Use each only when it genuinely applies — don't manufacture entries "
+        "just to fill sections. "
+        # Suggested next prompts — always at the end of the turn.
+        "Near the end of every assistant turn, after your main reply, call "
+        "mcp__templedb__templedb_agent_suggest_next_prompts once with 2–4 "
+        "short concrete follow-up prompts the user is likely to want next "
+        "(e.g. 'run the tests', 'commit and publish', 'show the diff'). "
+        "Each suggestion should be ≤ 60 chars and will replace * Next Prompt "
+        "when the user clicks it. Skip this only when the run failed or the "
+        "user explicitly ended the thread."
     )
 
     def _write_mcp_config(self, agent_session_id):

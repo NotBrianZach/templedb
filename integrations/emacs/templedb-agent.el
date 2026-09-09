@@ -58,7 +58,7 @@
 ;;;; Constants
 
 (defconst templedb-agent--section-heading-regex
-  "^\\* \\(Guide\\|Now\\|Goal\\|Context\\|Conversation\\|Next Prompt\\|Pinned\\|Notes\\|Scratch\\)\\(?:\n\\|$\\)"
+  "^\\* \\(Guide\\|Now\\|Goal\\|Context\\|Conversation\\|Next Prompt\\|Notes\\|Scratch\\)\\(?:\n\\|$\\)"
   "DEPRECATED. Regex for a top-level heading. Kept only for legacy callers
 that haven't been migrated to text-property anchors. Prefer
 `templedb-agent--find-section' / `--next-section-after' — they are
@@ -74,7 +74,7 @@ robust to user-typed content that looks like a heading.")
 (defconst templedb-agent--section-order
   '(guide now goal context conversation next-prompt
     findings todo open-questions
-    pinned notes scratch)
+    notes scratch)
   "Fixed top-level sections in display order.
 Dynamic sections (agent-created at runtime) are appended after this
 list at runtime via `--dynamic-section-order'; use
@@ -83,7 +83,7 @@ list at runtime via `--dynamic-section-order'; use
 The three agent-writable sections (findings, todo, open-questions)
 sit directly after the user's Next Prompt so their content is visible
 when writing the next message but out of the way of the user's own
-Pinned/Notes/Scratch scratch space.")
+Notes/Scratch scratch space.")
 
 (defvar-local templedb-agent--dynamic-section-order nil
   "Ordered list of dynamic-section anchor symbols (agent-created).
@@ -105,7 +105,6 @@ Sections are appended in creation order and rendered after `scratch'.")
     (findings       . "Findings")
     (todo           . "Todo")
     (open-questions . "Open Questions")
-    (pinned         . "Pinned")
     (notes          . "Notes")
     (scratch        . "Scratch"))
   "Symbol → heading title mapping for FIXED sections. Dynamic
@@ -173,6 +172,9 @@ inherit the anchor. Intended for use inside `--render-buffer' only."
 ;;    :assistant-done BOOL         — true after run.completed
 ;;    :buckets ALIST               — ((\"bucket-name\" . (TOOL TOOL ...)) ...)
 ;;    :messages LIST               — of (:header S :body S)
+;;    :suggestions LIST-OR-NIL     — list of strings; rendered as "Try next:"
+;;                                    block below Assistant, clickable to
+;;                                    fill * Next Prompt.
 ;;    :stats PLIST)                — (:tools N :failed N :started FLOAT :duration F-OR-NIL)
 ;;
 ;; Tool plist shape:
@@ -202,6 +204,7 @@ inherit the anchor. Intended for use inside `--render-buffer' only."
         :assistant-done nil
         :buckets nil
         :messages nil
+        :suggestions nil
         :stats (list :tools 0 :failed 0 :started (float-time) :duration nil)))
 
 (defun templedb-agent--last-exchange-node ()
@@ -292,7 +295,29 @@ FN is called with the plist and should mutate it in place (via
     (when (or assistant-done (not (string-empty-p assistant-text)))
       (insert (format "*** Assistant\n\n%s%s\n"
                       assistant-text
-                      (if assistant-done "" ""))))))
+                      (if assistant-done "" ""))))
+    ;; Suggested next prompts (from templedb_agent_suggest_next_prompts).
+    ;; Rendered as a "Try next:" list of clickable buttons; RET or mouse-1
+    ;; on any line pushes that text into * Next Prompt.
+    (let ((suggestions (plist-get ex :suggestions)))
+      (when suggestions
+        (insert "*** Try next\n\n")
+        (dolist (text suggestions)
+          (let ((start (point)))
+            (insert "  - ")
+            (insert-button
+             text
+             'action (lambda (btn)
+                       (templedb-agent--fill-next-prompt
+                        (button-get btn 'suggestion-text)))
+             'suggestion-text text
+             'follow-link t
+             'help-echo "RET or mouse-1: fill * Next Prompt with this suggestion")
+            (insert "\n")
+            ;; Section membership tag so save/restore + section-of-point work.
+            (add-text-properties start (point)
+                                 '(templedb-entry-section "suggestions"))))
+        (insert "\n")))))
 
 ;;;; Ewoc mutations (called from event handlers)
 
@@ -361,6 +386,29 @@ UPDATER is called with the tool plist and should mutate it in place."
      (let ((stats (plist-get ex :stats)))
        (plist-put stats :failed (1+ (or (plist-get stats :failed) 0)))))))
 
+(defun templedb-agent--set-suggestions (suggestions)
+  "Attach SUGGESTIONS (list of strings) to the last exchange and re-render."
+  (templedb-agent--mutate-last-exchange
+   (lambda (ex)
+     (plist-put ex :suggestions (append suggestions nil)))))
+
+(defun templedb-agent--fill-next-prompt (text)
+  "Replace the * Next Prompt section body with TEXT and move point there."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-min))
+      (when (re-search-forward "^\\* Next Prompt\n\n" nil t)
+        (let ((start (point))
+              (end (templedb-agent--next-section-after (point))))
+          (delete-region start end)
+          (goto-char start)
+          (insert text "\n\n"))))
+    ;; Move point into the prompt so the user can edit/send right away.
+    (goto-char (point-min))
+    (when (re-search-forward "^\\* Next Prompt\n\n" nil t)
+      (goto-char (line-end-position 0)))
+    (message "Suggestion inserted into * Next Prompt (C-c C-c to send)")))
+
 ;;; Agent-writable sections (Phase D: Findings / Todo / Open Questions +
 ;;; dynamic sections created by the agent at runtime).
 ;;
@@ -389,6 +437,8 @@ UPDATER is called with the tool plist and should mutate it in place."
 ;;   agent.section.question.answered {id, answer}
 ;;   agent.section.question.remove {id}
 ;;   agent.section.dynamic.write  {section, id, text, mode?}
+;;   agent.exchange.suggestions.write {suggestions: [string, ...]}
+;;                                (attaches "Try next" block to current exchange)
 ;;                                mode: 'append (default) | 'replace
 ;;   agent.section.dynamic.remove {section, id?}
 
@@ -1050,7 +1100,12 @@ its state was mutated."
          (if id
              (templedb-agent--dynamic-remove-entry section-name id)
            ;; No id → clear the whole section.
-           (templedb-agent--dynamic-replace section-name nil)))))))
+           (templedb-agent--dynamic-replace section-name nil))))
+      ("agent.exchange.suggestions.write"
+       ;; Payload: {suggestions: ["text 1", "text 2", ...]}. Attaches to
+       ;; the last (current) exchange as a "Try next" block below Assistant.
+       (let ((suggestions (append (alist-get 'suggestions data) nil)))
+         (templedb-agent--set-suggestions suggestions))))))
 
 ;;;; Agent-to-user asks (mcp__templedb__templedb_ask_user)
 
@@ -1123,7 +1178,6 @@ tool_result can return to Claude."
     (insert "| Context        | Projects and data sent with each message    | toggle   |\n")
     (insert "| Conversation   | Message history and tool activity           | no       |\n")
     (insert "| Next Prompt    | Your next message to Claude                 | yes      |\n")
-    (insert "| Pinned         | Tool results you pinned with =, .= for keep | yes      |\n")
     (insert "| Notes          | Persistent notes (saved to DB)              | yes      |\n")
     (insert "| Scratch        | Scratch space (not sent)                    | yes      |\n\n")
     (insert "| Key            | Action                                     |\n")
@@ -1149,7 +1203,6 @@ tool_result can return to Claude."
     (insert "| =, p=          | Set permission mode                        |\n")
     (insert "| =, ?=          | Debug info (process, stderr, pending)      |\n")
     (insert "| =, K=          | Kill stuck process                         |\n")
-    (insert "| =, .=          | Pin the tool result at point               |\n")
     (insert "| =TAB=          | Fold/unfold section                        |\n\n")
 
     ;; Now
@@ -1183,8 +1236,6 @@ tool_result can return to Claude."
     (templedb-agent--insert-section 'todo "Todo")
     (insert "\n\n")
     (templedb-agent--insert-section 'open-questions "Open Questions")
-    (insert "\n\n")
-    (templedb-agent--insert-section 'pinned "Pinned")
     (insert "\n\n")
     (templedb-agent--insert-section 'notes "Notes")
     (insert "\n\n")
@@ -1259,8 +1310,8 @@ before the next ** heading or before * Next Prompt.
 Both searches are bounded so they can't cross section boundaries:
 the backward search stops at * Conversation (can't find a stale **
 in a prior section like * Guide), and the forward search stops at
-end-of-conversation (can't overshoot into * Pinned's ** headings
-even though those come after * Next Prompt in the buffer)."
+end-of-conversation (can't overshoot into a later section's **
+headings even though those come after * Next Prompt in the buffer)."
   (save-excursion
     (let ((conversation-end (templedb-agent--end-of-conversation))
           (conversation-start (templedb-agent--start-of-conversation)))
@@ -1512,8 +1563,8 @@ Matches by TOOL_ID property for reliability, falls back to summary text.
 
 Both searches are BOUNDED to the Conversation section so a stray
 `:TOOL_ID:' or `**** RUNNING ...' left in Next Prompt (user paste),
-Pinned (copied tool result), Notes, or Scratch can't be mistaken for
-the real tool heading and pull the output insert into the wrong
+Notes, or Scratch can't be mistaken for the real tool heading and
+pull the output insert into the wrong
 section. Prior to this fix, an unbounded backward search from
 `point-max' was the leading cause of `tool completion ends up in
 Next Prompt' reports."
@@ -1595,7 +1646,7 @@ editing (Next Prompt / scratch space) or passively watching."
 
 Only moves point when the user's cursor is inside the Conversation
 section (or before it — Guide/Now/Goal/Context). If the user is
-typing in Next Prompt, editing Scratch/Notes/Pinned, or in the
+typing in Next Prompt, editing Scratch/Notes, or in the
 agent-writable sections (Findings/Todo/Open Questions/dynamic),
 the scroll is a no-op — otherwise every streaming chunk and tool
 event yanks point out of what they're typing into whatever
@@ -1604,7 +1655,7 @@ happens to be at `point-max' (usually Scratch)."
     (let* ((section (templedb-agent--section-of-point))
            (user-editing
             (memq section '(next-prompt findings todo open-questions
-                            pinned notes scratch)))
+                            notes scratch)))
            (in-dynamic (and section
                             (string-prefix-p "dynamic:"
                                              (symbol-name section)))))
@@ -1756,55 +1807,6 @@ output blobs are not persisted per event, so we can't reproduce them."
          (content . ,text)
          (context . ,(templedb-agent--build-context-payload)))
        (lambda (_result) nil)))))
-
-(defun templedb-agent-pin-current ()
-  "Copy the enclosing `**** DONE/FAILED' tool subtree into `* Pinned'.
-Point can be anywhere inside the tool's heading, PROPERTIES drawer,
-or output blocks. The pinned copy retains the TOOL_ID for traceability
-and gets a `PINNED: <ISO timestamp>' property."
-  (interactive)
-  (let ((tool-start nil)
-        (tool-end nil))
-    (save-excursion
-      (end-of-line)
-      (unless (re-search-backward "^\\*\\*\\*\\* \\(DONE\\|FAILED\\|RUNNING\\) " nil t)
-        (user-error "Point is not inside a tool entry"))
-      (setq tool-start (line-beginning-position))
-      (forward-line 1)
-      (setq tool-end (if (re-search-forward "^\\*+ \\|^- \\|\\'" nil t)
-                         (match-beginning 0)
-                       (point-max))))
-    (let ((subtree (buffer-substring-no-properties tool-start tool-end))
-          (stamp (format-time-string "%Y-%m-%dT%H:%M:%S%z")))
-      (save-excursion
-        (goto-char (point-min))
-        (unless (re-search-forward "^\\* Pinned\n" nil t)
-          (user-error "No Pinned section in buffer"))
-        (let* ((section-start (point))
-               (section-end (templedb-agent--next-section-after (point)))
-               (inhibit-read-only t))
-          (goto-char section-end)
-          ;; Promote the tool subtree so it sits at `** ' under `* Pinned'
-          ;; and any nested `*+ ' headings shift by the same delta.
-          (let* ((orig-depth 4)  ; tool headings are always `**** '
-                 (target-depth 2)
-                 (delta (- orig-depth target-depth))
-                 (promoted
-                  (replace-regexp-in-string
-                   "^\\(\\*+\\) "
-                   (lambda (m)
-                     (let* ((stars (match-string 1 m))
-                            (n (max 1 (- (length stars) delta))))
-                       (concat (make-string n ?*) " ")))
-                   subtree)))
-            (insert promoted)
-            ;; Inject PINNED timestamp inside the copied drawer.
-            (save-excursion
-              (goto-char section-end)
-              (when (re-search-forward "^:END:$" nil t)
-                (beginning-of-line)
-                (insert (format ":PINNED: %s\n" stamp)))))))
-      (message "Pinned to * Pinned"))))
 
 (defun templedb-agent-cancel ()
   "Cancel the current run."

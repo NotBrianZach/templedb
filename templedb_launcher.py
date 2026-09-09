@@ -604,6 +604,32 @@ try:
                                 {"id": entry_id, "answer": answer})
             return {"content": [{"type": "text", "text": f"question {entry_id} answered"}]}
 
+        def tool_agent_suggest_next_prompts(args):
+            """Attach a list of suggested follow-up prompts to the current
+            exchange. Renders as a clickable "Try next" block in the Emacs
+            agent buffer; each entry fills * Next Prompt on RET/click."""
+            session_id, err = _sections_session_id_or_error(
+                "templedb_agent_suggest_next_prompts")
+            if err: return err
+            suggestions = args.get("suggestions") or []
+            # Normalize: keep strings only, strip, drop empties, cap to 4.
+            cleaned = []
+            for s in suggestions:
+                if isinstance(s, str):
+                    t = s.strip()
+                    if t:
+                        cleaned.append(t)
+            cleaned = cleaned[:4]
+            if not cleaned:
+                return {"content": [{"type": "text",
+                    "text": "suggestions must be a non-empty list of strings"}],
+                    "isError": True}
+            _emit_section_event(session_id, "agent.exchange.suggestions.write",
+                                {"suggestions": cleaned},
+                                summary=f"{len(cleaned)} suggestion(s) offered")
+            return {"content": [{"type": "text",
+                "text": f"offered {len(cleaned)} suggestion(s)"}]}
+
         def tool_agent_section_write(args):
             """Write to (create if missing) an agent-invented dynamic section.
             Distinct from the three fixed sections above; use this when the
@@ -651,6 +677,7 @@ try:
             "templedb_agent_question_add":       tool_agent_question_add,
             "templedb_agent_question_answered":  tool_agent_question_answered,
             "templedb_agent_section_write":      tool_agent_section_write,
+            "templedb_agent_suggest_next_prompts": tool_agent_suggest_next_prompts,
         })
 
     _MCPServer.__init__ = _patched_mcp_init
@@ -866,6 +893,24 @@ try:
                  "text":    {"type": "string", "description": "Entry text"},
                  "mode":    {"type": "string", "enum": ["append", "replace"], "default": "append"},
              }, "required": ["section", "text"]}},
+            {"name": "templedb_agent_suggest_next_prompts",
+             "description":
+                 "Offer 2–4 short suggested follow-up prompts for the user, rendered "
+                 "as a clickable 'Try next' block at the end of the current exchange "
+                 "in the Emacs agent buffer. Each suggestion becomes a button that "
+                 "fills * Next Prompt on click. Call this ONCE near the end of every "
+                 "assistant turn, after you've finished your main reply — the "
+                 "suggestions should be concrete next steps the user is likely to "
+                 "want (e.g. 'run the tests', 'commit and publish', 'show me the "
+                 "diff', 'look at the failing case'). Keep each suggestion short "
+                 "(≤ 60 chars); it will replace the user's prompt when clicked. "
+                 "Do NOT offer suggestions that duplicate the user's last message.",
+             "inputSchema": {"type": "object", "properties": {
+                 "suggestions": {"type": "array",
+                                 "items": {"type": "string"},
+                                 "minItems": 1, "maxItems": 4,
+                                 "description": "2–4 short next-prompt strings"},
+             }, "required": ["suggestions"]}},
         ]
 
     _MCPServer.get_tool_definitions = _patched_list_tools

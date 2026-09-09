@@ -2,8 +2,8 @@
 """
 File management commands for TempleDB.
 
-These commands read/write directly from the TempleDB database.
-Primary write path since FUSE was retired in 2026-08.
+These commands read/write directly from the TempleDB database and are the
+primary write path.
 
   templedb file cat      — read a file's current DB snapshot
   templedb file set      — write content to DB, mirror to checkout,
@@ -408,18 +408,14 @@ class FileCommands(Command):
         """Print every known mirror location for SLUG/PATH, with hash + status.
 
         Solves the 'which of these copies is the current one' pain: templedb
-        content lives in several places (DB, writable/read-only checkouts,
-        legacy FUSE-era paths). Silent drift among them was the root of
-        five recent incidents. This command makes drift *visible* without
-        trying to make it *impossible*.
+        content lives in several places (DB and two checkouts). Silent drift
+        among them was the root of five recent incidents. This command makes
+        drift *visible* without trying to make it *impossible*.
 
         Mirrors probed (skip any that don't exist for this slug):
           - DB (via file_contents.is_current)
           - ~/.config/templedb/checkouts/<slug>/<path>       (read-only publish)
           - ~/.config/templedb/edit-workspaces/<slug>/<path> (writable workspace)
-
-        Legacy FUSE mirrors (~/temple/*, ~/status/*) were retired
-        2026-08 alongside the FUSE mount. No longer probed.
 
         Not yet probed (need per-project resolution): nix store paths that
         home-manager symlinks into (e.g. spacemacs layer). Follow-up.
