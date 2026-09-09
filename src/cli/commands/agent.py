@@ -20,6 +20,19 @@ class AgentCommands(Command):
 
     def serve(self, args):
         """Start the agent protocol server (stdio JSON-lines)."""
+        # stdout is the JSON-lines protocol channel to Emacs; rebuild the
+        # root logger so log output can never leak into it. `config.py`
+        # runs `setup_logging` on import with the (now stderr) default,
+        # but a subsequent import could still swap handlers, so we
+        # reassert here right before we hand stdout to the protocol.
+        import logging as _logging, sys as _sys
+        _root = _logging.getLogger()
+        _root.handlers.clear()
+        _h = _logging.StreamHandler(_sys.stderr)
+        _h.setFormatter(_logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        _root.addHandler(_h)
+
         from agent.protocol import ProtocolServer
         server = ProtocolServer()
         try:

@@ -43,7 +43,8 @@ class ColoredFormatter(logging.Formatter):
 def setup_logging(
     level: Optional[str] = None,
     log_file: Optional[Path] = None,
-    verbose: bool = False
+    verbose: bool = False,
+    stream=None,
 ) -> logging.Logger:
     """
     Configure logging for TempleDB.
@@ -53,6 +54,11 @@ def setup_logging(
                If None, reads from TEMPLEDB_LOG_LEVEL env var or defaults to INFO.
         log_file: Optional path to log file. If provided, logs will be written to file.
         verbose: If True, sets level to DEBUG regardless of other settings.
+        stream: Output stream for console logs. Defaults to sys.stderr — stdout
+                is reserved for stdio protocol servers (agent protocol, MCP
+                server) so log lines don't corrupt the JSON channel. Pass
+                sys.stdout only for CLI commands that legitimately want log
+                output visible alongside program output.
 
     Returns:
         Configured root logger instance.
@@ -79,8 +85,12 @@ def setup_logging(
     # Remove existing handlers to avoid duplicates
     root_logger.handlers.clear()
 
-    # Console handler with colored output
-    console_handler = logging.StreamHandler(sys.stdout)
+    # Console handler with colored output.
+    # Defaults to stderr — stdout is the JSON-lines channel for
+    # `templedb ai agent serve` and `templedb ai mcp serve`, so a stray
+    # log line (e.g. "DB locked, retry 1/3") would land inside the
+    # emacs agent buffer as raw text.
+    console_handler = logging.StreamHandler(stream or sys.stderr)
     console_handler.setLevel(log_level)
 
     console_format = '%(levelname)-8s %(message)s'

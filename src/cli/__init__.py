@@ -28,6 +28,84 @@ _DEV_CHECKOUT = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" 
 
 if os.environ.get("TEMPLEDB_DEV_MODE"):
     if _DEV_CHECKOUT.exists() and (_DEV_CHECKOUT / "cli").exists():
+        # A' — read-time sync. Before any src/ import happens, diff the
+        # checkout against file_contents.is_current for the templedb
+        # slug and force-sync any drifted files. Corrects for silent
+        # mirror failures in `file set` and stale disks from external
+        # chmod / half-materialized workspaces. Complements the
+        # `_refresh_ws_row_from_disk` write-side guard (2026-09-09
+        # commit 6B38DE6D) by ensuring the read side is always current.
+        # Stdlib only — importing any src/ module here would use the
+        # pre-sync (potentially stale) code, defeating the point.
+        try:
+            import sqlite3 as _sqlite
+            import hashlib as _hashlib
+            _db = Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite"
+            if _db.exists():
+                _conn = _sqlite.connect(f"file:{_db}?mode=ro", uri=True, timeout=1.0)
+                # 1. Pull expected hashes (cheap: 200-ish rows, no blob text).
+                _expected = dict(_conn.execute(
+                    """SELECT pf.file_path, fc.content_hash
+                         FROM file_contents fc
+                         JOIN project_files pf ON pf.id = fc.file_id
+                         JOIN projects p ON p.id = pf.project_id
+                        WHERE p.slug = 'templedb'
+                          AND fc.is_current = 1
+                          AND pf.file_path LIKE 'src/%'"""
+                ).fetchall())
+                # 2. Diff against disk (hash local files).
+                _co_root = _DEV_CHECKOUT.parent  # ~/.config/templedb/checkouts/templedb
+                _drifted = []
+                for _fpath, _wanted in _expected.items():
+                    _disk = _co_root / _fpath
+                    try:
+                        if _disk.is_file():
+                            _actual = _hashlib.sha256(_disk.read_bytes()).hexdigest()
+                            if _actual == _wanted:
+                                continue
+                    except OSError:
+                        pass  # unreadable — treat as drift, will overwrite
+                    _drifted.append((_fpath, _wanted))
+                # 3. Fetch content only for drifted files, then materialize.
+                _synced_paths = []
+                if _drifted:
+                    _q = ",".join("?" * len(_drifted))
+                    _content_map = dict(_conn.execute(
+                        f"""SELECT hash_sha256, content_text
+                              FROM content_blobs
+                             WHERE hash_sha256 IN ({_q})
+                               AND content_text IS NOT NULL""",
+                        [_h for _, _h in _drifted]
+                    ).fetchall())
+                    for _fpath, _wanted in _drifted:
+                        _content = _content_map.get(_wanted)
+                        if _content is None:
+                            continue  # binary / large blob — skip
+                        _disk = _co_root / _fpath
+                        try:
+                            _disk.parent.mkdir(parents=True, exist_ok=True)
+                            _tmp = _disk.parent / f"{_disk.name}.dev-sync.tmp"
+                            _tmp.write_text(_content, encoding="utf-8")
+                            _tmp.replace(_disk)
+                            _synced_paths.append(_fpath)
+                        except OSError:
+                            pass  # can't write — leave as-is
+                _conn.close()
+                if _synced_paths:
+                    _preview = ", ".join(_synced_paths[:3])
+                    _extra = f" (+{len(_synced_paths)-3} more)" if len(_synced_paths) > 3 else ""
+                    print(
+                        f"⚠  dev-mode: synced {len(_synced_paths)} drifted "
+                        f"file(s) from DB: {_preview}{_extra}",
+                        file=sys.stderr,
+                    )
+        except Exception as _e:
+            # Preflight is best-effort: never break the CLI over it.
+            print(
+                f"⚠  dev-mode: preflight sync skipped ({type(_e).__name__}: {_e})",
+                file=sys.stderr,
+            )
+
         _dev_src = str(_DEV_CHECKOUT)
         if _dev_src not in sys.path:
             sys.path.insert(0, _dev_src)

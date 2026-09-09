@@ -23,12 +23,16 @@ from llm_context import TempleDBContext
 from config import DB_PATH, PROJECT_ROOT
 from logger import get_logger
 
-# Configure logging to stderr so stdout is clean for MCP protocol
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler(sys.stderr)]
-)
+# Configure logging to stderr so stdout is clean for MCP protocol.
+# NOTE: `logging.basicConfig(...)` is a no-op if the root logger already
+# has handlers (which it will, because importing `config` above triggered
+# `logger.setup_logging`). Rebuild handlers explicitly.
+_root = logging.getLogger()
+_root.handlers.clear()
+_root.setLevel(logging.INFO)
+_h = logging.StreamHandler(sys.stderr)
+_h.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+_root.addHandler(_h)
 logger = get_logger(__name__)
 
 

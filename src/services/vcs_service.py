@@ -12,6 +12,9 @@ from typing import List, Dict, Any, Optional
 
 from services.base import BaseService
 from error_handler import ResourceNotFoundError, ValidationError
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class VCSService(BaseService):
@@ -358,6 +361,36 @@ class VCSService(BaseService):
                 WHERE id = ?
             """, (ws_row_id,))
             return None
+
+        # Guard against silent-revert bug: if ws.last_modified is >1s
+        # newer than disk mtime, the DB write (from file set) is
+        # authoritative — skip refresh, keep ws.content_hash. Absorbs
+        # the mirror-failure case where disk stays stale.
+        try:
+            import os as _os
+            from datetime import datetime as _dt, timezone as _tz
+            _disk_mtime = _dt.fromtimestamp(
+                _os.stat(disk_path).st_mtime, tz=_tz.utc,
+            )
+            _ws = self.vcs_repo.query_one(
+                """SELECT last_modified, content_hash
+                     FROM vcs_working_state WHERE id = ?""",
+                (ws_row_id,),
+            )
+            if _ws and _ws['last_modified'] and _ws['content_hash']:
+                _ws_ts = _dt.strptime(
+                    _ws['last_modified'], '%Y-%m-%d %H:%M:%S',
+                ).replace(tzinfo=_tz.utc)
+                if (_ws_ts - _disk_mtime).total_seconds() > 1.0:
+                    logger.info(
+                        f"refresh_ws_row: ws {_ws_ts} > disk mtime "
+                        f"{_disk_mtime} for {file_path} — DB write is "
+                        f"authoritative, keeping "
+                        f"({_ws['content_hash'][:12]})"
+                    )
+                    return _ws['content_hash']
+        except Exception as _e:
+            logger.debug(f"refresh_ws_row mtime guard: {_e}")
 
         fc = ContentStore.read_file_content(disk_path)
         if fc is None:

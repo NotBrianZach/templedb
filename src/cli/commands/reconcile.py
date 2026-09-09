@@ -261,6 +261,89 @@ class ReconcileCommands(Command):
         except Exception as e:
             logger.debug(f"reconcile_runs record failed: {e}")
 
+    def deployment(self, args) -> int:
+        """Fetch a project's live /version endpoint and compare its
+        sha against the head commit in the templedb graph."""
+        import json
+        import time
+        from urllib.request import urlopen, Request
+        from urllib.error import URLError
+        from db_utils import query_one
+
+        slug = args.slug
+        project = query_one(
+            "SELECT id, slug FROM projects WHERE slug = ?",
+            (slug,),
+        )
+        if not project:
+            logger.error(f"Project '{slug}' not found")
+            return 3
+
+        head = query_one(
+            """SELECT c.commit_hash
+                 FROM vcs_branches b
+                 JOIN vcs_commits c ON c.id = b.head_commit_id
+                WHERE b.project_id = ? AND b.is_default = 1""",
+            (project['id'],),
+        )
+        if not head:
+            logger.error(
+                f"No HEAD commit for '{slug}' — no default branch "
+                f"with a head_commit_id. Has it been committed via "
+                f"templedb vcs?"
+            )
+            return 3
+
+        expected_sha = head['commit_hash']
+        url = args.url
+        target = args.target
+        virt_machine = f"deployment:{slug}:{target}"
+        started = time.monotonic()
+
+        try:
+            req = Request(url, headers={'User-Agent': 'templedb-reconcile'})
+            with urlopen(req, timeout=15) as resp:
+                payload = json.loads(resp.read().decode('utf-8'))
+        except (URLError, TimeoutError, ValueError) as e:
+            elapsed = int((time.monotonic() - started) * 1000)
+            logger.error(f"Could not fetch {url}: {e}")
+            self._record_run(
+                virt_machine, 'unreachable', None,
+                None, f"fetch failed: {e}", elapsed,
+            )
+            return 2
+
+        elapsed = int((time.monotonic() - started) * 1000)
+        actual_sha = payload.get('sha', 'unknown')
+
+        if actual_sha.lower() == expected_sha.lower():
+            print(f"✓ OK: live sha matches graph HEAD ({expected_sha})")
+            if getattr(args, 'verbose', False) and payload.get('builtAt'):
+                print(f"    built at: {payload['builtAt']}")
+            self._record_run(
+                virt_machine, 'ok', 0, None,
+                f"live sha matches HEAD ({expected_sha})", elapsed,
+            )
+            return 0
+
+        drift = {
+            'expected': expected_sha,
+            'actual': actual_sha,
+            'url': url,
+            'built_at': payload.get('builtAt'),
+        }
+        print("✗ DRIFT: live sha does not match graph HEAD")
+        print(f"    expected (HEAD):   {expected_sha}")
+        print(f"    actual   (live):   {actual_sha}")
+        if payload.get('builtAt'):
+            print(f"    built at:          {payload['builtAt']}")
+        print(f"    endpoint:          {url}")
+        self._record_run(
+            virt_machine, 'drift', 0,
+            json.dumps(drift), None, elapsed,
+        )
+        return 1
+
     def schedule(self, args) -> int:
         """Manage the systemd user timer for scheduled reconcile.
 
@@ -483,6 +566,23 @@ def register(cli):
     h.add_argument('--limit', default=30,
                    help='Max rows (default 30)')
     cli.commands['reconcile.history'] = cmd.history
+
+    d = sub.add_parser(
+        'deployment',
+        help='HTTP probe a deployed app and compare its /version '
+             'sha with the graph HEAD commit',
+    )
+    d.add_argument('slug', help='Project slug (e.g. bza)')
+    d.add_argument(
+        '--url', required=True,
+        help='Endpoint URL returning {"sha": ...} JSON',
+    )
+    d.add_argument(
+        '--target', default='production',
+        help='Deploy target label (default: production)',
+    )
+    d.add_argument('-v', '--verbose', action='store_true')
+    cli.commands['reconcile.deployment'] = cmd.deployment
 
     sc = sub.add_parser('schedule',
                         help='Install/uninstall systemd user timer '
