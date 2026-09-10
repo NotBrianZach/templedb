@@ -58,12 +58,18 @@ class PublishCommands(Command):
                 ).fetchone()
 
                 if staged and staged["n"] > 0:
-                    # Use the CLI to commit (handles all the logic)
+                    # Use the CLI to commit (handles all the logic).
+                    # TEMPLEDB_SKIP_PUBLISH prevents the auto-publish hook
+                    # in that inner vcs commit from recursively re-invoking
+                    # publish and infinite-looping.
+                    import os as _os
+                    _env = {**_os.environ, "TEMPLEDB_SKIP_PUBLISH": "1"}
                     r = subprocess.run(
                         [sys.executable, "-m", "cli", "vcs", "commit",
                          "-p", project_slug, "-m", message, "-a", "TempleDB"],
                         cwd=str(Path(__file__).parent.parent.parent.parent),
-                        capture_output=True, text=True
+                        capture_output=True, text=True,
+                        env=_env,
                     )
                     if r.returncode == 0:
                         print(f"  Committed: {message}")

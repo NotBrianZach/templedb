@@ -597,6 +597,16 @@ class VCSCommands(Command):
         except Exception as e:
             logger.debug(f"Auto-deploy check skipped: {e}")
 
+        # Auto-publish hook (opt-out): if the project has a git mirror,
+        # kick off `templedb publish run <slug>` in the background.
+        # Skips silently if --no-publish, TEMPLEDB_SKIP_PUBLISH=1, or
+        # no mirror is configured. See src/services/publish_hook.py.
+        try:
+            from services.publish_hook import maybe_trigger_publish
+            maybe_trigger_publish(project['slug'], args)
+        except Exception as e:
+            logger.debug(f"Auto-publish check skipped: {e}")
+
         from cli.json_output import emit
         result = {
             "hash": commit_hash,
@@ -1849,6 +1859,10 @@ def register(cli):
     commit_parser.add_argument('-p', '--project', required=True, help='Project name or pattern (fuzzy matching enabled)')
     commit_parser.add_argument('-b', '--branch', help='Branch name')
     commit_parser.add_argument('-a', '--author', help='Author name')
+    commit_parser.add_argument('--no-publish', action='store_true',
+                               help='Skip the auto-publish hook that fires after successful commit '
+                                    'when the project has a git mirror. Equivalent to setting '
+                                    'TEMPLEDB_SKIP_PUBLISH=1 for this one commit.')
     cli.commands['vcs.commit'] = cmd.commit
 
     # vcs status
