@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-09-10-1122-db-lock-warnings-in-agent-buffer-and-ingest-pipeline-stall.html">
+  <div class="row">
+    <span class="date">2026-09-10 11:22</span>
+    <span class="title">DB lock warnings in agent buffer and ingest pipeline stall</span>
+  </div>
+  <div class="summary">
+    Two symptoms surfaced together during a 2026-09-10 session: the Emacs templedb ai agent serve --stdio buffer showed intermittent "database is locked" warnings, and the Reports GUI had no reports since 2026-09-05. Both trace to failures in the SQLite write path — one at the agent write layer, one at the hourly ingest timer. This report separates the two, gives root causes, and lists the smallest fixes that get each unstuck.
+  </div>
+</a>
+
 <a class="report" href="2026-09-06-0858-session-recap-12-recap-11-follow-ups-landed.html">
   <div class="row">
     <span class="date">2026-09-06 08:58</span>
