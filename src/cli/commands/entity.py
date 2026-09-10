@@ -2641,9 +2641,9 @@ WantedBy=timers.target
     def graph_trace(self, args) -> int:
         """Recursive BFS from a starting entity, printing a path tree.
 
-        Turns the entity graph into a queryable substrate: the 5-hop
-        provenance query the plan has been building toward is now
-        one command.
+        Recursive BFS across relation kinds. A chain that would
+        otherwise mean stepping through git, nix, deploy logs, agent
+        history, and report metadata separately is a single command.
 
         Args:
           entity:     <kind>/<external_ref> to start from

@@ -59,8 +59,9 @@ templedb commit templedb ~/.config/templedb/edit-workspaces/templedb -m "..."
 
 `templedb commit` (alias for `templedb project commit`) compares your
 workspace directory against DB and creates a commit from filesystem
-content. **Use it instead of `templedb vcs commit`** — see "Known bugs"
-below.
+content. Interchangeable with `templedb vcs commit` since the 2026-09-09
+guard fixes (see write-path history below); pick whichever fits the
+workflow.
 
 ## VCS: use templedb, not git
 
@@ -79,8 +80,11 @@ templedb vcs merge  templedb feature-x       # merge (add --squash if wanted)
 templedb vcs branch templedb -d feature-x    # delete
 ```
 
-`templedb vcs commit -p <slug> -m "msg"` exists but has a known
-correctness bug (see below). Prefer `templedb commit <slug> <workspace>`.
+`templedb vcs commit -p <slug> -m "msg"` is the fine-grained path
+(commits only what's in the current session's stage); `templedb commit
+<slug> <workspace>` commits from a workspace snapshot. Both are safe
+with the 2026-09-09 write-path guards; see the history section below
+if either misbehaves.
 
 ## Search: use templedb graph
 
@@ -184,13 +188,30 @@ Investigation of the related revert regression:
 
 ## Write-path history and remaining hazards
 
-**Recently fixed (2026-08-04, commits DBB417D8, 40BAE4CF, 189F33CA):**
-The "`vcs commit` silently reverts `file set` writes" bug. `templedb
-file set` now writes the new `content_hash` into `vcs_working_state`
-and mirrors the content to the checkout dir, so a subsequent
-`vcs commit` or `vcs status --refresh` no longer clobbers the intended
-content. If you observe this class of bug returning, verify those three
-commits are in your build.
+**Fixed in two waves — 2026-08-04 (DBB417D8, 40BAE4CF, 189F33CA) then 2026-09-09 (6072B9F7 + 61832A68):**
+The "`vcs commit` silently reverts `file set` writes" bug. First wave
+made `templedb file set` write `content_hash` into `vcs_working_state`
+and mirror to the checkout, so `vcs commit`/`vcs status --refresh`
+wouldn't clobber via those paths. Second wave closed the remaining
+path: `_refresh_ws_row_from_disk` (invoked by `vcs add`) was still
+unconditionally re-hashing from disk, so when the mirror step failed
+silently the stale disk hash would overwrite the correct
+`ws.content_hash` before commit.
+
+Two guards now protect the write/read chain:
+- **Write-side mtime guard** (`_refresh_ws_row_from_disk`): if
+  `vcs_working_state.last_modified` is >1s newer than disk mtime, keep
+  `ws.content_hash` — the DB write is authoritative. Logs `INFO
+  refresh_ws_row: … DB write is authoritative` when it fires.
+- **Read-side A' preflight** (`cli/__init__.py`, active when
+  `TEMPLEDB_DEV_MODE=1`): before any `src/` import, diffs the checkout
+  against `file_contents.is_current` and force-syncs drifted files.
+  Makes the dev loop `file set → run command` — no manual `file
+  checkout` between them. Logs `⚠ dev-mode: synced N drifted file(s)
+  from DB` when it does anything.
+
+If either guard fires spuriously in normal use, that's a signal — the
+DB-vs-disk mismatch it caught is real.
 
 **Belt-and-suspenders SQL check** (run after any critical write):
 

@@ -6,6 +6,7 @@ parses the streaming events, and converts them into normalized Temple Agent even
 import json
 import os
 import shutil
+import select
 import subprocess
 import time
 
@@ -197,11 +198,56 @@ class ClaudeCodeProvider(BaseProvider):
             accumulated_text = []
             terminal_emitted = False
 
-            for line in self._process.stdout:
+            # Liveness-checked line reader. Naive `for line in stdout` blocks
+            # forever if Claude dies while a grandchild still holds the pipe
+            # write end open — no EOF ever arrives, no terminal event ever
+            # emitted, emacs sees the run as still-running. We poll for data
+            # with a 1s timeout, and every timeout we check if the child is
+            # still alive. If it exited, drain any buffered stdout and stop.
+            stdout = self._process.stdout
+            drain = False
+            while True:
                 if self._cancelled:
                     self._kill_process()
                     yield make_event(RUN_INTERRUPTED, summary="Cancelled by user")
                     return
+
+                ready, _, _ = select.select([stdout], [], [], 1.0)
+                if ready:
+                    line = stdout.readline()
+                    if not line:
+                        # EOF — Claude closed stdout cleanly.
+                        break
+                elif self._process.poll() is not None:
+                    # Child exited but stdout might still have buffered data
+                    # from a grandchild or late flush. Drain once, then stop.
+                    if drain:
+                        break
+                    drain = True
+                    remainder = stdout.read() or ""
+                    if not remainder:
+                        break
+                    # Push each remainder line through the same normalizer.
+                    for line in remainder.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        for normalized in self._normalize_claude_event(
+                                event, assistant_started, accumulated_text):
+                            ntype = normalized.get("type")
+                            if ntype == ASSISTANT_STARTED:
+                                assistant_started = True
+                            if ntype in (RUN_FAILED, PROVIDER_LOGIN_REQUIRED):
+                                terminal_emitted = True
+                            yield normalized
+                    break
+                else:
+                    # No data, child still alive — keep polling.
+                    continue
 
                 line = line.strip()
                 if not line:
@@ -220,7 +266,17 @@ class ClaudeCodeProvider(BaseProvider):
                         terminal_emitted = True
                     yield normalized
 
-            self._process.wait()
+            # Bounded wait — reap the zombie without risking an indefinite
+            # block if the child is somehow still winding down.
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "Claude subprocess didn't exit within 5s of stdout EOF; "
+                    "sending SIGKILL to prevent zombie",
+                )
+                self._process.kill()
+                self._process.wait()
 
             if self._process.returncode == 0:
                 if accumulated_text:

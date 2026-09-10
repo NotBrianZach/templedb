@@ -26,7 +26,7 @@ What that means concretely:
 - **Cross-cutting queries.** The five-hop provenance query — *which store path is running on this machine, from which deployment, from which commit, from which agent-session-and-intent-chain, motivated by which report?* — is one traversal.
 - **Reconcile from day one.** `templedb doctor entities` walks the graph and asks each authority whether its facts are still current. Drift is measurable, not mysterious.
 
-Or, in existing-tool shorthand: **Sourcegraph** (cross-repo code intelligence via SCIP) + **Terraform-refresh** (state vs. reality reconcile loop) + **Datomic/XTDB** (bitemporal typed entity graph) + **Backstage** (software catalog with ownership and design docs) + **Colmena/Morph** (NixOS fleet deploy) + **age/sops** (secrets) — but stitched together by transition maps between each system's native coordinates, so a five-hop provenance query is one traversal rather than five separate tool switches.
+Or, in existing-tool shorthand: **Sourcegraph** (cross-repo code intelligence via SCIP) + **Terraform-refresh** (state vs. reality reconcile loop) + **Datomic/XTDB** (bitemporal typed entity graph) + **Backstage** (software catalog with ownership and design docs) + **Colmena/Morph** (NixOS fleet deploy) + **age/sops** (secrets) — but stitched together by transition maps between each system's native coordinates, so a provenance chain that would otherwise mean five separate tool switches becomes one traversal.
 
 ---
 
@@ -37,7 +37,7 @@ Everything TempleDB does either writes to the entity graph, reads from it, or sy
 | # | Role | What it means |
 |---|------|---------------|
 | 1 | **Writes** | Every commit, deploy, agent edit, tool call, report, symbol scan, or config change lands as entities and relations. Adapters do the ingestion; nothing bypasses the graph. |
-| 2 | **Design & understanding** | `graph search`, `who-uses`, `importers`, `callers`, `hygiene dead-imports`, five-hop provenance queries. The graph is how you reason about the codebase without opening every file. Reports are `Report` entities linked to `Commit`s via `motivated`/`implemented-in` — so "which design decisions actually got implemented?" is a two-line query. |
+| 2 | **Design & understanding** | `graph search`, `who-uses`, `importers`, `callers`, `hygiene dead-imports`, cross-authority traversals. The graph is how you reason about the codebase without opening every file. Reports are `Report` entities linked to `Commit`s via `motivated`/`implemented-in` — so "which design decisions actually got implemented?" is a two-line query. |
 | 3 | **Deploy** | Fleet operations read `Machine` entities to know targets; deploy runs write `Deployment → installs → StorePath → Machine` provenance. `templedb deploy rollback` walks Deployment history. Reproducible artifacts (`Build`, `Generation`, `Derivation`) are all first-class. |
 | 4 | **Manage** | Config-ast edits, secrets/keys, per-host NixOS overrides, edit-intents, agent sessions — all have entity representations. Managing anything means editing its entity. |
 | 5 | **Reconcile** | `templedb doctor entities` walks the graph and asks each authority (git, nix, SSH probe) "still true?" — drift is measurable, not silent. Invariants like `entity_counts_match_source_tables` catch structural bugs (see [answers report](reports/2026-09-03-1947-answers-to-open-questions-on-the-observer-integrator-schema.html)). |
@@ -80,78 +80,7 @@ You interact with the graph through several surfaces:
    scripting Code             replica  detect   checkout
 ```
 
-Every surface reads or writes the same underlying graph.
-
-The CLI (`templedb` or `tdb`) is the primary entry point:
-
-```bash
-$ templedb --help
-
-command groups:
-
-  Getting Started
-    bootstrap          Set up TempleDB on a new machine
-    tutorial           Interactive tutorials
-    status             System overview
-
-  Projects & Files
-    project            Import, list, show, attach, checkout
-    edit               Open a workspace for interactive editing
-    source             Read-only observations of source state (snapshots)
-    intent             EditIntent — proposed edits, dry-run, apply, revert
-    vcs                Version control (status, add, commit, log, diff, session)
-    file               File-level ops (cat, set, ls, checkout, where, rm)
-
-  Entity Graph & Reconcile
-    graph              Query the knowledge graph (search, who-uses, importers)
-    entity             Entity graph ops (list, kinds, freshness, paths)
-    hygiene            Dead-imports, dead-code, structural checks
-    doctor             Reconcile facts against their authorities
-
-  NixOS Integration
-    nixos              Generate modules, rebuild, doctor, hosts, dotfiles
-    config-ast         AST-based system config (tree, set, generate, host)
-    ast                AST-based NixOS config builds (build, diff, promote)
-
-  Secrets & Environment
-    env secret         Encrypted secrets (age/sops)
-    env var            Environment variables per project
-    var                Unified env-var + secret interface with scope hierarchy
-    env key            Key management (Yubikey, multi-key, quorum revoke)
-    env direnv         Direnv integration
-
-  Deployment & Publishing
-    deploy run         Deploy project (FHS isolation, caching, health checks)
-    deploy trigger     Auto-deploy on commit (branch → target rules)
-    deploy fleet       Multi-machine NixOS deployment with magic rollback
-    publish            Commit + push to GitHub mirrors
-
-  Reports & Design Archive
-    reports            List, view, scaffold, reindex design reports
-
-  AI & Tooling
-    ai claude          Claude integration
-    ai vibe            Vibe coding sessions
-    ai agent           Temple Agent native AI interface (JSON-lines over stdio)
-    ai mcp             MCP server for Claude Code / other MCP clients
-
-  Sync & Network
-    sync network       Tailscale VPN setup
-    sync serve         Sync server (CRSql replication, port 9420)
-
-  Storage & Admin
-    storage backup     Local and cloud (GCS) backups — captures whole graph
-    storage cathedral  Cathedral packages — portable graph bundles per project
-    storage blob       Blob storage
-    admin db           Migrations, integrity checks, repair
-    admin gitserver    Git server (serves DB-materialized repos)
-```
-
----
-
-## The daily workflow
-
-Every step below either writes to the graph, reads from it, or drives an action that produces new entities and relations.
+The CLI (`templedb` or `tdb`) is the primary entry point; `templedb --help` lists every command group. The rest of this section is the everyday paths — writes, reads, and reconciles walked in the order you'd normally hit them.
 
 ### Editing source (writes → EditIntent, FileSnapshot)
 
@@ -210,6 +139,23 @@ templedb vcs commit -p bza -m "..."               # only this session's stages
 ```
 
 The session id itself is an entity; every tool call within it becomes a `ToolCall` entity linked to the session via `invoked`.
+
+### Why `vcs commit` doesn't call `git commit`
+
+`vcs commit` writes to TempleDB's own tables (`vcs_commits`, `vcs_working_state`, `file_contents`, `content_blobs`) — **not** to git. Two reasons:
+
+1. Content lives in the DB blob store. `file set` writes directly to `content_blobs` + `file_contents`; there's no working tree to `git add`.
+2. Much of what TempleDB tracks (encrypted secrets, per-machine config, cross-project observations, ingested reports) doesn't ship to git at all — the same interface handles all of it.
+
+Git is a second-stage handoff via `templedb publish run <slug>`: materialize DB → working tree, run `git add`/`git commit`, push to the mirror. Everyday work stays fast (single SQL transaction, no subprocess); git is involved only when you decide to publish.
+
+This is a **dual-write system** — DB, disk mirror, and eventually git — so consistency between the three has failure modes. Two guards make it safe:
+
+- **Write-side mtime guard** in `_refresh_ws_row_from_disk` (`src/services/vcs_service.py`). `vcs add` normally rehashes files from disk to catch editor edits since the last scan. But if `file set` just wrote the DB and the disk mirror failed (read-only file, missing dir, race), disk is stale and rehashing would clobber the correct `ws.content_hash`. The guard compares `vcs_working_state.last_modified` against disk mtime: if ws is >1s newer, the DB write is authoritative — keep `ws.content_hash`, don't rehash. Logs `INFO refresh_ws_row: … DB write is authoritative` when it fires.
+
+- **Read-side A' preflight** in `cli/__init__.py` (active when `TEMPLEDB_DEV_MODE=1`). Before any TempleDB `src/` module import, diffs the checkout against `file_contents.is_current` for the templedb slug and force-syncs drifted files (stdlib-only — importing src/ code here would defeat the point). Makes the dev loop `file set → run command`; no explicit `file checkout` between them. Logs `⚠ dev-mode: synced N drifted file(s) from DB` when it does anything, silent in the happy path.
+
+Both guards were added 2026-09-09 after a silent-revert bug where `file set` succeeded, the disk mirror failed silently, and the next `vcs commit` baked in stale content. History: see `reports/2026-08-21-vcs-commit-revert-regression-investigation.html` for the earlier attempt and commits `6072B9F7` (mtime guard) + `61832A68` (A' preflight) for the current state. If either guard fires spuriously in normal use, that's a signal — the DB-vs-disk mismatch it caught is real.
 
 ### Deploy (writes → Deployment, Generation; reads → Machine, StorePath)
 
