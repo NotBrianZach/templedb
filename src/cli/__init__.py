@@ -26,7 +26,56 @@ from pathlib import Path
 # ────────────────────────────────────────────────────────────────────
 _DEV_CHECKOUT = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" / "src"
 
-if os.environ.get("TEMPLEDB_DEV_MODE"):
+
+# Long-running services (GUI, MCP agent, agent protocol server) capture their
+# code at process start and stay frozen for hours or days. Under the frozen-nix
+# default, an edit to src/gui.py via `templedb file set` doesn't reach a
+# running GUI until the operator restarts it AND remembers to export
+# TEMPLEDB_DEV_MODE=1. Every extra step is a place to forget. So for these
+# invocations, opt-in polarity is inverted: default is dev-mode-when-checkout-
+# exists, opt out via TEMPLEDB_DEV_MODE=0 (or any falsy value).
+#
+# Short-lived CLI invocations keep the existing opt-in behavior — they benefit
+# less from the auto-default (A' preflight already handles per-invocation
+# sync when dev-mode IS set, and reproducibility matters more for scripting).
+_LONG_RUNNING_MARKERS = [
+    ("gui",),                    # templedb gui
+    ("ai", "mcp", "serve"),      # templedb ai mcp serve
+    ("ai", "agent", "serve"),    # templedb ai agent serve
+]
+
+
+def _is_long_running_service(argv):
+    """Contiguous-subsequence match of argv against known service markers."""
+    args = [a for a in argv[1:] if not a.startswith("-")]
+    for marker in _LONG_RUNNING_MARKERS:
+        for i in range(len(args) - len(marker) + 1):
+            if tuple(args[i:i + len(marker)]) == marker:
+                return True
+    return False
+
+
+def _dev_mode_enabled():
+    """Resolve effective dev-mode. Priority:
+      1. Explicit TEMPLEDB_DEV_MODE (truthy → on, falsy 0/no/false/off → off)
+      2. Long-running service AND checkout exists → on (default polarity flip)
+      3. Otherwise → off
+    """
+    env = os.environ.get("TEMPLEDB_DEV_MODE")
+    if env is not None:
+        return env.lower() not in ("", "0", "false", "no", "off")
+    if _is_long_running_service(sys.argv):
+        return _DEV_CHECKOUT.exists() and (_DEV_CHECKOUT / "cli").exists()
+    return False
+
+
+_DEV_MODE_AUTO_ENABLED = (
+    os.environ.get("TEMPLEDB_DEV_MODE") is None
+    and _is_long_running_service(sys.argv)
+)
+
+
+if _dev_mode_enabled():
     if _DEV_CHECKOUT.exists() and (_DEV_CHECKOUT / "cli").exists():
         # A' — read-time sync. Before any src/ import happens, diff the
         # checkout against file_contents.is_current for the templedb
@@ -111,12 +160,23 @@ if os.environ.get("TEMPLEDB_DEV_MODE"):
             sys.path.insert(0, _dev_src)
         # Redirect submodule search for the cli package to the checkout.
         __path__ = [str(_DEV_CHECKOUT / "cli")]
+        if _DEV_MODE_AUTO_ENABLED:
+            print(
+                f"⚠  dev-mode auto-enabled (long-running service) — "
+                f"loading from {_DEV_CHECKOUT}. Set TEMPLEDB_DEV_MODE=0 "
+                f"to force the frozen nix package.",
+                file=sys.stderr,
+            )
     else:
-        print(
-            f"⚠  TEMPLEDB_DEV_MODE=1 but no checkout at {_DEV_CHECKOUT} — "
-            "run `templedb publish run templedb` to materialize",
-            file=sys.stderr,
-        )
+        # Only warn on explicit opt-in with missing checkout; if we auto-
+        # enabled and the checkout is missing, silently fall through to nix
+        # (the fallback the operator would've gotten anyway).
+        if not _DEV_MODE_AUTO_ENABLED:
+            print(
+                f"⚠  TEMPLEDB_DEV_MODE=1 but no checkout at {_DEV_CHECKOUT} — "
+                "run `templedb publish run templedb` to materialize",
+                file=sys.stderr,
+            )
 
 # Ensure parent directory is in path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -268,7 +328,7 @@ def _dev_mode_staleness_banner():
 
     Silent on success. Prints one line to stderr on mismatch. Never raises.
     """
-    if not os.environ.get("TEMPLEDB_DEV_MODE"):
+    if not _dev_mode_enabled():
         return
     if not _DEV_CHECKOUT.exists():
         return  # Already warned at module load
