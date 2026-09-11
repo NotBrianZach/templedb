@@ -53,6 +53,60 @@ def safe_copy_db(src=None, dst=None):
     shutil.copy2(str(src), str(dst))
 
 
+
+
+# --- cr-sqlite extension loading ---------------------------------------
+# Templedb's DB has ~24 triggers created via `templedb sync init` that
+# call `crsql_internal_sync_bit()` on every INSERT/UPDATE/DELETE. That
+# function comes from the cr-sqlite loadable extension. Any connection
+# that writes without the extension loaded fails the trigger with
+# `no such function: crsql_internal_sync_bit`.
+#
+# sync_engine._connect() loads the extension for its own connections;
+# this module needs the same for get_connection() / get_simple_connection()
+# so ingest/CLI/agent writes don't cascade-fail. Load is best-effort:
+# missing extension logs a warning and continues (triggers will then
+# fail on the next write, which is a strictly better failure mode than
+# every command booting into an unusable state).
+#
+# See src/sync_engine.py::_find_crsqlite for the path resolution logic.
+
+_CRSQLITE_PATH = None
+_CRSQLITE_LOAD_ATTEMPTED = False
+
+
+def _crsqlite_path():
+    """Locate crsqlite extension via sync_engine.CRSQLITE_PATH. Cached."""
+    global _CRSQLITE_PATH
+    if _CRSQLITE_PATH is None:
+        try:
+            from sync_engine import CRSQLITE_PATH
+            _CRSQLITE_PATH = CRSQLITE_PATH
+        except Exception as e:
+            logger.debug(f"could not resolve crsqlite path: {e}")
+            _CRSQLITE_PATH = "crsqlite"  # dynamic-loader fallback
+    return _CRSQLITE_PATH
+
+
+def _load_crsqlite_into(conn: sqlite3.Connection) -> None:
+    """Best-effort: enable + load the crsqlite extension on `conn`.
+    Silent on success, one WARNING on first failure (avoids log spam
+    per-connection when extension truly missing)."""
+    global _CRSQLITE_LOAD_ATTEMPTED
+    try:
+        conn.enable_load_extension(True)
+        conn.load_extension(_crsqlite_path())
+    except Exception as e:
+        if not _CRSQLITE_LOAD_ATTEMPTED:
+            logger.warning(
+                f"crsqlite extension not loaded ({e}); any write to a "
+                f"sync-tracked table will fail 'no such function: "
+                f"crsql_internal_sync_bit'. Fix: install crsqlite via "
+                f"nix/home-manager, or set TEMPLEDB_CRSQLITE_PATH."
+            )
+            _CRSQLITE_LOAD_ATTEMPTED = True
+
+
 # Thread-local storage for connections
 _thread_local = threading.local()
 
@@ -71,6 +125,7 @@ def get_connection() -> sqlite3.Connection:
         _thread_local.connection.execute("PRAGMA temp_store=MEMORY")
         _thread_local.connection.execute("PRAGMA mmap_size=268435456")  # 256MB mmap
         _thread_local.connection.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
+        _load_crsqlite_into(_thread_local.connection)
     return _thread_local.connection
 
 
@@ -100,6 +155,7 @@ def get_simple_connection(db_path: str = None, row_factory: bool = False) -> sql
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA foreign_keys=ON")
 
+    _load_crsqlite_into(conn)
     return conn
 
 
