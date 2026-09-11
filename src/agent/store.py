@@ -70,12 +70,12 @@ def create_session(provider_name, project_id=None, title=None, model=None):
     session_uuid = str(uuid.uuid4())
     now = _now()
 
-    session_id = execute(
+    session_id = _retry_on_lock(lambda: execute(
         """INSERT INTO agent_sessions
            (session_uuid, project_id, provider_id, title, status, model, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (session_uuid, project_id, provider["id"], title, SESSION_CREATED, model, now, now),
-    )
+    ))
     return get_session(session_id)
 
 
@@ -148,11 +148,11 @@ def update_session_title(session_id, title):
 def create_run(session_id):
     """Create a new run within a session. Returns the full run row."""
     now = _now()
-    run_id = execute(
+    run_id = _retry_on_lock(lambda: execute(
         """INSERT INTO agent_runs (session_id, status, started_at)
            VALUES (?, ?, ?)""",
         (session_id, RUN_STATUS_RUNNING, now),
-    )
+    ))
     return query_one("SELECT * FROM agent_runs WHERE id = ?", (run_id,))
 
 
@@ -197,12 +197,12 @@ def add_message(session_id, role, content_text, run_id=None, content_format="org
     seq = row["next_seq"]
     now = _now()
 
-    msg_id = execute(
+    msg_id = _retry_on_lock(lambda: execute(
         """INSERT INTO agent_messages
            (session_id, run_id, sequence_number, role, content_text, content_format, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (session_id, run_id, seq, role, content_text, content_format, now, now),
-    )
+    ))
     return query_one("SELECT * FROM agent_messages WHERE id = ?", (msg_id,))
 
 
@@ -301,13 +301,13 @@ def _record_tool_call_started(run_id, event_id, payload):
         "SELECT session_id FROM agent_runs WHERE id = ?", (run_id,),
     )
     session_id = run['session_id'] if run else None
-    execute(
+    _retry_on_lock(lambda: execute(
         """INSERT INTO tool_calls
                (run_id, session_id, tool_name, started_at,
                 status, source_event_id)
              VALUES (?, ?, ?, datetime('now'), 'running', ?)""",
         (run_id, session_id, tool_name, event_id),
-    )
+    ))
 
 
 def _record_tool_call_completed(run_id, failed=False):
