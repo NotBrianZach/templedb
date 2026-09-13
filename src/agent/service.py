@@ -177,11 +177,12 @@ class AgentService:
 
     # --- Messages ---
 
-    def send_message(self, session_id, content, context=None):
+    def send_message(self, session_id, content=None, context=None):
         """Send a user message and stream the response.
 
         This is the main interaction point. It:
-        1. Stores the user message
+        1. Stores the user message (unless CONTENT is None — for resume,
+           where the pending user message is already in the DB)
         2. Creates a new run
         3. Sends all messages to the provider
         4. Streams events back, batching DB writes
@@ -197,15 +198,26 @@ class AgentService:
         if not provider:
             raise ValueError(f"No provider for session {session_id}. Call open_session first.")
 
-        # Store user message
-        store.add_message(session_id, ROLE_USER, content)
+        # Store user message (skipped on resume — the pending message is
+        # already in the DB and re-adding it would duplicate seq 79/80-style
+        # orphans as a fresh tail user message).
+        if content is not None:
+            store.add_message(session_id, ROLE_USER, content)
 
-        # Auto-title from first message
+        # Auto-title from first user message. On resume the caller passed no
+        # new content, so title from whatever's already in history.
         if not session.get("title"):
-            title = content[:80].strip()
-            if len(content) > 80:
-                title += "..."
-            store.update_session_title(session_id, title)
+            title_source = content
+            if title_source is None:
+                for m in store.get_messages(session_id):
+                    if m["role"] == ROLE_USER:
+                        title_source = m["content_text"]
+                        break
+            if title_source:
+                title = title_source[:80].strip()
+                if len(title_source) > 80:
+                    title += "..."
+                store.update_session_title(session_id, title)
 
         # Create run
         run = store.create_run(session_id)
@@ -376,7 +388,14 @@ class AgentService:
             provider.cancel()
 
     def resume_run(self, session_id, context=None):
-        """Resume an interrupted session by re-sending messages.
+        """Resume an interrupted/failed session over the existing message
+        history. Does NOT duplicate the last user message (the old behavior
+        re-called send_message with the last user content, which appended a
+        fresh row and left Claude looking at "hows it goin ... hows it goin").
+
+        Requires that the last message in the session is user-authored —
+        otherwise there's nothing pending to answer and we bail.
+
         Yields events like send_message.
         """
         session = store.get_session(session_id)
@@ -387,22 +406,18 @@ class AgentService:
         if session_id not in self._providers:
             self.open_session(session_id)
 
-        # Get last user message
         messages = store.get_messages(session_id)
         if not messages:
             raise ValueError("No messages to resume from")
+        if messages[-1]["role"] != ROLE_USER:
+            raise ValueError(
+                "Nothing to resume: last message is not from user "
+                "(the previous run already produced an answer)"
+            )
 
-        last_user_msg = None
-        for m in reversed(messages):
-            if m["role"] == ROLE_USER:
-                last_user_msg = m
-                break
-
-        if not last_user_msg:
-            raise ValueError("No user message found to resume from")
-
-        # Re-send via normal flow
-        yield from self.send_message(session_id, last_user_msg["content_text"], context)
+        # Kick off a new run over the existing history, without adding a
+        # duplicate user message.
+        yield from self.send_message(session_id, content=None, context=context)
 
     # --- Recovery ---
 

@@ -116,7 +116,15 @@ class ClaudeCodeProvider(BaseProvider):
         "(e.g. 'run the tests', 'commit and publish', 'show the diff'). "
         "Each suggestion should be ≤ 60 chars and will replace * Next Prompt "
         "when the user clicks it. Skip this only when the run failed or the "
-        "user explicitly ended the thread."
+        "user explicitly ended the thread. "
+        # Self-kill footgun guard (incident 2026-09-13, session 282).
+        "You are running inside a `templedb ai agent serve --stdio` "
+        "subprocess. Do NOT `kill` PIDs of any `ai agent serve` process "
+        "found via ps/pgrep — even ones that look stale — because you may "
+        "be looking at your own parent server (see "
+        "$TEMPLEDB_AGENT_SERVER_PID) and terminating it will crash this "
+        "run mid-turn. Use `templedb ai agent stop-stale [--dry-run]` "
+        "instead; it auto-excludes the current process's ancestor chain."
     )
 
     def _write_mcp_config(self, agent_session_id):
@@ -178,6 +186,10 @@ class ClaudeCodeProvider(BaseProvider):
                 cmd.extend(["--mcp-config", mcp_config_path])
                 cmd.extend(["--append-system-prompt", self._AGENT_SYSTEM_PROMPT])
 
+        # `--` ends option parsing; without it, a prompt starting with `-`
+        # (e.g. a bullet pasted from a reply) is misread as an unknown option
+        # and Claude exits with code 1 before doing anything.
+        cmd.append("--")
         cmd.append(last_message)
 
         logger.info(f"Launching Claude: {' '.join(cmd[:6])}...")
@@ -187,11 +199,16 @@ class ClaudeCodeProvider(BaseProvider):
             # stdin=DEVNULL: our parent stdin is the Emacs↔serve JSON pipe; if
             # Claude inherits it, `claude -p` waits 3s for prompt-on-stdin data
             # and prints a warning that gets mistaken for the real error.
+            # Advertise our own PID so Bash tools that call
+            # `templedb ai agent stop-stale` can filter this server out.
+            child_env = dict(os.environ)
+            child_env["TEMPLEDB_AGENT_SERVER_PID"] = str(os.getpid())
             self._process = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1,
                 cwd=context.get("cwd") if context else None,
+                env=child_env,
             )
 
             assistant_started = False
