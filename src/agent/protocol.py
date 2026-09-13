@@ -261,14 +261,13 @@ class ProtocolServer:
     def _handle_message_queue(self, request_id, params):
         session_id = params.get("session_id")
         content = params.get("content", "")
-        context = params.get("context")
         if not session_id:
             self._respond(request_id, error="session_id required")
             return
         if not content.strip():
             self._respond(request_id, error="content required")
             return
-        self.service.queue_message(session_id, content, context=context)
+        self.service.queue_message(session_id, content)
         self._respond(request_id, result={"ok": True, "queued": True})
 
     def _handle_run_cancel(self, request_id, params):

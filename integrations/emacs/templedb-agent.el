@@ -1799,8 +1799,7 @@ output blobs are not persisted per event, so we can't reproduce them."
         (templedb-agent--send
          "message.queue"
          `((session_id . ,templedb-agent--session-id)
-           (content . ,text)
-           (context . ,(templedb-agent--build-context-payload)))
+           (content . ,text))
          (lambda (_result) (message "Message queued (Claude is working)")))
       (templedb-agent--send
        "message.send"

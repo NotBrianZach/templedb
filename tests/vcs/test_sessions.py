@@ -233,5 +233,112 @@ class TestSessionLifecycle(_VCSFixture):
         self.assertNotIn(s1['id'], active_ids)
 
 
+class TestSessionPin(_VCSFixture):
+    """Filesystem session pin (agent-safe cross-invocation sharing).
+
+    Motivation: under Claude Code / other agent runners, each Bash tool
+    call spawns a fresh shell with a fresh SID and no inherited env, so
+    both TEMPLEDB_SESSION_ID and the SID-based lookup fail to share
+    sessions across `templedb vcs add ...` + `templedb vcs commit ...`.
+    The pin file bridges the gap.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Isolate the pin file per test so we don't clobber the user's
+        # real pin on the running machine.
+        self._pin_dir = tempfile.mkdtemp(prefix='vcs-pin-test-')
+        self._prev_xdg = os.environ.get('XDG_STATE_HOME')
+        os.environ['XDG_STATE_HOME'] = self._pin_dir
+
+    def tearDown(self):
+        if self._prev_xdg is None:
+            os.environ.pop('XDG_STATE_HOME', None)
+        else:
+            os.environ['XDG_STATE_HOME'] = self._prev_xdg
+        import shutil
+        shutil.rmtree(self._pin_dir, ignore_errors=True)
+
+    def test_pin_persists_across_service_instances(self):
+        svc1 = self._service(author='pin-test')
+        s = svc1.start_session(name='pinned')
+        svc1.pin_current_session(session_id=s['id'])
+
+        # Fresh service instance, no env, no cached state — must still
+        # resolve to the pinned session.
+        svc2 = self._service(author='pin-test')
+        s2 = svc2.get_current_session()
+        self.assertEqual(s2['id'], s['id'],
+                         "fresh VCSService should resolve to the pinned "
+                         "session even with no env vars set")
+
+    def test_pin_ignored_when_author_mismatches(self):
+        """A pin written under one author should not silently apply
+        when a different author invokes templedb (protects a shared
+        homedir from cross-contamination)."""
+        svc = self._service(author='alice')
+        s = svc.start_session(name='alice-work')
+        svc.pin_current_session(session_id=s['id'])
+
+        svc2 = self._service(author='bob')
+        s2 = svc2.get_current_session()
+        self.assertNotEqual(s2['id'], s['id'],
+                            "bob must not inherit alice's pinned session")
+
+    def test_pin_ignored_when_session_ended(self):
+        svc = self._service(author='ended-test')
+        s = svc.start_session(name='will-end')
+        svc.pin_current_session(session_id=s['id'])
+        svc.end_session(s['id'], reason='explicit-end')
+
+        # Fresh service — the pin points at an ended session; resolver
+        # must fall through and create a fresh one.
+        svc2 = self._service(author='ended-test')
+        s2 = svc2.get_current_session()
+        self.assertNotEqual(s2['id'], s['id'])
+
+    def test_unpin_removes_the_file(self):
+        svc = self._service(author='unpin-test')
+        s = svc.start_session()
+        svc.pin_current_session(session_id=s['id'])
+        pin_path = svc._session_pin_path()
+        self.assertTrue(os.path.exists(pin_path))
+        removed = svc.unpin_session()
+        self.assertTrue(removed)
+        self.assertFalse(os.path.exists(pin_path))
+
+    def test_pin_survives_when_env_and_sid_would_miss(self):
+        """The core agent scenario: session started + pinned in one
+        'invocation', then a completely fresh VCSService (mimicking
+        a new Bash-tool shell with new SID + no env) resolves the
+        same session. TEMPLEDB_SESSION_ID is explicitly unset."""
+        svc = self._service(author='agent-workflow')
+        s = svc.start_session(name='agent')
+        svc.pin_current_session(session_id=s['id'])
+
+        os.environ.pop('TEMPLEDB_SESSION_ID', None)
+        # Even calling `get_current_session` from a brand-new instance
+        # with no session cache should hit the pin file.
+        from services.context import ServiceContext
+        ctx = ServiceContext()
+        svc3 = ctx.get_vcs_service()
+        s3 = svc3.get_current_session()
+        self.assertEqual(s3['id'], s['id'])
+
+    def test_env_var_still_takes_precedence_over_pin(self):
+        """The env var stays the top-of-stack override — an explicit
+        TEMPLEDB_SESSION_ID must beat the pin file so users can
+        one-off-target a specific session without unpinning."""
+        svc = self._service(author='override-test')
+        pinned = svc.start_session(name='pinned')
+        other = svc.start_session(name='other')
+        svc.pin_current_session(session_id=pinned['id'])
+
+        svc2 = self._service(session_id_env=other['id'],
+                             author='override-test')
+        s2 = svc2.get_current_session()
+        self.assertEqual(s2['id'], other['id'])
+
+
 if __name__ == '__main__':
     unittest.main()

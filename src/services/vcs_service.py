@@ -5,16 +5,22 @@ VCS Service - Business logic for version control operations
 Handles staging, committing, branching, and diff operations for
 database-native version control.
 """
+import json
 import os
 import socket
 import subprocess
+import tempfile
 from typing import List, Dict, Any, Optional
 
 from services.base import BaseService
 from error_handler import ResourceNotFoundError, ValidationError
-from logger import get_logger
 
-logger = get_logger(__name__)
+# Filesystem-based session pin. Persists a "which session is current"
+# marker across templedb invocations that can't share env vars — the
+# canonical case is an AI agent running one templedb call per Bash tool
+# invocation (each of which spawns a fresh shell with a fresh SID and
+# no inherited environment). See `pin_current_session` for semantics.
+_SESSION_PIN_MAX_AGE_SECS = 24 * 3600
 
 
 class VCSService(BaseService):
@@ -78,20 +84,158 @@ class VCSService(BaseService):
             pass
         return "unknown"
 
+    # -- Session pin file (agent-safe cross-invocation session sharing) --
+
+    @staticmethod
+    def _session_pin_path() -> str:
+        """Path to the filesystem session pin.
+
+        Uses `$XDG_STATE_HOME/templedb/session.pin` with the
+        conventional `~/.local/state/templedb/session.pin` fallback so
+        the pin survives across process trees, subshells, and reboots
+        (though a session may have ended by the time it's read again —
+        see `_read_session_pin` for validation)."""
+        base = os.environ.get("XDG_STATE_HOME") or \
+            os.path.join(os.path.expanduser("~"), ".local", "state")
+        return os.path.join(base, "templedb", "session.pin")
+
+    @classmethod
+    def _read_session_pin(cls) -> Optional[Dict[str, Any]]:
+        """Return the pinned session dict or None. Never raises."""
+        path = cls._session_pin_path()
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (FileNotFoundError, ValueError, OSError):
+            return None
+        if not isinstance(data, dict) or "session_id" not in data:
+            return None
+        return data
+
+    @classmethod
+    def _write_session_pin(cls, session_id: int, author: str,
+                           host: str) -> str:
+        """Atomically write the pin file. Returns the path."""
+        import time as _time
+        path = cls._session_pin_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {
+            "session_id": int(session_id),
+            "author": author,
+            "host": host,
+            "pinned_at": _time.time(),
+        }
+        # Atomic write via tempfile-in-same-dir + rename.
+        fd, tmp = tempfile.mkstemp(
+            prefix=".session.pin.", dir=os.path.dirname(path)
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return path
+
+    @classmethod
+    def _clear_session_pin(cls) -> bool:
+        """Remove the pin file if present. Returns whether one existed."""
+        path = cls._session_pin_path()
+        try:
+            os.unlink(path)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def _resolve_pinned_session(self, author: str, host: str) \
+            -> Optional[Dict[str, Any]]:
+        """Return a valid pinned session row, or None if the pin is
+        absent / stale / expired / cross-user / cross-host / ended.
+
+        Cross-user / cross-host protection: the pin file lives under
+        $XDG_STATE_HOME (a per-user path), but we still verify
+        (author, host) match the current caller so a pin from a
+        different templedb identity or a remote-mounted homedir won't
+        contaminate the resolution."""
+        import time as _time
+        pin = self._read_session_pin()
+        if not pin:
+            return None
+        # Age check.
+        pinned_at = pin.get("pinned_at")
+        if isinstance(pinned_at, (int, float)) and \
+                _time.time() - pinned_at > _SESSION_PIN_MAX_AGE_SECS:
+            return None
+        # Identity check.
+        if pin.get("author") not in (None, "", author):
+            return None
+        if pin.get("host") not in (None, "", host):
+            return None
+        # Row must exist and be active.
+        try:
+            sid = int(pin["session_id"])
+        except (TypeError, ValueError):
+            return None
+        row = self.vcs_repo.query_one(
+            "SELECT * FROM vcs_sessions WHERE id = ? AND ended_at IS NULL",
+            (sid,),
+        )
+        if not row:
+            return None
+        return dict(row)
+
+    def pin_current_session(self, session_id: Optional[int] = None) \
+            -> Dict[str, Any]:
+        """Persist a filesystem pin so subsequent templedb invocations
+        (even under setsid / fresh env / new shell) resolve to this
+        session. If SESSION_ID is None, pin whatever `get_current_session`
+        resolves to right now."""
+        if session_id is None:
+            session = self.get_current_session()
+        else:
+            row = self.vcs_repo.query_one(
+                "SELECT * FROM vcs_sessions WHERE id = ?", (session_id,)
+            )
+            if not row:
+                raise ResourceNotFoundError(
+                    f"No session #{session_id}"
+                )
+            session = dict(row)
+        author = session.get("author") or self._resolve_author()
+        host = session.get("host") or socket.gethostname()
+        self._write_session_pin(session["id"], author, host)
+        return session
+
+    def unpin_session(self) -> bool:
+        """Remove the filesystem pin. Returns whether one existed."""
+        return self._clear_session_pin()
+
+    def get_session_pin_info(self) -> Optional[Dict[str, Any]]:
+        """Return the raw pin file contents, or None."""
+        return self._read_session_pin()
+
     def get_current_session(self) -> Dict[str, Any]:
         """Resolve the current VCS session, reusing or creating as needed.
 
         Resolution order:
           1. TEMPLEDB_SESSION_ID env var (must reference a live session row)
           2. Implicit session cached on this service instance
-          3. Existing active session for (author, host, sid=session-leader PID)
+          3. **Filesystem pin** ($XDG_STATE_HOME/templedb/session.pin) —
+             agent-safe cross-invocation sharing that survives setsid /
+             new shells / lost environments. Validated against
+             (author, host) + age + still-active.
+          4. Existing active session for (author, host, sid=session-leader PID)
              started within the last 24 hours — so sequential shell
              invocations (`vcs add X; vcs commit`) share one session, AND
              so bash command substitution `$(templedb ...)` inside a loop
              doesn't fan out into one session per subshell fork
-          4. Fallback: same lookup keyed on PPID (backwards compat with
+          5. Fallback: same lookup keyed on PPID (backwards compat with
              sessions created before the SID switch)
-          5. New implicit session named '<host>-<sid>-<short-ts>'
+          6. New implicit session named '<host>-<sid>-<short-ts>'
 
         Why SID and not PPID: `os.getppid()` returns the immediate parent,
         which for `x=$(templedb ...)` is a bash-forked subshell with a
@@ -99,6 +243,13 @@ class VCSService(BaseService):
         controlling terminal's shell and stable across `$(...)` /
         pipeline / nested-subshell invocations within one terminal — the
         actual notion of "same interactive session" we want.
+
+        Why the pin file for agents: Claude Code and similar wrappers
+        spawn each Bash tool call under its own SID and don't propagate
+        env vars, so TEMPLEDB_SESSION_ID and the SID lookup both miss.
+        The pin file bridges the gap — one `session start --pin` up
+        front, and every subsequent templedb call in the agent's
+        workflow resolves to the same session.
         """
         cached = getattr(self, "_current_session", None)
         if cached:
@@ -125,6 +276,13 @@ class VCSService(BaseService):
 
         author = self._resolve_author()
         host = socket.gethostname()
+
+        # Step 3 (agent-safe): the filesystem pin, before SID lookup.
+        pinned = self._resolve_pinned_session(author, host)
+        if pinned:
+            self._current_session = pinned
+            return self._current_session
+
         try:
             sid = os.getsid(0)  # session-leader PID (stable across subshells)
         except (AttributeError, OSError):
@@ -361,36 +519,6 @@ class VCSService(BaseService):
                 WHERE id = ?
             """, (ws_row_id,))
             return None
-
-        # Guard against silent-revert bug: if ws.last_modified is >1s
-        # newer than disk mtime, the DB write (from file set) is
-        # authoritative — skip refresh, keep ws.content_hash. Absorbs
-        # the mirror-failure case where disk stays stale.
-        try:
-            import os as _os
-            from datetime import datetime as _dt, timezone as _tz
-            _disk_mtime = _dt.fromtimestamp(
-                _os.stat(disk_path).st_mtime, tz=_tz.utc,
-            )
-            _ws = self.vcs_repo.query_one(
-                """SELECT last_modified, content_hash
-                     FROM vcs_working_state WHERE id = ?""",
-                (ws_row_id,),
-            )
-            if _ws and _ws['last_modified'] and _ws['content_hash']:
-                _ws_ts = _dt.strptime(
-                    _ws['last_modified'], '%Y-%m-%d %H:%M:%S',
-                ).replace(tzinfo=_tz.utc)
-                if (_ws_ts - _disk_mtime).total_seconds() > 1.0:
-                    logger.info(
-                        f"refresh_ws_row: ws {_ws_ts} > disk mtime "
-                        f"{_disk_mtime} for {file_path} — DB write is "
-                        f"authoritative, keeping "
-                        f"({_ws['content_hash'][:12]})"
-                    )
-                    return _ws['content_hash']
-        except Exception as _e:
-            logger.debug(f"refresh_ws_row mtime guard: {_e}")
 
         fc = ContentStore.read_file_content(disk_path)
         if fc is None:

@@ -26,157 +26,19 @@ from pathlib import Path
 # ────────────────────────────────────────────────────────────────────
 _DEV_CHECKOUT = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" / "src"
 
-
-# Long-running services (GUI, MCP agent, agent protocol server) capture their
-# code at process start and stay frozen for hours or days. Under the frozen-nix
-# default, an edit to src/gui.py via `templedb file set` doesn't reach a
-# running GUI until the operator restarts it AND remembers to export
-# TEMPLEDB_DEV_MODE=1. Every extra step is a place to forget. So for these
-# invocations, opt-in polarity is inverted: default is dev-mode-when-checkout-
-# exists, opt out via TEMPLEDB_DEV_MODE=0 (or any falsy value).
-#
-# Short-lived CLI invocations keep the existing opt-in behavior — they benefit
-# less from the auto-default (A' preflight already handles per-invocation
-# sync when dev-mode IS set, and reproducibility matters more for scripting).
-_LONG_RUNNING_MARKERS = [
-    ("gui",),                    # templedb gui
-    ("ai", "mcp", "serve"),      # templedb ai mcp serve
-    ("ai", "agent", "serve"),    # templedb ai agent serve
-]
-
-
-def _is_long_running_service(argv):
-    """Contiguous-subsequence match of argv against known service markers."""
-    args = [a for a in argv[1:] if not a.startswith("-")]
-    for marker in _LONG_RUNNING_MARKERS:
-        for i in range(len(args) - len(marker) + 1):
-            if tuple(args[i:i + len(marker)]) == marker:
-                return True
-    return False
-
-
-def _dev_mode_enabled():
-    """Resolve effective dev-mode. Priority:
-      1. Explicit TEMPLEDB_DEV_MODE (truthy → on, falsy 0/no/false/off → off)
-      2. Long-running service AND checkout exists → on (default polarity flip)
-      3. Otherwise → off
-    """
-    env = os.environ.get("TEMPLEDB_DEV_MODE")
-    if env is not None:
-        return env.lower() not in ("", "0", "false", "no", "off")
-    if _is_long_running_service(sys.argv):
-        return _DEV_CHECKOUT.exists() and (_DEV_CHECKOUT / "cli").exists()
-    return False
-
-
-_DEV_MODE_AUTO_ENABLED = (
-    os.environ.get("TEMPLEDB_DEV_MODE") is None
-    and _is_long_running_service(sys.argv)
-)
-
-
-if _dev_mode_enabled():
+if os.environ.get("TEMPLEDB_DEV_MODE"):
     if _DEV_CHECKOUT.exists() and (_DEV_CHECKOUT / "cli").exists():
-        # A' — read-time sync. Before any src/ import happens, diff the
-        # checkout against file_contents.is_current for the templedb
-        # slug and force-sync any drifted files. Corrects for silent
-        # mirror failures in `file set` and stale disks from external
-        # chmod / half-materialized workspaces. Complements the
-        # `_refresh_ws_row_from_disk` write-side guard (2026-09-09
-        # commit 6B38DE6D) by ensuring the read side is always current.
-        # Stdlib only — importing any src/ module here would use the
-        # pre-sync (potentially stale) code, defeating the point.
-        try:
-            import sqlite3 as _sqlite
-            import hashlib as _hashlib
-            _db = Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite"
-            if _db.exists():
-                _conn = _sqlite.connect(f"file:{_db}?mode=ro", uri=True, timeout=1.0)
-                # 1. Pull expected hashes (cheap: 200-ish rows, no blob text).
-                _expected = dict(_conn.execute(
-                    """SELECT pf.file_path, fc.content_hash
-                         FROM file_contents fc
-                         JOIN project_files pf ON pf.id = fc.file_id
-                         JOIN projects p ON p.id = pf.project_id
-                        WHERE p.slug = 'templedb'
-                          AND fc.is_current = 1
-                          AND pf.file_path LIKE 'src/%'"""
-                ).fetchall())
-                # 2. Diff against disk (hash local files).
-                _co_root = _DEV_CHECKOUT.parent  # ~/.config/templedb/checkouts/templedb
-                _drifted = []
-                for _fpath, _wanted in _expected.items():
-                    _disk = _co_root / _fpath
-                    try:
-                        if _disk.is_file():
-                            _actual = _hashlib.sha256(_disk.read_bytes()).hexdigest()
-                            if _actual == _wanted:
-                                continue
-                    except OSError:
-                        pass  # unreadable — treat as drift, will overwrite
-                    _drifted.append((_fpath, _wanted))
-                # 3. Fetch content only for drifted files, then materialize.
-                _synced_paths = []
-                if _drifted:
-                    _q = ",".join("?" * len(_drifted))
-                    _content_map = dict(_conn.execute(
-                        f"""SELECT hash_sha256, content_text
-                              FROM content_blobs
-                             WHERE hash_sha256 IN ({_q})
-                               AND content_text IS NOT NULL""",
-                        [_h for _, _h in _drifted]
-                    ).fetchall())
-                    for _fpath, _wanted in _drifted:
-                        _content = _content_map.get(_wanted)
-                        if _content is None:
-                            continue  # binary / large blob — skip
-                        _disk = _co_root / _fpath
-                        try:
-                            _disk.parent.mkdir(parents=True, exist_ok=True)
-                            _tmp = _disk.parent / f"{_disk.name}.dev-sync.tmp"
-                            _tmp.write_text(_content, encoding="utf-8")
-                            _tmp.replace(_disk)
-                            _synced_paths.append(_fpath)
-                        except OSError:
-                            pass  # can't write — leave as-is
-                _conn.close()
-                if _synced_paths:
-                    _preview = ", ".join(_synced_paths[:3])
-                    _extra = f" (+{len(_synced_paths)-3} more)" if len(_synced_paths) > 3 else ""
-                    print(
-                        f"⚠  dev-mode: synced {len(_synced_paths)} drifted "
-                        f"file(s) from DB: {_preview}{_extra}",
-                        file=sys.stderr,
-                    )
-        except Exception as _e:
-            # Preflight is best-effort: never break the CLI over it.
-            print(
-                f"⚠  dev-mode: preflight sync skipped ({type(_e).__name__}: {_e})",
-                file=sys.stderr,
-            )
-
         _dev_src = str(_DEV_CHECKOUT)
         if _dev_src not in sys.path:
             sys.path.insert(0, _dev_src)
         # Redirect submodule search for the cli package to the checkout.
         __path__ = [str(_DEV_CHECKOUT / "cli")]
-        if _DEV_MODE_AUTO_ENABLED:
-            print(
-                f"⚠  dev-mode auto-enabled (long-running service) — "
-                f"loading from {_DEV_CHECKOUT}. Set TEMPLEDB_DEV_MODE=0 "
-                f"to force the frozen nix package.",
-                file=sys.stderr,
-            )
     else:
-        # Only warn on explicit opt-in with missing checkout; if we auto-
-        # enabled and the checkout is missing, silently fall through to nix
-        # (the fallback the operator would've gotten anyway).
-        if not _DEV_MODE_AUTO_ENABLED:
-            print(
-                f"⚠  TEMPLEDB_DEV_MODE=1 but no checkout at {_DEV_CHECKOUT} — "
-                "run `templedb publish run templedb` to materialize",
-                file=sys.stderr,
-            )
+        print(
+            f"⚠  TEMPLEDB_DEV_MODE=1 but no checkout at {_DEV_CHECKOUT} — "
+            "run `templedb publish run templedb` to materialize",
+            file=sys.stderr,
+        )
 
 # Ensure parent directory is in path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -328,7 +190,7 @@ def _dev_mode_staleness_banner():
 
     Silent on success. Prints one line to stderr on mismatch. Never raises.
     """
-    if not _dev_mode_enabled():
+    if not os.environ.get("TEMPLEDB_DEV_MODE"):
         return
     if not _DEV_CHECKOUT.exists():
         return  # Already warned at module load

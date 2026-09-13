@@ -142,7 +142,6 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("audit",    "/audit",     "Audit",      ", L"),
             ("domains",  "/domains",   "Domains",    ", O"),
             ("docs",     "/docs",      "Docs",       ", k"),
-            ("reports",  "/reports",   "Reports",    ", r"),
             ("code",     "/code",      "Code",       ", C"),
             ("config-ast", "/config-ast", "Config AST", ", A"),
             ("graph",    "/graph",     "Graph",      ", g"),

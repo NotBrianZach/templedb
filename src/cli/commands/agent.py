@@ -166,112 +166,6 @@ class AgentCommands(Command):
 
         return 0
 
-    def stop_stale(self, args):
-        """Stop stale `ai agent serve --stdio` processes without touching
-        the one that hosts the current call.
-
-        Why this exists: on 2026-09-13, Claude (running inside an agent
-        server) was asked "is the DB locked?", identified three
-        concurrent agent servers, and ran `kill 153213 726426` via a
-        Bash tool. That killed the process hosting its own subprocess
-        tree and interrupted the run mid-stream. This command
-        auto-excludes the current process's ancestor chain and the
-        agent-server PID advertised via TEMPLEDB_AGENT_SERVER_PID (set
-        by ClaudeCodeProvider), so an agent can cleanup safely.
-
-        Use `--dry-run` to preview.
-        """
-        protected = _find_stop_stale_protected_pids()
-        victims = _find_agent_serve_victims(protected)
-
-        if not victims:
-            print("No stale ai agent serve processes to stop.")
-            print(f"(Protected {len(protected)} PID(s): "
-                  f"{sorted(protected)})")
-            return 0
-
-        dry_run = getattr(args, 'dry_run', False)
-        force = getattr(args, 'force', False)
-        import os as _os
-        import signal as _signal
-        sig = _signal.SIGKILL if force else _signal.SIGTERM
-        for pid, cmdline in victims:
-            preview = cmdline[:90] + ("…" if len(cmdline) > 90 else "")
-            if dry_run:
-                print(f"[dry-run] would send {sig.name} to {pid}: {preview}")
-                continue
-            try:
-                _os.kill(pid, sig)
-                print(f"Sent {sig.name} to {pid}: {preview}")
-            except ProcessLookupError:
-                print(f"Process {pid} already gone.")
-            except PermissionError as e:
-                print(f"Cannot kill {pid}: {e}")
-        return 0
-
-
-def _find_stop_stale_protected_pids():
-    """Return the set of PIDs `stop-stale` must not kill: the current
-    process's ancestor chain plus $TEMPLEDB_AGENT_SERVER_PID if set."""
-    import os as _os
-    protected = set()
-    pid = _os.getpid()
-    depth = 0
-    while pid > 1 and depth < 50:
-        protected.add(pid)
-        try:
-            with open(f'/proc/{pid}/status') as f:
-                ppid = None
-                for line in f:
-                    if line.startswith('PPid:'):
-                        ppid = int(line.split()[1])
-                        break
-            if ppid is None or ppid == pid:
-                break
-            pid = ppid
-        except (FileNotFoundError, PermissionError, ValueError):
-            break
-        depth += 1
-    env_pid = _os.environ.get('TEMPLEDB_AGENT_SERVER_PID')
-    if env_pid:
-        try:
-            protected.add(int(env_pid))
-        except ValueError:
-            pass
-    return protected
-
-
-def _find_agent_serve_victims(protected_pids):
-    """Return [(pid, cmdline_str), ...] for `ai agent serve` processes not
-    in PROTECTED_PIDS. Reads /proc directly so we don't shell out to
-    pgrep and can't misparse quoted args."""
-    import os as _os
-    victims = []
-    try:
-        entries = _os.listdir('/proc')
-    except FileNotFoundError:
-        return victims  # non-linux fallback
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        pid_i = int(entry)
-        if pid_i in protected_pids:
-            continue
-        try:
-            with open(f'/proc/{entry}/cmdline', 'rb') as f:
-                raw = f.read()
-        except (FileNotFoundError, PermissionError):
-            continue
-        if not raw:
-            continue
-        cmdline = raw.replace(b'\x00', b' ').decode(
-            'utf-8', errors='replace').strip()
-        # Match both the launcher form and the wrapper form.
-        if 'ai agent serve' in cmdline and (
-                'templedb' in cmdline or '_launcher.py' in cmdline):
-            victims.append((pid_i, cmdline))
-    return victims
-
 
 def register_agent_commands(subparsers, cli):
     """Register agent subcommands under 'ai agent'."""
@@ -308,21 +202,6 @@ def register_agent_commands(subparsers, cli):
     log_parser.add_argument('--project', help='Filter by project slug')
     log_parser.add_argument('--limit', type=int, default=20, help='Number of entries')
     cli.commands['ai.agent.log'] = cmd.log
-
-    # stop-stale — safe cleanup of stray `ai agent serve` processes
-    stop_stale_parser = agent_sub.add_parser(
-        'stop-stale',
-        help='Stop stray `ai agent serve` processes '
-             '(auto-excludes own ancestor chain — safe to call from '
-             'a Bash tool inside an agent session).',
-    )
-    stop_stale_parser.add_argument(
-        '--dry-run', action='store_true',
-        help="Show what would be killed without doing it.")
-    stop_stale_parser.add_argument(
-        '--force', action='store_true',
-        help="Use SIGKILL instead of SIGTERM.")
-    cli.commands['ai.agent.stop-stale'] = cmd.stop_stale
 
     # Default handler for bare 'ai agent'
     cli.commands['ai.agent'] = cmd.sessions

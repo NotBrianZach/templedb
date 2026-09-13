@@ -417,6 +417,22 @@ class VCSCommands(Command):
             if other_staged_count:
                 print(f"  ({other_staged_count} file(s) staged in other sessions; "
                       f"see 'templedb vcs status --all')")
+                # Common footgun: an agent staged in one Bash tool call
+                # and now tries to commit from another. Point them at
+                # the pin file so add + commit share a session.
+                pin_info = self.service.get_session_pin_info()
+                if not pin_info:
+                    print("  If your stage lives in another session "
+                          "because this call came from a fresh shell")
+                    print("  (e.g. an agent Bash tool), pin a session "
+                          "up front so future calls share it:")
+                    print(f"    templedb vcs session start --pin --name "
+                          f"agent-{project['slug']}")
+                    print("    # stage + commit follow in any shell:")
+                    print(f"    templedb vcs add -p {project['slug']} "
+                          "<files>")
+                    print(f"    templedb vcs commit -p {project['slug']} "
+                          "-m \"...\"")
             print(f"  Check status:  templedb vcs status {project['slug']} --refresh")
             print(f"  Stage files:   templedb vcs add -p {project['slug']} --all")
             return 1
@@ -596,16 +612,6 @@ class VCSCommands(Command):
             )
         except Exception as e:
             logger.debug(f"Auto-deploy check skipped: {e}")
-
-        # Auto-publish hook (opt-out): if the project has a git mirror,
-        # kick off `templedb publish run <slug>` in the background.
-        # Skips silently if --no-publish, TEMPLEDB_SKIP_PUBLISH=1, or
-        # no mirror is configured. See src/services/publish_hook.py.
-        try:
-            from services.publish_hook import maybe_trigger_publish
-            maybe_trigger_publish(project['slug'], args)
-        except Exception as e:
-            logger.debug(f"Auto-publish check skipped: {e}")
 
         from cli.json_output import emit
         result = {
@@ -1718,8 +1724,51 @@ class VCSCommands(Command):
         print(f"Started session #{session['id']} ({session['name'] or 'unnamed'})")
         print(f"  Author: {session['author']}")
         print(f"  Host:   {session['host']}  PID: {session['pid']}")
-        print()
-        print(f"  export TEMPLEDB_SESSION_ID={session['id']}")
+        if getattr(args, 'pin', False):
+            self.service.pin_current_session(session_id=session['id'])
+            pin_path = self.service._session_pin_path()
+            print(f"  Pinned: {pin_path}")
+            print()
+            print("  Subsequent `templedb` calls on this host will "
+                  "resolve to this session")
+            print("  automatically — even in fresh shells / under "
+                  "setsid — until you run")
+            print("  `templedb vcs session unpin` or the pin expires "
+                  "in 24h.")
+        else:
+            print()
+            print(f"  export TEMPLEDB_SESSION_ID={session['id']}")
+            print("  (Or re-run with --pin to persist a filesystem "
+                  "pin instead — needed for")
+            print("   agent-driven workflows where env vars don't "
+                  "cross Bash-tool invocations.)")
+        return 0
+
+    def session_pin(self, args) -> int:
+        """Pin the current (or a given) session so future invocations
+        share it across setsid / new shells / lost env vars."""
+        session_id = getattr(args, 'id', None)
+        if session_id is not None:
+            try:
+                session_id = int(session_id)
+            except (TypeError, ValueError):
+                print("session pin id must be an integer", file=sys.stderr)
+                return 1
+        session = self.service.pin_current_session(session_id=session_id)
+        pin_path = self.service._session_pin_path()
+        print(f"Pinned session #{session['id']} "
+              f"({session.get('name') or 'unnamed'}) "
+              f"→ {pin_path}")
+        return 0
+
+    def session_unpin(self, args) -> int:
+        """Remove the filesystem session pin."""
+        removed = self.service.unpin_session()
+        pin_path = self.service._session_pin_path()
+        if removed:
+            print(f"Unpinned. (Removed {pin_path})")
+        else:
+            print(f"No pin was set. (Would be at {pin_path})")
         return 0
 
     def session_end(self, args) -> int:
@@ -1755,6 +1804,17 @@ class VCSCommands(Command):
         print(f"  Started: {session.get('started_at')}")
         if session.get('ended_at'):
             print(f"  Ended:  {session['ended_at']} ({session.get('ended_reason')})")
+
+        pin_info = self.service.get_session_pin_info()
+        if pin_info and pin_info.get("session_id") == session["id"]:
+            pin_path = self.service._session_pin_path()
+            print(f"  Pinned: yes ({pin_path})")
+        elif pin_info:
+            print(f"  Pinned: session #{pin_info.get('session_id')} "
+                  "(different — not applied; stale or "
+                  "cross-author/host)")
+        else:
+            print(f"  Pinned: no")
         return 0
 
     def session_show(self, args) -> int:
@@ -1859,10 +1919,6 @@ def register(cli):
     commit_parser.add_argument('-p', '--project', required=True, help='Project name or pattern (fuzzy matching enabled)')
     commit_parser.add_argument('-b', '--branch', help='Branch name')
     commit_parser.add_argument('-a', '--author', help='Author name')
-    commit_parser.add_argument('--no-publish', action='store_true',
-                               help='Skip the auto-publish hook that fires after successful commit '
-                                    'when the project has a git mirror. Equivalent to setting '
-                                    'TEMPLEDB_SKIP_PUBLISH=1 for this one commit.')
     cli.commands['vcs.commit'] = cmd.commit
 
     # vcs status
@@ -1880,7 +1936,29 @@ def register(cli):
     ss_start = session_sub.add_parser('start', help='Start a new staging session')
     ss_start.add_argument('--name', help='Optional human label for the session')
     ss_start.add_argument('--author', help='Override the resolved author')
+    ss_start.add_argument(
+        '--pin', action='store_true',
+        help='Persist a filesystem pin so subsequent templedb calls '
+             'on this host resolve to this session even under setsid / '
+             'new shells / lost env vars (agent-safe).',
+    )
     cli.commands['vcs.session.start'] = cmd.session_start
+
+    ss_pin = session_sub.add_parser(
+        'pin',
+        help='Pin the current (or given) session to '
+             '$XDG_STATE_HOME/templedb/session.pin so subsequent '
+             'invocations share it — needed under setsid or when env '
+             'vars are not inherited.',
+    )
+    ss_pin.add_argument('id', nargs='?', help='Session ID to pin '
+                        '(default: current)')
+    cli.commands['vcs.session.pin'] = cmd.session_pin
+
+    ss_unpin = session_sub.add_parser(
+        'unpin', help='Remove the filesystem session pin.'
+    )
+    cli.commands['vcs.session.unpin'] = cmd.session_unpin
 
     ss_end = session_sub.add_parser('end', help='End a staging session')
     ss_end.add_argument('id', help='Session ID to end')
