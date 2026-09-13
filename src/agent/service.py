@@ -82,7 +82,6 @@ class AgentService:
         self._active_run = {}  # session_id -> run dict
         self._event_callbacks = []  # list of fn(session_id, run_id, event)
         self._cancel_flags = {}  # session_id -> threading.Event
-        self._queued_messages = {}  # session_id -> list of queued content strings
         self._lock = threading.Lock()
         # Poller for MCP-bridge-written pending asks (out-of-process producer).
         self._ask_poll_thread = None
@@ -255,6 +254,7 @@ class AgentService:
         assistant_msg = store.add_message(session_id, ROLE_ASSISTANT, "", run_id=run_id)
         accumulated_text = []
         last_flush_time = time.time()
+        run_completed_cleanly = False
 
         try:
             for raw_event in provider.send(message_list, context):
@@ -309,6 +309,7 @@ class AgentService:
                 if event_type == RUN_COMPLETED:
                     store.complete_run(run_id, status=RUN_STATUS_COMPLETED)
                     store.update_session_status(session_id, SESSION_WAITING)
+                    run_completed_cleanly = True
                     try:
                         store.create_work_log_entry(
                             session_id, run_id, status="completed",
@@ -341,6 +342,25 @@ class AgentService:
             self._cancel_flags.pop(session_id, None)
             self._active_run.pop(session_id, None)
 
+        # Drain queued messages that arrived during this turn. queue_message
+        # writes user messages to the DB and (if a run is active) relies on
+        # this hook to pick them up when the current turn finishes. Only
+        # drain after a clean completion — a failed/cancelled run should
+        # surface to the user, not silently retry into an infinite loop.
+        if run_completed_cleanly:
+            try:
+                tail = store.get_messages(session_id)
+            except Exception as e:
+                logger.error(f"post-run message read failed: {e}")
+                tail = []
+            if tail and tail[-1]["role"] == ROLE_USER:
+                logger.info(
+                    f"draining queued user message(s) for session {session_id}"
+                )
+                yield from self.send_message(
+                    session_id, content=None, context=context
+                )
+
     def _enrich_event(self, session_id, run_id, stored, event):
         """Add session/run/sequence info to an event for client consumption."""
         return {
@@ -355,28 +375,43 @@ class AgentService:
 
     # --- Control ---
 
-    def queue_message(self, session_id, content):
-        """Queue a message to be sent after the current run completes.
-        Used when the user types while Claude is working.
+    def queue_message(self, session_id, content, context=None):
+        """Persist a user message and ensure it gets processed.
+
+        Called by Emacs when the user types while Claude is working — Emacs
+        chooses `message.queue` over `message.send` based on its local
+        status flag. Two cases:
+
+        - A run for this session is active in-process → just persist the
+          user message; the post-turn drain in `send_message` will pick it
+          up when the current turn finishes.
+        - No active run (e.g. the previous run died mid-stream and Emacs's
+          local status went stale — see the 2026-09-13 session 282
+          incident) → persist AND start a run in a background thread, so
+          the queued message doesn't sit forever waiting for a run that
+          will never come.
         """
-        if session_id not in self._queued_messages:
-            self._queued_messages[session_id] = []
-        self._queued_messages[session_id].append(content)
-        # Store immediately so it survives crash
         store.add_message(session_id, ROLE_USER, content)
         logger.info(f"Queued message for session {session_id}")
 
-    def _process_queue(self, session_id, context=None):
-        """Process any queued messages after a run completes. Yields events."""
-        queue = self._queued_messages.get(session_id, [])
-        if not queue:
-            return
-        # Take the first queued message
-        content = queue.pop(0)
-        if not queue:
-            self._queued_messages.pop(session_id, None)
-        # Message already stored by queue_message, so just send to provider
-        yield from self._run_with_provider(session_id, context)
+        with self._lock:
+            has_active_run = session_id in self._active_run
+        if has_active_run:
+            return  # drain hook in send_message will handle it
+
+        def _run_drain():
+            try:
+                for _ in self.send_message(session_id, content=None,
+                                           context=context):
+                    pass
+            except Exception as e:
+                logger.error(
+                    f"queue_message background drain failed "
+                    f"for session {session_id}: {e}"
+                )
+        threading.Thread(
+            target=_run_drain, daemon=True, name=f"queue-drain-{session_id}"
+        ).start()
 
     def cancel_run(self, session_id):
         """Cancel the active run for a session."""
