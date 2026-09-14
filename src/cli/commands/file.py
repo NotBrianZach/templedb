@@ -186,14 +186,19 @@ class FileCommands(Command):
                 logger.error("No content provided (use --content or pipe to stdin)")
                 return 1
 
+            # Do the actual write first. Only record the intent AFTER
+            # the write succeeds — otherwise a failed write leaves a
+            # lying `edit_intents.status='applied'` row that survives
+            # the abort and misleads later provenance queries.
+            # Prior ordering (intent → write) caused the 2026-09-14
+            # "intent applied but file_cat returns nothing" bug — see
+            # handoff #9.
+            self._write_content_to_db(project['id'], args.project, args.file_path, content)
+
             # Phase 2 intent recording: unless --skip-intent, record an
             # EditIntent as a bookkeeping side-effect of this write. The
-            # write itself still happens the same way; the intent gives
-            # us provenance ("who set this, when, from what session")
-            # without changing external behavior. Any failure recording
-            # the intent is non-fatal — the source write is the primary
-            # operation and we don't want intent overhead to break
-            # existing callers.
+            # intent gives us provenance ("who set this, when, from what
+            # session") without changing external behavior.
             intent_id = None
             skip_intent = getattr(args, 'skip_intent', False)
             if not skip_intent:
@@ -202,8 +207,6 @@ class FileCommands(Command):
                     file_path=args.file_path,
                     content=content,
                 )
-
-            self._write_content_to_db(project['id'], args.project, args.file_path, content)
 
             # Link the just-staged working-state row to the intent
             # (migration 088 adds intent_id column). Cosmetic — the
@@ -616,10 +619,26 @@ class FileCommands(Command):
                 VALUES (?, ?, ?, ?, 'active', ?, datetime('now'))
             """, (project_id, file_type_id, file_path, file_name, line_count))
 
-
+            # ON CONFLICT clause is critical here — even though this is
+            # the "new file" branch, an orphan file_contents row can
+            # exist for a project_files.id that just got reused (SQLite
+            # rowids can be reused after DELETE without AUTOINCREMENT,
+            # and PRAGMA foreign_keys defaults OFF so ON DELETE CASCADE
+            # doesn't fire for prior test cleanups or bulk deletes).
+            # Without ON CONFLICT the raw INSERT hits UNIQUE(file_id,
+            # is_current), raises IntegrityError, and _write_content_to_db
+            # aborts. If the caller (`set`) already stamped
+            # edit_intents.status='applied' via _record_and_apply_intent,
+            # the intent then LIES about the write. Reproduced 2026-09-14
+            # while building /agent-work-log; see handoff #9.
             base.execute("""
                 INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
                 VALUES (?, ?, ?, ?, 1)
+                ON CONFLICT(file_id, is_current) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    file_size_bytes = excluded.file_size_bytes,
+                    line_count = excluded.line_count,
+                    updated_at = datetime('now')
             """, (file_id, content_hash, len(content_bytes), line_count))
 
         # Auto-stage

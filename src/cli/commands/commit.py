@@ -250,6 +250,51 @@ class CommitCommand:
                     print(f"  3. Commit again")
                     return 1
                 elif strategy == 'force':
+                    # Refuse to force through intent-based conflicts
+                    # unless the user opts in even more explicitly. Rationale:
+                    # `--strategy force` was originally designed for classic
+                    # version conflicts (another session committed while
+                    # this workspace was editing); users reasonably read
+                    # it as "resolve conflict by taking my workspace." But
+                    # for intent-based conflicts (a fresh `templedb file set`
+                    # updated the DB while the workspace was still holding
+                    # the pre-set copy) the semantics are different: forcing
+                    # here REVERTS the file_set write. Prior bug: on
+                    # 2026-09-13 this reverted 4 agent-freeze fixes + 4 test
+                    # files after a --strategy force commit whose workspace
+                    # was materialized before the file_sets; on 2026-09-14
+                    # it reverted gui.py + gui_helpers.py the same way.
+                    # See handoff #9.
+                    intent_conflicts = [
+                        c for c in conflicts
+                        if 'intent applied' in (c.get('changed_by') or '')
+                    ]
+                    allow_revert = getattr(args, 'allow_revert_intents', False)
+                    if intent_conflicts and not allow_revert:
+                        logger.error(
+                            f"--strategy force refuses to revert {len(intent_conflicts)} "
+                            f"intent-based conflict(s): forcing would overwrite "
+                            f"the newer content that `templedb file set` wrote."
+                        )
+                        for c in intent_conflicts:
+                            print(f"  intent-conflict: {c['file_path']}")
+                        print(
+                            "\nOptions:\n"
+                            f"  A. Refresh workspace from DB:\n"
+                            f"     templedb project checkout {project_slug} "
+                            f"{workspace_dir} --force\n"
+                            f"     then commit again — the file_set content "
+                            "will be preserved.\n"
+                            f"  B. Really want to revert those file_sets? "
+                            "pass --allow-revert-intents in addition to "
+                            "--strategy force."
+                        )
+                        return 1
+                    if intent_conflicts and allow_revert:
+                        logger.warning(
+                            f"--allow-revert-intents: DELIBERATELY reverting "
+                            f"{len(intent_conflicts)} file_set write(s)."
+                        )
                     logger.warning(f"Forcing commit - will overwrite {len(conflicts)} conflicting file(s)")
                     force = True  # Proceed with force
                 else:

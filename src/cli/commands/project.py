@@ -595,6 +595,13 @@ def register(cli):
     commit_parser.add_argument('-m', '--message', required=True, help='Commit message')
     commit_parser.add_argument('--force', '-f', action='store_true', help='Force commit, overwrite conflicts')
     commit_parser.add_argument('--strategy', choices=['abort', 'force', 'rebase'], help='Conflict resolution strategy')
+    commit_parser.add_argument(
+        '--allow-revert-intents', action='store_true',
+        help='With --strategy force, allow reverting DB writes from '
+             'templedb file set (workspace-behind-DB conflicts). Off by '
+             'default: --strategy force alone will refuse these to prevent '
+             'silent loss of file_set writes.',
+    )
 
     # Metadata options
     commit_parser.add_argument('--interactive', '-i', action='store_true', help='Interactive mode for rich metadata')

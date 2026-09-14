@@ -78,6 +78,13 @@ def _register_top_level_aliases():
                                help='Auto-resolve conflicts non-interactively '
                                     '(bypasses the interactive prompt; '
                                     'no-TTY invocations auto-abort by default)')
+    commit_parser.add_argument(
+        '--allow-revert-intents', action='store_true',
+        help='With --strategy force, allow reverting DB writes from '
+             'templedb file set (workspace-behind-DB conflicts). Off by '
+             'default: --strategy force alone will refuse these to prevent '
+             'silent loss of file_set writes.',
+    )
     cli.commands['commit'] = commit_cmd.commit
 
     # templedb build <slug>  →  deploy nix build
