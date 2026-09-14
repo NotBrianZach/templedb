@@ -142,7 +142,6 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("audit",    "/audit",     "Audit",      ", L"),
             ("domains",  "/domains",   "Domains",    ", O"),
             ("docs",     "/docs",      "Docs",       ", k"),
-            ("reports",  "/reports",   "Reports",    ", r"),
             ("code",     "/code",      "Code",       ", C"),
             ("config-ast", "/config-ast", "Config AST", ", A"),
             ("graph",    "/graph",     "Graph",      ", g"),
@@ -731,6 +730,24 @@ try:
     app.include_router(reports_router)
 except Exception as e:
     logger.warning(f'Failed to load GUI page reports: {e}')
+
+try:
+    from gui_pages.handoffs import router as handoffs_router
+    app.include_router(handoffs_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page handoffs: {e}')
+
+try:
+    from gui_pages.pending_asks import router as pending_asks_router
+    app.include_router(pending_asks_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page pending_asks: {e}')
+
+try:
+    from gui_pages.agent_sessions import router as agent_sessions_router
+    app.include_router(agent_sessions_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page agent_sessions: {e}')
 
 try:
     from gui_pages.entities import router as entities_router
