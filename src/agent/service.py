@@ -82,7 +82,6 @@ class AgentService:
         self._active_run = {}  # session_id -> run dict
         self._event_callbacks = []  # list of fn(session_id, run_id, event)
         self._cancel_flags = {}  # session_id -> threading.Event
-        self._queued_messages = {}  # session_id -> list of queued content strings
         self._lock = threading.Lock()
         # Poller for MCP-bridge-written pending asks (out-of-process producer).
         self._ask_poll_thread = None
@@ -177,11 +176,12 @@ class AgentService:
 
     # --- Messages ---
 
-    def send_message(self, session_id, content, context=None):
+    def send_message(self, session_id, content=None, context=None):
         """Send a user message and stream the response.
 
         This is the main interaction point. It:
-        1. Stores the user message
+        1. Stores the user message (unless CONTENT is None — for resume,
+           where the pending user message is already in the DB)
         2. Creates a new run
         3. Sends all messages to the provider
         4. Streams events back, batching DB writes
@@ -197,15 +197,26 @@ class AgentService:
         if not provider:
             raise ValueError(f"No provider for session {session_id}. Call open_session first.")
 
-        # Store user message
-        store.add_message(session_id, ROLE_USER, content)
+        # Store user message (skipped on resume — the pending message is
+        # already in the DB and re-adding it would duplicate seq 79/80-style
+        # orphans as a fresh tail user message).
+        if content is not None:
+            store.add_message(session_id, ROLE_USER, content)
 
-        # Auto-title from first message
+        # Auto-title from first user message. On resume the caller passed no
+        # new content, so title from whatever's already in history.
         if not session.get("title"):
-            title = content[:80].strip()
-            if len(content) > 80:
-                title += "..."
-            store.update_session_title(session_id, title)
+            title_source = content
+            if title_source is None:
+                for m in store.get_messages(session_id):
+                    if m["role"] == ROLE_USER:
+                        title_source = m["content_text"]
+                        break
+            if title_source:
+                title = title_source[:80].strip()
+                if len(title_source) > 80:
+                    title += "..."
+                store.update_session_title(session_id, title)
 
         # Create run
         run = store.create_run(session_id)
@@ -243,6 +254,7 @@ class AgentService:
         assistant_msg = store.add_message(session_id, ROLE_ASSISTANT, "", run_id=run_id)
         accumulated_text = []
         last_flush_time = time.time()
+        run_completed_cleanly = False
 
         try:
             for raw_event in provider.send(message_list, context):
@@ -297,6 +309,7 @@ class AgentService:
                 if event_type == RUN_COMPLETED:
                     store.complete_run(run_id, status=RUN_STATUS_COMPLETED)
                     store.update_session_status(session_id, SESSION_WAITING)
+                    run_completed_cleanly = True
                     try:
                         store.create_work_log_entry(
                             session_id, run_id, status="completed",
@@ -329,6 +342,25 @@ class AgentService:
             self._cancel_flags.pop(session_id, None)
             self._active_run.pop(session_id, None)
 
+        # Drain queued messages that arrived during this turn. queue_message
+        # writes user messages to the DB and (if a run is active) relies on
+        # this hook to pick them up when the current turn finishes. Only
+        # drain after a clean completion — a failed/cancelled run should
+        # surface to the user, not silently retry into an infinite loop.
+        if run_completed_cleanly:
+            try:
+                tail = store.get_messages(session_id)
+            except Exception as e:
+                logger.error(f"post-run message read failed: {e}")
+                tail = []
+            if tail and tail[-1]["role"] == ROLE_USER:
+                logger.info(
+                    f"draining queued user message(s) for session {session_id}"
+                )
+                yield from self.send_message(
+                    session_id, content=None, context=context
+                )
+
     def _enrich_event(self, session_id, run_id, stored, event):
         """Add session/run/sequence info to an event for client consumption."""
         return {
@@ -343,28 +375,43 @@ class AgentService:
 
     # --- Control ---
 
-    def queue_message(self, session_id, content):
-        """Queue a message to be sent after the current run completes.
-        Used when the user types while Claude is working.
+    def queue_message(self, session_id, content, context=None):
+        """Persist a user message and ensure it gets processed.
+
+        Called by Emacs when the user types while Claude is working — Emacs
+        chooses `message.queue` over `message.send` based on its local
+        status flag. Two cases:
+
+        - A run for this session is active in-process → just persist the
+          user message; the post-turn drain in `send_message` will pick it
+          up when the current turn finishes.
+        - No active run (e.g. the previous run died mid-stream and Emacs's
+          local status went stale — see the 2026-09-13 session 282
+          incident) → persist AND start a run in a background thread, so
+          the queued message doesn't sit forever waiting for a run that
+          will never come.
         """
-        if session_id not in self._queued_messages:
-            self._queued_messages[session_id] = []
-        self._queued_messages[session_id].append(content)
-        # Store immediately so it survives crash
         store.add_message(session_id, ROLE_USER, content)
         logger.info(f"Queued message for session {session_id}")
 
-    def _process_queue(self, session_id, context=None):
-        """Process any queued messages after a run completes. Yields events."""
-        queue = self._queued_messages.get(session_id, [])
-        if not queue:
-            return
-        # Take the first queued message
-        content = queue.pop(0)
-        if not queue:
-            self._queued_messages.pop(session_id, None)
-        # Message already stored by queue_message, so just send to provider
-        yield from self._run_with_provider(session_id, context)
+        with self._lock:
+            has_active_run = session_id in self._active_run
+        if has_active_run:
+            return  # drain hook in send_message will handle it
+
+        def _run_drain():
+            try:
+                for _ in self.send_message(session_id, content=None,
+                                           context=context):
+                    pass
+            except Exception as e:
+                logger.error(
+                    f"queue_message background drain failed "
+                    f"for session {session_id}: {e}"
+                )
+        threading.Thread(
+            target=_run_drain, daemon=True, name=f"queue-drain-{session_id}"
+        ).start()
 
     def cancel_run(self, session_id):
         """Cancel the active run for a session."""
@@ -376,7 +423,14 @@ class AgentService:
             provider.cancel()
 
     def resume_run(self, session_id, context=None):
-        """Resume an interrupted session by re-sending messages.
+        """Resume an interrupted/failed session over the existing message
+        history. Does NOT duplicate the last user message (the old behavior
+        re-called send_message with the last user content, which appended a
+        fresh row and left Claude looking at "hows it goin ... hows it goin").
+
+        Requires that the last message in the session is user-authored —
+        otherwise there's nothing pending to answer and we bail.
+
         Yields events like send_message.
         """
         session = store.get_session(session_id)
@@ -387,22 +441,18 @@ class AgentService:
         if session_id not in self._providers:
             self.open_session(session_id)
 
-        # Get last user message
         messages = store.get_messages(session_id)
         if not messages:
             raise ValueError("No messages to resume from")
+        if messages[-1]["role"] != ROLE_USER:
+            raise ValueError(
+                "Nothing to resume: last message is not from user "
+                "(the previous run already produced an answer)"
+            )
 
-        last_user_msg = None
-        for m in reversed(messages):
-            if m["role"] == ROLE_USER:
-                last_user_msg = m
-                break
-
-        if not last_user_msg:
-            raise ValueError("No user message found to resume from")
-
-        # Re-send via normal flow
-        yield from self.send_message(session_id, last_user_msg["content_text"], context)
+        # Kick off a new run over the existing history, without adding a
+        # duplicate user message.
+        yield from self.send_message(session_id, content=None, context=context)
 
     # --- Recovery ---
 

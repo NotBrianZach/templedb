@@ -172,12 +172,6 @@ inherit the anchor. Intended for use inside `--render-buffer' only."
 ;;    :assistant-done BOOL         — true after run.completed
 ;;    :buckets ALIST               — ((\"bucket-name\" . (TOOL TOOL ...)) ...)
 ;;    :messages LIST               — of (:header S :body S)
-;;    :asks LIST-OR-NIL            — of ask plists; each is
-;;                                    (:ask-id S :questions LIST
-;;                                     :answered ALIST). Rendered inline
-;;                                    with clickable option buttons so
-;;                                    the user can't miss them the way a
-;;                                    minibuffer completing-read could.
 ;;    :suggestions LIST-OR-NIL     — list of strings; rendered as "Try next:"
 ;;                                    block below Assistant, clickable to
 ;;                                    fill * Next Prompt.
@@ -210,7 +204,6 @@ inherit the anchor. Intended for use inside `--render-buffer' only."
         :assistant-done nil
         :buckets nil
         :messages nil
-        :asks nil
         :suggestions nil
         :stats (list :tools 0 :failed 0 :started (float-time) :duration nil)))
 
@@ -246,57 +239,6 @@ FN is called with the plist and should mutate it in place (via
             (format " [%dt/%df]" tools failed)
           (format " [%dt]" tools))))))
 
-(defun templedb-agent--pp-ask (ask)
-  "Render one ASK plist to org text at point.
-
-Each question inside the ask gets its own set of clickable buttons —
-one per option label — plus a plain-text description line beneath so
-the user can see the full option before choosing. Once a question is
-answered (its label is recorded in :answered), we render the answer
-inline in place of the buttons so the exchange still reads coherently
-in scrollback."
-  (let ((ask-id (plist-get ask :ask-id))
-        (questions (append (plist-get ask :questions) nil))
-        (answered (plist-get ask :answered)))
-    (insert "*** Ask\n\n")
-    (dolist (q questions)
-      (let* ((qtext (alist-get 'question q))
-             (options (append (alist-get 'options q) nil))
-             (multi (alist-get 'multiSelect q))
-             (already (cdr (assoc qtext answered))))
-        (insert (format "- %s%s\n" qtext (if multi "  (multi-select)" "")))
-        (cond
-         (already
-          ;; Already answered — render the choice inline.
-          (insert (format "  → %s\n"
-                          (if (listp already)
-                              (mapconcat #'identity already ", ")
-                            already))))
-         (t
-          ;; Render clickable buttons for each option.
-          (dolist (o options)
-            (let* ((label (alist-get 'label o))
-                   (description (alist-get 'description o))
-                   (start (point)))
-              (insert "  [ ")
-              (insert-button
-               label
-               'action (lambda (_btn)
-                         (templedb-agent--respond-ask
-                          ask-id qtext label multi))
-               'follow-link t
-               'help-echo (format "RET or mouse-1: answer with %S"
-                                  label))
-              (insert " ]")
-              (when description
-                (insert (format " — %s" description)))
-              (insert "\n")
-              (add-text-properties
-               start (point)
-               `(templedb-entry-section "ask"
-                 templedb-ask-id ,ask-id)))))))
-      (insert "\n"))))
-
 (defun templedb-agent--pp-tool (tool)
   "Render one TOOL plist to org text at point."
   (let* ((status (plist-get tool :status))
@@ -328,7 +270,6 @@ in scrollback."
   (let ((user-text (plist-get ex :user-text))
         (buckets (plist-get ex :buckets))
         (messages (plist-get ex :messages))
-        (asks (plist-get ex :asks))
         (assistant-text (plist-get ex :assistant-text))
         (assistant-done (plist-get ex :assistant-done))
         (stats (plist-get ex :stats)))
@@ -350,12 +291,6 @@ in scrollback."
       (insert (format "*** Message: %s\n\n%s\n"
                       (plist-get msg :header)
                       (plist-get msg :body))))
-    ;; Pending asks — rendered as inline widgets so the user can click a
-    ;; button instead of hunting for a hidden minibuffer completing-read
-    ;; prompt (the way this used to work, and the way you missed the
-    ;; ask on 2026-09-13 that then timed out).
-    (dolist (ask asks)
-      (templedb-agent--pp-ask ask))
     ;; Assistant text (accumulating during streaming)
     (when (or assistant-done (not (string-empty-p assistant-text)))
       (insert (format "*** Assistant\n\n%s%s\n"
@@ -1175,112 +1110,43 @@ its state was mutated."
 ;;;; Agent-to-user asks (mcp__templedb__templedb_ask_user)
 
 (defun templedb-agent--handle-ask-question (data)
-  "Attach an ask widget to the current exchange, ring the bell, and
-raise the frame so the user notices.
-
-The old behavior called `completing-read' from inside the process
-filter, which blocks Emacs on a modal minibuffer prompt. If the user
-was focused in the *Next Prompt* section (or a different frame), the
-prompt was invisible and easy to miss — see the 2026-09-13 incident
-where an ask sat un-answered for the full 600s MCP timeout. The new
-behavior renders inline clickable buttons in the buffer where the
-user is already reading, keeps the ask visible across scrollback,
-and doesn't block Emacs's event loop while waiting for a response."
+  "Prompt the user via completing-read for each question in DATA, then
+send the responses back to the agent via ask.respond so the MCP tool's
+tool_result can return to Claude."
   (let ((ask-id (alist-get 'ask_id data))
         (questions (alist-get 'questions data)))
     (if (not (and ask-id questions))
         (message "Temple Agent: malformed ask event, ignoring")
-      (let ((ask (list :ask-id ask-id
-                       :questions questions
-                       :answered nil)))
-        (templedb-agent--mutate-last-exchange
-         (lambda (ex)
-           (plist-put ex :asks
-                      (append (plist-get ex :asks) (list ask))))))
-      (templedb-agent--set-now "Waiting on you: answer the *** Ask block")
-      ;; Ring the bell + surface the frame so the ask is impossible to
-      ;; miss even if the user is focused elsewhere.
-      (ding)
-      (when (fboundp 'x-focus-frame)
-        (x-focus-frame (selected-frame)))
-      (raise-frame)
-      (templedb-agent--auto-scroll)
-      (templedb-agent--notify-if-hidden
-       (format "Agent asks: %s"
-               (alist-get 'question (aref questions 0)))))))
-
-(defun templedb-agent--respond-ask (ask-id qtext label multi)
-  "Send ASK-ID's answer to the agent and mark the ask answered in the
-buffer. QTEXT is the question text (used as the answers-alist key so
-the response matches the schema the MCP tool expects). LABEL is the
-button label the user picked. MULTI is non-nil when the question
-accepts multiple selections; in that case we currently treat each
-click as a single-choice answer — a multi-select UI would need a
-different render (list of checkboxes + confirm button), so multi
-questions today still route through `completing-read-multiple' via
-`templedb-agent-answer-ask-minibuffer'."
-  (let ((response-value (if multi (list label) label)))
-    (templedb-agent--send
-     "ask.respond"
-     `((ask_id . ,ask-id)
-       (response . ((answers . ((,qtext . ,response-value))))))
-     (lambda (_result)
-       (message "Answered ask %s: %s" (substring ask-id 0 8) label)))
-    ;; Immediately reflect the answer in the buffer — don't wait for a
-    ;; round-trip. The server has no separate "ask answered" event that
-    ;; would let us rerender async, and the MCP tool timeout is
-    ;; 600s — user needs feedback now.
-    (templedb-agent--mutate-last-exchange
-     (lambda (ex)
-       (let ((asks (plist-get ex :asks)))
-         (dolist (ask asks)
-           (when (equal (plist-get ask :ask-id) ask-id)
-             (let ((answered (plist-get ask :answered)))
-               (plist-put ask :answered
-                          (cons (cons qtext response-value)
-                                (or answered nil))))))
-         (plist-put ex :asks asks))))))
-
-(defun templedb-agent-answer-ask-minibuffer ()
-  "Fallback: answer any pending ask in the current exchange via
-`completing-read'. Useful when the buffer is very long and the ask
-buttons scrolled off, or when the ask has a multi-select question
-the inline widget doesn't fully handle yet."
-  (interactive)
-  (let* ((node (templedb-agent--last-exchange-node))
-         (ex (and node (ewoc-data node)))
-         (asks (and ex (plist-get ex :asks)))
-         (pending (cl-remove-if
-                   (lambda (a)
-                     ;; All questions in the ask already answered.
-                     (let ((qs (append (plist-get a :questions) nil))
-                           (answered (plist-get a :answered)))
-                       (cl-every (lambda (q)
-                                   (assoc (alist-get 'question q) answered))
-                                 qs)))
-                   asks)))
-    (cond
-     ((not pending)
-      (message "No pending asks in current exchange."))
-     (t
-      (dolist (ask pending)
-        (let ((ask-id (plist-get ask :ask-id)))
-          (dolist (q (append (plist-get ask :questions) nil))
-            (let* ((qtext (alist-get 'question q))
-                   (already (assoc qtext (plist-get ask :answered))))
-              (unless already
-                (let* ((options (append (alist-get 'options q) nil))
-                       (labels (mapcar (lambda (o) (alist-get 'label o))
-                                       options))
-                       (multi (alist-get 'multiSelect q))
-                       (choice (if multi
-                                   (completing-read-multiple
-                                    (format "%s " qtext) labels nil t)
-                                 (completing-read
-                                  (format "%s " qtext) labels nil t))))
-                  (templedb-agent--respond-ask ask-id qtext choice
-                                               multi)))))))))))
-
+      ;; Post a marker on the current exchange so the log shows Claude asked,
+      ;; before we block on completing-read for the answers.
+      (templedb-agent--add-message
+       "Ask"
+       (mapconcat (lambda (q)
+                    (format "Q: %s" (alist-get 'question q)))
+                  questions "\n"))
+      (let ((answers '()))
+        (dolist (q (append questions nil))
+          (let* ((question-text (alist-get 'question q))
+                 (options (append (alist-get 'options q) nil))
+                 (labels (mapcar (lambda (o) (alist-get 'label o)) options))
+                 (multi (alist-get 'multiSelect q))
+                 (prompt (format "%s " question-text))
+                 (choice (if multi
+                             (completing-read-multiple prompt labels nil t)
+                           (completing-read prompt labels nil t))))
+            (push (cons question-text choice) answers)))
+        (templedb-agent--send
+         "ask.respond"
+         `((ask_id . ,ask-id)
+           (response . ((answers . ,(nreverse answers))))))
+        (templedb-agent--add-message
+         "Answered"
+         (mapconcat (lambda (a)
+                      (format "%s → %s" (car a)
+                              (if (listp (cdr a))
+                                  (mapconcat #'identity (cdr a) ", ")
+                                (cdr a))))
+                    (reverse answers) "; "))))))
 
 (defun templedb-agent--handle-agent-message (data)
   "Render a one-way message from the agent as an ewoc message entry."
@@ -1319,7 +1185,6 @@ the inline widget doesn't fully handle yet."
     (insert "| =C-c C-c=      | Send message                               |\n")
     (insert "| =C-c C-k=      | Cancel current run                         |\n")
     (insert "| =C-c C-r=      | Resume interrupted run                     |\n")
-    (insert "| =C-c C-a=      | Answer pending Ask (minibuffer fallback)   |\n")
     (insert "| =, x a=        | Add project to context                     |\n")
     (insert "| =, x r=        | Remove project from context                |\n")
     (insert "| =, x t=        | Toggle context item                        |\n")
@@ -1934,7 +1799,8 @@ output blobs are not persisted per event, so we can't reproduce them."
         (templedb-agent--send
          "message.queue"
          `((session_id . ,templedb-agent--session-id)
-           (content . ,text))
+           (content . ,text)
+           (context . ,(templedb-agent--build-context-payload)))
          (lambda (_result) (message "Message queued (Claude is working)")))
       (templedb-agent--send
        "message.send"
@@ -2847,7 +2713,6 @@ Optionally filter by PROJECT slug."
     (define-key map (kbd "C-c C-c") #'templedb-agent-send)
     (define-key map (kbd "C-c C-k") #'templedb-agent-cancel)
     (define-key map (kbd "C-c C-r") #'templedb-agent-resume)
-    (define-key map (kbd "C-c C-a") #'templedb-agent-answer-ask-minibuffer)
     (define-key map (kbd "C-c C-s") #'templedb-agent-save-user-sections)
     (define-key map (kbd "C-c u")   #'templedb-agent-remove-entry-at-point)
     (define-key map (kbd "C-c C-l") #'templedb-agent-reload-from-checkout)

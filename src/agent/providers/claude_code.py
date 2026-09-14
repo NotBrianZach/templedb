@@ -6,6 +6,7 @@ parses the streaming events, and converts them into normalized Temple Agent even
 import json
 import os
 import shutil
+import select
 import subprocess
 import time
 
@@ -115,7 +116,15 @@ class ClaudeCodeProvider(BaseProvider):
         "(e.g. 'run the tests', 'commit and publish', 'show the diff'). "
         "Each suggestion should be ≤ 60 chars and will replace * Next Prompt "
         "when the user clicks it. Skip this only when the run failed or the "
-        "user explicitly ended the thread."
+        "user explicitly ended the thread. "
+        # Self-kill footgun guard (incident 2026-09-13, session 282).
+        "You are running inside a `templedb ai agent serve --stdio` "
+        "subprocess. Do NOT `kill` PIDs of any `ai agent serve` process "
+        "found via ps/pgrep — even ones that look stale — because you may "
+        "be looking at your own parent server (see "
+        "$TEMPLEDB_AGENT_SERVER_PID) and terminating it will crash this "
+        "run mid-turn. Use `templedb ai agent stop-stale [--dry-run]` "
+        "instead; it auto-excludes the current process's ancestor chain."
     )
 
     def _write_mcp_config(self, agent_session_id):
@@ -177,6 +186,10 @@ class ClaudeCodeProvider(BaseProvider):
                 cmd.extend(["--mcp-config", mcp_config_path])
                 cmd.extend(["--append-system-prompt", self._AGENT_SYSTEM_PROMPT])
 
+        # `--` ends option parsing; without it, a prompt starting with `-`
+        # (e.g. a bullet pasted from a reply) is misread as an unknown option
+        # and Claude exits with code 1 before doing anything.
+        cmd.append("--")
         cmd.append(last_message)
 
         logger.info(f"Launching Claude: {' '.join(cmd[:6])}...")
@@ -186,22 +199,72 @@ class ClaudeCodeProvider(BaseProvider):
             # stdin=DEVNULL: our parent stdin is the Emacs↔serve JSON pipe; if
             # Claude inherits it, `claude -p` waits 3s for prompt-on-stdin data
             # and prints a warning that gets mistaken for the real error.
+            # Advertise our own PID so Bash tools that call
+            # `templedb ai agent stop-stale` can filter this server out.
+            child_env = dict(os.environ)
+            child_env["TEMPLEDB_AGENT_SERVER_PID"] = str(os.getpid())
             self._process = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1,
                 cwd=context.get("cwd") if context else None,
+                env=child_env,
             )
 
             assistant_started = False
             accumulated_text = []
             terminal_emitted = False
 
-            for line in self._process.stdout:
+            # Liveness-checked line reader. Naive `for line in stdout` blocks
+            # forever if Claude dies while a grandchild still holds the pipe
+            # write end open — no EOF ever arrives, no terminal event ever
+            # emitted, emacs sees the run as still-running. We poll for data
+            # with a 1s timeout, and every timeout we check if the child is
+            # still alive. If it exited, drain any buffered stdout and stop.
+            stdout = self._process.stdout
+            drain = False
+            while True:
                 if self._cancelled:
                     self._kill_process()
                     yield make_event(RUN_INTERRUPTED, summary="Cancelled by user")
                     return
+
+                ready, _, _ = select.select([stdout], [], [], 1.0)
+                if ready:
+                    line = stdout.readline()
+                    if not line:
+                        # EOF — Claude closed stdout cleanly.
+                        break
+                elif self._process.poll() is not None:
+                    # Child exited but stdout might still have buffered data
+                    # from a grandchild or late flush. Drain once, then stop.
+                    if drain:
+                        break
+                    drain = True
+                    remainder = stdout.read() or ""
+                    if not remainder:
+                        break
+                    # Push each remainder line through the same normalizer.
+                    for line in remainder.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        for normalized in self._normalize_claude_event(
+                                event, assistant_started, accumulated_text):
+                            ntype = normalized.get("type")
+                            if ntype == ASSISTANT_STARTED:
+                                assistant_started = True
+                            if ntype in (RUN_FAILED, PROVIDER_LOGIN_REQUIRED):
+                                terminal_emitted = True
+                            yield normalized
+                    break
+                else:
+                    # No data, child still alive — keep polling.
+                    continue
 
                 line = line.strip()
                 if not line:
@@ -220,7 +283,17 @@ class ClaudeCodeProvider(BaseProvider):
                         terminal_emitted = True
                     yield normalized
 
-            self._process.wait()
+            # Bounded wait — reap the zombie without risking an indefinite
+            # block if the child is somehow still winding down.
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "Claude subprocess didn't exit within 5s of stdout EOF; "
+                    "sending SIGKILL to prevent zombie",
+                )
+                self._process.kill()
+                self._process.wait()
 
             if self._process.returncode == 0:
                 if accumulated_text:
