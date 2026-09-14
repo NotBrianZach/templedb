@@ -750,6 +750,18 @@ except Exception as e:
     logger.warning(f'Failed to load GUI page agent_sessions: {e}')
 
 try:
+    from gui_pages.agent_work_log import router as agent_work_log_router
+    app.include_router(agent_work_log_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page agent_work_log: {e}')
+
+try:
+    from gui_pages.agent_sections import router as agent_sections_router
+    app.include_router(agent_sections_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page agent_sections: {e}')
+
+try:
     from gui_pages.entities import router as entities_router
     app.include_router(entities_router)
 except Exception as e:

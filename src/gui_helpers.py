@@ -142,6 +142,8 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("handoffs","/handoffs",   "Handoffs",   ", n"),
             ("pending-asks", "/pending-asks", "Asks",   ", A"),
             ("agent-sessions", "/agent-sessions", "Sessions", ", J"),
+            ("agent-work-log", "/agent-work-log", "Work log", ", W"),
+            ("agent-sections", "/agent-sections", "Notes",  ", B"),
             ("entities", "/entities",  "Entities",   ", e"),
             ("hygiene", "/hygiene",    "Hygiene",    ", H"),
             ("summary", "/summary",    "Summary",    ", h"),
