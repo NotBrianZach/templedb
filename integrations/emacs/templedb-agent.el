@@ -473,25 +473,6 @@ badge is dropped so the modeline stays short in fresh sessions."
 ;; entry it renders, so `templedb-agent-entry-at-point' can identify
 ;; which entry the user is on without regex-matching text (which would
 ;; be brittle to text-property font-lock and org-fold decorations).
-;;
-;; Entries also carry an :author slot (defaults to `agent'). The
-;; renderer prepends a compact marker before the bullet so the reader
-;; can tell agent-authored vs user-authored content at a glance.
-;; Currently every entry is agent-authored (there's no user-write path
-;; into Findings/Todo/Open Questions yet); the marker plumbing is here
-;; so the eventual promote-to-user command (see reflection report)
-;; Just Works.
-
-(defface templedb-agent--author-badge
-  '((t :foreground "#7080a0" :height 0.85))
-  "Face for the [a] / [u] author marker on agent-writable entries."
-  :group 'templedb-agent)
-
-(defun templedb-agent--author-marker (entry)
-  "Return a propertized `[a]' / `[u]' marker string for ENTRY."
-  (let ((author (or (plist-get entry :author) 'agent)))
-    (propertize (if (eq author 'user) "[u] " "[a] ")
-                'face 'templedb-agent--author-badge)))
 
 (defun templedb-agent--pp-stamped (section entry-id line)
   "Insert LINE at point with templedb-entry-{id,section} text props."
@@ -504,7 +485,6 @@ badge is dropped so the modeline stays short in fresh sessions."
 (defun templedb-agent--pp-finding (f)
   "Render one finding entry F at point."
   (let ((start (point)))
-    (insert (templedb-agent--author-marker f))
     (templedb-agent--pp-stamped
      "findings" (plist-get f :id)
      (format "- %s%s\n"
@@ -521,7 +501,6 @@ badge is dropped so the modeline stays short in fresh sessions."
   (let ((done (plist-get todo :done))
         (prio (plist-get todo :priority))
         (start (point)))
-    (insert (templedb-agent--author-marker todo))
     (templedb-agent--pp-stamped
      "todo" (plist-get todo :id)
      (format "- [%s] %s%s\n"
@@ -537,7 +516,6 @@ badge is dropped so the modeline stays short in fresh sessions."
   (let ((answered (plist-get q :answered))
         (answer (plist-get q :answer))
         (start (point)))
-    (insert (templedb-agent--author-marker q))
     (templedb-agent--pp-stamped
      "open-questions" (plist-get q :id)
      (format "- %s %s%s\n"
@@ -553,7 +531,6 @@ badge is dropped so the modeline stays short in fresh sessions."
   (let ((full-section (format "dynamic:%s" section-name)))
     (lambda (e)
       (let ((start (point)))
-        (insert (templedb-agent--author-marker e))
         (templedb-agent--pp-stamped
          full-section (plist-get e :id)
          (format "- %s\n" (plist-get e :text)))
@@ -565,7 +542,6 @@ badge is dropped so the modeline stays short in fresh sessions."
   "Fallback renderer if no section-name is threaded through — stamps
 without a section id. Prefer `--pp-dynamic-entry-for'."
   (let ((start (point)))
-    (insert (templedb-agent--author-marker e))
     (templedb-agent--pp-stamped
      nil (plist-get e :id)
      (format "- %s\n" (plist-get e :text)))
@@ -1232,9 +1208,6 @@ tool_result can return to Claude."
 
     (insert "| Marker              | Where             | Meaning                              |\n")
     (insert "|---------------------+-------------------+--------------------------------------|\n")
-    (insert "| =[a]= / =[u]=       | Findings, Todo,   | Author badge: agent- vs user-written |\n")
-    (insert "|                     | Open Questions,   | entry. Not a list index -- every     |\n")
-    (insert "|                     | dynamic sections  | entry gets one.                      |\n")
     (insert "| =- [ ]= / =- [X]=   | Todo              | Open vs done checkbox.               |\n")
     (insert "| =~low~= etc.        | Todo              | Priority tag: low / medium / high.   |\n")
     (insert "| =[?]= / =[✓]=       | Open Questions    | Unanswered vs answered. Answered     |\n")
