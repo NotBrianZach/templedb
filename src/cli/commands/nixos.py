@@ -509,18 +509,50 @@ class NixOSCommand(Command):
             slug = args.slug
             service = SystemService()
 
-            # Resolve checkout path
-            proj = _get_conn().execute(
-                "SELECT repo_url FROM projects WHERE slug = ?", (slug,)
-            ).fetchone()
-            if not proj or not proj[0]:
-                print(f"❌ Project '{slug}' has no repo_url set.", file=sys.stderr)
+            # Materialize DB → checkout before building so that `file set`
+            # edits that missed the checkout mirror don't silently rebuild
+            # against stale files. Mirrors switch_system() (system_service.py).
+            checkout_path = service.materialize_from_db(slug)
+            if not checkout_path:
+                checkout_path = service.get_project_checkout_path(slug)
+            if not checkout_path:
+                print(
+                    f"❌ No checkout for '{slug}'. Import files first: "
+                    f"templedb project import /path/to/config",
+                    file=sys.stderr,
+                )
                 return 1
 
-            checkout_path = Path(proj[0])
             print(f"🏠 Rebuilding home-manager from {slug}...")
 
             result = service._rebuild_home_manager(checkout_path)
+
+            # Record successful home-only rebuilds so they appear in
+            # `templedb nixos system-history`. command='home-switch' keeps
+            # them distinguishable from full-system 'switch' rows without a
+            # schema change; nixos_generation stays None because the hm
+            # generation is a separate numbering (recoverable from the
+            # output blob or ~/.local/state/nix/profiles/home-manager).
+            if result['success']:
+                try:
+                    config_path = (
+                        service.get_config_file_path(checkout_path) or checkout_path
+                    )
+                    service.record_deployment(
+                        slug,
+                        checkout_path,
+                        config_path,
+                        'home-switch',
+                        {
+                            'success': True,
+                            'exit_code': result.get('exit_code', 0),
+                            'stdout': result.get('stdout', ''),
+                            'stderr': result.get('stderr', ''),
+                            'nixos_generation': None,
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to record home-manager deployment: {e}")
 
             if result['success']:
                 print(f"\n✅ home-manager switch successful!")

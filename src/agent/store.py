@@ -101,11 +101,28 @@ def get_session_by_uuid(session_uuid):
     )
 
 
-def list_sessions(project_id=None, status=None, limit=50):
-    """List sessions with optional filters."""
-    sql = """SELECT s.*, p.name as provider_name
+def list_sessions(project_id=None, status=None, limit=50,
+                  provider_id=None, min_msgs=0, newer_than_days=None):
+    """List sessions with optional filters.
+
+    Each result row includes msg_count and pending_asks (computed
+    via LEFT JOINs). Filters:
+      - project_id / status / provider_id: exact match
+      - min_msgs: only rows with COALESCE(msg_count,0) >= N
+      - newer_than_days: only rows with updated_at within last N days
+    """
+    sql = """SELECT s.*, p.name as provider_name,
+                    COALESCE(m.msg_count, 0) as msg_count,
+                    COALESCE(a.pending_asks, 0) as pending_asks
              FROM agent_sessions s
              JOIN agent_providers p ON s.provider_id = p.id
+             LEFT JOIN (SELECT session_id, COUNT(*) as msg_count
+                          FROM agent_messages GROUP BY session_id) m
+                    ON m.session_id = s.id
+             LEFT JOIN (SELECT session_id, COUNT(*) as pending_asks
+                          FROM agent_pending_asks WHERE status='pending'
+                          GROUP BY session_id) a
+                    ON a.session_id = s.id
              WHERE 1=1"""
     params = []
     if project_id is not None:
@@ -114,6 +131,15 @@ def list_sessions(project_id=None, status=None, limit=50):
     if status:
         sql += " AND s.status = ?"
         params.append(status)
+    if provider_id is not None:
+        sql += " AND s.provider_id = ?"
+        params.append(provider_id)
+    if min_msgs and min_msgs > 0:
+        sql += " AND COALESCE(m.msg_count, 0) >= ?"
+        params.append(min_msgs)
+    if newer_than_days and newer_than_days > 0:
+        sql += " AND datetime(s.updated_at) >= datetime('now', ?)"
+        params.append(f"-{int(newer_than_days)} days")
     sql += " ORDER BY s.updated_at DESC LIMIT ?"
     params.append(limit)
     return query_all(sql, tuple(params))

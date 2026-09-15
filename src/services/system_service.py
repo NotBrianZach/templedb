@@ -8,8 +8,11 @@ import os
 import sys
 import subprocess
 import logging
+import shutil
+import socket
+import tempfile
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Callable, Dict, Any, Optional, List
 from datetime import datetime
 import getpass
 
@@ -593,70 +596,38 @@ class SystemService:
         logger.info(f"Running: {' '.join(cmd)}")
         print(f"Running: {' '.join(cmd)}")
 
-        try:
-            # Stream output live so the user can see progress and sudo prompts.
-            # Capture into buffers simultaneously for post-processing.
-            import io, threading
-
-            stdout_buf = io.StringIO()
-            stderr_buf = io.StringIO()
-
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-
-            def _should_display(line, quiet_mode):
-                """Filter noisy nix output when in quiet mode."""
-                if not quiet_mode:
-                    return True
-                # Hide nix store paths, copying/fetching lines, and derivation lists
-                if '/nix/store/' in line:
-                    return False
-                if line.strip().startswith('copying path'):
-                    return False
-                if line.strip().startswith('these ') and ('will be built' in line or 'will be fetched' in line):
-                    return False
+        def _should_display(line: str) -> bool:
+            """Filter noisy nix output when in quiet mode."""
+            if not quiet:
                 return True
+            if '/nix/store/' in line:
+                return False
+            stripped = line.strip()
+            if stripped.startswith('copying path'):
+                return False
+            if stripped.startswith('these ') and (
+                'will be built' in line or 'will be fetched' in line
+            ):
+                return False
+            return True
 
-            def _tee(src, buf, dest):
-                for line in src:
-                    buf.write(line)
-                    if _should_display(line, quiet):
-                        dest.write(line)
-                        dest.flush()
-
-            t_out = threading.Thread(target=_tee, args=(proc.stdout, stdout_buf, sys.stdout))
-            t_err = threading.Thread(target=_tee, args=(proc.stderr, stderr_buf, sys.stderr))
-            t_out.start()
-            t_err.start()
-
-            try:
-                proc.wait(timeout=1800)  # 30-minute timeout
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                raise SystemServiceError("nixos-rebuild command timed out after 30 minutes")
-            finally:
-                t_out.join()
-                t_err.join()
-
-            out = stdout_buf.getvalue()
-            err = stderr_buf.getvalue()
-            generation = self._extract_generation_number(out + err)
-
-            return {
-                'exit_code': proc.returncode,
-                'stdout': out,
-                'stderr': err,
-                'nixos_generation': generation,
-                'success': proc.returncode == 0
-            }
-        except SystemServiceError:
-            raise
+        try:
+            result = self._run_streaming(cmd, timeout=1800, should_display=_should_display)
         except Exception as e:
             raise SystemServiceError(f"Failed to run nixos-rebuild: {e}")
+
+        if result['timed_out']:
+            raise SystemServiceError("nixos-rebuild command timed out after 30 minutes")
+
+        out = result['stdout']
+        err = result['stderr']
+        return {
+            'exit_code': result['exit_code'],
+            'stdout': out,
+            'stderr': err,
+            'nixos_generation': self._extract_generation_number(out + err),
+            'success': result['exit_code'] == 0,
+        }
 
     def _extract_generation_number(self, output: str) -> Optional[int]:
         """Extract NixOS generation number from rebuild output"""
@@ -1043,20 +1014,94 @@ class SystemService:
 
         return result
 
-    def _rebuild_home_manager(self, flake_path: Path) -> Dict[str, Any]:
-        """Rebuild home-manager configuration from NixOS flake
+    def _run_streaming(
+        self,
+        cmd: List[str],
+        timeout: int,
+        should_display: Optional[Callable[[str], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Run CMD with stdout/stderr tee'd live to the terminal and captured.
+
+        All output is captured to the returned buffers; `should_display`
+        (line -> bool) is only consulted when deciding whether to also
+        echo that line to the user's terminal. Default: echo everything.
+
+        Returns a dict with exit_code (int, -1 on timeout), stdout (str),
+        stderr (str), and timed_out (bool).
+        """
+        import io, threading
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+        def _tee(src, buf, dest):
+            for line in src:
+                buf.write(line)
+                if should_display is None or should_display(line):
+                    dest.write(line)
+                    dest.flush()
+
+        t_out = threading.Thread(target=_tee, args=(proc.stdout, stdout_buf, sys.stdout))
+        t_err = threading.Thread(target=_tee, args=(proc.stderr, stderr_buf, sys.stderr))
+        t_out.start(); t_err.start()
+
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            timed_out = True
+        finally:
+            t_out.join(); t_err.join()
+
+        return {
+            'exit_code': proc.returncode if not timed_out else -1,
+            'stdout': stdout_buf.getvalue(),
+            'stderr': stderr_buf.getvalue(),
+            'timed_out': timed_out,
+        }
+
+    _HM_ATTR_MISSING_MARKERS = (
+        'does not provide attribute',
+        'has no attribute',
+        'attribute \'homeConfigurations\' missing',
+        'attribute \'home-manager\' missing',
+    )
+
+    def _rebuild_home_manager(
+        self,
+        flake_path: Path,
+        build_timeout: int = 1800,
+        activate_timeout: int = 600,
+    ) -> Dict[str, Any]:
+        """Rebuild home-manager configuration from a flake.
+
+        Tries the module-embedded attribute first (home-manager as a NixOS
+        module, the common topology on this system), then falls back to the
+        standalone `homeConfigurations` attribute. An explicit override can
+        be set via system_config key `nixos.home_manager_attr` (either a full
+        attr like `path/to/flake#foo.bar` or a suffix starting with `#`).
+
+        Output streams live; a per-invocation temp dir holds the --out-link
+        so concurrent rebuilds don't race on a shared /tmp path.
 
         Args:
-            flake_path: Path to flake directory
+            flake_path: Path to the flake directory.
+            build_timeout: Seconds to wait for `nix build` (default 1800).
+            activate_timeout: Seconds to wait for the activation script
+                (default 600).
 
         Returns:
-            Dict with home-manager rebuild results
+            Dict with success (bool), exit_code (int), stdout (str),
+            stderr (str), generation (Optional[int]).
         """
         try:
-            # Get configuration from database or auto-detect
             flake_output = self.get_system_config('nixos.flake_output')
             if not flake_output:
-                import socket
                 flake_output = socket.gethostname()
                 logger.info(f"Auto-detected flake output from hostname: {flake_output}")
 
@@ -1065,66 +1110,110 @@ class SystemService:
                 username = getpass.getuser()
                 logger.info(f"Auto-detected username: {username}")
 
-            # Build activation package
-            build_path = f"{flake_path}#nixosConfigurations.{flake_output}.config.home-manager.users.{username}.home.activationPackage"
-
-            print(f"  Building home-manager activation package...")
-            build_result = subprocess.run(
-                ["nix", "build", build_path, "--out-link", "/tmp/hm-activate"],
-                capture_output=True,
-                text=True,
-                timeout=600  # 10 minute timeout
-            )
-
-            if build_result.returncode != 0:
-                logger.warning(f"home-manager build failed: {build_result.stderr}")
-                return {
-                    'success': False,
-                    'exit_code': build_result.returncode,
-                    'stdout': build_result.stdout,
-                    'stderr': build_result.stderr,
-                    'generation': None
-                }
-
-            # Activate the generation
-            print(f"  Activating home-manager generation...")
-            activate_result = subprocess.run(
-                ["/tmp/hm-activate/activate"],
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-
-            # Extract generation number from activation output (may be in stdout or stderr)
-            generation = self._extract_hm_generation(activate_result.stdout) or self._extract_hm_generation(activate_result.stderr)
-
-            success = activate_result.returncode == 0
-            if success:
-                print(f"  ✅ home-manager activated (generation {generation})")
+            override = self.get_system_config('nixos.home_manager_attr')
+            candidates: List[str] = []
+            if override:
+                if override.startswith('#'):
+                    candidates.append(f"{flake_path}{override}")
+                else:
+                    candidates.append(override)
             else:
-                print(f"  ❌ home-manager activation failed")
+                candidates.extend([
+                    f"{flake_path}#nixosConfigurations.{flake_output}"
+                    f".config.home-manager.users.{username}.home.activationPackage",
+                    f"{flake_path}#homeConfigurations.{username}.activationPackage",
+                    f"{flake_path}#homeConfigurations.{flake_output}.activationPackage",
+                ])
 
-            return {
-                'success': success,
-                'exit_code': activate_result.returncode,
-                'stdout': activate_result.stdout,
-                'stderr': activate_result.stderr,
-                'generation': generation
-            }
+            outdir = tempfile.mkdtemp(prefix='templedb-hm-')
+            out_link = os.path.join(outdir, 'result')
 
-        except subprocess.TimeoutExpired:
-            return {
-                'success': False,
-                'error': 'home-manager rebuild timed out',
-                'generation': None
-            }
+            try:
+                build_result = None
+                attempted: List[str] = []
+                for build_path in candidates:
+                    attempted.append(build_path)
+                    print(f"  Building home-manager: {build_path}")
+                    build_result = self._run_streaming(
+                        ["nix", "build", build_path, "--out-link", out_link],
+                        timeout=build_timeout,
+                    )
+                    if build_result['timed_out']:
+                        return {
+                            'success': False,
+                            'exit_code': -1,
+                            'stdout': build_result['stdout'],
+                            'stderr': build_result['stderr'],
+                            'error': f'home-manager build timed out after {build_timeout}s',
+                            'generation': None,
+                        }
+                    if build_result['exit_code'] == 0:
+                        break
+                    stderr = build_result['stderr']
+                    if not any(marker in stderr for marker in self._HM_ATTR_MISSING_MARKERS):
+                        # Real build failure, not just wrong attribute path.
+                        break
+                    logger.info(f"attribute miss on {build_path}, trying next candidate")
+
+                if not build_result or build_result['exit_code'] != 0:
+                    logger.warning(
+                        "home-manager build failed. Attempted candidates:\n  "
+                        + "\n  ".join(attempted)
+                    )
+                    return {
+                        'success': False,
+                        'exit_code': build_result['exit_code'] if build_result else -1,
+                        'stdout': build_result['stdout'] if build_result else '',
+                        'stderr': build_result['stderr'] if build_result else '',
+                        'generation': None,
+                    }
+
+                print(f"  Activating home-manager generation...")
+                activate_result = self._run_streaming(
+                    [os.path.join(out_link, 'activate')],
+                    timeout=activate_timeout,
+                )
+                if activate_result['timed_out']:
+                    return {
+                        'success': False,
+                        'exit_code': -1,
+                        'stdout': build_result['stdout'] + activate_result['stdout'],
+                        'stderr': build_result['stderr'] + activate_result['stderr'],
+                        'error': f'home-manager activation timed out after {activate_timeout}s',
+                        'generation': None,
+                    }
+
+                generation = (
+                    self._extract_hm_generation(activate_result['stdout'])
+                    or self._extract_hm_generation(activate_result['stderr'])
+                )
+                success = activate_result['exit_code'] == 0
+                if success:
+                    print(f"  ✅ home-manager activated (generation {generation})")
+                else:
+                    print(f"  ❌ home-manager activation failed")
+
+                return {
+                    'success': success,
+                    'exit_code': activate_result['exit_code'],
+                    'stdout': build_result['stdout'] + '\n---activate---\n' + activate_result['stdout'],
+                    'stderr': build_result['stderr'] + '\n---activate---\n' + activate_result['stderr'],
+                    'generation': generation,
+                }
+            finally:
+                # Remove the per-invocation gcroot; the built path is either
+                # already active (nix retains it via the profile symlink) or
+                # eligible for eventual GC.
+                shutil.rmtree(outdir, ignore_errors=True)
+
         except Exception as e:
             logger.error(f"home-manager rebuild failed: {e}", exc_info=True)
             return {
                 'success': False,
                 'error': str(e),
-                'generation': None
+                'generation': None,
             }
+
 
     def _extract_hm_generation(self, output: str) -> Optional[int]:
         """Extract home-manager generation number from output"""

@@ -160,15 +160,25 @@ class AgentService:
 
         return store.get_session(session["id"])
 
-    def list_sessions(self, project_slug=None, status=None, limit=50):
-        """List sessions."""
+    def list_sessions(self, project_slug=None, status=None, limit=50,
+                      provider_name=None, min_msgs=0, newer_than_days=None):
+        """List sessions with optional filters (see store.list_sessions)."""
+        from db_utils import query_one
         project_id = None
         if project_slug:
-            from db_utils import query_one
             project = query_one("SELECT id FROM projects WHERE slug = ?", (project_slug,))
             if project:
                 project_id = project["id"]
-        return store.list_sessions(project_id=project_id, status=status, limit=limit)
+        provider_id = None
+        if provider_name:
+            prov = query_one("SELECT id FROM agent_providers WHERE name = ?", (provider_name,))
+            if prov:
+                provider_id = prov["id"]
+        return store.list_sessions(
+            project_id=project_id, status=status, limit=limit,
+            provider_id=provider_id, min_msgs=min_msgs,
+            newer_than_days=newer_than_days,
+        )
 
     def get_session(self, session_id):
         """Get full session info."""

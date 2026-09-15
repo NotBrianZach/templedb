@@ -63,20 +63,24 @@ class AgentCommands(Command):
         """List agent sessions."""
         from agent.service import AgentService
         service = AgentService()
-        project = getattr(args, 'project', None)
-        sessions = service.list_sessions(project_slug=project)
+        sessions = service.list_sessions(
+            project_slug=getattr(args, 'project', None),
+            status=getattr(args, 'status', None),
+            provider_name=getattr(args, 'provider', None),
+            min_msgs=getattr(args, 'min_msgs', 0) or 0,
+            newer_than_days=getattr(args, 'recent_days', None),
+            limit=getattr(args, 'limit', 50) or 50,
+        )
 
         if getattr(args, 'json', False):
             print(json.dumps(sessions, default=str))
         elif not sessions:
             print("No agent sessions found.")
         else:
-            rows = []
-            for s in sessions:
-                rows.append(s)
             print(self.format_table(
-                rows,
-                ['id', 'title', 'provider_name', 'status', 'updated_at'],
+                list(sessions),
+                ['id', 'title', 'provider_name', 'status',
+                 'msg_count', 'pending_asks', 'updated_at'],
                 title="Agent Sessions"
             ))
         return 0
@@ -294,6 +298,16 @@ def register_agent_commands(subparsers, cli):
     # sessions
     sessions_parser = agent_sub.add_parser('sessions', help='List agent sessions')
     sessions_parser.add_argument('--project', help='Filter by project slug')
+    sessions_parser.add_argument('--status', help=(
+        "Filter by status (e.g. running/waiting/interrupted/created/closed)"))
+    sessions_parser.add_argument('--provider', help=(
+        "Filter by provider name (e.g. claude-code, fake)"))
+    sessions_parser.add_argument('--min-msgs', type=int, default=0, help=(
+        "Only include sessions with at least N messages"))
+    sessions_parser.add_argument('--recent-days', type=int, help=(
+        "Only include sessions updated within the last N days"))
+    sessions_parser.add_argument('--limit', type=int, default=50, help=(
+        "Maximum rows to return (default 50)"))
     cli.commands['ai.agent.sessions'] = cmd.sessions
 
     # chat (testing)

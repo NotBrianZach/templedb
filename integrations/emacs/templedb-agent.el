@@ -1167,6 +1167,21 @@ tool_result can return to Claude."
     (insert (format "#+TDB_PROJECT: %s\n" (or templedb-agent--project "")))
     (insert (format "#+TDB_STATUS: %s\n\n" templedb-agent--status))
 
+    ;; Toolbar: action buttons always visible above the folded Guide.
+    (insert "Actions: ")
+    (insert-text-button
+     "[Close session]"
+     'action (lambda (_) (templedb-agent-close))
+     'follow-link t
+     'help-echo "Cleanly close this agent session (C-c C-q)")
+    (insert "  ")
+    (insert-text-button
+     "[Kill process]"
+     'action (lambda (_) (templedb-agent-kill-process))
+     'follow-link t
+     'help-echo "Force-kill the agent subprocess (unstick a frozen session)")
+    (insert "\n\n")
+
     ;; Guide (starts collapsed)
     (templedb-agent--insert-section 'guide "Guide")
     (insert "Temple Agent -- Claude Code inside Emacs.\n")
@@ -1191,12 +1206,14 @@ tool_result can return to Claude."
     (insert "| =, x f=        | Add project file to context (with picker)  |\n")
     (insert "| =, x b=        | Add current buffer to context              |\n")
     (insert "| =, x v=        | Add selected region to context             |\n")
+    (insert "| =, x l=        | Show current context projects              |\n")
     (insert "| =, i=          | Send guidance while Claude works           |\n")
     (insert "| =, g=          | Refresh buffer from database               |\n")
     (insert "| =, s n=        | New session                                |\n")
     (insert "| =, s s=        | Switch session                             |\n")
+    (insert "| =, s l=        | List sessions                              |\n")
     (insert "| =, s f=        | Fork session                               |\n")
-    (insert "| =, s q=        | Close session                              |\n")
+    (insert "| =C-c C-q=      | Close session (clean)                      |\n")
     (insert "| =, /=          | Slash command (/compact, /review, /cost)   |\n")
     (insert "| =, P=          | Toggle plan mode (read-only)               |\n")
     (insert "| =, M=          | Switch model (sonnet, opus, haiku)         |\n")
@@ -1204,6 +1221,14 @@ tool_result can return to Claude."
     (insert "| =, ?=          | Debug info (process, stderr, pending)      |\n")
     (insert "| =, K=          | Kill stuck process                         |\n")
     (insert "| =TAB=          | Fold/unfold section                        |\n\n")
+
+    (insert "| Key (any buffer) | Action                                    |\n")
+    (insert "|------------------+-------------------------------------------|\n")
+    (insert "| =SPC a T A n=    | New agent session                         |\n")
+    (insert "| =SPC a T A o=    | Open session by id                        |\n")
+    (insert "| =SPC a T A l=    | List sessions (RET/k/K/g inside)          |\n")
+    (insert "| =SPC a T A ?=    | Ask agent about symbol at point           |\n")
+    (insert "| =SPC a T A L=    | Show agent work log                       |\n\n")
 
     ;; Now
     (templedb-agent--insert-section 'now "Now")
@@ -2200,9 +2225,75 @@ If PROJECT has a recent session, offers to resume it."
     (templedb-agent--start-process)
     (templedb-agent--wait-and-open-session buf session-id)))
 
+(defvar templedb-agent-list-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "RET") #'templedb-agent-list-open-at-point)
+    (define-key map (kbd "k")   #'templedb-agent-list-kill-at-point)
+    (define-key map (kbd "K")   #'templedb-agent-list-reap-stale)
+    (define-key map (kbd "g")   #'templedb-agent-list)
+    map)
+  "Keymap for `templedb-agent-list-mode'.")
+
+(define-derived-mode templedb-agent-list-mode special-mode "TAgent-List"
+  "Major mode for the Temple Agent session list buffer.")
+
+(defun templedb-agent--list-session-id-at-point ()
+  "Return the numeric session ID on the current line, or nil."
+  (save-excursion
+    (beginning-of-line)
+    (when (looking-at "\\s-*\\([0-9]+\\)\\b")
+      (string-to-number (match-string 1)))))
+
+(defun templedb-agent-list-open-at-point ()
+  "Open the agent session on the current line."
+  (interactive)
+  (if-let ((id (templedb-agent--list-session-id-at-point)))
+      (templedb-agent-open id)
+    (user-error "No session ID on this line")))
+
+(defun templedb-agent-list-kill-at-point ()
+  "Kill the agent session on the current line.
+If an Emacs buffer for the session is live, close it cleanly (RPC
+session.close + delete process + kill buffer). Otherwise mark the DB
+row status='interrupted' so it stops showing as active."
+  (interactive)
+  (let ((id (templedb-agent--list-session-id-at-point)))
+    (unless id (user-error "No session ID on this line"))
+    (when (y-or-n-p (format "Kill agent session #%d? " id))
+      (let ((buf (get-buffer (format "*Temple Agent: #%d*" id))))
+        (if (buffer-live-p buf)
+            (with-current-buffer buf (templedb-agent-close))
+          (templedb-agent--sql-execute
+           (format "UPDATE agent_sessions SET status='interrupted', updated_at=datetime('now') WHERE id=%d" id))
+          (message "Session #%d marked interrupted (no live buffer)" id)))
+      (templedb-agent-list))))
+
+(defun templedb-agent-list-reap-stale ()
+  "Reap orphaned `ai agent serve' subprocesses via `templedb ai agent stop-stale'.
+Refreshes the sessions list buffer if it is visible."
+  (interactive)
+  (let ((output (with-temp-buffer
+                  (call-process templedb-agent-executable nil t nil
+                                "ai" "agent" "stop-stale")
+                  (buffer-string))))
+    (message "%s" (string-trim output)))
+  (when (get-buffer "*Temple Agent Sessions*")
+    (templedb-agent-list)))
+
+(defun templedb-agent--sql-execute (sql)
+  "Execute SQL against the TempleDB SQLite database (write mode)."
+  (let* ((db-path (or (and (boundp 'templedb-db-path) templedb-db-path)
+                      (expand-file-name "~/.local/share/templedb/templedb.sqlite")))
+         (sqlite3 (or (executable-find "sqlite3")
+                      (car (file-expand-wildcards "/nix/store/*-sqlite-*-bin/bin/sqlite3"))
+                      "sqlite3")))
+    (call-process sqlite3 nil nil nil db-path sql)))
+
 ;;;###autoload
 (defun templedb-agent-list ()
-  "List Temple Agent sessions."
+  "List Temple Agent sessions in an interactive buffer.
+Keys: =RET= open, =k= kill session at point, =g= refresh, =q= quit."
   (interactive)
   (let ((output (with-temp-buffer
                   (call-process templedb-agent-executable nil t nil
@@ -2213,8 +2304,10 @@ If PROJECT has a recent session, offers to resume it."
       (with-current-buffer (get-buffer-create "*Temple Agent Sessions*")
         (let ((inhibit-read-only t))
           (erase-buffer)
+          (insert "Keys: RET open  k kill at point  K reap orphan procs  g refresh  q quit\n\n")
           (insert output))
-        (special-mode)
+        (templedb-agent-list-mode)
+        (goto-char (point-min))
         (display-buffer (current-buffer))))))
 
 ;;;###autoload
@@ -2246,7 +2339,7 @@ If PROJECT has a recent session, offers to resume it."
   (interactive)
   (let* ((output (with-temp-buffer
                    (call-process templedb-agent-executable nil t nil
-                                 "ai" "agent" "sessions" "--json")
+                                 "--json" "ai" "agent" "sessions")
                    (buffer-string)))
          (sessions (condition-case nil (json-read-from-string output) (error nil))))
     (if (or (null sessions) (= (length sessions) 0))
@@ -2713,6 +2806,7 @@ Optionally filter by PROJECT slug."
     (define-key map (kbd "C-c C-c") #'templedb-agent-send)
     (define-key map (kbd "C-c C-k") #'templedb-agent-cancel)
     (define-key map (kbd "C-c C-r") #'templedb-agent-resume)
+    (define-key map (kbd "C-c C-q") #'templedb-agent-close)
     (define-key map (kbd "C-c C-s") #'templedb-agent-save-user-sections)
     (define-key map (kbd "C-c u")   #'templedb-agent-remove-entry-at-point)
     (define-key map (kbd "C-c C-l") #'templedb-agent-reload-from-checkout)
@@ -2979,7 +3073,10 @@ Prompts with completion from the project file index."
   (templedb-agent--set-now "Process killed (use , r to resume or C-c C-c to send new message)")
   (templedb-agent--set-status "interrupted"))
 
-;; Spacemacs keys are registered in packages.el (the proper Spacemacs way).
+;; Spacemacs leader keys for this mode are registered by the `templedb'
+;; layer at ~/.emacs.d/private/local-layers/templedb/packages.el (both
+;; global `SPC a T A ...' and major-mode `, ...' bindings). Keep the two
+;; in sync when adding new interactive commands here.
 
 (provide 'templedb-agent)
 

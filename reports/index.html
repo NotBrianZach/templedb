@@ -44,6 +44,36 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-09-15-0823-state-of-the-working-set-pending-asks-unread-handoffs-stale-.html">
+  <div class="row">
+    <span class="date">2026-09-15 08:23</span>
+    <span class="title">State of the working set — pending asks, unread handoffs, stale sessions, cleanup plan</span>
+  </div>
+  <div class="summary">
+    Snapshot of what's queued across TempleDB's five channels of accumulated state — pending asks, handoff notes, real agent sessions, session sections (findings/todos/questions), and the agent work log — as of 2026-09-15. Nothing here is on fire. Most of the "unread" volume is tidiness debt (handoffs that self-superseded), not real backlog. Two decision-pending asks in session #282 are the only items that actually gate forward motion.
+  </div>
+</a>
+
+<a class="report" href="2026-09-15-0818-home-rebuild-plumbing-hardening-materialize-deploy-record-st.html">
+  <div class="row">
+    <span class="date">2026-09-15 08:18</span>
+    <span class="title">home-rebuild plumbing hardening — materialize, deploy record, streaming, multi-attr fallback</span>
+  </div>
+  <div class="summary">
+    Session started with "is there a way to cleanly kill a temple agent session in Emacs?" and ended six commits deeper in the NixOS rebuild path. Along the way: audited/fixed the agent keybindings, discovered the Spacemacs layer, dropped an orphaned pin-current binding, and then — while investigating the CLI plumbing for templedb nixos home-rebuild — found four real sharp edges in the home-manager rebuild service and fixed them. This report covers the rebuild-path half. Agent-side changes are captured in the DB history (intents #285–#291).
+  </div>
+</a>
+
+<a class="report" href="2026-09-06-0858-session-recap-12-recap-11-follow-ups-landed.html">
+  <div class="row">
+    <span class="date">2026-09-06 08:58</span>
+    <span class="title">Session recap 12: recap-11 follow-ups landed (mostly)</span>
+  </div>
+  <div class="summary">
+    Direct continuation of recap 11. Went through all three follow-up tasks the recap flagged (#17 file set undelete, #18 .authinfo.gpg/flake.lock preservation, #19 bza npmDepsHash) plus a bonus (#20 FUSE mention cleanup in README/docs) and a UNIQUE-constraint fix in templedb ai vibe start caught along the way. Two of the three closed cleanly; #19 got as far as bumping the hash before hitting a deeper source-level v8 API mismatch in bza's better-sqlite3, so bza stays out of home.packages and #21 was filed to fix the binding. System landed on generation 270 with everything working from a plain shell.
+  </div>
+</a>
+
 <a class="report" href="2026-09-05-2230-crsql-prep-notes.html">
   <div class="row">
     <span class="date">2026-09-05 22:30</span>
@@ -61,6 +91,26 @@
   </div>
   <div class="summary">
     Picked up item 2 from docs/NEXT_SESSION_PICKUPS.md (SCIP for non-Python) and drove it through three released adapter versions. Along the way, three unrelated bugs surfaced and got fixed: the vcs-status scanner was reading from a stale directory, two commits shipped older blobs than the actual work (FUSE-write path bug), and FUSE itself turned out to be dead code kept alive only by an 11-day-old zombie process. Nine commits pushed to main, four publish/rebuild cycles, fleet still running the latest.
+  </div>
+</a>
+
+<a class="report" href="2026-09-05-2006-session-recap-11-nixos-rebuild-bza-flake-infrastructure.html">
+  <div class="row">
+    <span class="date">2026-09-05 20:06</span>
+    <span class="title">Session recap 11: NixOS rebuild landed the sync CLI (and surfaced 4 latent infrastructure bugs)</span>
+  </div>
+  <div class="summary">
+    Follow-up to recaps 9 and 10. User asked to rebuild NixOS so the new templedb sync CLI would work without dev-mode + env-var overrides. What should have been one command turned into hunting down four separate infrastructure regressions before the rebuild could complete: .authinfo.gpg/flake.lock wiped by templedb publish, bza project missing its flake.nix, templedb file set not un-deleting soft-deleted files, and bza's npmDepsHash gone stale. Also fixed a UNIQUE-constraint crash in templedb ai vibe start along the way. Ended at system-268 with templedb sync status working cleanly.
+  </div>
+</a>
+
+<a class="report" href="2026-09-05-1827-session-recap-10-natural-key-pks-fix-collision.html">
+  <div class="row">
+    <span class="date">2026-09-05 18:27</span>
+    <span class="title">Session recap 10: natural-key PKs fix the shadow.id collision</span>
+  </div>
+  <div class="summary">
+    Follow-up to recap 9. Landed migration 102 which drops the surrogate INTEGER PRIMARY KEY on sync_entities and sync_relations in favor of composite natural-key PKs. The two-instance convergence test that failed in recap 9 (with colliding autoincrement IDs on both sites) now converges cleanly. Committed as 81625C44, applied to prod.
   </div>
 </a>
 
