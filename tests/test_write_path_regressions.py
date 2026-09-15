@@ -343,3 +343,99 @@ class TestBug3IntentRevertGuard:
         assert row["content_hash"] == expected_a, (
             "--allow-revert-intents didn't actually revert"
         )
+
+
+class TestBug4AddedFileReactivatesTombstone:
+    """`templedb commit` on a workspace file whose path already has a
+    tombstoned (status='deleted') project_files row must reactivate
+    the row rather than INSERTing a new one. project_files has
+    UNIQUE(project_id, file_path), so raw INSERT raises IntegrityError.
+
+    Repro: this blocked the 2026-09-15 SVG restore. All four assets/*.svg
+    files had been silently tombstoned in commit 3D847114; a fresh
+    workspace containing them plus `templedb commit` hit the UNIQUE
+    constraint in _commit_added_file. Workaround was file_set + pinned
+    session + vcs commit."""
+
+    def test_readd_after_delete_via_workspace_commit(
+        self, fresh_project, tmp_path,
+    ):
+        pid, slug = fresh_project
+
+        # Round 1: workspace has the file, commit → project_files.status=active.
+        (tmp_path / "resurrected.py").write_text("# rev 1\n")
+        r = subprocess.run(
+            ['templedb', 'commit', slug, str(tmp_path), '-m', 'seed'],
+            capture_output=True, timeout=30,
+        )
+        assert r.returncode == 0, (
+            f"seed commit failed: {r.stderr.decode()[:400]}"
+        )
+        row = query_one(
+            "SELECT id, status FROM project_files "
+            "WHERE project_id = ? AND file_path = ?",
+            (pid, 'resurrected.py'),
+        )
+        assert row is not None
+        assert row["status"] == "active"
+        original_id = row["id"]
+
+        # Round 2: remove the file, commit → project_files.status=deleted,
+        # file_contents purged. The tombstone remains at the same
+        # (project_id, file_path).
+        (tmp_path / "resurrected.py").unlink()
+        r = subprocess.run(
+            ['templedb', 'commit', slug, str(tmp_path), '-m', 'delete'],
+            capture_output=True, timeout=30,
+        )
+        assert r.returncode == 0, (
+            f"delete commit failed: {r.stderr.decode()[:400]}"
+        )
+        row = query_one(
+            "SELECT status FROM project_files "
+            "WHERE project_id = ? AND file_path = ?",
+            (pid, 'resurrected.py'),
+        )
+        assert row["status"] == "deleted"
+
+        # Round 3: re-add the file (possibly different content) and commit.
+        # Pre-fix: IntegrityError, commit rolls back, workspace file
+        # never reaches the DB. Post-fix: tombstone reactivated in place,
+        # commit succeeds, file_contents holds the new hash.
+        (tmp_path / "resurrected.py").write_text("# rev 2\n")
+        r = subprocess.run(
+            ['templedb', 'commit', slug, str(tmp_path), '-m', 'resurrect'],
+            capture_output=True, timeout=30,
+        )
+        assert r.returncode == 0, (
+            f"re-add commit failed (the bug): "
+            f"stderr={r.stderr.decode()[:400]}"
+        )
+
+        # project_files row is reactivated and its id was reused
+        # (reactivate-in-place, not new INSERT).
+        row = query_one(
+            "SELECT id, status FROM project_files "
+            "WHERE project_id = ? AND file_path = ?",
+            (pid, 'resurrected.py'),
+        )
+        assert row["status"] == "active"
+        assert row["id"] == original_id, (
+            "reactivation should reuse the tombstoned row's id, "
+            f"got id={row['id']}, expected {original_id}"
+        )
+
+        # file_contents holds the new hash.
+        import hashlib
+        expected = hashlib.sha256(b"# rev 2\n").hexdigest()
+        fc = query_one(
+            """SELECT fc.content_hash FROM project_files pf
+                   JOIN file_contents fc ON fc.file_id=pf.id AND fc.is_current=1
+                  WHERE pf.project_id = ? AND pf.file_path = ?""",
+            (pid, 'resurrected.py'),
+        )
+        assert fc is not None, "no file_contents row after re-add"
+        assert fc["content_hash"] == expected, (
+            f"content_hash={fc['content_hash'][:12]}, "
+            f"expected {expected[:12]}"
+        )

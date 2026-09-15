@@ -483,11 +483,29 @@ class CommitCommand:
         file_name = Path(change.file_path).name
         component_name = Path(change.file_path).stem
 
-        file_id = self.file_repo.execute("""
-            INSERT INTO project_files
-            (project_id, file_path, file_name, file_type_id, component_name)
-            VALUES (?, ?, ?, ?, ?)
-        """, (project_id, change.file_path, file_name, file_type_id, component_name), commit=False)
+        # Reactivate a tombstoned row if one exists at this path — otherwise
+        # UNIQUE(project_id, file_path) fires. Scanner reports the workspace
+        # file as 'added' because get_files_for_project filters status='active'
+        # and doesn't see the tombstone; without this branch, re-adding any
+        # previously-deleted path raises IntegrityError.
+        existing = self.file_repo.get_file_by_path(project_id, change.file_path)
+        if existing:
+            file_id = existing['id']
+            self.file_repo.execute("""
+                UPDATE project_files
+                   SET status = 'active',
+                       file_name = ?,
+                       file_type_id = ?,
+                       component_name = ?,
+                       updated_at = datetime('now')
+                 WHERE id = ?
+            """, (file_name, file_type_id, component_name, file_id), commit=False)
+        else:
+            file_id = self.file_repo.execute("""
+                INSERT INTO project_files
+                (project_id, file_path, file_name, file_type_id, component_name)
+                VALUES (?, ?, ?, ?, ?)
+            """, (project_id, change.file_path, file_name, file_type_id, component_name), commit=False)
 
         # Store content blob (INSERT OR IGNORE for deduplication)
         if change.content.content_type == 'text':
