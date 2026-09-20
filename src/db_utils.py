@@ -71,6 +71,25 @@ def get_connection() -> sqlite3.Connection:
         _thread_local.connection.execute("PRAGMA temp_store=MEMORY")
         _thread_local.connection.execute("PRAGMA mmap_size=268435456")  # 256MB mmap
         _thread_local.connection.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
+        # Load cr-sqlite extension so INSERTs into sync-tracked tables
+        # (entities, relations, etc.) don't blow up on the
+        # crsql_internal_sync_bit function reference in their triggers.
+        # Best-effort — failing to load leaves the connection usable
+        # for everything except sync-tracked writes. sync_engine.py
+        # has the canonical extension-finder logic; import it lazily
+        # here to avoid circular imports and to keep the db_utils
+        # module import-safe on hosts without cr-sqlite.
+        try:
+            from sync_engine import CRSQLITE_PATH as _CRSQLITE_PATH
+            _thread_local.connection.enable_load_extension(True)
+            _thread_local.connection.load_extension(_CRSQLITE_PATH)
+            _thread_local.connection.enable_load_extension(False)
+        except Exception:
+            # No cr-sqlite available (fresh install, dev env without
+            # extraPackages, etc.). Only reads and writes to
+            # non-sync-tracked tables will work; that's still most
+            # of templedb.
+            pass
     return _thread_local.connection
 
 
