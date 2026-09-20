@@ -64,6 +64,7 @@ class FileRepository(BaseRepository):
                     pf.file_path,
                     pf.file_name,
                     pf.lines_of_code,
+                    pf.edit_mode,
                     fc.content_hash,
                     fc.version
                 FROM project_files pf
