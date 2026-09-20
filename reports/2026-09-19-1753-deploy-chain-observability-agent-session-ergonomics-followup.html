@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>deploy-chain observability + agent session ergonomics — followup spec</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  .spec { border: 1px solid var(--border); background: var(--panel);
+          padding: 1.1rem 1.3rem; margin: 1.4rem 0; border-radius: 5px; }
+  .spec h3 { margin-top: 0; color: #e6c46b; }
+  .spec .meta { font-size: 0.78rem; color: var(--muted);
+                margin: 0 0 1rem; font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .spec .meta span { margin-right: 1.2rem; }
+  .spec .cost-s   { color: #6ecf7a; }
+  .spec .cost-m   { color: #d8c26a; }
+  .spec .cost-l   { color: #e94560; }
+  .spec ul { margin: 0.5rem 0 0.8rem; padding-left: 1.2rem; }
+  .spec li { margin: 0.3rem 0; }
+  .spec .heading { color: #b0b0d0; font-weight: bold;
+                   text-transform: uppercase; font-size: 0.72rem;
+                   letter-spacing: 0.08em; margin: 1rem 0 0.4rem; }
+  .quiet { color: var(--muted); }
+  table.rank { border-collapse: collapse; width: 100%; margin: 0.8rem 0;
+               font-size: 0.87em; }
+  table.rank th, table.rank td {
+    border-bottom: 1px solid var(--border); padding: 0.45rem 0.6rem;
+    text-align: left; vertical-align: top;
+  }
+  table.rank th { color: var(--muted); font-weight: normal;
+                  text-transform: uppercase; font-size: 0.7rem;
+                  letter-spacing: 0.08em; }
+</style>
+</head>
+<body>
+
+<h1>deploy-chain observability + agent session ergonomics — followup spec</h1>
+<p class="lede">
+  Spec for the six followups that came out of the 2026-09-19 session
+  recap (<a href="2026-09-19-1722-session-recap-agent-login-required-write-path-hazards-publis.html">recap</a>).
+  Each one addresses a pattern that has re-bitten across multiple sessions,
+  not a one-off bug. Concrete enough that anyone (including a fresh
+  agent context) can pick one off the top and implement.
+</p>
+
+<h2>Framing: three recurring pain classes</h2>
+
+<p>
+  The recap flagged three "notice" patterns. All three cost me time this
+  session; all three have re-bitten across recaps 10–12 as well. Each
+  is addressed by one or more of the specs below.
+</p>
+
+<table class="rank">
+  <tr>
+    <th>Pain class</th><th>Manifestation this session</th><th>Specs that address it</th>
+  </tr>
+  <tr>
+    <td><strong>Silent session mismatch</strong></td>
+    <td><code>publish</code> and <code>vcs commit</code> quietly not-including
+        stages from "other sessions" — footer noted, action wasn't taken.
+        Hit 3× before I session-pinned.</td>
+    <td>§1 auto-pin agent context · §2 <code>vcs session gc</code></td>
+  </tr>
+  <tr>
+    <td><strong>Silent no-op stages</strong></td>
+    <td>5 rebuild cycles, most caused by stages either skipping or
+        producing content that raced against downstream fetchers.
+        Nothing errored; nothing landed either.</td>
+    <td>§3 <code>--expect-rev</code> assertion · §4 stage hash logging</td>
+  </tr>
+  <tr>
+    <td><strong>Seven-hop file chain</strong></td>
+    <td><code>templedb-agent.el</code>: DB → checkout → edit-workspace →
+        materialized system_config layer → templedb overlay copy →
+        home-manager-files → nix-store layer → symlink into
+        <code>~/.emacs.d</code>. <code>file where</code> now surfaces one
+        hop; six remain invisible.</td>
+    <td>§5 <code>templedb file trace</code> · §6 dev-mode symlink</td>
+  </tr>
+</table>
+
+<h2>Priority ranking</h2>
+
+<table class="rank">
+  <tr>
+    <th>Rank</th><th>Spec</th><th>LOC</th><th>Value</th><th>Effort</th><th>Risk</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td>§3 <code>--expect-rev</code> on publish</td>
+    <td>~15</td>
+    <td>High — kills the whole race class</td>
+    <td>Trivial</td>
+    <td>None (opt-in flag)</td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td>§5 <code>templedb file trace</code></td>
+    <td>~80</td>
+    <td>High — makes the 7-hop chain legible</td>
+    <td>Medium</td>
+    <td>None (read-only)</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td>§4 Stage outcome-hash logging</td>
+    <td>~30 across 4 files</td>
+    <td>Medium — enables cross-stage assertions</td>
+    <td>Medium</td>
+    <td>Minor (output noise)</td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td>§1 Auto-pin agent context</td>
+    <td>~40</td>
+    <td>High for agent UX</td>
+    <td>Medium</td>
+    <td>Real — must gate carefully</td>
+  </tr>
+  <tr>
+    <td>5</td>
+    <td>§2 <code>vcs session gc</code></td>
+    <td>~50</td>
+    <td>Low-Medium — quality-of-life</td>
+    <td>Medium</td>
+    <td>Real — could reap active work if bad</td>
+  </tr>
+  <tr>
+    <td>6</td>
+    <td>§6 Dev-mode symlink overlay</td>
+    <td>~30 nix + design decisions</td>
+    <td>Medium — biggest hop reduction, narrow scope</td>
+    <td>Larger (design work)</td>
+    <td>Medium (breaks nix invariant)</td>
+  </tr>
+</table>
+
+<h2>§1 · Auto-pin agent context</h2>
+
+<div class="spec">
+  <h3>Auto-write session pin when the context looks agent-y</h3>
+  <p class="meta">
+    <span>files: <code>src/services/vcs_service.py</code></span>
+    <span>cost: <span class="cost-m">medium</span></span>
+    <span>touches: session resolution path (careful)</span>
+  </p>
+
+  <p><strong>Problem.</strong> Every Claude Code Bash tool invocation runs
+    in a fresh shell with a fresh session-leader PID and no inherited
+    env. Without a filesystem pin, each <code>templedb</code> call resolves
+    to its own new session. Stages from earlier calls become invisible
+    to later commits. The workaround (<code>vcs session start --pin</code>)
+    exists but requires human awareness.</p>
+
+  <p><strong>Design.</strong> In <code>VCSService.get_current_session()</code>,
+    after step 3 (filesystem pin lookup) fails but before step 4 (SID
+    lookup), insert an <strong>auto-pin</strong> step:</p>
+  <ol>
+    <li>If <code>TEMPLEDB_AUTO_PIN=0</code> is set, skip. (Env-var opt-out.)</li>
+    <li>Detect "agent context" via one of:
+      <ul>
+        <li><code>CLAUDECODE=1</code> or <code>CLAUDE_CODE_ENTRYPOINT</code>
+            in env (Claude Code sets these), or</li>
+        <li>controlling terminal absent (<code>os.isatty(0)</code> is false
+            AND stdin is a pipe), or</li>
+        <li>an env var flag opts in explicitly:
+            <code>TEMPLEDB_AUTO_PIN=1</code>.</li>
+      </ul>
+    </li>
+    <li>If agent context detected AND no existing pin file, create a
+        session with name <code>auto-agent-&lt;host&gt;</code> and write the
+        pin. Log a single INFO line the first time.</li>
+    <li>Subsequent calls in the same context read the pin normally.</li>
+  </ol>
+
+  <p><strong>Guardrails.</strong></p>
+  <ul>
+    <li>Auto-pin creates a session with a distinct name prefix
+        (<code>auto-agent-*</code>) so it's obvious in <code>session list</code>.</li>
+    <li>Auto-pins expire after 4 hours (shorter than the 24h manual pin
+        TTL) to reduce collision blast radius.</li>
+    <li>If <em>two</em> auto-pin candidates race, the first-writer-wins
+        (via <code>O_EXCL</code> on the pin file). Second one just adopts
+        the first's session.</li>
+    <li><code>templedb doctor</code> gets a check: "You have N stale
+        auto-agent sessions; consider <code>vcs session gc</code>."</li>
+  </ul>
+
+  <p><strong>Risk.</strong> If a real human runs <code>templedb</code> in a
+    shell that happens to trigger the agent-context heuristic (e.g. tmux
+    on a non-TTY), they get an auto-pin they didn't ask for. Mitigation:
+    the log line ("auto-pinned session for agent context — <code>unpin</code>
+    with…") is loud enough to notice, and unpin is one command.</p>
+
+  <p><strong>Ready-to-write test.</strong> Set <code>CLAUDECODE=1</code>,
+    run <code>templedb file set</code> in one subprocess, <code>vcs commit</code>
+    in another — they must share the session. Set <code>CLAUDECODE=1</code>,
+    run <code>vcs session current</code>; expect an <code>auto-agent-*</code>
+    session identity.</p>
+</div>
+
+<h2>§2 · <code>vcs session gc</code></h2>
+
+<div class="spec">
+  <h3>Reap orphaned sessions and their working-state rows</h3>
+  <p class="meta">
+    <span>files: <code>src/services/vcs_service.py</code>,
+                  <code>src/cli/commands/vcs.py</code></span>
+    <span>cost: <span class="cost-m">medium</span></span>
+    <span>touches: <code>vcs_sessions</code>, <code>vcs_working_state</code></span>
+  </p>
+
+  <p><strong>Problem.</strong> Every publish output ends with
+    <code>(N file(s) staged in other sessions were not included)</code>.
+    That N grew from 21 to 23 during this session as I created new
+    auto-shell sessions. Most of those rows are orphaned — their
+    session was a one-shot shell that ended hours ago.</p>
+
+  <p><strong>Design.</strong> New subcommand:</p>
+  <pre>templedb vcs session gc [--dry-run] [--older-than DURATION] [--force]</pre>
+  <p>Behavior:</p>
+  <ul>
+    <li>Find sessions where <code>ended_at IS NULL</code> AND
+        <code>started_at &lt; now - DURATION</code> (default: 24h) AND
+        <code>pid</code> is no longer alive (probe with <code>os.kill(pid, 0)</code>
+        under the same author). If any of those conditions fail,
+        session is "possibly still active" — skip.</li>
+    <li>For each reap candidate: <code>SET ended_at = datetime('now'),
+        end_reason = 'gc'</code>. Do NOT delete <code>vcs_working_state</code>
+        rows staged by them — those are user data. Instead, orphan them
+        (<code>SET staged_by_session_id = NULL, state = 'modified'</code>).
+        The user's next <code>vcs status</code> then correctly shows them
+        as unstaged modifications.</li>
+    <li><code>--dry-run</code> reports the plan without executing.</li>
+    <li><code>--force</code> bypasses the "pid still alive" check (for
+        cleaning up after a crashed process where the PID has been
+        reused).</li>
+  </ul>
+
+  <p><strong>Guardrail.</strong> Never touch a session that has an active
+    pin file pointing at it. And never touch <code>vcs_working_state</code>
+    rows in a way that loses content — only rewrite their session
+    ownership.</p>
+
+  <p><strong>UX addition.</strong> <code>templedb doctor</code> reports
+    "You have N staged rows from ended sessions; run <code>vcs session
+    gc --dry-run</code> to see them." Nudges without acting.</p>
+</div>
+
+<h2>§3 · <code>--expect-rev</code> assertion on publish</h2>
+
+<div class="spec">
+  <h3>Fast-fail when the flake fetcher resolves to an unexpected rev</h3>
+  <p class="meta">
+    <span>files: <code>src/cli/commands/publish.py</code>,
+                  <code>src/services/system_service.py</code></span>
+    <span>cost: <span class="cost-s">small</span> (~15 LOC)</span>
+    <span>touches: no schema, no data</span>
+  </p>
+
+  <p><strong>Problem.</strong> The rebuild race we hit five times this
+    session: publish materializes and pushes, but if the local git
+    daemon hasn't reflected the new commit by the time
+    <code>nixos-rebuild --flake .</code> runs its flake fetch, nix locks to
+    the previous rev. Everything says "OK." Nothing changed.</p>
+
+  <p><strong>Design.</strong> Two touch points.</p>
+
+  <p><span class="heading">Emit new rev after publish</span></p>
+  <p>Modify <code>PublishCommands.publish()</code> to capture the git
+    HEAD hash of the target's checkout <em>after</em> the materialize
+    step succeeds. Print it:</p>
+  <pre>Published to 1 mirror(s)
+  git HEAD: 04558face5873ad946f041723776dd8accfd77d7</pre>
+  <p>Also emit a machine-readable JSON line when
+    <code>--json</code> is passed:</p>
+  <pre>{"slug": "templedb", "head": "04558face5...", "materialized": 751, "committed": true}</pre>
+
+  <p><span class="heading">Add <code>--expect-templedb-rev &lt;hash&gt;</code>
+     (or generalized: <code>--expect-input &lt;name&gt;=&lt;hash&gt;</code>)</span></p>
+  <p>New flag on <code>publish run</code>. If passed, after the publish
+    completes, run <code>nix flake metadata --refresh</code> against the
+    resulting checkout and assert that the named input resolves to the
+    expected hash. Exit 3 (distinct from other errors) on mismatch.</p>
+  <pre>templedb publish run system_config \
+    --pin-input templedb \
+    --expect-input templedb=04558face5873ad946f041723776dd8accfd77d7</pre>
+  <p>Combined with <code>--pin-input</code>, this guarantees:
+    (a) the rev is pinned in flake.nix, and (b) nix's resolver actually
+    picks up the pin. If the daemon isn't serving that rev yet, we
+    fail loud instead of building silently against a stale one.</p>
+
+  <p><strong>Usage pattern.</strong> A scripted "publish + rebuild"
+    loop becomes:</p>
+  <pre>NEWREV=$(templedb publish run templedb --json | jq -r .head)
+templedb publish run system_config \
+    --pin-input templedb \
+    --expect-input templedb=$NEWREV
+templedb nixos system-switch system_config --yes</pre>
+</div>
+
+<h2>§4 · Stage outcome-hash logging</h2>
+
+<div class="spec">
+  <h3>Every deploy-chain stage prints its input+output hash</h3>
+  <p class="meta">
+    <span>files: <code>publish.py</code>, <code>system_service.py</code>,
+                  <code>nix_deploy_backend.py</code></span>
+    <span>cost: <span class="cost-m">medium</span> (~30 LOC across 4 files)</span>
+    <span>touches: log output only</span>
+  </p>
+
+  <p><strong>Problem.</strong> Each stage optimizes its own idempotency
+    (skip if unchanged) and reports success either way. Cross-stage,
+    that means "everything says it worked" is compatible with "nothing
+    changed at any stage." No way to tell which stage no-op'd.</p>
+
+  <p><strong>Design.</strong> Introduce a consistent log format at each
+    boundary. Even on no-op, emit a line with the pre/post hash.</p>
+
+  <table class="rank">
+    <tr><th>Stage</th><th>Format</th></tr>
+    <tr>
+      <td><code>file set</code></td>
+      <td><code>set &lt;slug&gt;/&lt;path&gt;: db=&lt;pre12&gt; → &lt;post12&gt;</code>
+          (post=pre if content unchanged)</td>
+    </tr>
+    <tr>
+      <td><code>vcs commit</code></td>
+      <td><code>commit &lt;slug&gt;: HEAD=&lt;pre12&gt; → &lt;commit_hash12&gt;
+          (N files)</code></td>
+    </tr>
+    <tr>
+      <td><code>publish</code> materialize</td>
+      <td><code>materialize &lt;slug&gt;: db_state=&lt;12&gt; disk_pre=&lt;12&gt;
+          disk_post=&lt;12&gt; (N files written, git-commit=&lt;hash|noop&gt;)</code></td>
+    </tr>
+    <tr>
+      <td><code>publish</code> git push</td>
+      <td><code>push &lt;mirror&gt;: local=&lt;12&gt; remote_pre=&lt;12&gt;
+          → remote_post=&lt;12&gt;</code></td>
+    </tr>
+    <tr>
+      <td><code>nixos-rebuild</code> flake fetch</td>
+      <td><code>flake: input &lt;name&gt; resolved to rev=&lt;40&gt;</code>
+          (one line per non-follows input)</td>
+    </tr>
+  </table>
+
+  <p><strong>Implementation.</strong> Each stage has an existing
+    "success" print — extend it. The hash is already computed
+    internally in almost every case (content_blob hash, git rev-parse,
+    etc.). Just print it.</p>
+
+  <p><strong>Depends on.</strong> Enables §3
+    <code>--expect-rev</code> assertions in a scripted pipeline
+    (parseable output) and §5 <code>file trace</code> (relies on stages
+    to record their hashes durably somewhere queryable).</p>
+</div>
+
+<h2>§5 · <code>templedb file trace &lt;slug&gt; &lt;path&gt;</code></h2>
+
+<div class="spec">
+  <h3>Print every copy of a file across the full deploy chain</h3>
+  <p class="meta">
+    <span>files: <code>src/cli/commands/file.py</code></span>
+    <span>cost: <span class="cost-m">medium</span> (~80 LOC)</span>
+    <span>touches: adds a new subcommand, no schema</span>
+  </p>
+
+  <p><strong>Problem.</strong> <code>file where</code> now surfaces one
+    hop (the live overlay). But the actual chain from DB to the running
+    binary is up to 7 hops. When a change fails to land, you need to
+    know <em>which hop</em> is stuck.</p>
+
+  <p><strong>Design.</strong> New subcommand:</p>
+  <pre>templedb file trace &lt;slug&gt; &lt;path&gt; [--verbose]</pre>
+  <p>Walks the chain and prints every copy with its hash and how it
+    was derived:</p>
+  <pre>trace: templedb/src/agent/providers/claude_code.py
+
+  01. DB              hash=fed7e5fd6f98  is_current=1
+      ↳ blob_size=4748  updated=2026-09-19 13:47:30
+
+  02. checkout        hash=fed7e5fd6f98  ✓ matches DB
+      /home/zach/.config/templedb/checkouts/templedb/src/agent/providers/claude_code.py
+
+  03. edit-workspace  hash=ed9e9b9ba231  ✗ drift (older DB rev)
+      /home/zach/.config/templedb/edit-workspaces/templedb/src/agent/providers/claude_code.py
+
+  04. git HEAD        hash=fed7e5fd6f98  ✓ matches DB
+      commit=04558face5  msg="fix(file where): use os.walk..."
+
+  05. git daemon HEAD hash=fed7e5fd6f98  ✓ matches git HEAD
+      served at git://localhost:9419/templedb
+
+  06. flake.lock pin  rev=04558face5873a  (via ?rev= in flake.nix)
+      /home/zach/.config/templedb/checkouts/system_config/flake.nix
+
+  07. nix store       hash=fed7e5fd6f98  ✓ matches DB
+      /nix/store/7h5jyhb19142mvp7nv8dq3vlrblimcd7-templedb-0.1.0/lib/python3.13/site-packages/agent/providers/claude_code.py
+
+  08. live binary     ✓ resolves to step 07
+      /home/zach/.nix-profile/bin/templedb → same store path
+
+verdict: ✓ end-to-end match, current DB content is what's running</pre>
+
+  <p>For a file with drift, the verdict changes:</p>
+  <pre>verdict: ✗ drift at step 6 (flake pin) — nix store still holds an older rev.
+Recommended: templedb publish run system_config --pin-input &lt;slug&gt;</pre>
+
+  <p><strong>Implementation notes.</strong></p>
+  <ul>
+    <li>Steps 1–3 reuse <code>file where</code>'s existing probes.</li>
+    <li>Step 4: <code>git rev-parse HEAD</code> + <code>git show HEAD:&lt;path&gt;</code>
+        under the target's checkout.</li>
+    <li>Step 5: <code>git ls-remote git://localhost:9419/&lt;slug&gt; HEAD</code>
+        (skip if daemon not local).</li>
+    <li>Step 6: parse the consuming project's flake.lock (find any node
+        whose <code>original.url</code> is <code>git://localhost:9419/&lt;slug&gt;</code>).
+        Cross-project — need to know which consumer(s) to check. Take
+        <code>--consumer &lt;slug&gt;</code> to disambiguate; default to
+        <code>system_config</code>.</li>
+    <li>Step 7: for known projects, follow the mapping to a nix store
+        path. For templedb specifically:
+        <code>readlink -f $(which templedb) → /nix/store/&lt;hash&gt;-templedb-*/bin/…</code>.
+        For arbitrary slugs, walk <code>~/.local/state/nix/profiles/*</code>
+        (already partial coverage in <code>file where</code>).</li>
+    <li>Step 8: symlink/binary chain resolution.</li>
+  </ul>
+
+  <p><strong>Follow-up ideas.</strong></p>
+  <ul>
+    <li><code>--fix</code>: for each drift, offer the exact command to
+        re-sync that hop.</li>
+    <li><code>--json</code>: machine-readable trace, so CI can assert
+        the chain is clean.</li>
+    <li><code>templedb doctor</code> runs <code>trace</code> for a
+        canary file per project (e.g. <code>flake.nix</code> for system_config,
+        <code>templedb</code> binary for templedb) and reports any drift.</li>
+  </ul>
+</div>
+
+<h2>§6 · Dev-mode symlink for editable overlays</h2>
+
+<div class="spec">
+  <h3>Skip the 7-hop chain for files under active development</h3>
+  <p class="meta">
+    <span>files: <code>home.nix</code>,
+                  <code>src/services/system_service.py</code>,
+                  possibly Emacs layer <code>packages.el</code></span>
+    <span>cost: <span class="cost-l">larger — design work</span></span>
+    <span>touches: home-manager module structure</span>
+  </p>
+
+  <p><strong>Problem.</strong> Currently every edit to
+    <code>templedb-agent.el</code> requires: DB write → publish → git push
+    → flake update → home-manager rebuild. ~90 seconds and a nix
+    generation per iteration. For files edited during active
+    development, this is unbearable friction.</p>
+
+  <p><strong>Design.</strong> Add an opt-in dev-mode symlink pattern to
+    home.nix for specifically enumerated files. When enabled:</p>
+  <pre>home.file.".emacs.d/private/local-layers/templedb/local/templedb-agent/templedb-agent.el" = {
+  source = if config.templedb.devMode
+    then config.lib.file.mkOutOfStoreSymlink
+      "/home/zach/temple/templedb/integrations/emacs/templedb-agent.el"
+    else <the current nix-store overlay>;
+};</pre>
+
+  <p>When <code>templedb.devMode = true</code>: the file is a symlink to
+    the FUSE mount. Edits via <code>templedb file set</code> reflect
+    immediately in Emacs (after <code>M-x load-file</code>). No rebuild
+    needed.</p>
+
+  <p>When <code>false</code> (default, deploy mode): current chain
+    unchanged. Reproducible builds, signed deployments, etc.</p>
+
+  <p><strong>Enable list.</strong> Should be a small, explicit whitelist
+    of files that receive dev-mode treatment. Candidates:</p>
+  <ul>
+    <li><code>templedb-agent.el</code> and other <code>integrations/emacs/*.el</code></li>
+    <li>Config files that don't affect the nix closure (documentation,
+        systemd unit descriptions, etc.)</li>
+  </ul>
+
+  <p><strong>Cost / open questions.</strong></p>
+  <ul>
+    <li>FUSE mount is a runtime dependency. If it's not mounted, dev-mode
+        Emacs is broken. Need a startup check.</li>
+    <li>Introduces a per-file exception to "everything through nix,"
+        which is a real invariant break. Worth it only if the friction
+        savings materially exceed the cognitive tax.</li>
+    <li>Doesn't help for files that affect the nix closure (e.g. Python
+        source, Nix modules). Only helps for interpreted / read-at-use
+        files.</li>
+    <li>Might be simpler to just teach agents to run
+        <code>templedb file checkout &lt;slug&gt; &lt;path&gt; -o &lt;target&gt;</code>
+        after every edit, to a well-known dev-mode target. Less nix
+        design, more shell scripting.</li>
+  </ul>
+
+  <p><strong>Recommendation.</strong> Do §5 (<code>file trace</code>)
+    first. It'll tell us quantitatively how often the 7-hop chain
+    matters vs. is fine. If most edits go end-to-end cleanly, this spec
+    is unnecessary. If many drift, then dev-mode symlink pays back.</p>
+</div>
+
+<h2>How these compose</h2>
+
+<p>
+  The specs interlock more than the ranking suggests. In order of
+  dependency:
+</p>
+<ol>
+  <li><strong>§4 stage hash logging</strong> is the substrate. Every other
+      spec assumes stages emit their outcome hashes.</li>
+  <li><strong>§3 <code>--expect-rev</code></strong> uses §4's output for
+      scripts to assert against.</li>
+  <li><strong>§5 <code>file trace</code></strong> queries §4's records
+      (or re-derives them) to walk the chain.</li>
+  <li><strong>§1 auto-pin</strong> and <strong>§2 gc</strong> are session-side
+      concerns; they don't depend on §3–§5 but do interact
+      (auto-pin creates sessions that gc must handle correctly).</li>
+  <li><strong>§6 dev-mode symlink</strong> is orthogonal — a shortcut around
+      the chain for specific files rather than a chain improvement.</li>
+</ol>
+
+<h2>What NOT to do</h2>
+
+<ul>
+  <li><strong>Don't remove session isolation.</strong> The "other
+      sessions" mechanic is the right default for concurrent human
+      work. The fix is to auto-share for agent contexts, not to remove
+      isolation.</li>
+  <li><strong>Don't try to reduce the 7-hop chain by rewriting the
+      architecture.</strong> Each hop encodes a real requirement (DB
+      source-of-truth, git-for-nix, nix content-addressing, home-
+      manager overlays). Trying to unify them would produce a worse
+      version of both nix and templedb. Make the chain
+      <em>observable</em> (§5), not shorter.</li>
+  <li><strong>Don't add "empty commits so materialize always emits
+      one."</strong> Considered and rejected. The no-op skip is correct;
+      it's the <em>invisibility</em> of the skip that's the problem, and
+      §4 fixes visibility without breaking idempotency.</li>
+</ul>
+
+<h2>Meta</h2>
+
+<p>
+  This is a "we noticed patterns" spec, not a bug list. Each item
+  addresses a class rather than an incident. If half of these land, the
+  next agent session should hit exactly zero of the frictions this
+  session hit.
+</p>
+
+</body>
+</html>

@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 8: SCIP v1.0→1.2 end-to-end, FUSE retired, scanner fixed</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); font-weight: 600; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+  .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<h1>Session recap 8: SCIP 1.0 → 1.2 end-to-end + fallout fixes</h1>
+<p class="lede">
+  Picked up item 2 from
+  <code>docs/NEXT_SESSION_PICKUPS.md</code> (SCIP for non-Python) and
+  drove it through three released adapter versions. Along the way,
+  three unrelated bugs surfaced and got fixed: the vcs-status scanner
+  was reading from a stale directory, two commits shipped older blobs
+  than the actual work (FUSE-write path bug), and FUSE itself turned
+  out to be dead code kept alive only by an 11-day-old zombie process.
+  Nine commits pushed to <code>main</code>, four publish/rebuild cycles,
+  fleet still running the latest.
+</p>
+
+<h2>Final graph state</h2>
+
+<table class="matrix">
+  <tr><th>Authority</th><th>Symbols</th><th>defines</th><th>uses</th><th>imports</th></tr>
+  <tr>
+    <td>python (unchanged)</td>
+    <td class="num pos">4,532</td>
+    <td class="num pos">—</td>
+    <td class="num pos">2,802</td>
+    <td class="num pos">582</td>
+  </tr>
+  <tr>
+    <td><strong>scip-typescript (new)</strong></td>
+    <td class="num pos"><strong>12,428</strong></td>
+    <td class="num pos"><strong>12,428</strong></td>
+    <td class="num pos"><strong>10,149</strong></td>
+    <td class="num pos"><strong>329</strong></td>
+  </tr>
+</table>
+
+<p>
+  Semantic edges are actually flowing:
+  <code>middleware.ts → supabaseServerClient.createSupabaseServerClient()</code>,
+  <code>route.ts:GET() → apiQuota.getUserFromToken()</code> — the
+  cross-file resolution works. Python authority totally untouched
+  across all nine commits (verified before + after each ingest).
+</p>
+
+<h2>The three SCIP adapter versions</h2>
+
+<h3>1.0 — File→defines→Symbol only</h3>
+<p>
+  Shells out to <code>scip-typescript index</code> on a project's
+  materialized checkout, converts via <code>scip print --json</code>,
+  walks <code>Index.documents[*].symbols[]</code>. Mirrors python's
+  discipline: per-file <code>__module__</code> synthetic, external_ref
+  <code>{slug}:{path}:{name}</code>, scoped pruning on
+  <code>source_authority='scip-typescript'</code>. Deliberately does
+  NOT re-upsert File entities — git provenance survives.
+</p>
+<p>
+  Packaging: <code>nix/scip-typescript.nix</code> in templedb's flake,
+  <code>writeShellApplication</code> wrapping <code>npx --yes
+  @sourcegraph/scip-typescript@0.4.0</code>. Not fully hermetic (first
+  invocation fetches from npm cache), but avoids the two-hash hunt
+  <code>buildNpmPackage</code>/<code>mkYarnPackage</code> would need.
+  Wired into the templedb wrapper's <code>--prefix PATH</code>
+  alongside <code>pkgs.scip</code>. Commit <code>F1D0C4CA</code>
+  (later repaired by <code>4537FDB3</code>, see below).
+</p>
+
+<h3>1.1 — Symbol→uses→Symbol from occurrences</h3>
+<p>
+  Restructured to two-pass. Pass 1 emits defines + builds
+  <code>scip_symbol → entity_id</code> map (global for regular
+  symbols, per-file for <code>local N</code> scoped). Pass 2 walks
+  <code>Document.occurrences[]</code>; for each non-Definition
+  reference, resolves the target via the map, finds the source
+  symbol by innermost <code>enclosing_range</code> containing the
+  reference, falls back to the file's <code>__module__</code> when
+  no def encloses. Added inline range-containment helpers
+  (<code>_norm_range</code>, <code>_range_contains</code>,
+  <code>_find_enclosing_sym_id</code>) to handle SCIP's 3-element
+  single-line vs 4-element multi-line range formats.
+</p>
+<p>
+  Only <code>uses</code> emitted, not <code>calls</code> or
+  <code>inherits</code> — scip-typescript@0.4.0's
+  <code>symbol_roles</code> doesn't reliably distinguish call sites
+  from other reads (verified empirically: all 52,406 non-Definition
+  occurrences have <code>symbol_roles=0</code>). Dead-imports doctor
+  already accepts <code>uses</code> as a bridge kind, so this is
+  enough for that surface. Commit <code>66838F85</code>.
+</p>
+
+<h3>1.2 — File→imports→File + label polish</h3>
+<p>
+  Two additions:
+</p>
+<ul>
+  <li>
+    <strong>File→imports→File.</strong> The original v1.2 plan was to
+    filter on <code>symbol_roles &amp; 2</code> (SCIP's Import role
+    bit). Verified empirically after the first attempt yielded zero
+    edges: <em>scip-typescript@0.4.0 doesn't populate the Import bit
+    at all</em>. Pivoted to inferring imports from cross-file
+    references: any reference where target's defining File differs
+    from source File implies a static dependency, which is what
+    dead-imports doctor wants. Superset of pure <code>import</code>
+    statements (also catches inline uses of imported symbols), but
+    for the dead-imports semantic that's exactly right.
+  </li>
+  <li>
+    <strong>Label polish.</strong> Trailing SCIP descriptor cruft
+    (<code>.</code>, <code>()</code>, <code>().</code>) stripped for
+    labels. Erefs UNCHANGED — mutating them would break idempotency
+    across v1.1↔v1.2 ingest cycles without a rename migration.
+    Empty-display leaves (from scip_syms ending in <code>/</code>)
+    get labeled <code>scip (anonymous)</code>.
+  </li>
+</ul>
+<p>
+  Result: 329 File→imports→File edges on bza/frontend, and
+  <code>entity explore</code> now shows clean semantic labels.
+  Commit <code>0F6BC1F9</code>.
+</p>
+
+<h2>Three fallout bugs found + fixed along the way</h2>
+
+<h3>1. Scanner false positives (145 → 0)</h3>
+<div class="callout warn">
+  <span class="label">Symptom</span>
+  Every <code>templedb vcs status --refresh</code> reported ~50-60
+  files as "modified" with <code>staged_by_session_id=NULL</code>,
+  even though the workspace content matched DB current byte-for-byte.
+  Cleared them manually; they came back on next refresh.
+</div>
+<p>
+  Root cause: <code>_refresh_working_state</code> in
+  <code>src/cli/commands/vcs.py</code> passed
+  <code>project['repo_url']</code> to
+  <code>WorkingStateDetector</code>. For templedb, that's
+  <code>/home/zach/templeDB</code> (a legacy import path last touched
+  2026-08-17). But the operational checkout lives at
+  <code>~/.config/templedb/checkouts/templedb/</code>. Every file
+  whose content had drifted between the two directories produced
+  a spurious "modified" row on each scan.
+</p>
+<p>
+  <code>SyncManager.get_checkout_path()</code> already resolves the
+  right path (active checkout record → falls back to repo_url only
+  if none). One-line change routing <code>_refresh_working_state</code>
+  through it. Went from 145 spurious rows → 27 real drift rows on
+  the first scan after the fix. Commit <code>6D6D1B55</code>
+  (later repaired to include the actual code by <code>4537FDB3</code>).
+</p>
+
+<h3>2. Stale blobs in commits (FUSE→is_current propagation gap)</h3>
+<div class="callout warn">
+  <span class="label">Symptom</span>
+  <code>templedb publish run templedb</code> refused to materialize
+  because two just-committed commits' file blobs didn't match the
+  workspace. Commits F1D0C4CA (SCIP 1.0) and 6D6D1B55 (scanner fix)
+  claimed changes their actual stored blobs didn't contain.
+</div>
+<p>
+  Root cause: <code>Edit</code> tool through the FUSE mount wrote
+  new content to the workspace, but the FUSE→DB propagation didn't
+  update <code>file_contents.is_current</code> — it went into
+  <code>vcs_working_state</code> for session 41 (the fuse-auto
+  session) instead. Later <code>vcs add</code> hashed the pre-Edit
+  blob still in <code>is_current</code>, staging content that
+  matched the commit <em>message</em> but not the <em>intended
+  diff</em>.
+</p>
+<p>
+  Fix: <code>templedb file set --verify</code> for the two affected
+  files (updates <code>is_current</code> from workspace content),
+  then a fresh commit. Landed as <code>4537FDB3</code> — "actually
+  include SCIP wiring + scanner fix (F1D0C4CA/6D6D1B55 shipped
+  stale blobs)". <code>entity.py</code> escaped this class of bug
+  because it happened to have been file-set'd via a different flow
+  that did update is_current.
+</p>
+
+<h3>3. FUSE was dead code kept alive by a zombie</h3>
+<div class="callout warn">
+  <span class="label">Symptom</span>
+  Investigating the FUSE→is_current propagation bug turned up:
+  no <code>temple_fuse.py</code> in current source, no <code>mount</code>
+  CLI subcommand, no <code>fusepy</code> importers. But
+  <code>~/temple/templedb/</code> was mounted and writable.
+</div>
+<p>
+  Root cause: process 1643805 was still running <code>templedb mount
+  /home/zach/temple</code> from a nix store path
+  (<code>afchk35cb5nf3j37irbkpga6zw7md9n3</code>) that had been
+  garbage-collected long ago. It was serving BOTH
+  <code>~/temple</code> and <code>~/status</code> FUSE mounts with
+  the retired-11-days-ago FUSE code, complete with the write-path
+  propagation bug.
+</p>
+<p>
+  Retirement (per the 2026-08-29 report's Phase 2 recommendation
+  which had been half-completed): killed zombie process, unmounted
+  both paths, disabled + removed
+  <code>templedb-mount.service</code>, deleted the dead
+  <code>mount.enable</code>/<code>mount.path</code> scaffolding from
+  <code>homeManagerModule</code>, removed <code>fusepy</code> from
+  <code>pythonEnv</code> and <code>devShell</code>, removed
+  <code>Bash(fusermount:*)</code> from Claude Code permissions,
+  fixed the stale <code>src/temple_fuse.py</code> example in
+  <code>CLAUDE.md</code>. Commits <code>54D87C3A</code> and
+  <code>3006521C</code>.
+</p>
+<p>
+  Silver lining: the "FUSE Edit → is_current propagation bug" this
+  arc was originally chasing turned out to be a non-issue on the
+  current build. No live FUSE writer exists any more.
+</p>
+
+<h2>Three metacognition moments</h2>
+
+<h3>1. Question I should have asked once, asked twice</h3>
+<p>
+  Offered "npx" vs "add to system_config" for scip-typescript
+  packaging without first checking nixpkgs. User picked system_config
+  — then <code>nix eval nixpkgs#scip-typescript</code> showed it's
+  not packaged there. Had to re-ask with
+  <code>buildNpmPackage</code> / <code>mkYarnPackage</code> / npx
+  options. Then <em>during</em> the buildNpmPackage attempt discovered
+  scip-typescript actually uses yarn (no
+  <code>package-lock.json</code>), so pivoted to
+  <code>writeShellApplication</code>. Two forced pivots that
+  five minutes of upfront tooling verification would have avoided.
+</p>
+
+<h3>2. User course-correct: ownership matters</h3>
+<div class="callout">
+  <span class="label">User redirect (mid-run)</span>
+  <em>"also since templedb depends on scip can we make it a templedb
+  flake thing? as opposed to system wide?"</em>
+</div>
+<p>
+  Correct call — templedb is the consumer, templedb should own the
+  packaging. Undid the system_config edits, put
+  <code>nix/scip-typescript.nix</code> in templedb, wired into the
+  wrapper's <code>--prefix PATH</code> + devShell + packages output.
+  Anyone with templedb installed now gets scip capability for free;
+  no system_config surgery required for other users. Better
+  encapsulation, better handoff.
+</p>
+
+<h3>3. The publish-conflict was the hint</h3>
+<p>
+  If <code>publish run</code> hadn't done its checkout-vs-DB drift
+  check, the SCIP 1.0 and scanner-fix commits would have been pushed
+  to github with the wrong contents and nothing would have caught it
+  until someone ran the built binary and it didn't have scip-typescript
+  on PATH. The intent-ahead detection guardrail landed just yesterday
+  (commit E98CD602 in recap 6) is what surfaced the bug. Two
+  independent hygiene systems (publish drift check + intent-ahead
+  detection) caught the same class of bug from different angles.
+</p>
+
+<h2>Full commit sequence</h2>
+<pre>Session 8 commits pushed to main (bottom = earliest):
+
+0F6BC1F9  ingest scip 1.2: File→imports→File + label polish
+66838F85  ingest scip 1.1: Symbol→uses→Symbol edges from occurrences
+3006521C  docs: fix stale src/temple_fuse.py example in CLAUDE.md
+54D87C3A  flake: remove dead FUSE mount option + fusepy dep + fusermount permission
+4537FDB3  fix: actually include SCIP wiring + scanner fix (F1D0C4CA/6D6D1B55 shipped stale blobs)
+6D6D1B55  vcs status: scan the operational checkout, not project.repo_url
+F1D0C4CA  ingest scip 1.0: File→defines→Symbol adapter + templedb-owned indexer
+38D0929B  chore: delete 11 stale FUSE-write tmp artifacts</pre>
+
+<h2>Publish/rebuild rhythm</h2>
+<p>
+  Four full cycles of <code>templedb publish run templedb</code> →
+  <code>nix flake lock --update-input templedb</code> →
+  <code>sudo nixos-rebuild switch --flake .#zMothership2</code>.
+  Every cycle produced a fresh nixos-system generation, all activated
+  cleanly. templedb went from 0.7.0 with scip 1.0 → 0.7.0 with scip 1.2
+  live on the host with no reboots.
+</p>
+
+<h2>Cleanup batched in</h2>
+<ul>
+  <li>Killed 6 stale templedb processes (vibe/mcp/gui zombies from
+      Sep 3–4 running from garbage-collected store paths).</li>
+  <li>Restored 3 missing reports from DB → workspace (2026-09-03
+      handoff-semantics, proposed-schema, answers-to-open-questions).
+      They existed in DB current but not in workspace, so the scanner
+      was flagging them as "deleted".</li>
+  <li>Removed <code>TEST_SCRATCH.md</code> phantom (existed in
+      project_files with no content_blob).</li>
+  <li>~200 stale <code>vcs_working_state</code> rows cleared from
+      earlier sessions (chore commit <code>38D0929B</code> deleted
+      11 tmp files that were FUSE-Edit fallout).</li>
+</ul>
+
+<h2>Verification</h2>
+<pre>$ templedb --version
+TempleDB 0.7.0
+
+$ SITE=... grep "'scip':" .../entity.py | head -1
+'scip':    '1.2',    # 1.2 emits File→imports→File...
+
+$ templedb entity explore File/bza/frontend/lib/supabaseServerClient.ts
+  outbound (19): defines → __module__, YEAR_IN_SECONDS,
+                 supabaseCookieOptions, createSupabaseServerClient, ...
+  inbound (3):   imports ← middleware.ts, books/merge/route.ts,
+                          import/math-academy/route.ts
+
+$ templedb vcs status templedb --refresh
+   Added: 2 / Modified: 3 / Deleted: 20 / Unmodified: 722
+   (before scanner fix: 145 spurious rows; now all 25 are real drift)
+
+$ templedb ingest scip --project bza --subdir frontend  (idempotent rerun)
+✓ ingest scip: +0 symbols, +0 relations, 2 untracked</pre>
+
+<h2>State at end of session</h2>
+<ul>
+  <li>Python ingest still at 1.17 (untouched this session).</li>
+  <li>SCIP ingest at <strong>1.2</strong> (new: 1.0 → 1.1 → 1.2).</li>
+  <li>Doctor invariants: 14 green.</li>
+  <li>Fleet hygiene: 0/582 (unchanged; SCIP imports don't overlap the
+      python file set the doctor scans).</li>
+  <li>FUSE mounts: <strong>gone</strong>. No more zombie process.</li>
+  <li>vcs status scanner: <strong>fixed</strong>; reports real drift only.</li>
+  <li>templedb wrapper carries scip-typescript + scip on internal PATH
+      (no global pollution, no dev-mode required).</li>
+  <li>Nothing broken. Existing python ingest, doctor, reconcile,
+      handoff, publish, vcs commit — all still work.</li>
+</ul>
+
+<h2>Next up</h2>
+<ol>
+  <li><strong>CRSql fleet sync</strong> (item 1 in
+      <code>NEXT_SESSION_PICKUPS</code>) — the other big rock.
+      Prep report at
+      <code>reports/2026-09-05-crsql-prep-notes.html</code>.</li>
+  <li><strong>SCIP on a second language</strong> (scip-go / scip-python
+      / scip-rust). Adapter is already language-agnostic; just needs
+      another indexer wrapper. Small lift.</li>
+  <li><strong>The remaining 25 real drift items</strong> (uncommitted
+      DB writes, real removals not yet committed). Not urgent.</li>
+</ol>
+
+</body>
+</html>

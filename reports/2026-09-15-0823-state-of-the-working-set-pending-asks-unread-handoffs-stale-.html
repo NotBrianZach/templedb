@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>State of the working set — pending asks, unread handoffs, stale sessions, cleanup plan</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --pos: #7fd493;
+    --warn: #f0c674;
+    --neg: #f28c8c;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  ul, ol { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin: 0.25rem 0; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); font-weight: 600; }
+  .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<h1>State of the working set</h1>
+<p class="lede">
+  Snapshot of what's queued across TempleDB's five channels of accumulated
+  state — pending asks, handoff notes, real agent sessions, session sections
+  (findings/todos/questions), and the agent work log — as of
+  <strong>2026-09-15</strong>. Nothing here is on fire. Most of the "unread"
+  volume is tidiness debt (handoffs that self-superseded), not real backlog.
+  Two decision-pending asks in session <code>#282</code> are the only items
+  that actually gate forward motion.
+</p>
+
+<h2>TL;DR — what to do next</h2>
+
+<ol>
+  <li>
+    <strong>Answer or discard the two pending asks in session #282</strong>
+    (BookReader refactor scope, VPS/Windows Docker topology). They're 6
+    and 2 days old and are the only user-decision blockers in the whole
+    queue.
+  </li>
+  <li>
+    <strong>Ack handoffs <code>#4–#7</code> and <code>#9</code></strong>
+    (5 unread). All are announcements of fixes that landed and were
+    superseded by later handoffs or by observable behavior. One command
+    per: <code>templedb handoff ack &lt;id&gt;</code>.
+  </li>
+  <li>
+    <strong>Decide fate of session #283</strong>: interrupted 5 days ago
+    with a real goal ("templedb terminology cleanup after refactor").
+    Either resume it (<code>SPC a T A o 283</code>) or close it
+    (<code>C-c C-q</code> in the buffer).
+  </li>
+  <li>
+    <strong>Batch-close the 257 <code>fake</code>-provider test sessions</strong>
+    (see cleanup mechanics below). They pollute <code>templedb ai agent
+    sessions</code> to the point that real sessions get lost in the noise.
+  </li>
+  <li>
+    <strong>Bulk-close the 12 <code>waiting</code> August-era claude
+    sessions</strong> with zero activity in 2–4 weeks. If a thread was
+    important someone would have resumed it by now.
+  </li>
+</ol>
+
+<h2>Pending asks (2)</h2>
+
+<p>
+  Both live under session <code>#282</code> (bza thread). Both are
+  decision questions with pre-computed options — no code needed, just a
+  choice. Neither has a response recorded in <code>agent_pending_asks</code>.
+</p>
+
+<table class="matrix">
+  <tr><th>Ask ID</th><th>Age</th><th>Question</th></tr>
+  <tr>
+    <td class="num">c70ec066…</td>
+    <td class="warn num">2 days</td>
+    <td>
+      <strong>VPS → Windows Neko topology.</strong> Three routes on
+      offer: nginx+LE+Tailscale from Vultr; Cloudflare Tunnel from
+      Vultr (needs API-token scope fix); or Cloudflare Tunnel
+      straight from Windows (skip Vultr).<br>
+      <strong>Plus:</strong> Windows Docker setup —
+      Docker-Desktop-WSL2 / WSL2-Ubuntu-native / full Linux VM.
+    </td>
+  </tr>
+  <tr>
+    <td class="num">dc5480bf…</td>
+    <td class="warn num">6 days</td>
+    <td>
+      <strong>BookReader refactor scope.</strong> Four options: full
+      extraction (5+ hooks, ~200loc shell, hours of work, high regression
+      risk); helpers + 1–2 clean hooks (small win, low risk); only the
+      safe helpers; or defer entirely to a dedicated dev-server session.
+    </td>
+  </tr>
+</table>
+
+<div class="callout warn">
+  <span class="label">Why they're stuck</span>
+  Both were dispatched by the agent via <code>ask.question</code>,
+  successfully persisted, and never got a response written back.
+  The Emacs-side ask widget landed in commit <code>4B0AF958</code>
+  (per handoff #8), so the reception path works — these are just
+  awaiting your input in a session that isn't currently focused.
+</div>
+
+<p>To answer:</p>
+<pre># Open session 282 in the agent (loads any pending asks into the buffer)
+M-x templedb-agent-open RET 282 RET
+
+# Or discard both if the underlying decisions were made elsewhere:
+sqlite3 ~/.local/share/templedb/templedb.sqlite \
+  "UPDATE agent_pending_asks SET status='discarded', responded_at=datetime('now') \
+   WHERE status='pending';"</pre>
+
+<h2>Handoff notes (10 total, 6 unread)</h2>
+
+<table class="matrix">
+  <tr><th>#</th><th>State</th><th>Date</th><th>Subject</th></tr>
+  <tr><td>1</td><td class="warn">UNREAD</td><td>2026-09-03</td><td>phase 2.5 shipped</td></tr>
+  <tr><td>2</td><td class="pos">ACKED</td><td>2026-09-03</td><td>smoke test badge</td></tr>
+  <tr><td>3</td><td>READ</td><td>2026-09-04</td><td>Post-recap-4 handoff</td></tr>
+  <tr><td>4</td><td class="warn">UNREAD</td><td>2026-09-13</td><td>ClaudeCodeProvider argv fix — needs nix rebuild to take effect</td></tr>
+  <tr><td>5</td><td class="warn">UNREAD</td><td>2026-09-13</td><td>Session 282 freeze — three-part fix landed</td></tr>
+  <tr><td>6</td><td class="warn">UNREAD</td><td>2026-09-13</td><td>Message queue drain landed — full agent freeze fix set complete</td></tr>
+  <tr><td>7</td><td class="warn">UNREAD</td><td>2026-09-13</td><td>VCS session-pin landed — agent add+commit works across Bash calls</td></tr>
+  <tr><td>8</td><td>READ</td><td>2026-09-14</td><td>Ask-user inline widget + restored fixes shipped</td></tr>
+  <tr><td>9</td><td class="warn">UNREAD</td><td>2026-09-14</td><td>Two write-path bugs surfaced during today's GUI work</td></tr>
+  <tr><td>10</td><td>READ</td><td>2026-09-14</td><td>Write-path bugs from handoff #9 fixed in commit 734E01E0</td></tr>
+</table>
+
+<p>
+  <strong>The unreads self-supersede.</strong>
+  <code>#4</code> ("needs nix rebuild") was superseded by <code>#5</code>
+  (three-part fix landed), which was capped by <code>#6</code>
+  (message queue drain — "full agent freeze fix set is complete").
+  <code>#9</code> (two write-path bugs) was resolved by <code>#10</code>
+  (both fixed in commit 734E01E0). <code>#7</code> (VCS session-pin) is
+  a landed-feature announcement.
+</p>
+
+<p>
+  <strong>The only pre-Sept-13 unread is <code>#1</code></strong>
+  ("phase 2.5 shipped") from 2026-09-03. Given phase-2.5 has been
+  built on for 12+ days, presumably it's safe to ack.
+</p>
+
+<p>Cleanup:</p>
+<pre># One-liner to ack the 5 stale-but-superseded handoffs.
+for id in 1 4 5 7 9; do
+  templedb handoff ack $id --note "superseded by later handoff / observable behavior"
+done
+
+# #6 is the "capstone" of the agent-freeze fix cluster — worth reading first
+# to build the mental model for the actual current agent state:
+templedb handoff show 6
+
+# Then ack it and move on.
+templedb handoff ack 6</pre>
+
+<h2>Real agent sessions (8 active of 284)</h2>
+
+<div class="callout warn">
+  <span class="label">Correction</span>
+  An earlier draft of this report cited "47 fake + 3 claude-code"
+  sessions — that was the default 50-row limit on
+  <code>templedb --json ai agent sessions</code> biting me at inventory
+  time. Actual breakdown: <strong>257 fake</strong> (177 empty),
+  <strong>27 claude-code</strong> (10 waiting stale, 1 running,
+  5 interrupted, 10 empty <code>created</code>). This shortcoming is
+  now fixed via new <code>--limit</code>, <code>--min-msgs</code>,
+  <code>--recent-days</code>, <code>--provider</code>,
+  <code>--status</code> flags on the sessions CLI (intents #301–#303).
+</div>
+
+<p>
+  <code>agent_sessions</code> has 284 rows. Filter out the 47
+  <code>fake</code>-provider test sessions and the 234 empty
+  <code>created</code>-status sessions with zero runs, and you're
+  left with three that matter today:
+</p>
+
+<table class="matrix">
+  <tr><th>ID</th><th>Status</th><th>Runs/Msgs</th><th>Last active</th><th>Goal</th></tr>
+  <tr>
+    <td class="num">284</td>
+    <td class="pos">running</td>
+    <td class="num">15 / 30</td>
+    <td>now</td>
+    <td>This session (agent-close + rebuild-path hardening)</td>
+  </tr>
+  <tr>
+    <td class="num">282</td>
+    <td class="warn">waiting</td>
+    <td class="num">41 / 86</td>
+    <td>2026-09-14</td>
+    <td>bza deployment pipeline + BookReader refactor (holds both pending asks)</td>
+  </tr>
+  <tr>
+    <td class="num">283</td>
+    <td class="warn">interrupted</td>
+    <td class="num">8 / 16</td>
+    <td>2026-09-10</td>
+    <td>templedb terminology cleanup post-refactor ("temple agent still mentioned…")</td>
+  </tr>
+</table>
+
+<p>
+  Below these three, everything is at least two weeks stale:
+</p>
+
+<ul>
+  <li>
+    <strong>10 August-era claude sessions</strong> in
+    <code>waiting</code> status with 3–10 runs each. Titles range from
+    "hows it goin" (dev-check chatter) to real threads like "for
+    templedb we have a db schema where we store our content blobs" (#25
+    — an early FUSE-vs-DB design conversation, since resolved by
+    the ~2026-08-29 post-FUSE-editing report).
+  </li>
+  <li>
+    <strong>~10 empty <code>created</code> claude sessions</strong> from
+    August — never had a first message.
+  </li>
+  <li>
+    <strong>177 empty <code>created</code> fake sessions</strong> —
+    test-fixture leftovers from provider-testing runs.
+  </li>
+</ul>
+
+<div class="callout warn">
+  <span class="label">Non-issue but worth noting</span>
+  <code>templedb-agent-list</code> in Emacs doesn't currently filter
+  by provider or by staleness, so those 234 empty rows scroll past
+  every time. The <code>K</code> reap-stale key added this session
+  handles <em>process</em> orphans, not DB row cruft. A
+  <code>--status</code> / <code>--min-msgs</code> filter on the CLI
+  would go a long way; today the closest is
+  <code>templedb ai agent sessions --project &lt;slug&gt;</code>.
+</div>
+
+<h2>Session sections (findings, todos, open questions)</h2>
+
+<p>
+  104 rows in <code>agent_session_sections</code>. Almost all are
+  test-data noise from sessions <code>&lt;270</code>:
+</p>
+
+<table class="matrix">
+  <tr><th>Section</th><th>Count</th><th>Notes</th></tr>
+  <tr><td>todo</td><td class="num">55</td><td>All test data ("item 0", "item 1", "do it"). Zero real todos on live sessions.</td></tr>
+  <tr><td>findings</td><td class="num">36</td><td>All test data ("hello", "yo", "b"). Zero real findings on live sessions.</td></tr>
+  <tr><td>dynamic:Discoveries</td><td class="num">7</td><td>Test.</td></tr>
+  <tr><td>dynamic:Blockers</td><td class="num">2</td><td>Test.</td></tr>
+  <tr><td>dynamic:Live Demo</td><td class="num">2</td><td>Test.</td></tr>
+  <tr><td>open-questions</td><td class="num">2</td><td>Test.</td></tr>
+</table>
+
+<p>
+  <strong>None of the three live sessions (#282, #283, #284) has used
+  the findings/todo/question sections yet.</strong> This is a UX
+  finding in itself: the sections exist, the modeline badge exists,
+  the agent has MCP tools to write them, but the workflow habit hasn't
+  formed. Nothing to clean up here; the test data is old but harmless.
+</p>
+
+<h2>Agent work log (138 entries)</h2>
+
+<p>
+  Rolling audit of run completions. Recent (last 24h) is entirely
+  this session — 16 turns of home-rebuild + agent-close work,
+  cost-attributable via <code>templedb ai agent log</code>. Nothing
+  needs cleanup; the log is append-only and self-maintaining.
+</p>
+
+<p>
+  The pre-Sept-15 tail is dominated by the 2026-09-13 bza reprovisioning
+  thread (session #282 — some entries marked <code>failed</code>,
+  most <code>completed</code>) and the 2026-09-13 agent-freeze
+  debugging cluster.
+</p>
+
+<h2>Cross-references: reports and commits</h2>
+
+<p>
+  Handoffs <code>#5–#10</code> and the recent agent-freeze work all
+  reference commits that landed. To connect the dots without leaving
+  the CLI:
+</p>
+<pre># List Report ↔ Commit links (auto-detected via commit-message parsing):
+templedb report links
+
+# Recent commits from the freeze-fix cluster:
+templedb vcs log templedb --limit 20 | grep -iE 'freeze|queue|argv|session-pin'
+
+# All 39 reports (post today, 41):
+templedb reports list | head -20</pre>
+
+<h2>Cleanup mechanics — one-shot commands</h2>
+
+<h3>Ack all superseded handoffs</h3>
+<pre>for id in 1 4 5 7 9; do
+  templedb handoff ack $id --note "superseded (see later handoffs / observable behavior)"
+done
+templedb handoff show 6 && templedb handoff ack 6</pre>
+
+<h3>Discard the two stale asks (only if answered elsewhere)</h3>
+<pre>sqlite3 ~/.local/share/templedb/templedb.sqlite &lt;&lt;'SQL'
+UPDATE agent_pending_asks
+   SET status='discarded', responded_at=datetime('now'),
+       response='{"discarded":"decided out-of-band"}'
+ WHERE status='pending';
+SQL</pre>
+
+<h3>Batch-close the 47 fake-provider test sessions</h3>
+<pre>sqlite3 ~/.local/share/templedb/templedb.sqlite &lt;&lt;'SQL'
+UPDATE agent_sessions
+   SET status='closed', updated_at=datetime('now')
+ WHERE provider_id = (SELECT id FROM agent_providers WHERE name='fake')
+   AND status IN ('running','waiting','created');
+SQL</pre>
+
+<h3>Bulk-close August-era stale claude sessions</h3>
+<pre>sqlite3 ~/.local/share/templedb/templedb.sqlite &lt;&lt;'SQL'
+UPDATE agent_sessions
+   SET status='closed', updated_at=datetime('now')
+ WHERE provider_id = (SELECT id FROM agent_providers WHERE name='claude-code')
+   AND status = 'waiting'
+   AND datetime(updated_at) &lt; datetime('now','-14 days');
+SQL</pre>
+
+<div class="callout warn">
+  <span class="label">Caveat</span>
+  Direct SQL bypasses whatever the service layer does on session
+  close (per handoff #6-era refactor, service.close_session is
+  in-memory-only per-instance — no service-side side-effects on
+  status change). So SQL is fine here, but if <code>close_session</code>
+  grows real invariants later, migrate to a CLI wrapper.
+</div>
+
+<h2>Next-actions summary</h2>
+
+<table class="matrix">
+  <tr><th>Priority</th><th>Action</th><th>Cost</th></tr>
+  <tr><td class="neg">P0</td><td>Answer or discard pending asks in session #282</td><td>15 min if answering; 30s if discarding</td></tr>
+  <tr><td class="warn">P1</td><td>Ack handoffs #1, #4, #5, #6, #7, #9</td><td>1 min</td></tr>
+  <tr><td class="warn">P1</td><td>Decide fate of session #283 (resume or close)</td><td>1 min triage; hours if resuming the terminology cleanup work</td></tr>
+  <tr><td>P2</td><td>Batch-close 257 fake + 10 stale claude sessions</td><td>10s SQL</td></tr>
+  <tr><td>P2</td><td>Add <code>--min-msgs</code> / <code>--status</code> filter to <code>ai agent sessions</code></td><td>~30 lines in cli/commands/agent.py</td></tr>
+  <tr><td>P3</td><td>Consider surfacing per-session pending-ask count in <code>agent sessions</code> output</td><td>~10 lines (join agent_pending_asks)</td></tr>
+</table>
+
+<h2>Load-bearing tables</h2>
+
+<ul>
+  <li><code>agent_pending_asks</code> — <code>(ask_id, session_id, kind, payload, status, response, created_at, responded_at, dispatched_at)</code>. No <code>id</code> column; keyed by <code>ask_id</code>.</li>
+  <li><code>handoff_notes</code> — <code>id, subject, body, tags, ref_report, ref_commit, ref_file, created_at, read_at, acked_at</code>. <code>--unread</code> = <code>acked_at IS NULL</code>.</li>
+  <li><code>agent_sessions</code> — 284 rows; filter with <code>provider_id=(SELECT id FROM agent_providers WHERE name='claude-code')</code> to skip fakes.</li>
+  <li><code>agent_session_notes</code> — one row per session, columns <code>goal_org / notes_org / scratch_org</code>. Written on kill-buffer / idle from the agent's Emacs buffer.</li>
+  <li><code>agent_session_sections</code> — findings/todos/questions/dynamic sections keyed by <code>(session_id, section, entry_id)</code> with JSON <code>entry_json</code> blob.</li>
+  <li><code>agent_work_log</code> — 138-row rolling audit of run completions.</li>
+</ul>
+
+<h2>Sessions CLI improvements (landed this pass)</h2>
+
+<p>
+  New flags on <code>templedb ai agent sessions</code> and matching
+  changes down the stack:
+</p>
+
+<table class="matrix">
+  <tr><th>Flag</th><th>Effect</th></tr>
+  <tr><td><code>--status STATUS</code></td><td>Filter by running/waiting/interrupted/created/closed</td></tr>
+  <tr><td><code>--provider NAME</code></td><td>Filter by provider (e.g. <code>--provider claude-code</code> to hide fakes)</td></tr>
+  <tr><td><code>--min-msgs N</code></td><td>Only sessions with ≥ N messages (skip empty <code>created</code> shells)</td></tr>
+  <tr><td><code>--recent-days N</code></td><td>Only sessions updated within the last N days</td></tr>
+  <tr><td><code>--limit N</code></td><td>Row cap (default 50 — was previously silently truncating)</td></tr>
+</table>
+
+<p>
+  Output now includes <code>msg_count</code> and <code>pending_asks</code>
+  columns (both text and JSON modes), so stuck asks are visible without
+  opening each session. Store query uses LEFT JOIN subqueries against
+  <code>agent_messages</code> and <code>agent_pending_asks</code> —
+  one round trip regardless of session count.
+</p>
+
+<p>Example — a workflow to find sessions worth attention:</p>
+<pre>templedb ai agent sessions --provider claude-code --min-msgs 2 --recent-days 30
+templedb ai agent sessions --status waiting        # any provider, waiting only
+templedb --json ai agent sessions --limit 500 | jq '.[] | select(.pending_asks &gt; 0)'</pre>
+
+<h2>Placeholder (unused)</h2>
+<ul>
+</ul>
+
+</body>
+</html>

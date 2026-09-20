@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 7: SCIP thin slice — end-to-end on bza/frontend</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); font-weight: 600; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+  .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<h1>Session recap 7: SCIP thin slice — end-to-end on bza/frontend</h1>
+<p class="lede">
+  Picked up item 2 from <code>docs/NEXT_SESSION_PICKUPS.md</code>:
+  bridge the code-intelligence graph to non-Python languages via SCIP.
+  Landed <strong>+12,428 TypeScript Symbol entities</strong> in the graph
+  from bza/frontend, indexed by scip-typescript, ingested by a new
+  <code>templedb ingest scip</code> adapter. Python graph totally
+  untouched (4,531 python symbols still there). Two mid-session
+  pivots landed cleaner scaffolding than the original plan.
+</p>
+
+<h2>What shipped</h2>
+
+<div class="callout win">
+  <span class="label">End-to-end verified</span>
+  <code>PATH=... TEMPLEDB_DEV_MODE=1 templedb ingest scip
+  --project bza --subdir frontend</code>
+  &rarr; <code>&check; ingest scip: +12428 symbols, +12428 relations,
+  2 untracked</code>. Idempotent (rerun gives +0). Python symbols
+  untouched (verified via <code>source_authority</code> filter).
+</div>
+
+<h3>1. <code>_ingest_scip</code> adapter (thin slice v1.0)</h3>
+<p>
+  New method in <code>src/cli/commands/entity.py</code>, ~245 lines.
+  Shells out to <code>scip-typescript index</code>, pipes through
+  <code>scip print --json</code>, walks
+  <code>Index.documents[*].symbols[]</code>, emits
+  <strong>File &rarr; defines &rarr; Symbol</strong>. Per-file
+  <code>__module__</code> synthetic mirrored from python. Prunes
+  scoped to <code>source_authority='scip-typescript'</code> so
+  python's edges are safe. Does not re-upsert File entities
+  (git provenance preserved).
+</p>
+
+<h3>2. CLI wiring</h3>
+<pre>templedb ingest scip --project bza --subdir frontend
+templedb ingest scip --project bza --scip-index /path/to/index.scip  # reuse existing index</pre>
+<p>
+  <code>scip</code> added to <code>choices</code> + adapter dispatch
+  dict. Three new args: <code>--project</code> (required),
+  <code>--subdir</code>, <code>--scip-index</code>. Not added to
+  <code>_ingest_all</code> (needs required <code>--project</code>).
+  <code>_ADAPTER_VERSIONS['scip'] = '1.0'</code>.
+</p>
+
+<h3>3. scip-typescript in templedb's flake (not system_config)</h3>
+<p>
+  Original plan: package in <code>system_config</code> via
+  <code>buildNpmPackage</code>. Mid-session user redirect: <em>"since
+  templedb depends on scip can we make it a templedb flake thing?
+  as opposed to system wide?"</em>. Correct call &mdash; the tool that
+  needs it should own the packaging.
+</p>
+<p>
+  New file: <code>nix/scip-typescript.nix</code> in templedb.
+  Wired three places in templedb's <code>flake.nix</code>:
+</p>
+<ul>
+  <li><strong>Wrapper PATH prefix</strong>: same
+      <code>--prefix PATH</code> line that already adds swi-prolog
+      now also adds scip-typescript's <code>bin/</code> and
+      <code>pkgs.scip</code>'s <code>bin/</code>. No global PATH
+      pollution; only available when running through the templedb
+      wrapper.</li>
+  <li><strong>packages output</strong>:
+      <code>packages.scip-typescript</code> so
+      <code>nix build .#scip-typescript</code> works for
+      hash re-derivation later.</li>
+  <li><strong>devShell</strong>: added to
+      <code>devShells.default</code> so
+      <code>nix develop</code> gets it on PATH (dev-mode ingest
+      bypasses the nix wrapper).</li>
+</ul>
+
+<h3>4. writeShellApplication over buildNpmPackage</h3>
+<p>
+  <code>buildNpmPackage</code> failed: scip-typescript uses yarn, not
+  npm (no <code>package-lock.json</code>). Considered
+  <code>mkYarnPackage</code> (correct but adds two more hashes to
+  hunt); shipped <code>writeShellApplication</code> wrapping
+  <code>npx --yes @sourcegraph/scip-typescript@0.4.0</code>.
+  Trade-off documented at the top of the file: not fully hermetic
+  (first run fetches from npm cache), but zero hash management,
+  deterministic version pin, works today. If hermeticity matters
+  later, migrate to <code>mkYarnPackage</code> &mdash; upstream source
+  hash <code>sha256-VKzNiazF+TtlvmXNCIEJbhsuNfnL2c8FslnVFvydXs8=</code>
+  is preserved in the file's header comment.
+</p>
+
+<h2>Two mid-session pivots that changed the shape</h2>
+
+<h3>Pivot 1: system_config &rarr; templedb flake</h3>
+<div class="callout">
+  <span class="label">User redirect (mid-run)</span>
+  <em>"also since templedb depends on scip can we make it a templedb
+  flake thing? as opposed to system wide?"</em>
+</div>
+<p>
+  Cleaner ownership: templedb is the consumer, templedb packages the
+  dependency. Anyone with templedb installed gets scip capability by
+  default; no system_config edits required for other users. Undid
+  the initial <code>scip</code> addition to
+  <code>configuration.nix</code>'s <code>systemPackages</code> and
+  staged deletion of <code>system_config/scip-typescript.nix</code>.
+</p>
+
+<h3>Pivot 2: buildNpmPackage &rarr; writeShellApplication</h3>
+<p>
+  Discovered upstream uses yarn only after the first
+  <code>nix-build</code> attempt. buildNpmPackage needs
+  <code>package-lock.json</code>; the yarn.lock is what actually
+  ships. mkYarnPackage would work but adds complexity. Chose the
+  smallest solution that unblocks today (writeShellApplication +
+  npx) with a clear escape hatch for later hermetic packaging.
+</p>
+
+<h2>Debugging highlights</h2>
+
+<h3>SCIP JSON uses snake_case, not camelCase</h3>
+<p>
+  First bza/frontend ingest reported <code>+0 symbols, 154 untracked</code>.
+  Diagnosis: <code>scip print --json</code> emits
+  <code>relative_path</code>, <code>display_name</code>,
+  <code>symbol_roles</code>. Adapter was looking for camelCase
+  (<code>relativePath</code>, <code>displayName</code>). Fixed in
+  the field. Next run: <strong>+12,428 symbols.</strong>
+</p>
+
+<h3>display_name is empty for every scip-typescript@0.4.0 symbol</h3>
+<p>
+  After fixing the snake_case bug, verified that <code>display_name</code>
+  is populated for 0 of 12,398 emitted symbols. Labels all come from
+  the fallback <code>scip_sym.rsplit('/', 1)[-1]</code> path. So the
+  labels look like <code>createSupabaseServerClient().</code> (with
+  the trailing SCIP descriptor suffix) instead of the cleaner
+  <code>createSupabaseServerClient</code>. Cosmetic; refine in v1.1
+  by stripping trailing <code>().</code> and <code>.</code>. No
+  data-integrity impact.
+</p>
+
+<h3>FUSE default view vs. checkout diverge silently</h3>
+<div class="callout warn">
+  <span class="label">Reflection</span>
+  <code>templedb file set --verify</code> writes to
+  <code>vcs_working_state</code> and mirrors to the checkout dir.
+  The FUSE mount's default view uses <code>file_contents.is_current</code>,
+  which <em>doesn't</em> update on <code>file set</code>. Wasted a
+  minute chasing "why is nix-build seeing my old buildNpmPackage
+  code?" &mdash; because the FUSE view served the old <em>current</em>
+  blob while the checkout had the new <em>working</em> blob.
+  <br><br>Corollary for tool-driven work: read the checkout, not the
+  FUSE mount, when validating in-session <code>file set</code> edits.
+</div>
+
+<h3>Session forking defeats intent tracking</h3>
+<p>
+  <code>templedb vcs status</code> at end-of-session showed my edits
+  as "Staged in other sessions" &mdash; each Bash tool subprocess forked
+  a new session leader, so my <code>file set</code>s scattered across
+  ~5 sessions. Known issue per recap 6 (added <code>vcs session gc</code>
+  as mitigation). Downstream effect: I couldn't cleanly stage just
+  my SCIP-related files via <code>vcs add</code> because they're
+  owned by other sessions. Worked around by testing via dev-mode +
+  in-memory checkout paths, deferring the git publish.
+</p>
+
+<h2>What the SCIP data looks like</h2>
+
+<pre>SELECT COUNT(*), source_authority FROM entities WHERE kind='Symbol'
+  GROUP BY source_authority;
+  4531   python              (unchanged — no regression)
+ 12428   scip-typescript     (new)
+
+SELECT external_ref FROM entities WHERE kind='Symbol'
+   AND source_authority='scip-typescript' LIMIT 4:
+  bza:frontend/lib/supabaseServerClient.ts:__module__
+  bza:frontend/lib/supabaseServerClient.ts:YEAR_IN_SECONDS.
+  bza:frontend/lib/supabaseServerClient.ts:createSupabaseServerClient().
+  bza:frontend/lib/supabaseServerClient.ts:local 2</pre>
+
+<p>
+  152 of 154 SCIP-emitted documents matched templedb File entities.
+  The 2 "untracked" are stubs / generated files templedb doesn't
+  track (probably <code>next-env.d.ts</code>-style noise).
+</p>
+
+<h2>What's still needed to fully activate</h2>
+
+<ol>
+  <li><strong>Publish templedb</strong>:
+      <code>templedb publish run templedb -m "SCIP ingest v1.0 +
+      scip-typescript packaging"</code>. Materializes DB &rarr; git so
+      the flake build sees <code>nix/scip-typescript.nix</code> and
+      the updated <code>flake.nix</code>. <em>Warning</em>: this
+      session's <code>vcs status</code> also shows 65 modified +
+      89 deleted files from prior sessions and staged-elsewhere
+      changes. Review with <code>templedb vcs status templedb</code>
+      first; a sweeping publish would fold all of that in.</li>
+  <li><strong>Home-manager switch</strong>: rebuilds the templedb
+      wrapper with scip-typescript + scip on its internal PATH.
+      After that, no <code>PATH=...</code> prefix needed &mdash;
+      <code>templedb ingest scip ...</code> just works.</li>
+  <li><strong>Optional: commit the system_config revert</strong>:
+      <code>scip-typescript.nix</code> is staged for deletion in
+      system_config, <code>configuration.nix</code>'s
+      <code>systemPackages</code> revert is uncommitted. Neither
+      applies until a system_config commit + <code>nixos-rebuild
+      switch</code>.</li>
+</ol>
+
+<h2>What did NOT get done</h2>
+
+<table class="matrix">
+  <tr><th>Item</th><th>Why</th></tr>
+  <tr>
+    <td>calls / uses / inherits edges for TS</td>
+    <td>Explicit v1.0 scope. Requires walking
+        <code>Occurrence.symbol_roles</code> bitfields.
+        Tracked as v1.1.</td>
+  </tr>
+  <tr>
+    <td>dead-imports SQL extension for TS</td>
+    <td>Blocked on v1.1 above. Bridging today would over-flag every
+        TS import.</td>
+  </tr>
+  <tr>
+    <td>Cleaner Symbol labels</td>
+    <td><code>scip-typescript@0.4.0</code> doesn't populate
+        <code>display_name</code>, so labels carry SCIP descriptor
+        cruft (<code>createSupabaseServerClient().</code>). Strip
+        trailing punctuation in v1.1.</td>
+  </tr>
+  <tr>
+    <td>Auto-detect subdir from package.json</td>
+    <td>User passes <code>--subdir frontend</code> manually. Fine
+        for one project; add heuristic if multiple TS projects land.</td>
+  </tr>
+  <tr>
+    <td>Other-language SCIP indexers</td>
+    <td>Same adapter works &mdash; just add another
+        <code>writeShellApplication</code> wrapper (or
+        proper mkYarnPackage) for scip-go / scip-java / scip-rust.</td>
+  </tr>
+</table>
+
+<h2>Files touched</h2>
+<pre>M  templedb        src/cli/commands/entity.py           +245 lines
+M  templedb        flake.nix                             +14 lines
+A  templedb        nix/scip-typescript.nix               +43 lines
+A  templedb        reports/2026-09-05-1200-session-recap-7-*.html
+M  system_config   configuration.nix                     no-op (reverted +7 line addition)
+D  system_config   scip-typescript.nix                   staged for deletion</pre>
+
+<h2>Verification</h2>
+<pre>$ python3 -c "import ast; ast.parse(open(entity.py).read())"
+parse OK
+
+$ nix build .#scip-typescript      (via nix-build -E; same shape)
+/nix/store/99bj4kr3d587hwz5zp6qzmw1w97qgxqf-scip-typescript
+
+$ /nix/store/99b.../bin/scip-typescript --version
+0.4.0
+
+$ TEMPLEDB_DEV_MODE=1 templedb ingest scip --project bza --subdir frontend
+✓ ingest scip: +12428 symbols, +12428 relations, 2 untracked
+
+$ TEMPLEDB_DEV_MODE=1 templedb ingest scip ... (rerun — idempotent)
+✓ ingest scip: +0 symbols, +0 relations, 2 untracked
+
+$ SELECT count(*) FROM entities WHERE source_authority='python';
+4531   (unchanged — no regression)</pre>
+
+<h2>State at end of session</h2>
+<ul>
+  <li>Python ingest still at <strong>1.17</strong> (untouched).</li>
+  <li>SCIP ingest at <strong>1.0</strong> (new, working end-to-end).</li>
+  <li>Adapter dispatch: <code>{git, agent, intent, reports, nix,
+      deploy, python, <strong>scip</strong>}</code>.</li>
+  <li>Doctor invariants: 14 green (unchanged).</li>
+  <li>Fleet hygiene: 0/582 (unchanged &mdash; SCIP doesn't emit
+      import edges yet).</li>
+  <li>SCIP-authored entities in graph: <strong>12,428</strong>.</li>
+  <li>Python-authored entities in graph: <strong>4,531</strong>
+      (unchanged).</li>
+  <li>templedb wrapper not yet rebuilt with scip on PATH &mdash;
+      user activates via publish + home-manager switch.</li>
+</ul>
+
+</body>
+</html>

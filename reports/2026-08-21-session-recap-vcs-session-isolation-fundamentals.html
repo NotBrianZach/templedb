@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap &mdash; VCS session isolation, the fundamentals fix</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.4rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.2rem;
+  }
+  h3 {
+    color: #b0b0d0; font-size: 0.95rem; margin: 1.5rem 0 0.4rem;
+    display: flex; align-items: baseline; gap: 0.6rem;
+  }
+  h3 .tag {
+    color: var(--muted); font-size: 0.7rem; font-weight: 400;
+    text-transform: uppercase; letter-spacing: 0.08em; margin-left: auto;
+  }
+  h3 .tag.win { color: var(--pos); }
+  h3 .tag.miss { color: var(--neg); }
+  h3 .tag.watch { color: var(--warn); }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.94rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.7rem 1.05rem; margin: 1.1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.miss { border-left-color: var(--neg); }
+  .callout.watch { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.miss .label { color: var(--neg); }
+  .callout.watch .label { color: var(--warn); }
+  .ledger {
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 0.7rem 1rem; margin: 1.1rem 0; border-radius: 4px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.7;
+  }
+  .ledger .commit { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<h1>Session recap &mdash; VCS session isolation, the fundamentals fix</h1>
+<p class="lede">
+  Second half of a two-request session. User asked
+  <em>&ldquo;wouldn&rsquo;t it be nice if different agents had
+  different staging areas&rdquo;</em> after I noted a near-miss where
+  <code>templedb vcs commit</code> almost swept another agent&rsquo;s
+  <code>vibe.py</code> stage into my org-render reconciliation commit.
+  Answered by adding session-scoped staging to TempleDB&rsquo;s VCS in
+  five phases (0 &rarr; 5), plus an investigation report for a related
+  memory-noted regression I couldn&rsquo;t reproduce. Six commits, one
+  design report, one investigation report, 11 new passing tests.
+</p>
+
+<div class="ledger">
+<span class="commit">A6615A35</span>  templedb  : design report &mdash; session-scoped VCS staging<br>
+<span class="commit">E6DCDE39</span>  templedb  : Phase 1 &mdash; schema, service, session-aware commit<br>
+<span class="commit">C032F453</span>  templedb  : Phase 2 &mdash; session CLI, --all view, refresh preservation<br>
+<span class="commit">C14A68FF</span>  templedb  : Phase 3+3.5 &mdash; regression investigation + shell-workflow session reuse<br>
+<span class="commit">7679C883</span>  templedb  : Phase 4 &mdash; tests/vcs/test_sessions.py (11 tests)<br>
+<span class="commit">(pending)</span>  templedb  : Phase 5 &mdash; docs + this recap
+</div>
+
+<h2>What happened</h2>
+
+<p>
+  Started with the user&rsquo;s musing on per-agent staging. Presented
+  two directions: a minimal <code>vcs commit -- &lt;paths&gt;</code>
+  filter, or a proper session concept. User picked the deeper
+  &ldquo;fix the fundamentals&rdquo; path, and specifically requested
+  design-doc-first.
+</p>
+
+<p>
+  Wrote the design report at
+  <code>reports/2026-08-20-session-scoped-vcs-staging-design.html</code>
+  before touching any code. Design covered: the failure mode
+  (near-miss with vibe.py), the current schema state (found the
+  <code>vcs_staging</code> table with unused <code>staged_by</code>
+  column already sitting in the schema file, from a v1 design that got
+  consolidated away in archived migration 011), four alternatives
+  (do-nothing / path-filter / env-var author / session-scoped), and a
+  recommendation.
+</p>
+
+<p>
+  Then executed in phases with a commit at the end of each. Phase 3
+  wasn&rsquo;t the vibe.py fix &mdash; it was investigating the
+  memory-noted <em>&ldquo;vcs commit reverts file set writes&rdquo;</em>
+  regression. Couldn&rsquo;t repro after four scenarios. But while
+  setting up the repro, I discovered a real bug I&rsquo;d
+  <em>introduced</em> in Phase 1+2: sequential shell invocations of
+  <code>templedb</code> each create their own implicit session, so
+  <code>add</code>&rsquo;s file lands in session A and <code>commit</code>
+  runs in session B and can&rsquo;t see it. Added Phase 3.5 to fix it
+  via <code>(author, host, ppid)</code> lookup, where <code>ppid</code>
+  is the shell PID (stable across separate templedb invocations from
+  the same shell).
+</p>
+
+<p>
+  Phase 4 (tests) hit a real infrastructure discovery: the fresh-DB
+  path in <code>Migrator</code> applies <code>schema.sql</code> and
+  marks all numbered migrations as applied without running them &mdash;
+  and <code>schema.sql</code> is frozen at an older point, so
+  everything from migration 075 onwards (nine migrations!) is
+  <em>marked applied but never executed</em> on a fresh install. My
+  test fixture had to bypass <code>Migrator</code> and apply schema.sql
+  + 082 directly. This is a pre-existing latent bug in TempleDB and
+  worth naming.
+</p>
+
+<h2>What I noticed about my process</h2>
+
+<h3><span>Design-report-first pattern kept paying off</span> <span class="tag win">keep doing</span></h3>
+<p>
+  Third session in a row where I wrote a design report before
+  implementation. Each phase committed separately after that. Reviewing
+  <code>git log --oneline</code> now shows a clean narrative:
+  <em>design report &rarr; schema &rarr; UI &rarr; discovered-bug fix
+  &rarr; tests &rarr; docs</em>. If any phase turns out to be wrong,
+  revert is one commit. Compare to how I&rsquo;d have done this two
+  months ago: one 12-file &ldquo;add session scoping&rdquo; PR that
+  couldn&rsquo;t be pulled apart.
+</p>
+
+<h3><span>Discovered a self-inflicted bug while investigating another one</span> <span class="tag win">keep doing</span></h3>
+<p>
+  The shell-workflow session bug (Phase 3.5) was invisible to me until
+  I tried to set up the regression repro and hit &ldquo;No changes
+  staged for commit in this session&rdquo; on a workflow I&rsquo;d
+  smoke-tested successfully in Phase 1. What was different: Phase 1
+  smoke-tests used <code>TEMPLEDB_SESSION_ID=&lt;n&gt;</code> explicitly.
+  My repro attempt didn&rsquo;t. So the ppid-reuse path never got
+  exercised until I stopped setting the env var.
+</p>
+<div class="callout win">
+  <span class="label">Rule to keep</span>
+  Smoke tests that always use explicit env vars can hide bugs in the
+  implicit path. When feasible, do a &ldquo;bare-bones what would a
+  human do&rdquo; test with all env vars unset before shipping.
+</div>
+
+<h3><span>Cannot-reproduce is a valid investigation outcome</span> <span class="tag win">keep doing</span></h3>
+<p>
+  Four scenarios attempted, none reverted. Wrote the investigation
+  report honestly (&ldquo;<em>cannot reproduce</em>&rdquo;), documented
+  why my original hypothesis was wrong once I read the code, and listed
+  what would still be worth verifying. Didn&rsquo;t force a fix onto
+  something that wasn&rsquo;t broken in front of me. The user&rsquo;s
+  guidance (&ldquo;design report + defer fix if non-trivial&rdquo;) made
+  this the right shape &mdash; if I&rsquo;d chosen &ldquo;fix no matter
+  what,&rdquo; I&rsquo;d have spent hours chasing a phantom.
+</p>
+
+<h3><span>Bash-tool shell variance masked the ppid fix at first</span> <span class="tag watch">notice</span></h3>
+<p>
+  My first attempt to verify the Phase 3.5 fix looked like it didn&rsquo;t
+  work: each Bash tool call I made returned a different session. Turned
+  out each Bash invocation spawns a fresh shell, so PPID differs
+  across tool calls. Real interactive users are in one shell, so PPID
+  stays stable and the fix works. Confirmed by chaining commands in
+  one <code>bash -c '…'</code>. Worth naming: the harness&rsquo;s
+  shell-per-call model makes ppid-based tests need one Bash call.
+</p>
+
+<h3><span>Went further into the schema than I&rsquo;d planned</span> <span class="tag watch">notice</span></h3>
+<p>
+  Phase 4 uncovered that <code>Migrator</code>&rsquo;s fresh-DB path is
+  broken (9 migrations skip execution on fresh installs). I noted it
+  as an observation but didn&rsquo;t fix it &mdash; it&rsquo;s
+  genuinely out of scope for &ldquo;add session isolation.&rdquo; But
+  I could easily have gotten distracted chasing that. Held to the
+  original phased scope, put the observation into this recap&rsquo;s
+  followups, moved on.
+</p>
+
+<h3><span>Two overlong analyses in the prompt space</span> <span class="tag miss">didn&rsquo;t</span></h3>
+<p>
+  The 5-decision recap of the design report&rsquo;s implicit choices
+  before starting Phase 1, and the 4-row comparison table before
+  proposing the reconciliation direction on the previous half of the
+  session &mdash; both were more thorough than the user needed to say
+  &ldquo;go&rdquo;. Last recap called this out; I did it again in
+  slightly-milder form. Third instance would be a pattern.
+</p>
+
+<h3><span>The vibe.py near-miss became the motivating story</span> <span class="tag win">keep doing</span></h3>
+<p>
+  The concrete incident from the previous half of the session
+  (accidentally almost sweeping another agent&rsquo;s file into my
+  commit) drove the whole shape of the design report and every commit
+  message. Made the &ldquo;why&rdquo; unambiguous. Contrast with
+  writing a session recap that abstractly names &ldquo;multi-agent
+  isolation would be nice&rdquo; &mdash; concrete near-misses are
+  more persuasive.
+</p>
+
+<h2>Open threads</h2>
+
+<ul>
+  <li>
+    <strong><code>Migrator</code> fresh-DB path marks unrun migrations
+    as applied.</strong> If you spin up a fresh templedb DB today,
+    migrations 075-082 are recorded as &ldquo;applied via schema.sql&rdquo;
+    but their DDL never ran. That means <code>vcs_sessions</code>,
+    <code>ast_builds</code>, <code>nix_store_paths</code>, and six
+    others don&rsquo;t exist on fresh installs but the DB thinks they
+    do. Real bug. Fix: either regenerate <code>schema.sql</code> from
+    current state, or make Migrator actually run the numbered
+    migrations after applying schema.sql (safer for gapped versions).
+  </li>
+  <li>
+    <strong>Old <code>staged BOOLEAN</code> column still present.</strong>
+    Phase 1 kept it as a compat mirror maintained by service code. A
+    follow-up migration should drop it once nothing reads it. Grep for
+    <code>ws.staged =</code> across the codebase before dropping.
+  </li>
+  <li>
+    <strong>Memory-noted regression status.</strong> Cannot reproduce
+    in dev-mode or on deployed 0.7.0 with either checkout or FUSE
+    write paths. The <code>--verify</code> flag on <code>file set</code>
+    might be masking it; the highest-value remaining test would be a
+    non-<code>--verify</code> <code>file set</code> against templedb
+    itself (a project with a real <code>repo_url</code>) and a commit
+    without any refresh in between.
+  </li>
+  <li>
+    <strong>Session cleanup story.</strong> Sessions accumulate. There
+    is no <code>vcs session prune</code> or <code>--stale</code> flag
+    yet. Non-critical because listing still works, but if a system
+    runs long enough the list gets noisy.
+  </li>
+</ul>
+
+<h2>Concrete followups (in decreasing expected value)</h2>
+
+<ol>
+  <li>
+    <strong>Fix the Migrator fresh-DB bug.</strong> Highest impact
+    &mdash; every new templedb install is silently broken relative to
+    the migration history. This is a real production bug hiding in
+    infrastructure that no one exercises often.
+  </li>
+  <li>
+    <strong>Regenerate <code>migrations/schema.sql</code> from the
+    current live schema.</strong> Even if Migrator gets fixed
+    independently, the frozen schema.sql is misleading for anyone
+    reading it to understand the schema shape. Should be a periodic
+    chore.
+  </li>
+  <li>
+    <strong>Drop <code>vcs_working_state.staged BOOLEAN</code>.</strong>
+    Once verified nothing still reads it, remove via a small migration
+    083.
+  </li>
+  <li>
+    <strong>Do the non-<code>--verify</code> revert test</strong> on
+    templedb itself. If revert happens, the <code>--verify</code> flag
+    is a workaround not a fix; if it doesn&rsquo;t, the memory note
+    can be safely updated to <em>&ldquo;historical, not currently
+    reproducible&rdquo;</em>.
+  </li>
+  <li>
+    <strong>Add <code>vcs session prune --older-than 30d</code>.</strong>
+    Small feature, keeps the list clean over time.
+  </li>
+</ol>
+
+<h2>Check against prior recap&rsquo;s followups</h2>
+
+<p>
+  Prior recap (this session&rsquo;s earlier half,
+  <a href="2026-08-20-session-recap-agent-org-render-reconciliation.html">agent Org render reconciliation</a>)
+  had three followups:
+</p>
+<ul>
+  <li>
+    <em>Open a real Emacs session and eyeball a reopen</em> &mdash;
+    <span class="tag" style="color: var(--muted)">not addressed this session</span>
+  </li>
+  <li>
+    <em>File the FTS5 snake_case tokenizer gap</em> &mdash;
+    <span class="tag" style="color: var(--muted)">not addressed</span>
+    (hit again this session searching for
+    <code>render_session</code>; noticed and moved on)
+  </li>
+  <li>
+    <em>Persist tool.completed args for rich replay</em> &mdash;
+    <span class="tag" style="color: var(--muted)">not addressed</span>
+  </li>
+</ul>
+<p>
+  Zero of three carried &mdash; the current session went entirely into
+  the VCS staging direction the user redirected to. Reasonable; those
+  followups are still available for later.
+</p>
+
+</body>
+</html>

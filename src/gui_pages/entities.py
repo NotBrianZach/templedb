@@ -1,0 +1,851 @@
+"""TempleDB GUI — Entity graph + health pages.
+
+Four routes:
+  GET /entities                        Overview: counts by kind
+  GET /entities/{kind}                 List entities of that kind
+  GET /entity/{kind}/{ref:path}        Single entity + relations
+  GET /summary                         Health at a glance
+                                       (visual mirror of `templedb summary`)
+
+The graph substrate is described in docs/ENTITY_GRAPH_DESIGN.md.
+"""
+import html
+import sys
+from pathlib import Path
+
+from fastapi import APIRouter
+from fastapi.responses import HTMLResponse
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from db_utils import query_all, query_one
+
+from gui_helpers import _base
+
+router = APIRouter()
+
+
+def _kind_glyph(kind: str) -> str:
+    """Small emoji-ish glyph for scanability."""
+    return {
+        'Machine': '🖥',
+        'Generation': '⚙',
+        'Deployment': '🚀',
+        'Commit': '⟝',
+        'File': '📄',
+        'AgentSession': '🤖',
+        'ToolCall': '🔧',
+        'Report': '📝',
+        'EditIntent': '✎',
+        'StorePath': '📦',
+        'Derivation': '🏗',
+        'AstBuild': '🌲',
+    }.get(kind, '•')
+
+
+@router.get("/entities/search", response_class=HTMLResponse)
+def entities_search(q: str = "", kind: str = ""):
+    """Full-text search across entity label + external_ref."""
+    if not q or len(q) < 2:
+        body = """
+<h1>Search entities</h1>
+<form method="get" action="/entities/search">
+  <input type="text" name="q" placeholder="Type ≥ 2 chars — search across labels + external refs"
+         style="width:70%;padding:0.6rem;background:#13131f;color:#d0d0e8;
+                border:1px solid #2a2a4a;border-radius:4px;font-size:0.95rem"
+         autofocus>
+  <button style="padding:0.6rem 1rem;background:#e94560;color:#fff;
+                  border:none;border-radius:4px;cursor:pointer">Search</button>
+</form>
+<p class="dim" style="margin-top:1rem">Examples: <code>auth</code>,
+<code>zMothership</code>, <code>flake.lock</code></p>
+"""
+        return _base("Search entities", body, active="entities")
+
+    pattern = f"%{q.lower()}%"
+    params = [pattern, pattern]
+    where = "(LOWER(label) LIKE ? OR LOWER(external_ref) LIKE ?)"
+    if kind:
+        where += " AND kind = ?"
+        params.append(kind)
+    rows = query_all(
+        f"""SELECT kind, external_ref, label, source_authority,
+                   observed_at
+              FROM entities
+             WHERE {where}
+             ORDER BY observed_at DESC
+             LIMIT 100""",
+        tuple(params),
+    )
+    row_html = "".join(
+        f'<tr>'
+        f'<td>{_kind_glyph(r["kind"])} {html.escape(r["kind"])}</td>'
+        f'<td><a href="/entity/{html.escape(r["kind"])}/{html.escape(r["external_ref"])}">'
+        f'{html.escape(r["external_ref"])}</a></td>'
+        f'<td>{html.escape(r["label"] or "")}</td>'
+        f'<td class="dim">{html.escape(r["source_authority"])}</td>'
+        f'</tr>'
+        for r in rows
+    )
+    body = f"""
+<style>
+  table.res {{ border-collapse: collapse; width: 100%; font-size: 0.88em; }}
+  table.res th, table.res td {{ border: 1px solid var(--border);
+                                 padding: 4px 8px; vertical-align: top; }}
+  table.res th {{ background: var(--panel); color: var(--muted);
+                   text-align: left; }}
+  table.res a {{ font-family: "JetBrains Mono", monospace; }}
+  .dim {{ color: var(--muted); font-size: 0.85em; }}
+</style>
+<p><a href="/entities">← entities overview</a></p>
+<h1>Search: <code>{html.escape(q)}</code>
+   {f'in <code>{html.escape(kind)}</code>' if kind else ''}
+   <span class="dim">({len(rows)} match{"es" if len(rows) != 1 else ""})</span>
+</h1>
+<form method="get" action="/entities/search" style="margin-bottom:1rem">
+  <input type="text" name="q" value="{html.escape(q)}"
+         style="width:60%;padding:0.4rem;background:#13131f;color:#d0d0e8;
+                border:1px solid #2a2a4a;border-radius:4px">
+  <button style="padding:0.4rem 0.9rem;background:#e94560;color:#fff;
+                  border:none;border-radius:4px">Search</button>
+</form>
+{f'<table class="res"><tr><th>kind</th><th>external_ref</th><th>label</th><th>authority</th></tr>{row_html}</table>'
+ if row_html else '<p class="dim">No matches.</p>'}
+"""
+    return _base(f"Search: {q}", body, active="entities")
+
+
+@router.get("/entities", response_class=HTMLResponse)
+def entities_overview():
+    """Grid of entity kinds with counts. Click through to list."""
+    rows = query_all(
+        """SELECT kind, COUNT(*) AS n,
+                  COUNT(DISTINCT source_authority) AS n_authorities
+             FROM entities
+            GROUP BY kind
+            ORDER BY n DESC"""
+    )
+    total_e = sum(r['n'] for r in rows)
+    rel_rows = query_all(
+        """SELECT kind, COUNT(*) AS n FROM relations
+            GROUP BY kind ORDER BY n DESC"""
+    )
+    total_r = sum(r['n'] for r in rel_rows)
+
+    kind_cards = "".join(
+        f'<a href="/entities/{html.escape(r["kind"])}" class="kind-card">'
+        f'  <div class="kind-glyph">{_kind_glyph(r["kind"])}</div>'
+        f'  <div class="kind-name">{html.escape(r["kind"])}</div>'
+        f'  <div class="kind-count">{r["n"]:,}</div>'
+        f'</a>'
+        for r in rows
+    )
+
+    rel_rows_html = "".join(
+        f'<tr><td>{html.escape(r["kind"])}</td>'
+        f'<td class="num">{r["n"]:,}</td></tr>'
+        for r in rel_rows
+    )
+
+    body = f"""
+<style>
+  .grid-stats {{
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 1rem; margin-bottom: 1.5rem;
+  }}
+  .grid-stats .stat-box {{
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px;
+  }}
+  .grid-stats .stat-box .n {{ font-size: 1.6rem; color: var(--accent); }}
+  .grid-stats .stat-box .lbl {{ color: var(--muted); font-size: 0.8rem;
+                                 text-transform: uppercase; letter-spacing: 0.06em; }}
+
+  .kind-grid {{
+    display: grid; gap: 0.7rem; margin-bottom: 1.5rem;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }}
+  .kind-card {{
+    display: block; text-decoration: none; padding: 0.7rem 0.9rem;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 5px; text-align: center; color: var(--text);
+  }}
+  .kind-card:hover {{ border-color: var(--accent); }}
+  .kind-glyph {{ font-size: 1.6rem; opacity: 0.8; }}
+  .kind-name {{ color: #b0b0d0; font-size: 0.85rem; margin: 0.2rem 0; }}
+  .kind-count {{ color: var(--accent); font-size: 1.2rem;
+                 font-family: "JetBrains Mono", monospace; }}
+
+  table.rel {{ border-collapse: collapse; width: 100%; font-size: 0.9em; }}
+  table.rel th, table.rel td {{ border: 1px solid var(--border); padding: 5px 10px; }}
+  table.rel th {{ background: var(--panel); color: var(--muted); text-align: left; }}
+  table.rel td.num {{ text-align: right;
+                      font-family: "JetBrains Mono", monospace; }}
+</style>
+
+<h1>Entity Graph</h1>
+<p class="lede">
+  Cross-authority knowledge graph substrate — see
+  <code>docs/ENTITY_GRAPH_DESIGN.md</code>. Every entity carries its
+  source authority (git, nix, agent-runtime, templedb, author) and
+  observed-at timestamp.
+</p>
+
+<form method="get" action="/entities/search"
+      style="margin: 0 0 1.5rem 0">
+  <input type="text" name="q"
+         placeholder="Search across all entity labels + refs…"
+         style="width:60%;padding:0.5rem;background:#13131f;color:#d0d0e8;
+                border:1px solid #2a2a4a;border-radius:4px;
+                font-family:monospace;font-size:0.9em">
+  <button style="padding:0.5rem 1rem;background:#e94560;color:#fff;
+                  border:none;border-radius:4px;cursor:pointer">
+    Search
+  </button>
+</form>
+
+<div class="grid-stats">
+  <div class="stat-box">
+    <div class="lbl">Entities</div>
+    <div class="n">{total_e:,}</div>
+  </div>
+  <div class="stat-box">
+    <div class="lbl">Relations</div>
+    <div class="n">{total_r:,}</div>
+  </div>
+</div>
+
+<h2>By kind</h2>
+<div class="kind-grid">
+{kind_cards}
+</div>
+
+<h2>Relation kinds</h2>
+<table class="rel">
+  <tr><th>Kind</th><th style="text-align:right">Count</th></tr>
+  {rel_rows_html}
+</table>
+"""
+    return _base("Entities", body, active="entities")
+
+
+@router.get("/entities/{kind}", response_class=HTMLResponse)
+def entities_by_kind(kind: str):
+    """Paginated-ish list of entities of one kind (first 200)."""
+    rows = query_all(
+        """SELECT id, external_ref, label, source_authority, observed_at
+             FROM entities WHERE kind = ?
+            ORDER BY id DESC LIMIT 200""",
+        (kind,),
+    )
+    total = query_one(
+        "SELECT COUNT(*) AS n FROM entities WHERE kind = ?", (kind,),
+    )['n']
+
+    if not rows:
+        body = f"""
+<h1>{html.escape(kind)}</h1>
+<p>No entities of this kind. Try running
+<code>templedb ingest all</code> first.</p>
+<p><a href="/entities">← back to overview</a></p>
+"""
+        return _base(f"{kind} — Entities", body, active="entities")
+
+    items = "".join(
+        f'<tr>'
+        f'<td><a href="/entity/{html.escape(kind)}/{html.escape(r["external_ref"])}">'
+        f'{html.escape(r["external_ref"])}</a></td>'
+        f'<td>{html.escape(r["label"] or "")}</td>'
+        f'<td class="dim">{html.escape(r["source_authority"])}</td>'
+        f'<td class="dim">{html.escape(r["observed_at"] or "")}</td>'
+        f'</tr>'
+        for r in rows
+    )
+    body = f"""
+<style>
+  table.ents {{ border-collapse: collapse; width: 100%; font-size: 0.9em; }}
+  table.ents th, table.ents td {{ border: 1px solid var(--border);
+                                   padding: 5px 10px; vertical-align: top; }}
+  table.ents th {{ background: var(--panel); color: var(--muted);
+                    text-align: left; }}
+  table.ents a {{ color: var(--link); font-family: "JetBrains Mono", monospace;
+                   font-size: 0.85em; }}
+  .dim {{ color: var(--muted); font-size: 0.85em; }}
+</style>
+<p><a href="/entities">← entities overview</a></p>
+<h1>{_kind_glyph(kind)} {html.escape(kind)}</h1>
+<p class="lede">Showing {len(rows):,} of {total:,} entities.
+{"" if total <= 200 else "(First 200 by id.)"}</p>
+<table class="ents">
+  <tr><th>external_ref</th><th>label</th>
+      <th>authority</th><th>observed_at</th></tr>
+  {items}
+</table>
+"""
+    return _base(f"{kind} — Entities", body, active="entities")
+
+
+@router.get("/entity/{kind}/{ref:path}", response_class=HTMLResponse)
+def entity_detail(kind: str, ref: str):
+    """Show one entity's metadata + inbound/outbound relations."""
+    entity = query_one(
+        """SELECT id, external_ref, label, source_authority,
+                  observed_at, created_at
+             FROM entities WHERE kind = ? AND external_ref = ?""",
+        (kind, ref),
+    )
+    if not entity:
+        body = f"""
+<h1>Entity not found</h1>
+<p><code>{html.escape(kind)}/{html.escape(ref)}</code> has no matching row.</p>
+<p><a href="/entities/{html.escape(kind)}">← {html.escape(kind)} list</a></p>
+"""
+        return _base(f"{kind} not found", body, active="entities")
+
+    outbound = query_all(
+        """SELECT r.kind AS relkind, r.observed_at,
+                  e.kind AS peer_kind, e.external_ref AS peer_ref,
+                  e.label AS peer_label
+             FROM relations r
+             JOIN entities e ON e.id = r.to_entity_id
+            WHERE r.from_entity_id = ?
+            ORDER BY r.kind, e.kind
+            LIMIT 200""",
+        (entity['id'],),
+    )
+    inbound = query_all(
+        """SELECT r.kind AS relkind, r.observed_at,
+                  e.kind AS peer_kind, e.external_ref AS peer_ref,
+                  e.label AS peer_label
+             FROM relations r
+             JOIN entities e ON e.id = r.from_entity_id
+            WHERE r.to_entity_id = ?
+            ORDER BY r.kind, e.kind
+            LIMIT 200""",
+        (entity['id'],),
+    )
+
+    def _rel_row(r, arrow):
+        peer_ref = r['peer_ref']
+        peer_label = f' <span class="dim">— {html.escape(r["peer_label"] or "")}</span>' \
+            if r['peer_label'] else ''
+        return (
+            f'<tr>'
+            f'<td class="rel-kind">{html.escape(r["relkind"])}</td>'
+            f'<td>{arrow}</td>'
+            f'<td><a href="/entity/{html.escape(r["peer_kind"])}/{html.escape(peer_ref)}">'
+            f'{html.escape(r["peer_kind"])}/{html.escape(peer_ref)}</a>{peer_label}</td>'
+            f'</tr>'
+        )
+    outbound_rows = "".join(_rel_row(r, '→') for r in outbound)
+    inbound_rows = "".join(_rel_row(r, '←') for r in inbound)
+
+    body = f"""
+<style>
+  dl.meta {{ display: grid; grid-template-columns: 140px 1fr; gap: 0.4rem 1rem;
+             margin-bottom: 1.5rem; }}
+  dl.meta dt {{ color: var(--muted); font-size: 0.85em;
+                 text-transform: uppercase; letter-spacing: 0.05em; }}
+  dl.meta dd {{ font-family: "JetBrains Mono", monospace;
+                 font-size: 0.9em; margin: 0; }}
+  table.rels {{ border-collapse: collapse; width: 100%; font-size: 0.88em; }}
+  table.rels th, table.rels td {{ border: 1px solid var(--border);
+                                    padding: 4px 8px; }}
+  table.rels th {{ background: var(--panel); color: var(--muted);
+                    text-align: left; }}
+  table.rels a {{ color: var(--link); font-family: "JetBrains Mono", monospace; }}
+  td.rel-kind {{ color: var(--accent); font-weight: 500;
+                  font-family: "JetBrains Mono", monospace; }}
+  .dim {{ color: var(--muted); font-size: 0.85em; }}
+</style>
+
+<p><a href="/entities/{html.escape(kind)}">← {html.escape(kind)} list</a>
+   · <a href="/entities">← entities</a></p>
+
+<h1>{_kind_glyph(kind)} {html.escape(kind)}/{html.escape(ref)}</h1>
+{f'<p class="lede">{html.escape(entity["label"])}</p>' if entity['label'] else ''}
+
+<dl class="meta">
+  <dt>authority</dt><dd>{html.escape(entity['source_authority'])}</dd>
+  <dt>observed_at</dt><dd>{html.escape(entity['observed_at'])}</dd>
+  <dt>created_at</dt><dd>{html.escape(entity['created_at'])}</dd>
+  <dt>entity id</dt><dd>{entity['id']}</dd>
+</dl>
+
+<h2>Outbound ({len(outbound)})</h2>
+{f'<table class="rels"><tr><th>relation</th><th></th><th>target</th></tr>{outbound_rows}</table>'
+ if outbound_rows else '<p class="dim">(no outbound relations)</p>'}
+
+<h2>Inbound ({len(inbound)})</h2>
+{f'<table class="rels"><tr><th>relation</th><th></th><th>source</th></tr>{inbound_rows}</table>'
+ if inbound_rows else '<p class="dim">(no inbound relations)</p>'}
+"""
+    return _base(f"{kind}/{ref}", body, active="entities")
+
+
+def _age_hint(ts, threshold_hours=1):
+    """Return (age_string, class) where class is 'ok' | 'stale' | 'never'."""
+    if not ts:
+        return ('never', 'never')
+    row = query_one(
+        "SELECT (julianday('now') - julianday(?)) * 24 AS hours",
+        (ts,),
+    )
+    hours = row['hours'] if row else None
+    if hours is None:
+        return ('unknown', 'stale')
+    if hours < 1:
+        return (f"{int(hours * 60)}min ago", 'ok')
+    if hours < threshold_hours:
+        return (f"{int(hours)}h ago", 'ok')
+    if hours < threshold_hours * 24:
+        return (f"{int(hours)}h ago", 'stale')
+    return (f"{int(hours / 24)}d ago", 'ancient')
+
+
+@router.get("/hygiene", response_class=HTMLResponse)
+def hygiene_page(slug: str = ""):
+    """Per-project dead-import drill-down. Mirrors
+    `templedb entity dead-imports` + `templedb summary` hygiene
+    block but with clickable file rows.
+
+    Without ?slug=…: shows the per-project rollup.
+    With ?slug=…: lists every candidate dead import in that project.
+    """
+    _dead_bridge_kinds = "('calls', 'inherits', 'uses')"
+    _base_cte = f"""
+        WITH imports AS (
+          SELECT
+            substr(fe.external_ref, 1,
+                   instr(fe.external_ref, '/') - 1) AS slug,
+            fe.id AS from_id, te.id AS to_id,
+            fe.external_ref AS from_ref,
+            te.external_ref AS to_ref
+          FROM relations r
+          JOIN entities fe ON fe.id = r.from_entity_id
+          JOIN entities te ON te.id = r.to_entity_id
+          WHERE r.kind = 'imports'
+            AND fe.kind = 'File'
+            AND te.kind = 'File'
+        ),
+        bridges AS (
+          SELECT imp.slug, imp.from_id, imp.to_id,
+                 imp.from_ref, imp.to_ref,
+                 SUM(CASE WHEN dr_to.id IS NOT NULL
+                          THEN 1 ELSE 0 END) AS bridge_count
+          FROM imports imp
+          LEFT JOIN relations dr_from
+            ON dr_from.from_entity_id = imp.from_id
+            AND dr_from.kind = 'defines'
+          LEFT JOIN entities fsym
+            ON fsym.id = dr_from.to_entity_id
+            AND fsym.kind = 'Symbol'
+          LEFT JOIN relations cr
+            ON cr.from_entity_id = fsym.id
+            AND cr.kind IN {_dead_bridge_kinds}
+          LEFT JOIN entities tsym
+            ON tsym.id = cr.to_entity_id
+            AND tsym.kind = 'Symbol'
+          LEFT JOIN relations dr_to
+            ON dr_to.from_entity_id = imp.to_id
+            AND dr_to.kind = 'defines'
+            AND dr_to.to_entity_id = tsym.id
+          GROUP BY imp.slug, imp.from_id, imp.to_id
+        )
+    """
+
+    if slug:
+        # Drill-down: every candidate for one project
+        rows = query_all(
+            _base_cte + """
+            SELECT from_ref, to_ref FROM bridges
+             WHERE slug = ? AND bridge_count = 0
+             ORDER BY from_ref, to_ref
+            """,
+            (slug,),
+        )
+        rollup = query_one(
+            _base_cte + """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN bridge_count = 0 THEN 1 ELSE 0 END)
+                       AS dead
+              FROM bridges
+             WHERE slug = ?
+            """,
+            (slug,),
+        )
+        cur = None
+        candidates_html = ''
+        for row in rows:
+            if row['from_ref'] != cur:
+                if cur is not None:
+                    candidates_html += '</td></tr>'
+                cur = row['from_ref']
+                candidates_html += (
+                    f'<tr><td><code>'
+                    f'<a href="/entity/File/{html.escape(cur)}">'
+                    f'{html.escape(cur)}</a></code></td><td>'
+                )
+            candidates_html += (
+                f'<div>→ <code>'
+                f'<a href="/entity/File/{html.escape(row["to_ref"])}">'
+                f'{html.escape(row["to_ref"])}</a></code></div>'
+            )
+        if cur is not None:
+            candidates_html += '</td></tr>'
+
+        if not rows:
+            candidates_html = (
+                '<tr><td colspan="2" class="dim">'
+                'No candidate dead imports for this project.'
+                '</td></tr>'
+            )
+
+        total = rollup['total'] if rollup else 0
+        dead = rollup['dead'] if rollup else 0
+        pct = (100.0 * dead / total) if total else 0
+        pct_cls = ('ok' if pct < 10 else 'warn' if pct < 30 else 'err')
+        body = f"""
+<style>
+  .card {{ background: var(--panel); border: 1px solid var(--border);
+           padding: 1rem 1.2rem; border-radius: 6px; margin-bottom: 1.2rem; }}
+  .card h2 {{ margin-top: 0; color: var(--accent); font-size: 0.95rem;
+              text-transform: uppercase; letter-spacing: 0.06em;
+              border: none; padding-top: 0; }}
+  .pill {{ display: inline-block; padding: 2px 8px; border-radius: 10px;
+           font-size: 0.8em; font-weight: 500;
+           font-family: "JetBrains Mono", monospace; }}
+  .pill-ok {{ background: rgba(127,214,160,.15); color: var(--pos); }}
+  .pill-warn {{ background: rgba(224,192,96,.15); color: var(--warn); }}
+  .pill-err {{ background: rgba(233,112,112,.15); color: var(--neg); }}
+  table.hs {{ border-collapse: collapse; width: 100%; font-size: 0.88em; }}
+  table.hs td {{ border-top: 1px solid var(--border); padding: 6px 10px;
+                 vertical-align: top; }}
+  .dim {{ color: var(--muted); font-size: 0.82em; }}
+</style>
+<h1>Hygiene — {html.escape(slug)}</h1>
+<p class="lede">
+  <span class="pill pill-{pct_cls}">{dead}/{total} dead ({pct:.0f}%)</span>
+  &nbsp;·&nbsp;
+  <a href="/hygiene">← all projects</a>
+</p>
+<div class="card">
+  <h2>Candidate dead imports</h2>
+  <table class="hs"><tr><th>File</th><th>Imports (no bridge)</th></tr>
+    {candidates_html}
+  </table>
+  <p class="dim">
+    Bridge = any <code>Symbol → calls|inherits|uses → Symbol</code>
+    between the two files' symbol sets. False positives from
+    attribute-chain calls (<code>svc.foo()</code>), reflection
+    (<code>getattr</code>), and side-effect imports (plugin
+    registration) are expected — see
+    <a href="/reports/2026-09-04-1450-session-recap-3-code-intelligence-hygiene.html">
+    session recap 3</a>.
+  </p>
+</div>
+"""
+        return _base(f"Hygiene — {slug}", body, active="hygiene")
+
+    # Rollup: per-project counts
+    rollup_rows = query_all(
+        _base_cte + """
+        SELECT slug,
+               COUNT(*) AS total_imports,
+               SUM(CASE WHEN bridge_count = 0 THEN 1 ELSE 0 END)
+                   AS dead_candidates
+          FROM bridges
+         GROUP BY slug
+         HAVING total_imports > 0
+         ORDER BY dead_candidates DESC, total_imports DESC
+        """
+    )
+    rows_html = ''
+    for row in rollup_rows:
+        pct = (100.0 * row['dead_candidates']
+               / row['total_imports']) if row['total_imports'] else 0
+        pct_cls = ('ok' if pct < 10 else 'warn' if pct < 30 else 'err')
+        rows_html += (
+            f'<tr>'
+            f'<td><a href="/hygiene?slug={html.escape(row["slug"])}">'
+            f'{html.escape(row["slug"])}</a></td>'
+            f'<td class="num">{row["dead_candidates"]}</td>'
+            f'<td class="num">{row["total_imports"]}</td>'
+            f'<td><span class="pill pill-{pct_cls}">'
+            f'{pct:.0f}%</span></td>'
+            f'</tr>'
+        )
+    if not rows_html:
+        rows_html = (
+            '<tr><td colspan="4" class="dim">No python imports observed. '
+            'Run <code>templedb ingest python</code>.</td></tr>'
+        )
+
+    body = f"""
+<style>
+  .card {{ background: var(--panel); border: 1px solid var(--border);
+           padding: 1rem 1.2rem; border-radius: 6px; margin-bottom: 1.2rem; }}
+  .card h2 {{ margin-top: 0; color: var(--accent); font-size: 0.95rem;
+              text-transform: uppercase; letter-spacing: 0.06em;
+              border: none; padding-top: 0; }}
+  .pill {{ display: inline-block; padding: 2px 8px; border-radius: 10px;
+           font-size: 0.8em; font-weight: 500;
+           font-family: "JetBrains Mono", monospace; }}
+  .pill-ok {{ background: rgba(127,214,160,.15); color: var(--pos); }}
+  .pill-warn {{ background: rgba(224,192,96,.15); color: var(--warn); }}
+  .pill-err {{ background: rgba(233,112,112,.15); color: var(--neg); }}
+  table.hs {{ border-collapse: collapse; width: 100%; font-size: 0.88em; }}
+  table.hs th, table.hs td {{
+    border-top: 1px solid var(--border); padding: 6px 10px;
+    text-align: left; vertical-align: top; }}
+  table.hs th {{ color: var(--muted); font-weight: 500;
+                 font-size: 0.72rem; text-transform: uppercase;
+                 letter-spacing: 0.08em; }}
+  .num {{ font-family: "JetBrains Mono", monospace;
+          font-variant-numeric: tabular-nums; text-align: right; }}
+  .dim {{ color: var(--muted); font-size: 0.82em; }}
+</style>
+<h1>Hygiene</h1>
+<p class="lede">
+  Candidate dead imports per project. A candidate is a
+  <code>File → imports → File</code> edge where no
+  <code>Symbol</code> in the source has a
+  <code>calls / inherits / uses</code> edge to any
+  <code>Symbol</code> in the target.
+</p>
+<div class="card">
+  <h2>Per project</h2>
+  <table class="hs">
+    <tr><th>Slug</th><th>Dead</th><th>Total</th><th>%</th></tr>
+    {rows_html}
+  </table>
+</div>
+"""
+    return _base("Hygiene", body, active="hygiene")
+
+
+@router.get("/summary", response_class=HTMLResponse)
+def summary_page():
+    """Visual health mirror of `templedb summary`."""
+    import os
+    import socket
+
+    e_total = query_one("SELECT COUNT(*) AS n FROM entities")['n']
+    r_total = query_one("SELECT COUNT(*) AS n FROM relations")['n']
+    e_kinds = query_all(
+        """SELECT kind, COUNT(*) AS n FROM entities
+            GROUP BY kind ORDER BY n DESC"""
+    )
+
+    # Ingest freshness per adapter
+    adapters = query_all(
+        """SELECT adapter,
+                  MAX(started_at) AS last_run,
+                  SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok_count,
+                  SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS err_count
+             FROM ingestion_runs
+            GROUP BY adapter
+            ORDER BY last_run DESC"""
+    )
+
+    # Doctor invariants (latest result per check)
+    checks = query_all(
+        """SELECT check_name, status, MAX(ran_at) AS ran_at,
+                  issue_count
+             FROM invariant_checks
+            GROUP BY check_name
+            ORDER BY status ASC, ran_at DESC"""
+    )
+    violated = sum(1 for c in checks if c['status'] != 'ok')
+
+    # Reconcile per machine
+    machines = query_all(
+        """SELECT fm.machine_name,
+                  MAX(rr.ran_at) AS last_run,
+                  (SELECT status FROM reconcile_runs rr2
+                    WHERE rr2.machine_name = fm.machine_name
+                    ORDER BY rr2.ran_at DESC LIMIT 1) AS last_status
+             FROM fleet_machines fm
+             LEFT JOIN reconcile_runs rr
+               ON rr.machine_name = fm.machine_name
+            GROUP BY fm.machine_name
+            ORDER BY fm.machine_name"""
+    )
+
+    # Handoff inbox for this session's SID (best effort — GUI has
+    # no session context, so use host+ppid heuristic).
+    sid = os.environ.get('TEMPLEDB_SESSION_ID') \
+        or f"{socket.gethostname()}-{os.getppid()}"
+    direct = query_one(
+        """SELECT COUNT(*) AS n FROM handoff_notes
+            WHERE to_session = ? AND acked_at IS NULL""",
+        (sid,),
+    )['n']
+    broadcast = query_one(
+        """SELECT COUNT(*) AS n FROM handoff_notes
+            WHERE to_session IS NULL AND to_topic IS NULL
+              AND acked_at IS NULL"""
+    )['n']
+
+    # Render.
+    def _pill(text, cls):
+        return f'<span class="pill pill-{cls}">{html.escape(str(text))}</span>'
+
+    kind_html = "".join(
+        f'<span class="chip">'
+        f'<a href="/entities/{html.escape(k["kind"])}">'
+        f'{_kind_glyph(k["kind"])} {html.escape(k["kind"])}</a>'
+        f' <b>{k["n"]:,}</b></span>'
+        for k in e_kinds
+    )
+
+    ingest_rows = ""
+    for a in adapters:
+        age, cls = _age_hint(a['last_run'], threshold_hours=6)
+        pill = 'ok' if cls == 'ok' else ('warn' if cls == 'stale' else 'err')
+        err_pill = _pill(f"{a['err_count']} err", 'err') \
+            if a['err_count'] else ''
+        ingest_rows += (
+            f'<tr>'
+            f'<td>{html.escape(a["adapter"])}</td>'
+            f'<td>{_pill(age, pill)}</td>'
+            f'<td class="dim">{html.escape(a["last_run"] or "")}</td>'
+            f'<td>{a["ok_count"]:,} ok {err_pill}</td>'
+            f'</tr>'
+        )
+
+    check_rows = ""
+    for c in checks:
+        marker = '✓' if c['status'] == 'ok' else '✗'
+        cls = 'ok' if c['status'] == 'ok' else 'err'
+        summary = ('OK' if c['status'] == 'ok'
+                   else f"{c['issue_count']} issue(s)")
+        check_rows += (
+            f'<tr>'
+            f'<td>{_pill(marker, cls)}</td>'
+            f'<td><code>{html.escape(c["check_name"])}</code></td>'
+            f'<td>{html.escape(summary)}</td>'
+            f'<td class="dim">{html.escape(c["ran_at"] or "")}</td>'
+            f'</tr>'
+        )
+
+    machine_rows = ""
+    for m in machines:
+        if not m['last_run']:
+            machine_rows += (
+                f'<tr>'
+                f'<td><a href="/entity/Machine/{html.escape(m["machine_name"])}">'
+                f'{html.escape(m["machine_name"])}</a></td>'
+                f'<td>{_pill("never", "warn")}</td>'
+                f'<td class="dim">—</td>'
+                f'</tr>'
+            )
+            continue
+        age, _ = _age_hint(m['last_run'], threshold_hours=168)
+        st = m['last_status'] or '?'
+        cls = ('ok' if st == 'ok'
+               else 'err' if st == 'drift'
+               else 'warn')
+        machine_rows += (
+            f'<tr>'
+            f'<td><a href="/entity/Machine/{html.escape(m["machine_name"])}">'
+            f'{html.escape(m["machine_name"])}</a></td>'
+            f'<td>{_pill(st, cls)}</td>'
+            f'<td class="dim">{html.escape(age)} — {html.escape(m["last_run"])}</td>'
+            f'</tr>'
+        )
+
+    handoff_body = ''
+    if direct or broadcast:
+        parts = []
+        if direct:
+            parts.append(f'{direct} unacked note(s) for this session')
+        if broadcast:
+            parts.append(f'{broadcast} unacked broadcast(s)')
+        handoff_body = _pill(' · '.join(parts), 'warn')
+    else:
+        handoff_body = '<span class="dim">(no unacked handoffs)</span>'
+
+    body = f"""
+<style>
+  .pill {{
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 0.8em; font-weight: 500;
+    font-family: "JetBrains Mono", monospace;
+  }}
+  .pill-ok {{ background: rgba(127, 214, 160, 0.15); color: var(--pos); }}
+  .pill-warn {{ background: rgba(224, 192, 96, 0.15); color: var(--warn); }}
+  .pill-err {{ background: rgba(233, 112, 112, 0.15); color: var(--neg); }}
+  .card {{
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 1rem 1.2rem; border-radius: 6px; margin-bottom: 1.2rem;
+  }}
+  .card h2 {{ margin-top: 0; color: var(--accent);
+              font-size: 0.95rem; text-transform: uppercase;
+              letter-spacing: 0.06em; border: none; padding-top: 0; }}
+  .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;
+             margin-bottom: 1rem; }}
+  .grid-2 .n {{ font-size: 2rem; color: var(--accent);
+                font-family: "JetBrains Mono", monospace; }}
+  .grid-2 .lbl {{ color: var(--muted); font-size: 0.75rem;
+                  text-transform: uppercase; letter-spacing: 0.08em; }}
+  .chip {{
+    display: inline-block; padding: 3px 9px; margin: 3px 4px 0 0;
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 4px; font-size: 0.85em;
+  }}
+  .chip a {{ text-decoration: none; }}
+  .chip b {{ color: var(--accent); font-family: "JetBrains Mono", monospace; }}
+  table.hs {{ border-collapse: collapse; width: 100%; font-size: 0.88em; }}
+  table.hs td {{ border-top: 1px solid var(--border); padding: 5px 8px;
+                  vertical-align: top; }}
+  table.hs td:first-child {{ color: #b0b0d0; font-family: "JetBrains Mono", monospace; }}
+  .dim {{ color: var(--muted); font-size: 0.82em; }}
+</style>
+
+<h1>Summary</h1>
+<p class="lede">
+  Health at a glance. Visual mirror of <code>templedb summary</code>.
+  Refresh manually — this page is not currently auto-polling.
+</p>
+
+<div class="card">
+  <h2>Entity graph</h2>
+  <div class="grid-2">
+    <div>
+      <div class="lbl">Entities</div>
+      <div class="n">{e_total:,}</div>
+    </div>
+    <div>
+      <div class="lbl">Relations</div>
+      <div class="n">{r_total:,}</div>
+    </div>
+  </div>
+  <div>{kind_html}</div>
+</div>
+
+<div class="card">
+  <h2>Ingestion — per adapter</h2>
+  {f'<table class="hs">{ingest_rows}</table>' if ingest_rows
+   else '<span class="dim">(no ingests recorded)</span>'}
+</div>
+
+<div class="card">
+  <h2>Doctor invariants —
+    {_pill(f'{violated} violated', 'err') if violated else _pill('all passing', 'ok')}
+    <span class="dim">({len(checks)} tracked)</span></h2>
+  {f'<table class="hs">{check_rows}</table>' if check_rows
+   else '<span class="dim">(no doctor runs)</span>'}
+</div>
+
+<div class="card">
+  <h2>Reconcile — per fleet machine</h2>
+  {f'<table class="hs">{machine_rows}</table>' if machine_rows
+   else '<span class="dim">(no fleet_machines registered)</span>'}
+</div>
+
+<div class="card">
+  <h2>Handoff inbox</h2>
+  {handoff_body}
+</div>
+"""
+    return _base("Summary", body, active="summary")

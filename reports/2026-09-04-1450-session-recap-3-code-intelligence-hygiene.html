@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 3: code-intelligence hygiene — dead-imports and the __module__ trick</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); font-weight: 600; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+  .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<h1>Session recap 3: code-intelligence hygiene</h1>
+<p class="lede">
+  What we shipped after the context-window compaction on 2026-09-04:
+  <code>entity paths</code>, <code>entity dead-imports</code>, the
+  <code>__module__</code> synthetic symbol trick, cross-file
+  <code>inherits</code> edges, decorator tracking, and an ambient
+  hygiene digest in <code>templedb summary</code>. Five commits,
+  five backups.
+</p>
+
+<h2>What existed at the start of this stretch</h2>
+<p>
+  The observer/integrator plan was <em>done</em> through Phase 5. Six
+  ingest adapters, ten doctor invariants, three preset workflow
+  queries, systemd timers on hourly + daily cadences, and the
+  <code>entities</code> table full of ~16k nodes across git / agent /
+  intent / reports / nix / deploy / python authorities.
+</p>
+<p>
+  What we <em>didn't</em> have was a way to <strong>ask questions the
+  graph should be trivially able to answer</strong>. Namely:
+</p>
+<ul>
+  <li>"How is X connected to Y?" — <code>entity trace</code> walks
+      outward from one node; it can't home in on a target.</li>
+  <li>"Which of my imports are dead?" — the raw call graph exists but
+      no CLI surfaces it.</li>
+  <li>"Is this project's import hygiene getting worse over time?" —
+      no ambient signal; you had to remember to look.</li>
+</ul>
+
+<h2>What shipped</h2>
+
+<table class="matrix">
+  <tr><th>Command</th><th>Answers</th><th>Under the hood</th></tr>
+  <tr>
+    <td><code>entity paths FROM TO</code></td>
+    <td>How does X reach Y in the graph?</td>
+    <td>BFS from FROM with parent pointers; undirected by default;
+        prints reconstructed chain with entity labels.</td>
+  </tr>
+  <tr>
+    <td><code>entity dead-imports [--slug S]</code></td>
+    <td>Which imports have no calls, inherits, or decorator bridge?</td>
+    <td>SQL CTE: for each <code>File→imports→File</code>, LEFT JOIN
+        the <code>defines→calls|inherits→defines</code> chain; keep
+        those with zero bridging edges.</td>
+  </tr>
+  <tr>
+    <td><code>summary</code> hygiene block</td>
+    <td>Is any project's import hygiene drifting?</td>
+    <td>Same SQL grouped by slug, top 5. Green/yellow/red on % dead.</td>
+  </tr>
+</table>
+
+<h3>Python ingest went 1.6 → 1.9</h3>
+
+<table class="matrix">
+  <tr><th>Version</th><th>Change</th><th>Why</th></tr>
+  <tr>
+    <td class="num">1.7</td>
+    <td>Emit synthetic <code>__module__</code> Symbol per file</td>
+    <td>Module-scope calls (<code>logger = get_logger(__name__)</code>,
+        top-level <code>main()</code>) had no owning Symbol → dead
+        imports flagged ~63% of edges as unused. Fixed by giving
+        module scope a syntactic home.</td>
+  </tr>
+  <tr>
+    <td class="num">1.8</td>
+    <td><code>Symbol → inherits → Symbol</code> for class bases</td>
+    <td><code>class Provider(BaseProvider)</code> imported the base
+        purely to subclass — no <code>calls</code> edge, showed as
+        dead. Same-file + cross-file resolution mirrors call
+        resolution. <strong>Bare Name bases only</strong>; attribute
+        chains (<code>module.Base</code>) deferred to match the
+        equivalent gap in call resolution.</td>
+  </tr>
+  <tr>
+    <td class="num">1.9</td>
+    <td>Track module-scope decorator calls</td>
+    <td><code>@decorator</code> is invoked at import time. Walker now
+        yields decorator_list from every skipped def/class; bare
+        <code>@name</code> is wrapped in a synthetic
+        <code>ast.Call</code> so the resolver's uniform
+        <code>sub.func</code> inspection just works.</td>
+  </tr>
+</table>
+
+<h2>The metrics</h2>
+
+<table class="matrix">
+  <tr><th>Adapter</th><th>Dead candidates</th><th>Total imports</th><th>% dead</th></tr>
+  <tr><td>1.6 (baseline)</td><td class="num">282</td><td class="num">446</td><td class="neg num">63%</td></tr>
+  <tr><td>1.7 (<code>__module__</code>)</td><td class="num">172</td><td class="num">446</td><td class="warn num">39%</td></tr>
+  <tr><td>1.8 (inherits)</td><td class="num">92</td><td class="num">446</td><td class="warn num">21%</td></tr>
+  <tr><td>1.9 (decorators)</td><td class="num">92</td><td class="num">446</td><td class="warn num">21%</td></tr>
+</table>
+
+<p>
+  1.9 was flat, which was surprising until you look at the shape of
+  templedb's own code — nearly all decorators here are stdlib
+  (<code>@classmethod</code>, <code>@property</code>, <code>@staticmethod</code>)
+  which aren't project-Symbol targets. Codebases with FastAPI-style
+  <code>@app.get</code> or <code>@dataclass</code>-heavy modules
+  would see much bigger drops.
+</p>
+
+<h2>The remaining 21%</h2>
+<p>
+  Diminishing returns. The candidates still flagged are mostly:
+</p>
+<ul>
+  <li><strong>Type annotations</strong>:
+      <code>from t import UserSpec; def f(x: UserSpec)</code> — the
+      Name is used in an annotation, never called. Would need to
+      scan annotation subtrees and emit a <code>uses</code> relation.</li>
+  <li><strong>Attribute chains</strong>:
+      <code>from mod import svc; svc.method()</code> — the call is
+      <code>Attribute(Name('svc'), 'method')</code>, which the
+      resolver doesn't chase.</li>
+  <li><strong>Reflection</strong>: <code>getattr(mod, name)</code>,
+      dynamic dispatch — no static analysis will catch these.</li>
+  <li><strong>Genuinely dead imports</strong>: the actual value the
+      tool exists to find, buried in the noise.</li>
+</ul>
+
+<div class="callout">
+  <span class="label">Decision</span>
+  We stopped at 21%. The tool works for eyeballing per-project — a
+  human can distinguish real dead imports from annotation-uses by
+  reading the file. Making the tool auto-suppress every case would
+  require going deep into type-annotation scanning and would risk
+  hiding real signal.
+</div>
+
+<h2>The categorical bit worth noting</h2>
+<p>
+  The observer/integrator design put a lot of weight on entities as
+  <em>objects</em> and relations as <em>morphisms</em>. What this
+  stretch showed is that <strong>the useful queries are about the
+  category, not the objects</strong>:
+</p>
+<ul>
+  <li><code>entity paths</code> asks about morphism composition.</li>
+  <li><code>entity dead-imports</code> asks about the presence of any
+      composition-chain bridging two Files — regardless of whether
+      the bridge is a <code>calls</code> or <code>inherits</code> or
+      any future kind.</li>
+</ul>
+<p>
+  When we added <code>inherits</code> in 1.8, dead-imports absorbed
+  it via a two-character SQL diff:
+  <code>cr.kind IN ('calls', 'inherits')</code>. Adding
+  <code>uses</code> or <code>references</code> later would be the same
+  size change. That's the payoff of a uniform graph over
+  domain-specific tables.
+</p>
+
+<h2>Bug we ate our own dogfood on</h2>
+<p>
+  When 1.7 landed and I ran the first live dead-imports, my test
+  helpfully failed on:
+</p>
+<pre>assert 'used_lib.py' not in out</pre>
+<p>
+  ...because <code>unused_lib.py</code> contains
+  <code>used_lib.py</code> as a substring. Trivial fix — anchor to
+  the full path <code>testproj/src/used_lib.py</code> — but a nice
+  reminder that string containment is not string equality.
+</p>
+
+<h2>What's still on the table</h2>
+<ul>
+  <li><strong>Type annotation tracking</strong> — <code>uses</code>
+      relations from annotation subtrees. Would probably drop
+      dead-imports another 5–10 pp on templedb.</li>
+  <li><strong>Attribute-chain call resolution</strong> —
+      <code>svc.method()</code> where <code>svc</code> is an
+      instance/module of a known type. Big lift; would benefit
+      from SCIP or type inference.</li>
+  <li><strong>GUI page for hygiene</strong> —
+      <code>/hygiene</code> mirroring the CLI. Ambient visibility
+      for browser users.</li>
+  <li><strong>Historical hygiene tracking</strong> — record
+      dead-import counts into a table, plot over time. Would let
+      the doctor flag "candidates jumped +30 this week".</li>
+  <li><strong>CRSql for fleet</strong> — still deferred; sync of
+      the entity graph across machines is the natural next Big Rock
+      after code-intelligence is settled.</li>
+</ul>
+
+<h2>Shipping cadence</h2>
+<p>
+  Five publish cycles this stretch, all following the same recipe
+  the session has used ~35 times total:
+</p>
+<pre>templedb commit templedb $EDIT_WORKSPACE -m "..."
+templedb project checkout templedb $CHECKOUT --writable --force
+cd $CHECKOUT && git add -A && git commit -m "..."
+cd $SYSTEM_CONFIG && nix flake lock --update-input templedb
+templedb nixos system-switch system_config --yes
+cd $CHECKOUT && git push github master
+templedb storage backup gcs</pre>
+<p>
+  A macro. This is worth its own polish someday —
+  <code>templedb publish run templedb -m "..."</code> already
+  handles part of it; a <code>templedb ship</code> alias that also
+  triggers the nix switch + gh push + backup would compress this
+  to one command. Explicitly not doing that now — the visibility
+  of the individual steps is worth the typing.
+</p>
+
+<h2>Backups</h2>
+<pre>ba4a4f1  → 51e106b  → 2afc593  → ba4a4f1  → 5f5d324
+GCS: 5 uploads, 718 MB each, gs://templedb-backups-poink/</pre>
+
+</body>
+</html>

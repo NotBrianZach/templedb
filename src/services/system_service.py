@@ -1,0 +1,1300 @@
+#!/usr/bin/env python3
+"""
+System Service for TempleDB
+Manages NixOS system configuration deployments
+"""
+
+import os
+import sys
+import subprocess
+import logging
+import shutil
+import socket
+import tempfile
+from pathlib import Path
+from typing import Callable, Dict, Any, Optional, List
+from datetime import datetime
+import getpass
+
+from db_utils import query_one, query_all, execute, get_connection
+
+logger = logging.getLogger(__name__)
+
+
+class SystemServiceError(Exception):
+    """Raised when system operations fail"""
+    pass
+
+
+class SystemService:
+    """Service for managing NixOS system configurations"""
+
+    def __init__(self):
+        self.db_conn = get_connection()
+
+    def get_nixos_config_projects(self) -> List[Dict[str, Any]]:
+        """Get all projects marked as nixos-config type"""
+        return query_all("""
+            SELECT id, slug, name, repo_url, project_type, created_at
+            FROM projects
+            WHERE project_type = 'nixos-config'
+            ORDER BY slug
+        """)
+
+    def _checkout_dir_for(self, project_slug: str) -> Path:
+        """Return the standard checkout directory for a project."""
+        sudo_user = os.environ.get('SUDO_USER')
+        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
+        return real_home / ".config" / "templedb" / "checkouts" / project_slug
+
+    def check_checkout_conflicts(self, project_slug: str) -> List[str]:
+        """Check if checkout has local changes that would be overwritten by materialize.
+
+        Returns list of conflicting file paths (empty = no conflicts).
+        """
+        checkout_dir = self._checkout_dir_for(project_slug)
+        if not checkout_dir.exists():
+            return []
+
+        try:
+            conn = get_connection()
+            proj = conn.execute(
+                "SELECT id FROM projects WHERE slug = ?", (project_slug,)
+            ).fetchone()
+            if not proj:
+                return []
+
+            db_files = conn.execute("""
+                SELECT pf.file_path, cb.content_text, cb.content_blob
+                FROM project_files pf
+                JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
+                JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+                WHERE pf.project_id = ? AND pf.status = 'active'
+            """, (proj["id"],)).fetchall()
+
+            conflicts = []
+            for f in db_files:
+                fpath = checkout_dir / f["file_path"]
+                if not fpath.exists():
+                    continue
+                # Compare local content to DB content
+                if f["content_text"] is not None:
+                    try:
+                        local = fpath.read_text(encoding="utf-8")
+                        if local != f["content_text"]:
+                            conflicts.append(f["file_path"])
+                    except Exception:
+                        conflicts.append(f["file_path"])
+                elif f["content_blob"] is not None:
+                    try:
+                        local = fpath.read_bytes()
+                        if local != bytes(f["content_blob"]):
+                            conflicts.append(f["file_path"])
+                    except Exception:
+                        conflicts.append(f["file_path"])
+
+            return conflicts
+        except Exception as e:
+            logger.warning(f"Conflict check failed: {e}")
+            return []
+
+    def check_sudo_access(self) -> bool:
+        """Check if passwordless sudo is available.
+
+        Returns True if sudo works without a password prompt.
+        """
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "true"],
+                capture_output=True, timeout=5
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def materialize_from_db(self, project_slug: str, force: bool = False) -> Optional[Path]:
+        """Write project files from DB to checkout dir for nix evaluation.
+
+        The DB is the source of truth, but nix needs real files in a git
+        repo. This method materializes the DB content to disk and ensures
+        git tracks it.
+
+        Args:
+            project_slug: Project to materialize
+            force: If False, abort when local files differ from DB.
+                   If True, overwrite without warning.
+
+        Returns:
+            Path to materialized checkout, or None on failure.
+        """
+        checkout_dir = self._checkout_dir_for(project_slug)
+
+        try:
+            # Check for local conflicts before overwriting
+            if not force and checkout_dir.exists():
+                conflicts = self.check_checkout_conflicts(project_slug)
+                if conflicts:
+                    logger.warning(
+                        f"Local changes in {project_slug} checkout would be overwritten by materialize:"
+                    )
+                    for cf in conflicts[:10]:
+                        logger.warning(f"  {cf}")
+                    if len(conflicts) > 10:
+                        logger.warning(f"  ... and {len(conflicts) - 10} more")
+                    logger.warning(
+                        "Commit local changes to DB first (templedb vcs add/commit), "
+                        "or use --force to overwrite."
+                    )
+                    # Print to stderr too so CLI users see it
+                    import sys
+                    print(f"\nConflict: {len(conflicts)} file(s) in checkout differ from DB:", file=sys.stderr)
+                    for cf in conflicts[:5]:
+                        print(f"  {cf}", file=sys.stderr)
+                    if len(conflicts) > 5:
+                        print(f"  ... and {len(conflicts) - 5} more", file=sys.stderr)
+                    print("Commit changes first, or re-run with --force to overwrite.", file=sys.stderr)
+                    return None
+
+            conn = get_connection()
+            proj = conn.execute(
+                "SELECT id FROM projects WHERE slug = ?", (project_slug,)
+            ).fetchone()
+            if not proj:
+                return None
+
+            # Get all current files with content
+            files = conn.execute("""
+                SELECT pf.file_path, cb.content_text, cb.content_blob, cb.content_type
+                FROM project_files pf
+                JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
+                JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+                WHERE pf.project_id = ? AND pf.status = 'active'
+            """, (proj["id"],)).fetchall()
+
+            if not files:
+                logger.warning(f"No files to materialize for {project_slug}")
+                return None
+
+            checkout_dir.mkdir(parents=True, exist_ok=True)
+
+            written = 0
+            # Track authoritative paths so we can delete stragglers below
+            db_paths = {(checkout_dir / f["file_path"]).resolve() for f in files}
+            for f in files:
+                fpath = checkout_dir / f["file_path"]
+                fpath.parent.mkdir(parents=True, exist_ok=True)
+
+                if f["content_text"] is not None:
+                    fpath.write_text(f["content_text"], encoding="utf-8")
+                elif f["content_blob"] is not None:
+                    fpath.write_bytes(bytes(f["content_blob"]))
+                else:
+                    fpath.write_bytes(b"")
+                written += 1
+
+            # Delete files that exist on disk but are no longer in the DB
+            # active set — closes the drift class where materialize copied
+            # additively and never cleaned up (task #13). Sample impact
+            # observed 2026-08-31: bza had Spotify files lingering in
+            # checkout for two weeks post-delete because materialize left
+            # them; that in turn contaminated worker_secrets code-scan.
+            #
+            # Skip .git (nix-git-daemon state) and standard build-artifact /
+            # dep dirs that are node-managed, not DB-managed.
+            _SKIP_DIRS = {
+                '.git', 'node_modules', '.next', '.open-next', '.wrangler',
+                '.turbo', '.direnv', 'dist', 'build', 'target',
+                '__pycache__', '.venv', 'venv',
+            }
+
+            # Compute gitignored-paths set once so we can preserve local
+            # secrets and other .gitignore'd files. Fixes the .authinfo.gpg
+            # sweep (2026-09-01): system_config's home.nix references
+            # ./.authinfo.gpg, which is a real on-disk secret the DB
+            # doesn't track. Prior materialize deleted it; nix build then
+            # failed because git-daemon serves committed content only, so
+            # the flake source stopped containing the file after the
+            # auto-commit picked up the deletion.
+            #
+            # Rule: if a file matches .gitignore, it is "not templedb's
+            # business" and we leave it alone. Requires the checkout to
+            # already be a git repo (git-daemon needs commits anyway, so
+            # this is almost always true; on first materialize into a
+            # fresh directory, ignored_paths is empty and behavior matches
+            # the pre-fix path).
+            ignored_paths = set()
+            if git_dir_check := (checkout_dir / ".git"):
+                if git_dir_check.exists():
+                    candidates = []
+                    for p in checkout_dir.rglob('*'):
+                        if not p.is_file():
+                            continue
+                        rel = p.relative_to(checkout_dir)
+                        if any(part in _SKIP_DIRS for part in rel.parts):
+                            continue
+                        candidates.append(str(rel))
+                    if candidates:
+                        try:
+                            # --no-index makes check-ignore evaluate .gitignore
+                            # rules even for files that are currently tracked.
+                            # Without it, files added via `git add -f` (e.g.
+                            # .authinfo.gpg, historically) are treated as
+                            # tracked-and-therefore-not-ignored, and the sweep
+                            # below deletes them — regressing the very fix
+                            # this block was written for. See recap 11.
+                            result = subprocess.run(
+                                ["git", "check-ignore", "--stdin", "--no-index"],
+                                cwd=str(checkout_dir),
+                                input="\n".join(candidates),
+                                capture_output=True, text=True, check=False,
+                            )
+                            # Exit code 0: at least one path is ignored (matches printed).
+                            # Exit code 1: no paths ignored (empty output).
+                            # Anything else: real error — log and proceed as if empty.
+                            if result.returncode in (0, 1):
+                                for line in result.stdout.splitlines():
+                                    line = line.strip()
+                                    if line:
+                                        ignored_paths.add(
+                                            (checkout_dir / line).resolve()
+                                        )
+                            else:
+                                logger.debug(
+                                    f"git check-ignore returned {result.returncode}: "
+                                    f"{result.stderr.strip()[:200]}"
+                                )
+                        except Exception as e:
+                            logger.debug(
+                                f"Could not compute gitignored paths for "
+                                f"{project_slug}: {e}"
+                            )
+
+            deleted = 0
+            preserved_ignored = 0
+            for path in checkout_dir.rglob('*'):
+                if not path.is_file():
+                    continue
+                if any(part in _SKIP_DIRS for part in path.relative_to(checkout_dir).parts):
+                    continue
+                if path.resolve() in db_paths:
+                    continue
+                if path.resolve() in ignored_paths:
+                    preserved_ignored += 1
+                    continue
+                try:
+                    path.unlink()
+                    deleted += 1
+                except OSError as e:
+                    logger.warning(f"Could not unlink stale {path}: {e}")
+
+            if preserved_ignored:
+                logger.debug(
+                    f"Preserved {preserved_ignored} gitignored file(s) "
+                    f"in {project_slug} checkout (not templedb's business)"
+                )
+
+            # Sweep empty directories bottom-up so parents can drop after children
+            for dirpath in sorted(
+                (p for p in checkout_dir.rglob('*') if p.is_dir()),
+                key=lambda p: len(p.parts), reverse=True,
+            ):
+                if any(part in _SKIP_DIRS for part in dirpath.relative_to(checkout_dir).parts):
+                    continue
+                try:
+                    dirpath.rmdir()  # only removes if empty
+                except OSError:
+                    pass  # not empty — fine
+
+            if deleted:
+                logger.info(f"Removed {deleted} stale files no longer in DB active set")
+
+            # Ensure git repo with committed files (git daemon needs commits to serve)
+            git_dir = checkout_dir / ".git"
+            if not git_dir.exists():
+                subprocess.run(["git", "init"], cwd=str(checkout_dir),
+                               capture_output=True, check=False)
+                # Enable git daemon export
+                (git_dir / "git-daemon-export-ok").touch()
+
+            subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
+                           capture_output=True, check=False)
+
+            # Only commit if there are actual changes (avoid noisy empty commits)
+            diff_result = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"],
+                cwd=str(checkout_dir), capture_output=True, check=False
+            )
+            if diff_result.returncode != 0:
+                # There are staged changes — commit them
+                subprocess.run(
+                    ["git", "commit", "-m",
+                     f"TempleDB materialize ({written} files)"],
+                    cwd=str(checkout_dir), capture_output=True, check=False,
+                    env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
+                         "GIT_AUTHOR_EMAIL": "templedb@localhost",
+                         "GIT_COMMITTER_NAME": "TempleDB",
+                         "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+                )
+
+            suffix = f" ({deleted} stale removed)" if deleted else ""
+            logger.info(f"Materialized {written} files to {checkout_dir}{suffix}")
+            return checkout_dir
+
+        except Exception as e:
+            logger.error(f"Materialize failed: {e}")
+            return None
+
+    def update_flake_input(self, project_slug: str, input_name: str) -> Dict[str, Any]:
+        """Run `nix flake update <input>` in the project's checkout and mirror
+        the updated flake.lock back to the DB.
+
+        Returns {success, stdout, stderr, db_synced} where db_synced is True
+        iff the updated lock file was successfully written back to the DB via
+        `templedb file set --verify`. If nix succeeded but the DB writeback
+        failed, success is still True but db_synced is False and stderr has
+        the writeback error.
+        """
+        checkout = self.materialize_from_db(project_slug, force=False)
+        if checkout is None:
+            return {"success": False, "stdout": "", "stderr":
+                    f"Failed to materialize {project_slug} — commit local "
+                    f"changes first, or use --force via a caller that "
+                    f"supports it.", "db_synced": False}
+        if not (checkout / "flake.nix").exists():
+            return {"success": False, "stdout": "", "stderr":
+                    f"No flake.nix in {checkout}", "db_synced": False}
+
+        try:
+            result = subprocess.run(
+                ["nix", "flake", "update", input_name],
+                cwd=str(checkout),
+                capture_output=True, text=True, timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            return {"success": False, "stdout": "",
+                    "stderr": "nix flake update timed out after 180s",
+                    "db_synced": False}
+        except FileNotFoundError:
+            return {"success": False, "stdout": "",
+                    "stderr": "nix not found in PATH",
+                    "db_synced": False}
+
+        out = {"success": result.returncode == 0,
+               "stdout": result.stdout,
+               "stderr": result.stderr,
+               "db_synced": False}
+
+        if not out["success"]:
+            return out
+
+        # Mirror flake.lock back to the DB via `file set --verify` so the
+        # source of truth doesn't drift.
+        lock_path = checkout / "flake.lock"
+        if not lock_path.exists():
+            out["stderr"] += "\n(warning: no flake.lock produced)"
+            return out
+
+        try:
+            with open(lock_path, "rb") as f:
+                writeback = subprocess.run(
+                    ["templedb", "file", "set", project_slug, "flake.lock",
+                     "--verify"],
+                    stdin=f, capture_output=True, text=True, timeout=30,
+                )
+            if writeback.returncode == 0:
+                out["db_synced"] = True
+            else:
+                out["stderr"] += (
+                    f"\n(warning: DB writeback of flake.lock failed: "
+                    f"{writeback.stderr.strip()})"
+                )
+        except Exception as e:
+            out["stderr"] += f"\n(warning: DB writeback error: {e})"
+
+        return out
+
+    def lock_checkout(self, project_slug: str):
+        """Make checkout files read-only after generate-all.
+
+        DB is the source of truth — edits should go through
+        `templedb edit <slug>` or the GUI, not the checkout directory.
+        """
+        checkout_dir = self._checkout_dir_for(project_slug)
+
+        if not checkout_dir.exists():
+            return 0
+
+        locked = 0
+        for fpath in checkout_dir.rglob("*"):
+            if fpath.is_file() and '.git' not in fpath.parts:
+                fpath.chmod(0o444)
+                locked += 1
+
+        # Final git commit (only if changes exist)
+        subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
+                       capture_output=True, check=False)
+        diff_result = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=str(checkout_dir), capture_output=True, check=False
+        )
+        if diff_result.returncode != 0:
+            subprocess.run(
+                ["git", "commit", "-m",
+                 f"TempleDB locked ({locked} files read-only)"],
+                cwd=str(checkout_dir), capture_output=True, check=False,
+                env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
+                     "GIT_AUTHOR_EMAIL": "templedb@localhost",
+                     "GIT_COMMITTER_NAME": "TempleDB",
+                     "GIT_COMMITTER_EMAIL": "templedb@localhost"}
+            )
+        return locked
+
+    def unlock_checkout(self, project_slug: str):
+        """Make checkout files writable for generate-all to modify."""
+        checkout_dir = self._checkout_dir_for(project_slug)
+
+        if not checkout_dir.exists():
+            return
+        for fpath in checkout_dir.rglob("*"):
+            if fpath.is_file() and '.git' not in fpath.parts:
+                fpath.chmod(0o644)
+
+    def get_project_checkout_path(self, project_slug: str) -> Optional[Path]:
+        """Get the checkout path for a project.
+
+        If no checkout exists, auto-materializes from DB.
+        """
+        sudo_user = os.environ.get('SUDO_USER')
+        real_home = Path(f'/home/{sudo_user}') if sudo_user else Path.home()
+
+        # Check standard locations
+        checkout_paths = [
+            real_home / ".config" / "templedb" / "checkouts" / project_slug,
+            real_home / "projects" / project_slug,
+            Path("/tmp") / f"templedb_checkout_{project_slug}",
+        ]
+
+        for path in checkout_paths:
+            if path.exists() and (path / "flake.nix").exists():
+                return path
+            elif path.exists() and (path / "configuration.nix").exists():
+                return path
+
+        # No checkout found — auto-materialize from DB
+        logger.info(f"No checkout found for {project_slug}, materializing from DB...")
+        return self.materialize_from_db(project_slug)
+
+    def get_config_file_path(self, checkout_path: Path) -> Optional[Path]:
+        """Find the main config file (flake.nix or configuration.nix)"""
+        flake_path = checkout_path / "flake.nix"
+        if flake_path.exists():
+            return flake_path
+
+        config_path = checkout_path / "configuration.nix"
+        if config_path.exists():
+            return config_path
+
+        return None
+
+    def update_system_symlink(self, config_path: Path, dry_run: bool = False) -> bool:
+        """Update /etc/nixos symlinks to point to checkout config files.
+
+        Always symlinks flake.nix/configuration.nix. Also symlinks home.nix
+        and any other .nix files that /etc/nixos currently tracks (i.e. already
+        has a symlink for), so the checkout stays the single source of truth.
+
+        Args:
+            config_path: Path to flake.nix or configuration.nix in the checkout
+            dry_run: If True, only show what would be done
+
+        Returns:
+            True if all symlinks were created successfully
+        """
+        checkout_dir = config_path.parent
+        etc_nixos = Path("/etc/nixos")
+
+        # Build the list of (source, target) pairs to symlink.
+        # Always include the primary config file.
+        if config_path.name == "flake.nix":
+            pairs = [(config_path, etc_nixos / "flake.nix")]
+        else:
+            pairs = [(config_path, etc_nixos / "configuration.nix")]
+
+        # Add every .nix file in the checkout that either:
+        #   a) already has a symlink in /etc/nixos (repair/update it), or
+        #   b) is home.nix (always managed by templedb)
+        for src in sorted(checkout_dir.glob("*.nix")):
+            if src == config_path:
+                continue  # already added above
+            target = etc_nixos / src.name
+            if src.name == "home.nix" or (target.exists() or target.is_symlink()):
+                pairs.append((src, target))
+
+        if dry_run:
+            print("Would update /etc/nixos symlinks:")
+            for src, target in pairs:
+                print(f"  {target} -> {src}")
+            return True
+
+        # Pre-check sudo before attempting symlink operations
+        if not self.check_sudo_access():
+            raise SystemServiceError(
+                "Cannot update /etc/nixos symlinks: sudo requires a password.\n"
+                "Run in an interactive terminal, or configure passwordless sudo."
+            )
+
+        try:
+            for src, target in pairs:
+                cmd = ["sudo", "ln", "-sf", str(src), str(target)]
+                subprocess.run(cmd, check=True)
+                logger.info(f"Updated symlink: {target} -> {src}")
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to update symlink: {e}")
+            raise SystemServiceError(f"Failed to update symlink (exit code {e.returncode})")
+
+    def run_nixos_rebuild(
+        self,
+        command: str,
+        flake_path: Optional[Path] = None,
+        dry_run: bool = False,
+        verbose: bool = False,
+        show_trace: bool = False,
+        no_update_lock_file: bool = False,
+        quiet: bool = False,
+    ) -> Dict[str, Any]:
+        """Run nixos-rebuild command
+
+        Args:
+            command: One of 'test', 'switch', 'boot', 'build', 'dry-build', 'dry-activate'
+            flake_path: Path to flake directory (for flake-based configs)
+            dry_run: If True, use 'dry-activate' command instead
+            verbose: If True, pass --print-build-logs to nixos-rebuild
+            show_trace: If True, pass --show-trace for full Nix eval stack traces
+            quiet: If True, filter out nix store paths and copying lines from display
+
+        Returns:
+            Dict with exit_code, stdout, stderr, and nixos_generation (if applicable)
+        """
+        # If dry_run is True, use dry-activate command
+        if dry_run and command in ['test', 'switch']:
+            command = 'dry-activate'
+        elif dry_run and command in ['build', 'boot']:
+            command = 'dry-build'
+
+        cmd = ["sudo", "nixos-rebuild", command]
+
+        if flake_path:
+            cmd.extend(["--flake", str(flake_path)])
+        if verbose:
+            cmd.append("--print-build-logs")
+        if show_trace:
+            cmd.append("--show-trace")
+        if no_update_lock_file:
+            cmd.append("--no-update-lock-file")
+
+        logger.info(f"Running: {' '.join(cmd)}")
+        print(f"Running: {' '.join(cmd)}")
+
+        def _should_display(line: str) -> bool:
+            """Filter noisy nix output when in quiet mode."""
+            if not quiet:
+                return True
+            if '/nix/store/' in line:
+                return False
+            stripped = line.strip()
+            if stripped.startswith('copying path'):
+                return False
+            if stripped.startswith('these ') and (
+                'will be built' in line or 'will be fetched' in line
+            ):
+                return False
+            return True
+
+        try:
+            result = self._run_streaming(cmd, timeout=1800, should_display=_should_display)
+        except Exception as e:
+            raise SystemServiceError(f"Failed to run nixos-rebuild: {e}")
+
+        if result['timed_out']:
+            raise SystemServiceError("nixos-rebuild command timed out after 30 minutes")
+
+        out = result['stdout']
+        err = result['stderr']
+        return {
+            'exit_code': result['exit_code'],
+            'stdout': out,
+            'stderr': err,
+            'nixos_generation': self._extract_generation_number(out + err),
+            'success': result['exit_code'] == 0,
+        }
+
+    def _extract_generation_number(self, output: str) -> Optional[int]:
+        """Extract NixOS generation number from rebuild output"""
+        import re
+        # Look for patterns like "building generation 123" or "activating configuration 123"
+        patterns = [
+            r'building generation (\d+)',
+            r'activating configuration (\d+)',
+            r'generation (\d+)',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+
+        return None
+
+    def record_deployment(
+        self,
+        project_slug: str,
+        checkout_path: Path,
+        config_path: Path,
+        command: str,
+        result: Dict[str, Any]
+    ) -> int:
+        """Record system deployment in database
+
+        Args:
+            project_slug: Project slug
+            checkout_path: Path to project checkout
+            config_path: Path to config file used
+            command: nixos-rebuild command used
+            result: Result dict from run_nixos_rebuild
+
+        Returns:
+            Deployment ID
+        """
+        project = query_one("SELECT id FROM projects WHERE slug = ?", (project_slug,))
+        if not project:
+            raise SystemServiceError(f"Project not found: {project_slug}")
+
+        deployment_id = execute("""
+            INSERT INTO system_deployments (
+                project_id,
+                checkout_path,
+                config_path,
+                is_active,
+                nixos_generation,
+                command,
+                exit_code,
+                output,
+                created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            project['id'],
+            str(checkout_path),
+            str(config_path),
+            1 if result['success'] else 0,  # Only mark active if successful
+            result.get('nixos_generation'),
+            command,
+            result['exit_code'],
+            result['stdout'] + "\n\n" + result['stderr'],
+            getpass.getuser()
+        ))
+
+        logger.info(f"Recorded deployment {deployment_id} for {project_slug}")
+
+        # Record NixOS generation with VCS linkage
+        if result['success']:
+            try:
+                self._record_nix_generation(
+                    project_slug=project_slug,
+                    project_id=project['id'],
+                    switch_action=command,
+                    system_deployment_id=deployment_id,
+                    toplevel_path=os.readlink("/run/current-system"),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to record nix generation: {e}")
+
+        return deployment_id
+
+    def _record_nix_generation(self, project_slug: str, project_id: int,
+                               switch_action: str, system_deployment_id: int,
+                               toplevel_path: str):
+        """Record a NixOS generation with full VCS and closure linkage."""
+        from services.nix_store_service import NixStoreService
+
+        # Find the latest VCS commit for this project
+        commit = query_one("""
+            SELECT c.id, c.commit_hash FROM vcs_commits c
+            JOIN vcs_branches b ON c.id = b.head_commit_id
+            WHERE b.project_id = ? AND b.is_default = 1
+        """, (project_id,))
+
+        svc = NixStoreService()
+        svc.record_generation(
+            toplevel_path=toplevel_path,
+            switch_action=switch_action,
+            commit_id=commit["id"] if commit else None,
+            commit_hash=commit["commit_hash"] if commit else None,
+            project_id=project_id,
+            system_deployment_id=system_deployment_id,
+        )
+        logger.info(f"Recorded nix generation for {project_slug} → {toplevel_path[:60]}")
+
+    def get_active_deployment(self) -> Optional[Dict[str, Any]]:
+        """Get currently active system deployment"""
+        return query_one("""
+            SELECT
+                sd.id,
+                sd.deployed_at,
+                sd.checkout_path,
+                sd.config_path,
+                sd.nixos_generation,
+                sd.command,
+                p.slug as project_slug,
+                p.name as project_name
+            FROM system_deployments sd
+            JOIN projects p ON sd.project_id = p.id
+            WHERE sd.is_active = 1
+            ORDER BY sd.deployed_at DESC
+            LIMIT 1
+        """)
+
+    def get_deployment_history(
+        self,
+        project_slug: Optional[str] = None,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Get deployment history
+
+        Args:
+            project_slug: Filter by project (optional)
+            limit: Maximum number of records to return
+        """
+        if project_slug:
+            return query_all("""
+                SELECT
+                    sd.id,
+                    sd.deployed_at,
+                    sd.checkout_path,
+                    sd.config_path,
+                    sd.is_active,
+                    sd.nixos_generation,
+                    sd.command,
+                    sd.exit_code,
+                    sd.created_by,
+                    p.slug as project_slug,
+                    p.name as project_name
+                FROM system_deployments sd
+                JOIN projects p ON sd.project_id = p.id
+                WHERE p.slug = ?
+                ORDER BY sd.deployed_at DESC
+                LIMIT ?
+            """, (project_slug, limit))
+        else:
+            return query_all("""
+                SELECT
+                    sd.id,
+                    sd.deployed_at,
+                    sd.checkout_path,
+                    sd.config_path,
+                    sd.is_active,
+                    sd.nixos_generation,
+                    sd.command,
+                    sd.exit_code,
+                    sd.created_by,
+                    p.slug as project_slug,
+                    p.name as project_name
+                FROM system_deployments sd
+                JOIN projects p ON sd.project_id = p.id
+                ORDER BY sd.deployed_at DESC
+                LIMIT ?
+            """, (limit,))
+
+    def rollback_to_deployment(self, deployment_id: int) -> Dict[str, Any]:
+        """Rollback to a previous deployment
+
+        This updates the symlink to point to the previous deployment's config
+        and runs nixos-rebuild switch.
+        """
+        deployment = query_one("""
+            SELECT
+                sd.checkout_path,
+                sd.config_path,
+                sd.nixos_generation,
+                p.slug as project_slug
+            FROM system_deployments sd
+            JOIN projects p ON sd.project_id = p.id
+            WHERE sd.id = ?
+        """, (deployment_id,))
+
+        if not deployment:
+            raise SystemServiceError(f"Deployment {deployment_id} not found")
+
+        config_path = Path(deployment['config_path'])
+        if not config_path.exists():
+            raise SystemServiceError(f"Config file no longer exists: {config_path}")
+
+        # Update symlink
+        self.update_system_symlink(config_path)
+
+        # Rebuild system
+        flake_path = config_path.parent if config_path.name == "flake.nix" else None
+        result = self.run_nixos_rebuild("switch", flake_path=flake_path)
+
+        if result['success']:
+            # Record as new deployment
+            self.record_deployment(
+                deployment['project_slug'],
+                Path(deployment['checkout_path']),
+                config_path,
+                'switch (rollback)',
+                result
+            )
+
+        return result
+
+    def _render_templates(self, project_slug: str) -> int:
+        """Render all configuration templates for a project
+
+        Args:
+            project_slug: Project slug
+
+        Returns:
+            Number of templates rendered
+        """
+        from template_renderer import TemplateRenderer
+
+        checkout_path = self.get_project_checkout_path(project_slug)
+        if not checkout_path:
+            logger.warning(f"No checkout found for {project_slug}, skipping template rendering")
+            return 0
+
+        renderer = TemplateRenderer()
+        count = renderer.render_project_templates(project_slug, checkout_path)
+
+        if count > 0:
+            logger.info(f"Rendered {count} template(s) for {project_slug}")
+            print(f"📝 Rendered {count} configuration template(s)")
+
+            # Auto-commit generated files for Nix flakes
+            # Nix flakes only see files tracked in git
+            try:
+                # Add only generated config files in modules/*/config.nix
+                subprocess.run(
+                    ["git", "add", "modules/*/config.nix"],
+                    cwd=checkout_path,
+                    check=False,
+                    capture_output=True
+                )
+                # Commit if there are changes
+                result = subprocess.run(
+                    ["git", "commit", "-m", "Auto-update generated config from TempleDB templates"],
+                    cwd=checkout_path,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    logger.info("Auto-committed generated config files")
+            except Exception as e:
+                logger.warning(f"Could not auto-commit generated files: {e}")
+
+        return count
+
+    def test_system(self, project_slug: str, dry_run: bool = False) -> Dict[str, Any]:
+        """Test system configuration without activating
+
+        This is the safe way to test changes before committing to them.
+        Uses 'nixos-rebuild test' which applies but doesn't add to boot.
+        """
+        # Render templates before testing
+        self._render_templates(project_slug)
+
+        checkout_path = self.get_project_checkout_path(project_slug)
+        if not checkout_path:
+            raise SystemServiceError(
+                f"Could not find checkout for {project_slug}. "
+                f"Expected at ~/.config/templedb/checkouts/{project_slug}"
+            )
+
+        config_path = self.get_config_file_path(checkout_path)
+        if not config_path:
+            raise SystemServiceError(
+                f"No flake.nix or configuration.nix found in {checkout_path}"
+            )
+
+        # Configure git safe directory when running with sudo
+        if os.environ.get('SUDO_USER'):
+            try:
+                subprocess.run(
+                    ["git", "config", "--global", "--add", "safe.directory", str(checkout_path)],
+                    check=False,  # Don't fail if already configured
+                    capture_output=True
+                )
+            except Exception:
+                pass  # Ignore errors, not critical
+
+        # Update symlink
+        self.update_system_symlink(config_path, dry_run=dry_run)
+
+        # Run test
+        flake_path = checkout_path if config_path.name == "flake.nix" else None
+        result = self.run_nixos_rebuild("test", flake_path=flake_path, dry_run=dry_run)
+
+        if not dry_run and result['success']:
+            self.record_deployment(project_slug, checkout_path, config_path, 'test', result)
+
+        return result
+
+    def switch_system(self, project_slug: str, dry_run: bool = False, with_home_manager: bool = False, verbose: bool = False, show_trace: bool = False, no_update_lock_file: bool = False, quiet: bool = False, checkout_path: Optional[Path] = None) -> Dict[str, Any]:
+        """Switch to system configuration (permanent)
+
+        This activates the configuration and adds it to boot menu.
+        Use test_system() first to verify changes.
+
+        Args:
+            project_slug: Project slug
+            dry_run: If True, only show what would be done
+            with_home_manager: If True, also rebuild home-manager after NixOS
+            checkout_path: Pre-materialized checkout path. If provided, skips
+                          redundant materialize_from_db() call.
+
+        Returns:
+            Dict with rebuild results including home-manager if applicable
+        """
+        # Pre-check sudo access before doing expensive work
+        if not dry_run and not self.check_sudo_access():
+            raise SystemServiceError(
+                "sudo requires a password. Run in an interactive terminal, "
+                "or configure passwordless sudo for this user."
+            )
+
+        # Use pre-materialized path if provided, otherwise materialize
+        if checkout_path is None:
+            checkout_path = self.materialize_from_db(project_slug)
+            if not checkout_path:
+                # Fall back to existing checkout
+                checkout_path = self.get_project_checkout_path(project_slug)
+
+        if not checkout_path:
+            raise SystemServiceError(
+                f"Could not find or materialize checkout for {project_slug}. "
+                f"Import files first: templedb project import /path/to/config"
+            )
+
+        # Render templates after materialize
+        self._render_templates(project_slug)
+
+        config_path = self.get_config_file_path(checkout_path)
+        if not config_path:
+            raise SystemServiceError(
+                f"No flake.nix or configuration.nix found in {checkout_path}"
+            )
+
+        # Configure git safe directory when running with sudo
+        if os.environ.get('SUDO_USER'):
+            try:
+                subprocess.run(
+                    ["git", "config", "--global", "--add", "safe.directory", str(checkout_path)],
+                    check=False,  # Don't fail if already configured
+                    capture_output=True
+                )
+            except Exception:
+                pass  # Ignore errors, not critical
+
+        # Update symlink
+        self.update_system_symlink(config_path, dry_run=dry_run)
+
+        # Run switch
+        flake_path = checkout_path if config_path.name == "flake.nix" else None
+        result = self.run_nixos_rebuild("switch", flake_path=flake_path, dry_run=dry_run, verbose=verbose, show_trace=show_trace, no_update_lock_file=no_update_lock_file, quiet=quiet)
+
+        # If home-manager rebuild requested and nixos-rebuild succeeded
+        if with_home_manager and result['success'] and not dry_run:
+            logger.info("Rebuilding home-manager configuration...")
+            hm_result = self._rebuild_home_manager(checkout_path)
+            result['home_manager'] = hm_result
+
+        if not dry_run and result['success']:
+            self.record_deployment(project_slug, checkout_path, config_path, 'switch', result)
+
+        return result
+
+    def _run_streaming(
+        self,
+        cmd: List[str],
+        timeout: int,
+        should_display: Optional[Callable[[str], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Run CMD with stdout/stderr tee'd live to the terminal and captured.
+
+        All output is captured to the returned buffers; `should_display`
+        (line -> bool) is only consulted when deciding whether to also
+        echo that line to the user's terminal. Default: echo everything.
+
+        Returns a dict with exit_code (int, -1 on timeout), stdout (str),
+        stderr (str), and timed_out (bool).
+        """
+        import io, threading
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+        def _tee(src, buf, dest):
+            for line in src:
+                buf.write(line)
+                if should_display is None or should_display(line):
+                    dest.write(line)
+                    dest.flush()
+
+        t_out = threading.Thread(target=_tee, args=(proc.stdout, stdout_buf, sys.stdout))
+        t_err = threading.Thread(target=_tee, args=(proc.stderr, stderr_buf, sys.stderr))
+        t_out.start(); t_err.start()
+
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            timed_out = True
+        finally:
+            t_out.join(); t_err.join()
+
+        return {
+            'exit_code': proc.returncode if not timed_out else -1,
+            'stdout': stdout_buf.getvalue(),
+            'stderr': stderr_buf.getvalue(),
+            'timed_out': timed_out,
+        }
+
+    _HM_ATTR_MISSING_MARKERS = (
+        'does not provide attribute',
+        'has no attribute',
+        'attribute \'homeConfigurations\' missing',
+        'attribute \'home-manager\' missing',
+    )
+
+    def _rebuild_home_manager(
+        self,
+        flake_path: Path,
+        build_timeout: int = 1800,
+        activate_timeout: int = 600,
+    ) -> Dict[str, Any]:
+        """Rebuild home-manager configuration from a flake.
+
+        Tries the module-embedded attribute first (home-manager as a NixOS
+        module, the common topology on this system), then falls back to the
+        standalone `homeConfigurations` attribute. An explicit override can
+        be set via system_config key `nixos.home_manager_attr` (either a full
+        attr like `path/to/flake#foo.bar` or a suffix starting with `#`).
+
+        Output streams live; a per-invocation temp dir holds the --out-link
+        so concurrent rebuilds don't race on a shared /tmp path.
+
+        Args:
+            flake_path: Path to the flake directory.
+            build_timeout: Seconds to wait for `nix build` (default 1800).
+            activate_timeout: Seconds to wait for the activation script
+                (default 600).
+
+        Returns:
+            Dict with success (bool), exit_code (int), stdout (str),
+            stderr (str), generation (Optional[int]).
+        """
+        try:
+            flake_output = self.get_system_config('nixos.flake_output')
+            if not flake_output:
+                flake_output = socket.gethostname()
+                logger.info(f"Auto-detected flake output from hostname: {flake_output}")
+
+            username = self.get_system_config('nixos.username')
+            if not username:
+                username = getpass.getuser()
+                logger.info(f"Auto-detected username: {username}")
+
+            override = self.get_system_config('nixos.home_manager_attr')
+            candidates: List[str] = []
+            if override:
+                if override.startswith('#'):
+                    candidates.append(f"{flake_path}{override}")
+                else:
+                    candidates.append(override)
+            else:
+                candidates.extend([
+                    f"{flake_path}#nixosConfigurations.{flake_output}"
+                    f".config.home-manager.users.{username}.home.activationPackage",
+                    f"{flake_path}#homeConfigurations.{username}.activationPackage",
+                    f"{flake_path}#homeConfigurations.{flake_output}.activationPackage",
+                ])
+
+            outdir = tempfile.mkdtemp(prefix='templedb-hm-')
+            out_link = os.path.join(outdir, 'result')
+
+            try:
+                build_result = None
+                attempted: List[str] = []
+                for build_path in candidates:
+                    attempted.append(build_path)
+                    print(f"  Building home-manager: {build_path}")
+                    build_result = self._run_streaming(
+                        ["nix", "build", build_path, "--out-link", out_link],
+                        timeout=build_timeout,
+                    )
+                    if build_result['timed_out']:
+                        return {
+                            'success': False,
+                            'exit_code': -1,
+                            'stdout': build_result['stdout'],
+                            'stderr': build_result['stderr'],
+                            'error': f'home-manager build timed out after {build_timeout}s',
+                            'generation': None,
+                        }
+                    if build_result['exit_code'] == 0:
+                        break
+                    stderr = build_result['stderr']
+                    if not any(marker in stderr for marker in self._HM_ATTR_MISSING_MARKERS):
+                        # Real build failure, not just wrong attribute path.
+                        break
+                    logger.info(f"attribute miss on {build_path}, trying next candidate")
+
+                if not build_result or build_result['exit_code'] != 0:
+                    logger.warning(
+                        "home-manager build failed. Attempted candidates:\n  "
+                        + "\n  ".join(attempted)
+                    )
+                    return {
+                        'success': False,
+                        'exit_code': build_result['exit_code'] if build_result else -1,
+                        'stdout': build_result['stdout'] if build_result else '',
+                        'stderr': build_result['stderr'] if build_result else '',
+                        'generation': None,
+                    }
+
+                print(f"  Activating home-manager generation...")
+                activate_result = self._run_streaming(
+                    [os.path.join(out_link, 'activate')],
+                    timeout=activate_timeout,
+                )
+                if activate_result['timed_out']:
+                    return {
+                        'success': False,
+                        'exit_code': -1,
+                        'stdout': build_result['stdout'] + activate_result['stdout'],
+                        'stderr': build_result['stderr'] + activate_result['stderr'],
+                        'error': f'home-manager activation timed out after {activate_timeout}s',
+                        'generation': None,
+                    }
+
+                generation = (
+                    self._extract_hm_generation(activate_result['stdout'])
+                    or self._extract_hm_generation(activate_result['stderr'])
+                )
+                success = activate_result['exit_code'] == 0
+                if success:
+                    print(f"  ✅ home-manager activated (generation {generation})")
+                else:
+                    print(f"  ❌ home-manager activation failed")
+
+                return {
+                    'success': success,
+                    'exit_code': activate_result['exit_code'],
+                    'stdout': build_result['stdout'] + '\n---activate---\n' + activate_result['stdout'],
+                    'stderr': build_result['stderr'] + '\n---activate---\n' + activate_result['stderr'],
+                    'generation': generation,
+                }
+            finally:
+                # Remove the per-invocation gcroot; the built path is either
+                # already active (nix retains it via the profile symlink) or
+                # eligible for eventual GC.
+                shutil.rmtree(outdir, ignore_errors=True)
+
+        except Exception as e:
+            logger.error(f"home-manager rebuild failed: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'generation': None,
+            }
+
+
+    def _extract_hm_generation(self, output: str) -> Optional[int]:
+        """Extract home-manager generation number from output"""
+        import re
+        # Look for "Creating new profile generation X" or "generation X"
+        patterns = [
+            r'profile generation (\d+)',
+            r'generation (\d+)',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+
+        # Fallback: read current generation from profile symlink
+        try:
+            import os
+            profile = os.path.expanduser("~/.local/state/nix/profiles/home-manager")
+            target = os.readlink(profile)
+            match = re.search(r'home-manager-(\d+)-link', target)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            pass
+
+        return None
+
+    def set_project_type(self, project_slug: str, project_type: str) -> None:
+        """Set project type for a project
+
+        Args:
+            project_slug: Project slug
+            project_type: One of 'regular', 'nixos-config', 'service', 'library'
+        """
+        valid_types = ['regular', 'nixos-config', 'service', 'library']
+        if project_type not in valid_types:
+            raise SystemServiceError(
+                f"Invalid project type: {project_type}. Must be one of {valid_types}"
+            )
+
+        execute("""
+            UPDATE projects
+            SET project_type = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE slug = ?
+        """, (project_type, project_slug))
+
+        logger.info(f"Set project {project_slug} type to {project_type}")
+
+    def get_system_config(self, key: str) -> Optional[str]:
+        """Get system configuration value from database
+
+        Args:
+            key: Configuration key (e.g., 'nixos.flake_output')
+
+        Returns:
+            Configuration value or None if not set/empty
+        """
+        result = query_one("SELECT value FROM system_config WHERE key = ?", (key,))
+        if result and result['value']:
+            return result['value']
+        return None
+
+    def set_system_config(self, key: str, value: str) -> None:
+        """Set system configuration value in database
+
+        Args:
+            key: Configuration key
+            value: Configuration value
+        """
+        execute("""
+            INSERT OR REPLACE INTO system_config (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        """, (key, value))
+        logger.info(f"Set system config {key} = {value}")
+
+    def list_system_config(self) -> List[Dict[str, Any]]:
+        """List all system configuration values"""
+        return query_all("""
+            SELECT key, value, description, updated_at
+            FROM system_config
+            ORDER BY key
+        """)

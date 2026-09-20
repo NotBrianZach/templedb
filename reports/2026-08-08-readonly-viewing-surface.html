@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A read-only viewing surface for TempleDB projects</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --neg: #e97070;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 {
+    color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem;
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 {
+    color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem;
+    display: flex; align-items: baseline; gap: 0.6rem;
+  }
+  h3 .tag {
+    color: var(--muted); font-size: 0.7rem; font-weight: 400;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-left: auto;
+  }
+  h3 .tag.pick { color: var(--pos); }
+  h3 .tag.later { color: var(--muted); }
+  h3 .tag.skip { color: var(--neg); }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  pre code { background: none; padding: 0; color: var(--text); }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  a:hover { color: #a0daff; }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.94em;
+  }
+  .callout.pick { border-left-color: var(--pos); }
+  .callout.negative { border-left-color: var(--neg); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.pick .label { color: var(--pos); }
+  .callout.negative .label { color: var(--neg); }
+  table {
+    width: 100%; border-collapse: collapse; margin: 1rem 0;
+    font-size: 0.88em;
+  }
+  th, td {
+    text-align: left; padding: 0.55rem 0.7rem;
+    border-bottom: 1px solid var(--border); vertical-align: top;
+  }
+  th { color: var(--muted); font-weight: 600; font-size: 0.72rem;
+       text-transform: uppercase; letter-spacing: 0.06em; }
+  td.check { color: var(--pos); font-weight: 700; }
+  td.x { color: var(--neg); font-weight: 700; }
+  td.mid { color: var(--muted); }
+  .close {
+    margin-top: 3rem; padding-top: 1.5rem;
+    border-top: 1px solid var(--border); color: var(--muted);
+    font-size: 0.9rem; font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<h1>A read-only viewing surface for TempleDB projects</h1>
+<p class="lede">
+  Sketch of how to expose project content for browser viewing without the FUSE
+  edit-truncation footgun. Three tiers ordered by cost. Recommendation and
+  concrete next-step at the bottom.
+</p>
+
+<h2>The problem</h2>
+
+<p>
+  TempleDB currently exposes project content in two ways:
+</p>
+<ul>
+  <li><strong>FUSE mount at <code>~/temple/&lt;project&gt;/</code></strong> — read
+      and write via normal filesystem. Convenient for editors but has a documented
+      truncation risk on non-trivial writes. The DB write reports success,
+      <code>file cat</code> returns truncated content, and only a byte-count check
+      catches it.</li>
+  <li><strong>Materialized checkout at
+      <code>~/.config/templedb/checkouts/&lt;slug&gt;/</code></strong> — the
+      launcher's source of truth for the running Python code, refreshed by
+      <code>publish run</code> or manual <code>file checkout</code>. Documented as
+      "read-only, auto-generated" but actual permissions are the default
+      <code>rw-r--r--</code>; nothing prevents an editor from writing to it and
+      those writes get silently overwritten on the next materialize.</li>
+</ul>
+
+<p>
+  For viewing HTML overview docs like the ones in the <code>agent-reports</code>
+  project, we don't want either surface — FUSE has the write risk, and the
+  checkout dir is buried and not actually read-only. What we want is:
+</p>
+<ol>
+  <li><strong>Path is browsable</strong> — <code>xdg-open</code> or
+      <code>file://</code> works.</li>
+  <li><strong>Path is stable</strong> — bookmark-friendly.</li>
+  <li><strong>Path is enforced read-only</strong> — accidental edits fail loudly
+      rather than silently.</li>
+  <li><strong>Refreshes on DB change</strong> — no stale content.</li>
+</ol>
+
+<h2>What we can already reuse</h2>
+
+<p>
+  The infrastructure covers most of this:
+</p>
+<ul>
+  <li><code>SystemService.materialize_from_db()</code> at
+      <code>src/services/system_service.py:112</code> — writes all current
+      project files to <code>~/.config/templedb/checkouts/&lt;slug&gt;/</code>,
+      with conflict detection.</li>
+  <li><code>templedb file checkout</code> — per-file extraction, already used to
+      refresh the launcher's copy after every DB edit.</li>
+  <li><code>templedb publish run</code> — commits + materializes + pushes.
+      Whole-project refresh already integrated with commit flow.</li>
+  <li><code>nix_store_paths</code> table (migration 075) — already tracks
+      <code>store_path, store_hash, nar_size, nar_hash, closure_size, is_valid</code>
+      for any registered store path. Ready to hold viewing paths without schema
+      changes.</li>
+</ul>
+
+<p>
+  So the missing pieces are: enforcement (chmod), a browsable location (or
+  symlink), and a <code>view</code> verb.
+</p>
+
+<h2>Tier A — chmod the existing checkout, add a view verb <span class="tag pick">RECOMMENDED</span></h2>
+
+<p>
+  Bolt read-only enforcement onto what already exists. Concretely:
+</p>
+<ol>
+  <li>In <code>SystemService.materialize_from_db()</code>, after writing all
+      files, walk the checkout dir and <code>chmod -R a-w</code>. Files become
+      <code>r--r--r--</code>, dirs <code>r-xr-xr-x</code>. Editors will refuse
+      to save. The next materialize needs to <code>chmod u+w</code> before
+      writing, then re-chmod after.</li>
+  <li>Add <code>templedb view &lt;project&gt; [path]</code>. Default
+      <code>path</code> is <code>index.html</code> if present, else opens the
+      checkout dir in <code>$BROWSER</code> or <code>xdg-open</code>. Auto-runs
+      a fresh <code>materialize_from_db</code> first if the checkout is stale
+      relative to the last VCS commit.</li>
+  <li>Symlink <code>~/temple-ro/</code> →
+      <code>~/.config/templedb/checkouts/</code> for discoverability. Muscle
+      memory becomes <code>~/temple/&lt;slug&gt;/</code> (edit surface, FUSE) vs
+      <code>~/temple-ro/&lt;slug&gt;/</code> (view surface, chmod'd). The
+      <code>-ro</code> suffix is a visible cue.</li>
+</ol>
+
+<p>
+  Rough size:
+</p>
+<pre><code># SystemService.materialize_from_db (add ~10 lines)
+for root, dirs, files in os.walk(checkout_dir):
+    for f in files: os.chmod(os.path.join(root, f), 0o444)
+    for d in dirs:  os.chmod(os.path.join(root, d), 0o555)
+
+# New CLI file: src/cli/commands/view.py (~40 lines)
+def view(args):
+    slug = args.project
+    checkout = Path.home() / ".config/templedb/checkouts" / slug
+    if _stale(slug, checkout):
+        SystemService().materialize_from_db(slug, force=False)
+    target = checkout / (args.path or "index.html")
+    if not target.exists():
+        target = checkout
+    subprocess.run(["xdg-open", str(target)])
+
+# One-time: mkdir ~/temple-ro; ln -s ~/.config/templedb/checkouts/&lt;slug&gt; ~/temple-ro/&lt;slug&gt;
+# Or auto-create the symlink at project create time.</code></pre>
+
+<div class="callout pick">
+  <span class="label">Solves</span>
+  Truncation footgun (edits fail loudly), discoverability (obvious "-ro" path),
+  browsability (<code>view</code> verb). Stability: path is a stable location per
+  project. Content freshness: guaranteed by materialize-before-open.
+</div>
+
+<div class="callout negative">
+  <span class="label">Doesn't solve</span>
+  Content-addressed sharing — <code>~/temple-ro/agent-reports/</code> is the same
+  path regardless of what version is materialized. You can't send someone a URL
+  and prove they're seeing what you saw. That's the Tier B property.
+</div>
+
+<h3>Effort</h3>
+<p>
+  About 60 lines of new code. Half a session. No new tables, no migrations, no
+  daemon dependency.
+</p>
+
+<h2>Tier B — Nix store paths as the read-only surface <span class="tag later">LATER</span></h2>
+
+<p>
+  Stage each materialized project into the Nix store, get back a
+  content-addressed path, and maintain a stable symlink that atomically flips on
+  each rebuild. This is the philosophically-consistent version — the
+  <em>ontology doc's</em> argument that TempleDB should lean into
+  content-addressed identity applied at the viewing layer.
+</p>
+
+<h3>How it works</h3>
+<pre><code># Trigger: after any successful materialize_from_db, or on commit.
+store_path = subprocess.check_output([
+    "nix", "store", "add-path",
+    "--recursive", str(checkout_dir)
+]).strip()
+# e.g. /nix/store/xxxxxxxxxxxxxxxxxxxxxxxx-agent-reports
+
+# Register in existing table (no schema change):
+INSERT INTO nix_store_paths (store_path, store_hash, name, ...)
+VALUES (?, ?, ?, ...)
+ON CONFLICT DO UPDATE SET last_seen_at = datetime('now');
+
+# Also record the pointer:
+INSERT INTO project_view_paths (project_id, store_path_id, materialized_at)
+VALUES (?, ?, datetime('now'));
+
+# Atomic symlink flip:
+ln -sfn &lt;new store_path&gt; ~/temple-ro/&lt;slug&gt;.tmp
+mv ~/temple-ro/&lt;slug&gt;.tmp ~/temple-ro/&lt;slug&gt;
+
+# GC root so nix-collect-garbage doesn't reclaim the current view:
+nix-store --add-root ~/.local/share/templedb/gc-roots/&lt;slug&gt; --indirect &lt;store_path&gt;</code></pre>
+
+<h3>What you get that Tier A doesn't</h3>
+<table>
+  <thead>
+    <tr><th>Property</th><th>Tier A</th><th>Tier B</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Read-only enforcement</td>
+      <td class="check">chmod</td>
+      <td class="check">store perms (stronger)</td>
+    </tr>
+    <tr>
+      <td>Path stability</td>
+      <td class="check">yes</td>
+      <td class="check">yes (via symlink)</td>
+    </tr>
+    <tr>
+      <td>Content-addressed identity</td>
+      <td class="x">no</td>
+      <td class="check">store hash is the identity</td>
+    </tr>
+    <tr>
+      <td>Shareable URL that proves version</td>
+      <td class="x">no</td>
+      <td class="check"><code>file:///nix/store/&lt;hash&gt;-...</code></td>
+    </tr>
+    <tr>
+      <td>Old versions remain valid</td>
+      <td class="x">no (overwritten)</td>
+      <td class="check">yes (until GC)</td>
+    </tr>
+    <tr>
+      <td>Two identical projects share storage</td>
+      <td class="x">no</td>
+      <td class="check">automatic (hash equality)</td>
+    </tr>
+    <tr>
+      <td>Nix daemon required</td>
+      <td class="check">no</td>
+      <td class="x">yes</td>
+    </tr>
+    <tr>
+      <td>Cost per write</td>
+      <td class="mid">chmod walk</td>
+      <td class="mid">NAR hash + copy to store</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Effort</h3>
+<p>
+  Roughly 150-300 lines, one migration (optional — a new
+  <code>project_view_paths</code> table linking projects to their current
+  store path, plus GC-root path). Real dependency on the Nix daemon (which is
+  already required for the rest of TempleDB, so not a new dependency at the
+  project level, but a new dependency for a viewing workflow that could
+  otherwise be daemon-free).
+</p>
+
+<div class="callout">
+  <span class="label">When this pays off</span>
+  When the sharing property becomes a real workflow. For <code>agent-reports</code>
+  specifically, the sharing question has never come up — reports live locally,
+  are read by one human. If reports ever get sent to other agents ("look at
+  <em>this</em> version of the analysis") or to other humans by URL, Tier B's
+  provable identity is worth having. Until then it's over-engineering.
+</div>
+
+<h2>Tier C — Scope Tier B to viewable projects <span class="tag skip">DEFER</span></h2>
+
+<p>
+  If Tier B lands, it doesn't need to run for every project. Source-heavy
+  projects like <code>templedb</code> itself, <code>bza</code>, or
+  <code>system_config</code> have thousands of files that nobody browses in a
+  browser — copying them into the store on every commit is pointless. A simple
+  filter:
+</p>
+<pre><code>-- add to projects table (or as an override):
+ALTER TABLE projects ADD COLUMN viewable BOOLEAN DEFAULT NULL;
+-- NULL = auto-detect (has index.html at root); TRUE/FALSE = explicit</code></pre>
+<p>
+  Skip this until Tier B is real and the store cost is measurably annoying.
+</p>
+
+<h2>The three-surface end-state</h2>
+
+<p>
+  FUSE isn't binary good-or-bad. The truncation risk is a bug in the write path;
+  reads are fine. So the honest architectural target is three surfaces, each
+  optimized for its actual use:
+</p>
+<table>
+  <thead>
+    <tr><th>Surface</th><th>Location</th><th>For</th><th>Enforcement</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Read (interactive)</td>
+      <td><code>~/temple/&lt;slug&gt;/</code></td>
+      <td>Editor navigation, quick <code>vim</code>, greps</td>
+      <td>None; user knows this is live</td>
+    </tr>
+    <tr>
+      <td>Write (canonical)</td>
+      <td><code>templedb file set</code> / <code>edit</code></td>
+      <td>All tool-driven and agent-driven edits</td>
+      <td>Enforced by CLAUDE.md, verified by <code>--verify</code></td>
+    </tr>
+    <tr>
+      <td>View (browsable)</td>
+      <td><code>~/temple-ro/&lt;slug&gt;/</code> or <code>templedb view</code></td>
+      <td>HTML docs, index pages, static previews</td>
+      <td>chmod (Tier A) or store perms (Tier B)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  The point of splitting them is that each surface's <em>path shape</em> is a
+  cue about what you can do with it. A URL starting with
+  <code>~/temple/</code> means "you can edit here." A URL starting with
+  <code>~/temple-ro/</code> means "you can't, and if you tried, the FS would
+  refuse." A CLI command means "the DB is authoritative." Muscle memory follows
+  path shape more reliably than documentation.
+</p>
+
+<h2>Recommendation</h2>
+
+<div class="callout pick">
+  <span class="label">Do Tier A now, defer B until sharing is real</span>
+  Tier A takes ~60 lines and eliminates the footgun. It's compatible with
+  Tier B if you later want content-addressed viewing — chmod'd checkout works
+  as the intermediate that Tier B stages into the store. Doing them in that
+  order costs nothing extra.
+</div>
+
+<p>
+  Tier B is architecturally correct — the ontology doc argues for exactly this
+  kind of content-addressed viewing surface — but its concrete payoff is
+  <em>shareable, version-provable URLs</em>. If nobody is sharing URLs today,
+  Tier B is aesthetic rather than useful. Build it when the first
+  <em>"send me the exact version of X you were looking at"</em> conversation
+  happens; you'll want it fast enough at that point.
+</p>
+
+<p>
+  One follow-up worth doing regardless: audit whether any existing tooling
+  reads from <code>~/.config/templedb/checkouts/&lt;slug&gt;/</code> and
+  expects to write to it. The launcher only reads (verified). If nothing
+  writes, chmod'ing to <code>0555 / 0444</code> is safe. If something writes,
+  Tier A needs to whitelist that path or convert the writer to a CLI call
+  first.
+</p>
+
+<div class="close">
+  Tier A: ~60 LOC, eliminates the footgun, ships in one session. Tier B: real
+  content-addressed viewing surface, worth it when sharing becomes a workflow.
+  Three-surface split (read/write/view) is the honest end-state — each path
+  shape becomes its own cue about what's safe to do.
+</div>
+
+</body>
+</html>

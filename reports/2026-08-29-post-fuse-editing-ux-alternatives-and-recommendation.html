@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Post-FUSE editing UX &mdash; alternatives and recommendation</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --neg: #e97070;
+    --warn: #e0c060;
+    --pick: #7ec7ff;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.4rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.2rem;
+  }
+  h3 {
+    color: #b0b0d0; font-size: 0.95rem; margin: 1.5rem 0 0.4rem;
+    display: flex; align-items: baseline; gap: 0.6rem;
+  }
+  h3 .tag {
+    color: var(--muted); font-size: 0.7rem; font-weight: 400;
+    text-transform: uppercase; letter-spacing: 0.08em; margin-left: auto;
+  }
+  h3 .tag.pick { color: var(--pick); }
+  h3 .tag.miss { color: var(--neg); }
+  h3 .tag.warn { color: var(--warn); }
+  h3 .tag.keep { color: var(--pos); }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.94rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.9rem 1rem; overflow-x: auto; border-radius: 4px;
+    font-size: 0.83em; line-height: 1.5;
+  }
+  pre code { background: transparent; padding: 0; color: var(--text); }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4rem; margin: 0 0 1rem; }
+  li { margin-bottom: 0.35rem; }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.8rem 1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.pick { border-left-color: var(--pick); }
+  .cost {
+    display: inline-block; padding: 1px 7px; border-radius: 3px;
+    font-size: 0.72em; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; margin-left: 0.5rem;
+  }
+  .cost.low  { background: rgba(127,214,160,0.15); color: var(--pos); }
+  .cost.med  { background: rgba(224,192,96,0.15);  color: var(--warn); }
+  .cost.high { background: rgba(233,112,112,0.15); color: var(--neg); }
+</style>
+</head>
+<body>
+
+<h1>Post-FUSE editing UX &mdash; alternatives and recommendation</h1>
+<p class="lede">
+  Assessing replacements for the <code>~/temple/</code> FUSE mount ahead of a
+  hard removal. Written 2026-08-29 during a bza pruning session that
+  surfaced FUSE-adjacent regressions (mount-view truncation hiding ghost
+  records, hook fragility, and the standing write-truncation risk).
+</p>
+
+<h2>Why remove FUSE at all</h2>
+<p>
+  FUSE was pitched as the low-friction path for interactive editing:
+  <code>vim ~/temple/bza/foo.ts</code> and save. In practice, three
+  categories of pain keep recurring:
+</p>
+<ul>
+  <li><strong>Silent write truncation.</strong> Large piped writes and
+    <code>Edit</code>-tool operations through FUSE occasionally truncate
+    mid-file with no error &mdash; the DB write reports success and
+    <code>file cat</code> returns the truncated content. Only a
+    byte-count or parse check catches it. Recorded as an unfixed hazard
+    in <code>templedb-write-broken</code> memory.</li>
+  <li><strong>Truncated mount view.</strong> The FUSE mount surfaces only
+    files with retrievable content in <code>file_contents</code>. Ghost
+    records (metadata rows without a current blob) are invisible via
+    FUSE, so <code>ls ~/temple/bza/</code> silently under-reports what
+    the DB actually tracks &mdash; masking real problems (see task #9).</li>
+  <li><strong>Split brain in agent workflows.</strong> Agents/hooks
+    reflexively redirect writes to FUSE paths (a Write-tool hook does
+    exactly this), while <code>CLAUDE.md</code> tells tools to use the
+    CLI. The two paths interact in confusing ways (session fanout, cache
+    invalidation races). Every project's <code>CLAUDE.md</code> ends up
+    documenting the tension.</li>
+</ul>
+<p>
+  Removing FUSE deletes the whole category. But it also removes the one
+  workflow FUSE is genuinely good at: <em>launch your editor at a
+  path, edit, save.</em> This report evaluates replacements for that
+  UX.
+</p>
+
+<h2>What we're solving for</h2>
+<p>The current interactive editing surface has three shapes:</p>
+<ol>
+  <li><strong>One-shot edit.</strong> "Change one line in one file."
+    <code>templedb file edit</code> already covers this via
+    <code>$EDITOR</code> round-trip.</li>
+  <li><strong>Session edit.</strong> "Open 3&ndash;10 files, edit them
+    over an hour, save intermittently, commit at the end." This is what
+    FUSE is best at today and what the alternatives compete on.</li>
+  <li><strong>Multi-file navigation + LSP.</strong> "Jump-to-definition,
+    rename symbol across files, run tests in-editor." FUSE only kind of
+    supports this &mdash; LSPs work but startup is slow, and any tool that
+    walks the tree hits the truncated-view problem.</li>
+</ol>
+
+<h2>Alternatives</h2>
+
+<h3>1. <code>templedb file edit</code> only <span class="tag pick">Keep</span></h3>
+<p>
+  Ships today. Opens the DB blob in <code>$EDITOR</code>, writes back on
+  save. Fine for one-shots, useless for anything requiring cross-file
+  navigation. <strong>Keep as the primary path for shape&nbsp;#1.</strong>
+</p>
+
+<h3>2. Materialized checkout + <code>templedb commit</code> <span class="tag pick">Keep</span></h3>
+<p>
+  <code>templedb project checkout &lt;slug&gt; /tmp/work --writable</code>
+  gives a real directory with full LSP/navigation. Edits happen normally.
+  <code>templedb commit &lt;slug&gt; /tmp/work</code> diffs and commits.
+  This is what the tool workflow already documents. <strong>Promote to
+  the recommended path for shapes #2 and&nbsp;#3.</strong> Downsides: the
+  workspace-diff hazard (deletion sweep) exists, and per-session
+  checkouts fill <code>/tmp</code> unless pruned.
+</p>
+
+<h3>3. <code>templedb watch</code> daemon (new) <span class="tag warn">Build</span> <span class="cost med">med</span></h3>
+<p>
+  Userspace file watcher (inotify on Linux) over a mirrored directory.
+  Any write triggers <code>templedb file set</code> in the background.
+  Preserves the "just save the file" UX without a kernel mount. Roughly
+  1&ndash;2 days to build a minimum viable version. Risks: initial mirror
+  drift, permission on-disk mismatch with DB, deletion semantics
+  ("did they mean to delete or was it a rename?").
+</p>
+
+<h3>4. Git as the interface <span class="tag warn">Build</span> <span class="cost med">med</span></h3>
+<p>
+  Every project already publishes to a git remote (github mirror seen in
+  <code>publish run</code> output). Formalise it: expose a project as a
+  bare repo the user <code>git clone</code>s, edits normally, and
+  <code>git push</code>es. A post-receive hook syncs commits back to the
+  DB. Zero new UX to learn. Downsides: every project needs a mirror
+  configured, the DB becomes derived state instead of source of truth
+  (an inversion), and the <code>vcs_working_state</code> /
+  <code>vcs_sessions</code> abstractions get harder to justify.
+</p>
+
+<h3>5. Editor plugin (Emacs Tramp / VS Code FS provider) <span class="tag warn">Build</span> <span class="cost high">high</span></h3>
+<p>
+  Register a <code>templedb://</code> URL scheme handled by editor
+  plugins. <code>M-x find-file templedb:bza/src/foo.ts</code> opens the
+  DB blob, save writes back. Per-editor implementations required.
+  Solves LSP/navigation well within one editor. Doesn't help
+  command-line tools (<code>grep</code>, <code>rg</code>, build systems).
+</p>
+
+<h3>6. Auto-checkout on demand <span class="tag warn">Build</span> <span class="cost low">low</span></h3>
+<p>
+  Cheap variant of #2. <code>templedb edit &lt;slug&gt;</code> (new
+  top-level command) creates or reuses a checkout at a stable path,
+  launches your editor, and prints the commit command on exit. Half a
+  day. Nudges the "session edit" shape into the checkout workflow
+  without asking you to remember the ceremony.
+</p>
+
+<h3>7. Poll-based bidirectional sync <span class="tag warn">Build</span> <span class="cost med">med</span></h3>
+<p>
+  Cousin of #3 without inotify. Daemon polls disk + DB every few seconds
+  and reconciles. Simpler and more portable than inotify but slower
+  feedback. Merge semantics on concurrent edits get gnarly fast.
+</p>
+
+<h3>8. HTTP-served virtual filesystem <span class="tag miss">Skip</span></h3>
+<p>
+  Mount DB as an HTTP file server. Almost no useful tool speaks
+  "filesystem over HTTP" natively. Skip.</p>
+
+<h2>Recommendation</h2>
+<div class="callout pick">
+  <p><strong>Ship options #2 (already exists) and #6 (half-day build)
+    together, and delete FUSE.</strong></p>
+  <p>
+    #2 handles power-user sessions correctly (LSP, navigation, testing);
+    #6 is the ergonomic on-ramp that avoids the "remember to checkout
+    first" tax. <code>templedb file edit</code> stays for one-liners.
+    That's the whole spectrum FUSE was covering, with none of the FUSE
+    failure modes.
+  </p>
+</div>
+
+<p>Phasing:</p>
+<ol>
+  <li><strong>Land now:</strong> deprecation warning on
+    <code>templedb mount</code>, update every project
+    <code>CLAUDE.md</code> to remove FUSE references, add
+    <code>templedb edit &lt;slug&gt;</code> as the session-edit
+    on-ramp.</li>
+  <li><strong>One&ndash;two days later:</strong> delete
+    <code>src/temple_fuse.py</code>, mount/unmount CLI commands, FUSE
+    cache invalidation code, the FUSE-oriented Write-tool hook.</li>
+  <li><strong>Ongoing:</strong> as new bug surfaces appear (session
+    fanout, ghost records, checkout-diff crash), fix or rationalise the
+    CLI path &mdash; that's now the only path.</li>
+</ol>
+
+<h2>Non-goals</h2>
+<ul>
+  <li>Emacs Tramp / VS Code FS providers are attractive but per-editor.
+    Punt until #2 + #6 prove insufficient.</li>
+  <li>Git-as-interface (#4) is worth revisiting once the FUSE dust
+    settles &mdash; potentially it obsoletes the whole
+    <code>vcs_working_state</code> abstraction. Not this quarter.</li>
+</ul>
+
+<h2>Open questions</h2>
+<ul>
+  <li>How many users besides the primary user actively rely on the FUSE
+    mount today? If &gt;1, add a migration guide before deleting.</li>
+  <li>Does removing FUSE simplify or complicate the templedb-agent
+    integration? Agent likely uses CLI already &mdash; verify.</li>
+  <li>The Write-tool hook that reflexively redirects
+    <code>/tmp/*</code> paths to <code>~/temple/*</code> lives outside
+    the templedb repo. Coordinate removal with the harness config
+    owners.</li>
+</ul>
+
+</body>
+</html>

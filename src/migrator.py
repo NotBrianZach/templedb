@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""
+TempleDB Migration Framework
+
+Tracks applied migrations in a schema_version table and applies
+pending ones in order. Supports both fresh installs (schema.sql)
+and incremental upgrades (numbered migrations).
+
+Usage:
+    from migrator import Migrator
+    m = Migrator(db_path)
+    m.migrate()       # apply all pending
+    m.status()        # show current state
+"""
+
+import os
+import re
+import sqlite3
+import hashlib
+import logging
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import List, Tuple, Optional, Dict
+
+logger = logging.getLogger(__name__)
+
+# Migration files live here.
+#
+# Two candidate layouts:
+#   - Dev tree / materialised checkout:
+#       src/migrator.py + migrations/*.sql at project root
+#     → Path(__file__).parent.parent / "migrations"
+#
+#   - Nix install: templedb.nix's postInstall copies migrations/ into
+#     site-packages/ next to migrator.py:
+#       site-packages/migrator.py + site-packages/migrations/*.sql
+#     → Path(__file__).parent / "migrations"
+#
+# Pick the first candidate that actually contains migrations. Falls
+# back to the dev-tree location so error messages remain intuitive
+# when nothing is found.
+
+def _find_migrations_dir():
+    module_dir = Path(__file__).parent
+    for candidate in (
+        module_dir / "migrations",           # nix install (sibling)
+        module_dir.parent / "migrations",    # dev tree (project root)
+    ):
+        if candidate.exists() and any(candidate.glob("*.sql")):
+            return candidate
+    return module_dir.parent / "migrations"
+
+
+MIGRATIONS_DIR = _find_migrations_dir()
+
+# Ordered list of numbered migrations to apply AFTER schema.sql
+# This is the canonical sequence — add new migrations at the end.
+MIGRATION_SEQUENCE = [
+    "015_add_var_tag_scope.sql",
+    "030_vibe_claude_interactions.sql",
+    "032_add_encryption_and_system_config.sql",
+    "033_remove_secret_blobs_project_id.sql",
+    "034_add_deployment_cache.sql",
+    "035_add_code_intelligence_graph.sql",
+    "036_add_nixops4_integration.sql",
+    "039_create_unified_views.sql",
+    "042_add_nixos_managed_packages.sql",
+    "044_add_checkout_edit_sessions.sql",
+    "045_add_git_server_config.sql",
+    "046_add_nix_first_support.sql",
+    "047_drop_orphaned_convoy_trigger.sql",
+    "048_add_readme_cross_reference_system.sql",
+    "049_add_deployment_tracking.sql",
+    "050_add_deployment_scripts.sql",
+    "063_drop_quiz_tables_rename_vibe_sessions.sql",
+    "064_add_branch_operations.sql",
+    "065_add_deployment_pipeline.sql",
+    "066_rename_nixops4_to_fleet.sql",
+    "067_add_edge_function_deployments.sql",
+    "068_add_blue_green_state.sql",
+    "069_add_project_tests.sql",
+    "070_drop_work_items.sql",
+    "072_fix_dangling_work_items_fks.sql",
+    "073_add_temple_agent.sql",
+    "074_drop_unused_tables_and_views.sql",
+    "075_nix_store_integration.sql",
+    "076_agent_work_log.sql",
+    "077_config_compiler.sql",
+    "078_config_compiler_full_nix_ast.sql",
+    "079_ast_builds.sql",
+    "080_agent_pending_asks.sql",
+    "081_graph_query_log.sql",
+    "082_vcs_sessions.sql",
+    "083_drop_staged_boolean.sql",
+    "084_agent_sections.sql",
+    "085_agent_user_edits.sql",
+    "086_source_snapshots_view.sql",
+    "087_edit_intents.sql",
+    "088_vcs_working_state_intent_id.sql",
+    "089_entities_and_relations.sql",
+    "090_report_implementations.sql",
+    "091_ingestion_runs.sql",
+    "092_invariant_checks.sql",
+    "093_handoff_notes.sql",
+    "094_tool_calls.sql",
+    "095_reconcile_runs.sql",
+    "096_adapter_version.sql",
+    "097_observations_archive.sql",
+    "098_entities_attributes_json.sql",
+    "099_sync_scope.sql",
+    "100_hygiene_snapshots.sql",
+    "101_sync_entities_relations.sql",
+    "102_sync_natural_key_pks.sql",
+    "103_vcs_sessions_context.sql",
+    "104_deploy_stage_runs.sql",
+    "105_vcs_sessions_lifetime.sql",
+    "106_agent_notifications.sql",
+    "config_links_schema.sql",
+    "database_vcs_schema.sql",
+    "file_tracking_schema.sql",
+    "file_versioning_schema.sql",
+    "vcs_metadata_schema.sql",
+    "views.sql",
+]
+
+
+def _file_hash(path: Path) -> str:
+    """SHA-256 of a migration file for integrity tracking."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+class Migrator:
+    """Database migration runner with version tracking."""
+
+    SCHEMA_VERSION_DDL = """
+    CREATE TABLE IF NOT EXISTS schema_version (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        version     INTEGER NOT NULL,
+        filename    TEXT NOT NULL,
+        file_hash   TEXT,
+        applied_at  TEXT NOT NULL,
+        UNIQUE(filename)
+    );
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.migrations_dir = MIGRATIONS_DIR
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def _ensure_version_table(self, conn: sqlite3.Connection):
+        conn.executescript(self.SCHEMA_VERSION_DDL)
+
+    def _get_applied(self, conn: sqlite3.Connection) -> Dict[str, dict]:
+        """Return {filename: {version, file_hash, applied_at}} for all applied migrations."""
+        self._ensure_version_table(conn)
+        rows = conn.execute(
+            "SELECT filename, version, file_hash, applied_at FROM schema_version ORDER BY version"
+        ).fetchall()
+        return {r["filename"]: dict(r) for r in rows}
+
+    def _is_fresh_db(self, conn: sqlite3.Connection) -> bool:
+        """Check if this is a brand new database with no user tables."""
+        tables = conn.execute(
+            "SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' "
+            "AND name NOT IN ('schema_version', 'sqlite_sequence')"
+        ).fetchone()
+        return tables["c"] == 0
+
+    def _apply_file(self, conn: sqlite3.Connection, filename: str, version: int) -> bool:
+        """Apply a single migration file. Returns True on success."""
+        path = self.migrations_dir / filename
+        if not path.exists():
+            logger.warning(f"Migration file not found: {filename}")
+            return False
+
+        sql = path.read_text()
+        fhash = _file_hash(path)
+
+        try:
+            conn.executescript(sql)
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, filename, file_hash, applied_at) "
+                "VALUES (?, ?, ?, datetime('now'))",
+                (version, filename, fhash),
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Migration {filename} failed: {e}")
+            conn.rollback()
+            return False
+
+    # Tables introduced by migrations *after* schema.sql's frozen point.
+    # If any are missing after a fresh install, the corresponding migration
+    # failed for a real reason (not a "schema.sql already has it" reason)
+    # and someone needs to look.
+    _POST_SCHEMA_TABLES = (
+        "nix_store_paths",      # 075
+        "agent_work_log",       # 076
+        "config_nodes",         # 077
+        "ast_builds",           # 079
+        "agent_pending_asks",   # 080
+        "graph_query_log",      # 081
+        "vcs_sessions",         # 082
+    )
+
+    def _verify_critical_tables(self, conn: sqlite3.Connection) -> None:
+        """After fresh install: assert every post-schema.sql migration's
+        key table exists. Missing tables mean the migration was silently
+        swallowed by our error tolerance."""
+        missing = []
+        for tbl in self._POST_SCHEMA_TABLES:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (tbl,),
+            ).fetchone()
+            if not row:
+                missing.append(tbl)
+        if missing:
+            logger.error(
+                f"Post-schema.sql tables missing after fresh install: {missing}. "
+                "This means a migration failed and its errors were swallowed. "
+                "Run `templedb admin db status` and inspect the marker hashes."
+            )
+            raise RuntimeError(f"Fresh install left tables missing: {missing}")
+
+
+    def migrate(self, dry_run: bool = False) -> Tuple[int, int]:
+        """
+        Apply all pending migrations.
+
+        For a fresh DB: applies schema.sql then marks all numbered migrations
+        as applied (schema.sql is the consolidated superset).
+
+        For an existing DB: applies only the numbered migrations that haven't
+        been recorded yet.
+
+        Returns (applied_count, skipped_count).
+        """
+        conn = self._connect()
+        self._ensure_version_table(conn)
+        applied = self._get_applied(conn)
+        fresh = self._is_fresh_db(conn)
+
+        applied_count = 0
+        skipped_count = 0
+
+        if fresh:
+            # Fresh install: schema.sql is the canonical superset. Mark
+            # all numbered migrations as applied via 'via-schema.sql' so
+            # subsequent non-fresh runs won't try to re-apply them.
+            #
+            # Correctness depends on schema.sql actually reflecting every
+            # migration's endpoint state. If schema.sql drifts (as
+            # happened Aug 2026 with migrations 075-082 missing), fresh
+            # installs get a broken shape. `_verify_critical_tables`
+            # catches that at install time; long-term fix is to
+            # regenerate schema.sql after every new migration lands.
+            schema_file = "schema.sql"
+            if schema_file not in applied:
+                if dry_run:
+                    print(f"  [DRY RUN] Would apply: {schema_file}")
+                    applied_count += 1
+                else:
+                    print(f"  Applying base schema: {schema_file}")
+                    if self._apply_file(conn, schema_file, 0):
+                        applied_count += 1
+                    else:
+                        conn.close()
+                        return (0, 0)
+
+                for i, filename in enumerate(MIGRATION_SEQUENCE, start=1):
+                    if filename not in applied:
+                        if not dry_run:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO schema_version (version, filename, file_hash, applied_at) "
+                                "VALUES (?, ?, 'via-schema.sql', datetime('now'))",
+                                (i, filename),
+                            )
+                        skipped_count += 1
+
+                if not dry_run:
+                    conn.commit()
+                    print(f"  Marked {skipped_count} numbered migrations as applied (schema.sql superset)")
+                    self._verify_critical_tables(conn)
+        else:
+            # Existing DB — apply only missing numbered migrations
+            for i, filename in enumerate(MIGRATION_SEQUENCE, start=1):
+                if filename in applied:
+                    skipped_count += 1
+                    continue
+
+                if dry_run:
+                    print(f"  [DRY RUN] Would apply: {filename}")
+                    applied_count += 1
+                else:
+                    print(f"  Applying: {filename}")
+                    if self._apply_file(conn, filename, i):
+                        applied_count += 1
+                    else:
+                        print(f"  STOPPED at {filename} due to error")
+                        break
+
+        conn.close()
+        return (applied_count, skipped_count)
+
+    def status(self) -> List[dict]:
+        """
+        Return migration status: each entry has filename, applied (bool),
+        applied_at, and file_hash.
+        """
+        conn = self._connect()
+        self._ensure_version_table(conn)
+        applied = self._get_applied(conn)
+        conn.close()
+
+        result = []
+        # Base schema
+        schema_info = applied.get("schema.sql")
+        result.append({
+            "filename": "schema.sql",
+            "applied": schema_info is not None,
+            "applied_at": schema_info["applied_at"] if schema_info else None,
+            "file_hash": schema_info["file_hash"] if schema_info else None,
+        })
+
+        # Numbered migrations
+        for filename in MIGRATION_SEQUENCE:
+            info = applied.get(filename)
+            result.append({
+                "filename": filename,
+                "applied": info is not None,
+                "applied_at": info["applied_at"] if info else None,
+                "file_hash": info["file_hash"] if info else None,
+            })
+
+        return result
+
+    def stamp_existing(self) -> int:
+        """
+        For an existing database that predates the migration framework:
+        mark all migrations as applied without running them.
+        Returns the number of migrations stamped.
+        """
+        conn = self._connect()
+        self._ensure_version_table(conn)
+        applied = self._get_applied(conn)
+
+        stamped = 0
+
+        # Stamp schema.sql
+        if "schema.sql" not in applied:
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, filename, file_hash, applied_at) "
+                "VALUES (0, 'schema.sql', 'pre-existing', datetime('now'))",
+            )
+            stamped += 1
+
+        # Stamp all numbered migrations
+        for i, filename in enumerate(MIGRATION_SEQUENCE, start=1):
+            if filename not in applied:
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_version (version, filename, file_hash, applied_at) "
+                    "VALUES (?, ?, 'pre-existing', datetime('now'))",
+                    (i, filename),
+                )
+                stamped += 1
+
+        conn.commit()
+        conn.close()
+        return stamped

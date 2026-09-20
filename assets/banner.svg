@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="800" height="200" viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- TempleDB Banner -->
+
+  <!-- Background -->
+  <rect width="800" height="200" fill="#0a0e27"/>
+
+  <!-- Grid pattern background -->
+  <defs>
+    <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+      <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#1a1a3e" stroke-width="0.5"/>
+    </pattern>
+  </defs>
+  <rect width="800" height="200" fill="url(#grid)"/>
+
+  <!-- Left decorative element: Temple silhouette -->
+  <g transform="translate(50, 60)">
+    <!-- Pediment -->
+    <path d="M 0 30 L 40 0 L 80 30 Z" fill="#e94560" opacity="0.3"/>
+    <!-- Columns -->
+    <rect x="5" y="30" width="10" height="50" fill="#e94560" opacity="0.3"/>
+    <rect x="25" y="30" width="10" height="50" fill="#e94560" opacity="0.3"/>
+    <rect x="45" y="30" width="10" height="50" fill="#e94560" opacity="0.3"/>
+    <rect x="65" y="30" width="10" height="50" fill="#e94560" opacity="0.3"/>
+    <!-- Base -->
+    <rect x="0" y="80" width="80" height="6" fill="#e94560" opacity="0.3"/>
+  </g>
+
+  <!-- Main title: TempleDB -->
+  <text x="200" y="90" font-family="'Courier New', monospace" font-size="56" font-weight="bold" fill="#00d4ff" letter-spacing="2">
+    TempleDB
+  </text>
+
+  <!-- Subtitle -->
+  <text x="200" y="120" font-family="'Courier New', monospace" font-size="18" fill="#e94560" letter-spacing="1">
+    Database-Native Project Management
+  </text>
+
+  <!-- Tribute line -->
+  <text x="200" y="145" font-family="'Courier New', monospace" font-size="14" fill="#808080" letter-spacing="0.5">
+    In Honor of Terry Davis (1969-2018)
+  </text>
+
+  <!-- Right decorative element: Database cylinders -->
+  <g transform="translate(680, 60)">
+    <ellipse cx="40" cy="20" rx="35" ry="8" fill="none" stroke="#00d4ff" stroke-width="2" opacity="0.4"/>
+    <line x1="5" y1="20" x2="5" y2="60" stroke="#00d4ff" stroke-width="2" opacity="0.4"/>
+    <line x1="75" y1="20" x2="75" y2="60" stroke="#00d4ff" stroke-width="2" opacity="0.4"/>
+    <ellipse cx="40" cy="40" rx="35" ry="8" fill="none" stroke="#00d4ff" stroke-width="2" opacity="0.4"/>
+    <ellipse cx="40" cy="60" rx="35" ry="8" fill="none" stroke="#00d4ff" stroke-width="2" opacity="0.4"/>
+  </g>
+
+  <!-- Data flow particles -->
+  <circle cx="150" cy="100" r="2" fill="#00d4ff" opacity="0.6"/>
+  <circle cx="170" cy="110" r="1.5" fill="#00d4ff" opacity="0.5"/>
+  <circle cx="180" cy="95" r="1" fill="#00d4ff" opacity="0.4"/>
+  <circle cx="650" cy="100" r="2" fill="#e94560" opacity="0.6"/>
+  <circle cx="630" cy="90" r="1.5" fill="#e94560" opacity="0.5"/>
+  <circle cx="620" cy="105" r="1" fill="#e94560" opacity="0.4"/>
+
+  <!-- Bottom accent line -->
+  <line x1="200" y1="160" x2="600" y2="160" stroke="#e94560" stroke-width="1" opacity="0.5"/>
+</svg>

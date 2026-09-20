@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Own vs observe: TempleDB's fork in the road</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); color: var(--muted); font-weight: 500; }
+  .dim { color: var(--muted); }
+  .spectrum {
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 1rem 1.2rem; margin: 1rem 0; border-radius: 4px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.9;
+  }
+</style>
+</head>
+<body>
+
+<h1>Own vs observe: TempleDB's fork in the road</h1>
+<p class="lede">
+  Companion to yesterday&rsquo;s <em>Nix as a projection of TempleDB</em>. That report proposed inverting the authority ordering between Nix and the DB. This one steps back one turn of the wheel and asks a harder question: whether the DB should be an authority over source code <em>at all</em>. Synthesizes three lines of analysis &mdash; unpacking &ldquo;consumers speak the DB protocol,&rdquo; the standard git multi-copy problem and its standard fixes, and the read-only projection pattern used by every serious static analysis tool &mdash; into a single argument. Adds meta-analysis on the identity crisis, the dogfood trap, and the complexity budget. The unified recommendation is: <strong>keep TempleDB&rsquo;s ownership over things that are legitimately DB-native (agent state, cross-project graph, deployment history), and give up its ownership over source code content in favor of the observer pattern.</strong>
+</p>
+
+<h2>The three tracks, briefly</h2>
+
+<p>This report synthesizes three threads pulled through consecutive conversations:</p>
+
+<ol>
+  <li><strong>Cost analysis of &ldquo;DB protocol.&rdquo;</strong> The Nix-as-projection proposal hand-waved past the phrase &ldquo;make consumers speak the DB protocol.&rdquo; Unpacking that phrase into its four concrete implementations (curated git-daemon, custom Nix fetcher, NAR endpoint, substituter) revealed that only the first is pragmatic, and the first is essentially what we already do &mdash; just with a materialize step that keeps introducing bugs.</li>
+  <li><strong>The standard git multi-copy problem.</strong> The class of drift bugs we&rsquo;ve been hitting (edited-the-wrong-copy, materialize sweeps, nix-store staleness) is a well-understood family in software engineering. Git has been living with it for 20 years and has good tools: lock files, watchers, drift diagnostics, single-canonical-working-copy conventions, symlink escape hatches. Under any model where source stays in git, these fixes work.</li>
+  <li><strong>The static analysis pattern.</strong> Every LSP server, Sourcegraph, GitHub&rsquo;s semantic code navigation, and rust-analyzer converged on the same architecture: source stays authoritative on disk, tool parses and indexes into an in-memory or DB projection, queries hit the projection, edits go back to disk via the editor and never through the tool. The tool <em>observes</em> code rather than <em>owning</em> it.</li>
+</ol>
+
+<p>The three tracks converge on one insight: <strong>the drift-bug family we&rsquo;ve been chasing is a symptom of a category mistake, not a technical problem.</strong> TempleDB has been trying to be an authority over source code content, and every mechanism it needs to maintain that authority (materialize, file set write-through, FUSE mount) is a bug factory. The tools that succeed in this space explicitly gave up authority and became well-informed observers.</p>
+
+<h2>Unpacking &ldquo;consumers speak the DB protocol&rdquo;</h2>
+
+<p>Nix builds by getting a source tree and turning it into a store path. Every consumer of templedb today obtains its source tree by asking git. To take git out of that chain, the consumer has to acquire the source tree by some other means. Four options, in order of decreasing pragmatism:</p>
+
+<ul>
+  <li><strong>B1 &mdash; DB-curated git-daemon.</strong> What we already do. Templedb materializes to disk, git-daemon serves it, consumers see &ldquo;a normal git repo.&rdquo; This <em>is</em> the DB protocol as consumers see it; the pain is that materialize is a batch/sweep operation that mangles working trees. The <code>.authinfo.gpg</code> incident yesterday was a materialize sweep. Fixable inside this option by making materialize incremental and gitignore-aware.</li>
+  <li><strong>B2 &mdash; Custom Nix fetcher.</strong> Consumers write <code>inputs.templedb.url = "templedb:templedb?rev=abc123"</code>. Requires a Nix builtin (fork nix, upstream to nixpkgs) or IFD-based glue that only works in impure eval mode.</li>
+  <li><strong>B3 &mdash; NAR endpoint.</strong> Templedb serves narinfo + NAR files keyed on commit hash. Loses git semantics entirely: no history, no blame, no branches. Adds an HTTP server as a hard runtime dependency of every build.</li>
+  <li><strong>B4 &mdash; Templedb as a binary cache.</strong> Complementary, not a source-tree alternative. Doesn&rsquo;t solve the problem.</li>
+</ul>
+
+<p>Almost the entire cost of the &ldquo;DB is truth&rdquo; proposal is concentrated in B2, because that&rsquo;s the version that actually makes consumers speak a new protocol. Under B2:</p>
+
+<ol>
+  <li><strong>Consumer ergonomics collapse.</strong> When someone clones system_config, <code>inputs.templedb</code> no longer resolves to a filesystem path they can <code>cd</code> into. Can&rsquo;t <code>git log</code>, can&rsquo;t <code>git blame</code>, can&rsquo;t open in an editor without installing templedb. Turns templedb from &ldquo;a repo that happens to have a helpful CLI&rdquo; into &ldquo;a closed ecosystem you must opt into fully.&rdquo;</li>
+  <li><strong>Pure-eval mode breaks.</strong> Custom fetchers via IFD are restricted at eval time. Needs either an upstream Nix builtin (multi-year political project) or impure eval, which breaks reproducibility and <code>nix flake check</code>.</li>
+  <li><strong>Bootstrap paradox multiplied.</strong> If templedb is the only way to obtain templedb&rsquo;s source, you need templedb to install templedb. You&rsquo;d maintain a hand-authored <code>bootstrap-flake.nix</code> that fetches a tarball, keeping <em>two</em> representations of the same code in sync forever. Guix does this. It&rsquo;s why Guix has PhD theses about its bootstrap chain.</li>
+  <li><strong>CI/CD becomes hostile.</strong> GitHub Actions, Hydra, anyone running <code>nix flake check</code> on a PR &mdash; none have templedb. Either you provide a stateless public mirror (which is just a git repo, defeating the point) or external CI can&rsquo;t verify PRs.</li>
+  <li><strong>Debugging regresses.</strong> Every <code>nix repl</code> session pays a shell-out tax to peek at source.</li>
+  <li><strong>AST parser completeness becomes load-bearing.</strong> Today&rsquo;s parser gaps (the &ldquo;outputs FnDef body silently dropped&rdquo; memory) are annoying under the index model &mdash; a query returns incomplete data. Under B2 they are fatal &mdash; unparseable Nix means the DB literally can&rsquo;t hold your code.</li>
+  <li><strong>Round-trip byte-fidelity kills git blame.</strong> Every DB &rarr; emit cycle re-normalizes formatting. Comments migrate. Whitespace shifts. <code>git blame</code> for emitted output shows the emitter as the author of every line. Historical context evaporates.</li>
+</ol>
+
+<h2>The standard git multi-copy problem</h2>
+
+<p>Take the DB-as-authority idea off the table for a moment and look at what we&rsquo;re actually left with. The bugs are a family: same content in multiple filesystem locations, each with its own edit path, no single act that guarantees they all agree.</p>
+
+<p>This is a well-known problem shape:</p>
+
+<ul>
+  <li><strong>Vendored dependencies</strong> &mdash; package X&rsquo;s code in project A&rsquo;s and project B&rsquo;s <code>vendor/</code>. Fixes in A don&rsquo;t reach B.</li>
+  <li><strong>Generated files</strong> &mdash; <code>dist/</code>, <code>.pb.go</code>, <code>schema.sql.dump</code>. Someone edited source, forgot to regenerate.</li>
+  <li><strong>Multiple working copies</strong> &mdash; dev machine, CI runner, deploy target.</li>
+  <li><strong>Long-lived branches</strong> &mdash; diverge faster than they can be merged.</li>
+</ul>
+
+<p>Our case &mdash; templedb source &rarr; flake input &rarr; nix store &rarr; home-manager symlink &rarr; Emacs &mdash; is a mix of the first two: vendored code that also flows through a generation step.</p>
+
+<h3>Standard fixes and how they map to our world</h3>
+
+<table class="matrix">
+  <tr><th>Fix</th><th>What it does</th><th>Where we stand</th></tr>
+  <tr><td>Lock files</td><td>Every consumer records exactly which upstream rev it built from. Drift becomes queryable.</td><td><code>flake.lock</code> does this for nix inputs. Underused as a diagnostic.</td></tr>
+  <tr><td>Rebuild on change</td><td>File watchers or IDE integrations trigger a rebuild whenever source changes. &ldquo;Wrong copy&rdquo; = &ldquo;stale cache.&rdquo;</td><td>Partial: <code>TEMPLEDB_DEV_MODE=1</code> for the CLI. No equivalent for the Emacs layer. No watcher.</td></tr>
+  <tr><td>Single canonical working copy</td><td>Convention: one writable location; everything else is derived and read-only.</td><td><code>edit-workspaces/</code> is writable; <code>checkouts/</code> is blocked; store paths are immutable. Under-communicated.</td></tr>
+  <tr><td>Symlink escape hatches</td><td>Dev inner loop: symlink canonical source into all downstream locations, so editing &ldquo;the wrong copy&rdquo; is actually editing the right copy.</td><td>Absent. Would look like: <code>--override-input templedb path:~/.config/templedb/edit-workspaces/templedb</code>.</td></tr>
+  <tr><td>CI verifies generated matches authored</td><td>Pre-merge check re-runs the generator and diffs.</td><td>Not present; matters only if we ever adopt emission.</td></tr>
+  <tr><td>Drift diagnostics</td><td>Making drift <em>visible</em>. <code>git status</code> for the local case.</td><td>Recommended <code>templedb file where</code> is exactly this shape.</td></tr>
+</table>
+
+<p>The point: under any model where source stays in git, these fixes work. They&rsquo;ve been working for other people&rsquo;s codebases for decades. This is a <em>policeable</em> problem, not an <em>impossible</em> one. The deep fix&rsquo;s appeal is &ldquo;no more policing needed,&rdquo; which is real &mdash; but as the cost analysis showed, the price of eliminating policing is higher than the price of doing it well.</p>
+
+<h2>The static analysis pattern</h2>
+
+<p>Every serious static analysis tool built in the last 15 years follows the same architectural shape:</p>
+
+<pre>authored source files                     (source of truth, human/tool writes here)
+         |
+         v  parser (usually tree-sitter or hand-rolled)
+   syntactic model                        (AST or CST, one per file)
+         |
+         v  resolver (imports, name binding, types)
+   semantic model                         (cross-file, project-wide)
+         |
+         v  indexer
+    fact database                         (queryable, persistent-or-not)
+         |
+         v  query engine
+   answers to "where is X defined?"       (read-only)</pre>
+
+<p>The critical property: <strong>the arrow only goes one way.</strong> The tool never writes back to the source. Edits happen in the editor, on disk, via git; the tool observes, re-parses, and updates its projection. This is why LSP servers, Sourcegraph, and rust-analyzer coexist gracefully with every editor, VCS, build system, and workflow ever invented &mdash; they consume rather than own.</p>
+
+<h3>Four canonical implementations</h3>
+
+<ul>
+  <li><strong>LSP servers</strong> (rust-analyzer, gopls, TypeScript language server): in-process, in-memory, per-editor-session. Editor sends <code>textDocument/didChange</code> with buffer content. Server maintains AST + symbol tables in RAM, invalidates on change. Never writes.</li>
+  <li><strong>Sourcegraph / GitHub code search</strong>: persistent, multi-repo, batch-indexed. Language-specific indexers emit a standardized fact stream (LSIF or SCIP). Every commit produces its own index; freshness comes from re-indexing on push.</li>
+  <li><strong>Tree-sitter</strong>: incremental parser generator. Grammar-to-parser that re-parses only changed subtrees. What templedb&rsquo;s <code>nix_ast_parser.py</code> already uses.</li>
+  <li><strong>GitHub&rsquo;s semantic</strong>: tree-sitter + a Haskell analyzer runs on push, symbols go to a DB, &ldquo;jump to definition&rdquo; queries the DB, not the source.</li>
+</ul>
+
+<h3>The invalidation loop is where all the complexity lives</h3>
+
+<p>Building an initial index is easy. Keeping it correct as source changes is the engineering challenge:</p>
+
+<ul>
+  <li><strong>Full re-index</strong> &mdash; wipe and rebuild. Simple, correct, slow. Sourcegraph does this per commit. Templedb&rsquo;s <code>graph build-deps</code> is a full re-scan.</li>
+  <li><strong>Coarse-grained incrementality</strong> &mdash; track changed files, re-parse them plus their reverse imports. Correct if the import graph is accurate.</li>
+  <li><strong>Fine-grained incrementality (memoized queries)</strong> &mdash; Salsa (rust-analyzer). Every derived fact is a memoized query; edits invalidate only the transitive query closure that depended on the changed input. Sub-second edit-to-diagnostic latency in million-line codebases.</li>
+</ul>
+
+<h3>Fact schemas: the interop layer</h3>
+
+<p>LSIF and SCIP standardized the fact format so indexers and consumers can evolve independently. Every LSIF-emitting indexer produces the same shape, so Sourcegraph can consume <code>lsif-go</code>, <code>lsif-clang</code>, <code>lsif-tsc</code> uniformly. <strong>If templedb ever wants external tools to consume its graph queries, adopting SCIP for language-agnostic facts (and keeping templedb-native tables as extensions) removes a translation layer.</strong></p>
+
+<h3>How templedb already fits the pattern</h3>
+
+<p>Pieces already in the shape of a static analyzer:</p>
+
+<ul>
+  <li><code>nix_ast_parser.py</code> uses tree-sitter-nix &mdash; parser layer.</li>
+  <li><code>config_nodes</code> table &mdash; syntactic model, persistent.</li>
+  <li><code>graph search / who-uses / importers / callers</code> &mdash; query layer.</li>
+  <li><code>project_files</code> + <code>file_contents</code> &mdash; source snapshotting, analogous to Sourcegraph&rsquo;s per-commit indexing.</li>
+  <li>The AST-deploy work &mdash; resolver layer for Nix specifically.</li>
+</ul>
+
+<p>Pieces that don&rsquo;t fit and cause the drift pain:</p>
+
+<ul>
+  <li><code>file_contents</code> as a <em>writable</em> store rather than a snapshot. Static analyzers snapshot for query purposes but never claim to be the source. <code>templedb file set</code> inverts this.</li>
+  <li>Materialize sweeps. No LSP would ever delete files from your working tree because they weren&rsquo;t in its index. That&rsquo;s the &ldquo;I own the source&rdquo; pattern showing through.</li>
+  <li>No watcher. Every serious tool has one; templedb requires manual <code>graph build-deps</code> runs.</li>
+</ul>
+
+<h2>Meta-analysis: TempleDB&rsquo;s identity crisis</h2>
+
+<p>The three tracks converge because they&rsquo;re all consequences of the same underlying decision. TempleDB has been trying to be N things at once, and the friction we&rsquo;ve been hitting is these roles conflicting.</p>
+
+<div class="spectrum">
+  observer &lt;-------------- own vs observe spectrum --------------&gt; owner<br>
+  &nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|<br>
+  Sourcegraph&nbsp;&nbsp;LSP&nbsp;&nbsp;&nbsp;&nbsp;GitHub&nbsp;&nbsp;templedb(now)&nbsp;git repo<br>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;templedb(deep fix)&nbsp;&nbsp;
+</div>
+
+<p>Every position on this spectrum is coherent. The trouble is picking one and staying there. Templedb&rsquo;s current position is unstable because the code was built up feature-by-feature over a year:</p>
+
+<ul>
+  <li>Started as a project registry (pure observer, minimal ownership).</li>
+  <li>Added VCS to unify project histories (moved right &mdash; now owns commit graph).</li>
+  <li>Added <code>file_contents</code> for cross-project queries (moved further right &mdash; now owns snapshots).</li>
+  <li>Added <code>file set</code> for scripted edits (moved further right &mdash; now owns writes).</li>
+  <li>Added FUSE mount for filesystem access to DB state (moved further right &mdash; now owns filesystem view).</li>
+  <li>Added materialize for nix build integration (moved further right &mdash; now owns working trees).</li>
+  <li>Added AST parsing for cross-project graph queries (moved <em>left</em> &mdash; observer of Nix source).</li>
+  <li>Added the agent runtime (own state that has no filesystem analog &mdash; legitimately DB-native).</li>
+</ul>
+
+<p>The result is a system that occupies two positions on the spectrum simultaneously. The observer parts want to consume; the owner parts want to author. When they meet in the middle &mdash; as they do every time <code>templedb project checkout</code> materializes a tree and <code>graph build-deps</code> indexes it &mdash; you get the drift bugs.</p>
+
+<h3>The three-body problem of writable state</h3>
+
+<p>When (a) the DB, (b) the filesystem checkout, and (c) the nix store copy of the same content can all be edited (or, in the store case, <em>replaced</em>), you have a small distributed systems problem. CAP applies: consistency, availability, and partition-tolerance can&rsquo;t all be satisfied. Templedb has been trying for all three:</p>
+
+<ul>
+  <li><strong>Consistency</strong>: after any write, all three views agree. Requires atomic multi-mirror writes, which is what materialize <em>tries</em> to do (and why materialize is dangerous).</li>
+  <li><strong>Availability</strong>: any of the three can be read at any time. Currently satisfied (each is on the local filesystem or DB).</li>
+  <li><strong>Partition-tolerance</strong>: temporary divergence is tolerable (e.g. dev-mode uses a stale nix store while the checkout has the fresh code). Also currently satisfied.</li>
+</ul>
+
+<p>The observer pattern implicitly picks: give up consistency (mirrors are eventually consistent via re-indexing) in exchange for a simpler ownership model. The DB-as-truth model tries to keep consistency, which is exactly why materialize has to sweep working trees and every regression hurts.</p>
+
+<h3>The dogfood trap</h3>
+
+<p>TempleDB dogfoods itself heavily &mdash; templedb the project is stored in templedb the DB. This is normally a strength (own eating own food, forces the tool to be usable). It becomes a trap when it locks you into your own poor design choices, because every path forward requires migrating your own workflow first. The mirror-drift class of bugs hits templedb the project harder than any external consumer, because templedb the project has the most mirrors (checkout, edit-workspace, nix store, spacemacs layer, FUSE historical). If we pick a new direction, we have to migrate templedb the project first &mdash; and that migration is on the critical path for every other improvement.</p>
+
+<h3>The complexity budget</h3>
+
+<p>Every architectural decision has ongoing maintenance cost. TempleDB has spent complexity budget on ambitious integrations: FUSE, AST-deploy, native VCS, MCP tools, agent-writable sections, config compiler, fleet deployment, Nix store tables, agent runtime, session-scoped VCS staging. Each is powerful. Together they eat all the budget for maintenance and evolution &mdash; there is no slack. The reflection report from two days ago noted this in passing (&ldquo;it accreted, all at once, over a marathon week&rdquo;). It&rsquo;s worth naming explicitly: <strong>this is a system built from a maximum-ambition-per-component budget.</strong> That style has run its course. The next several months should probably be spent on subtraction, not addition.</p>
+
+<h3>What TempleDB is uniquely good at</h3>
+
+<p>Not everything should be given up. There&rsquo;s a real set of things TempleDB does that nothing else in the ecosystem does:</p>
+
+<ul>
+  <li><strong>Cross-project awareness.</strong> One graph over N projects, queryable by symbol / import / caller / dependency. No other tool spans project boundaries this cleanly.</li>
+  <li><strong>Session-scoped VCS staging.</strong> Multiple parallel agents can stage changes without stepping on each other. This has no filesystem analog and can only live in a DB.</li>
+  <li><strong>Agent runtime.</strong> Sessions, MCP tools, pending events, agent-writable sections, work log. All genuinely DB-native.</li>
+  <li><strong>Deployment history.</strong> Which flake rev built which store path, deployed to which host, at which timestamp. This is business logic, not source code.</li>
+  <li><strong>Machine + secret management.</strong> Project metadata, tags, fleet config, sops keys. DB-native.</li>
+  <li><strong>Reports.</strong> An archive of design decisions with a stable index. Explicitly meant to be authored, and explicitly non-source-code.</li>
+</ul>
+
+<p>The recommendation isn&rsquo;t &ldquo;become pure observer&rdquo; &mdash; it&rsquo;s &ldquo;become an observer of source code, and remain the owner of everything above.&rdquo;</p>
+
+<h2>The recommendation, spelled out</h2>
+
+<p>One sentence: <strong>TempleDB should observe source code and own the graph of facts about it, but should not author the source itself.</strong></p>
+
+<p>Concretely, in decreasing order of urgency:</p>
+
+<ol>
+  <li><strong>Freeze the &ldquo;author source&rdquo; surface area.</strong> Deprecate <code>templedb file set</code> as a first-class edit path. Not delete &mdash; useful for agent scripts &mdash; but move it out of the recommended workflow. Editing means editing files on disk, in a normal git checkout, via <code>templedb edit &lt;slug&gt;</code>.</li>
+  <li><strong>Fix materialize.</strong> Make it gitignore-aware and incremental. It should never delete an untracked file. Yesterday&rsquo;s <code>.authinfo.gpg</code> sweep would have been prevented by a one-line rule.</li>
+  <li><strong>Add drift diagnostics.</strong> <code>templedb file where &lt;slug&gt; &lt;path&gt;</code> and content-hash xattrs on writable mirrors. Fixes the &ldquo;edited the wrong copy&rdquo; class without touching the ownership model.</li>
+  <li><strong>Add a watcher.</strong> <code>templedb watch &lt;slug&gt;</code> uses inotify to trigger <code>graph build-deps</code> incrementally when source changes. Closes the loop between authored edits and their propagation.</li>
+  <li><strong>Adopt SCIP for language-agnostic facts.</strong> Keep templedb-native tables for what SCIP doesn&rsquo;t cover. Export the code-facts subset as SCIP so external tools can consume templedb queries.</li>
+  <li><strong>Reframe <code>file_contents</code> as a snapshot table, not an authoring surface.</strong> Preserve the ability to query &ldquo;what did this file look like at commit X,&rdquo; but stop treating it as the write path.</li>
+  <li><strong>Symlink escape hatch for the Emacs layer.</strong> Mirror <code>TEMPLEDB_DEV_MODE=1</code> for the CLI. Under <code>TEMPLEDB_DEV_MODE_EMACS=1</code>, replace the read-only nix-store symlink with a symlink to the writable checkout. Editing &ldquo;the wrong copy&rdquo; becomes editing the right copy.</li>
+</ol>
+
+<p>Estimated cost: 4&ndash;6 weeks of focused work. Doesn&rsquo;t require Nix expertise. Doesn&rsquo;t affect any consumer. Doesn&rsquo;t require the AST parser to be complete. Doesn&rsquo;t change the bootstrap story. Doesn&rsquo;t break pure eval. Reduces the mirror-drift bug class by an order of magnitude. Preserves 100% of what TempleDB is uniquely good at.</p>
+
+<h2>What we&rsquo;d be giving up</h2>
+
+<p>Honesty section: the DB-as-truth model has real appeal that the index model can&rsquo;t match.</p>
+
+<ul>
+  <li><strong>&ldquo;No drift possible&rdquo; guarantee.</strong> Real. The index model reduces drift; it doesn&rsquo;t eliminate it. The escape hatch is <code>git status</code>-style diagnostics and human/agent policing.</li>
+  <li><strong>Content-addressed source globally.</strong> Every store path traceable to a DB snapshot. The index model gives you traceability of derived facts (&ldquo;which snapshot produced this graph query result&rdquo;) but not of store paths themselves. A partial fix would be to register nix store paths in the DB with their producing-source-rev &mdash; the <code>nix_store_paths</code> table already exists for this.</li>
+  <li><strong>Cross-machine consistency by construction.</strong> Under DB-as-truth, syncing the DB syncs everything. Under the index model, sync happens per-mirror (git for source, nix for store paths, DB for facts). More moving parts, well-understood standards for each.</li>
+  <li><strong>The philosophical elegance of &ldquo;one truth.&rdquo;</strong> This is real and shouldn&rsquo;t be dismissed. Elegance matters. But the pattern of &ldquo;elegant model + hostile ecosystem interaction&rdquo; has been played out enough times (Guix, NixOS itself in its early days, Bazel outside Google) that the correct default is &ldquo;coexist gracefully.&rdquo;</li>
+</ul>
+
+<h2>Meta-meta: why did we get here</h2>
+
+<p>Two forces drove the drift from observer toward owner:</p>
+
+<p><strong>Force 1: dogfooding.</strong> When templedb&rsquo;s own source is stored in templedb, every workflow feature has to work for editing templedb itself. That created pressure for <code>templedb file set</code>, for materialize, for FUSE &mdash; each was a real ergonomic win for the developer who had to type <code>git add</code> into a checkout of the tool they were writing.</p>
+
+<p><strong>Force 2: agent-driven edits.</strong> When agents (Temple Agent, Claude Code via MCP) started editing source, they needed a scriptable write path. Filesystem edits are scriptable, but they don&rsquo;t give agents the durability, session-scoping, and provenance guarantees that DB writes do. <code>templedb file set</code> was the natural answer &mdash; a DB write path with a filesystem-compatible interface.</p>
+
+<p>The observer pattern doesn&rsquo;t reject either of these. Dogfooding still works (templedb the project is a normal git checkout, edited normally, snapshotted by templedb the DB). Agent edits still work (agent writes to a filesystem checkout, and templedb watches; or agent uses <code>templedb file set</code> as an internal shortcut with the understanding that it&rsquo;s writing into the eventual-consistency layer). What the observer pattern rejects is the invariant that <em>every</em> edit go through the DB. That invariant was never enforceable anyway &mdash; humans edit in Emacs, nix rebuilds create store paths, git commits create refs &mdash; and pretending it was cost us the drift bug family.</p>
+
+<h2>What&rsquo;s next</h2>
+
+<p>Concrete first step, if the direction is accepted: implement <code>templedb file where</code>, fix the materialize gitignore bug from yesterday, and land the Emacs layer symlink escape hatch. Those three changes cost about a week and buy most of the daily-life improvement.</p>
+
+<p>The larger direction &mdash; adopting SCIP, retiring <code>file set</code> as a first-class path, adding the watcher &mdash; can happen incrementally over a quarter. Nothing about it is urgent; nothing about it blocks any other improvement. It&rsquo;s a philosophical realignment first, an implementation project second.</p>
+
+<p>The report ends where it started: TempleDB has been trying to be an authority over source code. That&rsquo;s a costly position and there&rsquo;s a well-trodden alternative &mdash; observer rather than owner &mdash; that&rsquo;s cheaper, robust, and preserves everything TempleDB is uniquely good at. The fork in the road is here.</p>
+
+</body>
+</html>

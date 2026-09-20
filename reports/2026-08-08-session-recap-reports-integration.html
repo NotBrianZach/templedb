@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap — reports integration, frecency, nixos reorg, three HTML docs</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --neg: #e97070;
+    --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 {
+    color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem;
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.4rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.2rem;
+  }
+  h3 {
+    color: #b0b0d0; font-size: 0.95rem; margin: 1.5rem 0 0.4rem;
+    display: flex; align-items: baseline; gap: 0.6rem;
+  }
+  h3 .tag {
+    color: var(--muted); font-size: 0.7rem; font-weight: 400;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-left: auto;
+  }
+  h3 .tag.win { color: var(--pos); }
+  h3 .tag.miss { color: var(--neg); }
+  h3 .tag.watch { color: var(--warn); }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.94rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  pre code { background: none; padding: 0; color: var(--text); }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  a:hover { color: #a0daff; }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.7rem 1.05rem; margin: 1.1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.miss { border-left-color: var(--neg); }
+  .callout.watch { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.miss .label { color: var(--neg); }
+  .callout.watch .label { color: var(--warn); }
+  .ledger {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em;
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.6rem 0.9rem; border-radius: 5px;
+    margin: 0.8rem 0; line-height: 1.5;
+  }
+  .ledger .commit {
+    color: var(--pos); font-weight: 600;
+  }
+  .close {
+    margin-top: 3rem; padding-top: 1.5rem;
+    border-top: 1px solid var(--border); color: var(--muted);
+    font-size: 0.9rem; font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<h1>Session recap — reports integration, frecency, nixos reorg, three HTML docs</h1>
+<p class="lede">
+  First session-recap-with-metacognition report, written per new standing
+  instruction that every work session ends with one of these. Covers the
+  2026-08-07 → 2026-08-08 span. Structured as: what happened, what landed,
+  what I noticed about my own process, open threads, and concrete followups.
+  The metacognition is the load-bearing part — the ledger of commits is just
+  scaffolding.
+</p>
+
+<h2>What triggered the session</h2>
+<p>
+  Started as a bug report — <em>"Claude throws an error and exits when I try to
+  launch the temple agent through Emacs"</em> — but the diagnostic path
+  branched fast: the immediate cause (revoked OAuth token) surfaced two latent
+  bugs in the agent provider (Popen's inherited pipe stdin causing a spurious
+  warning; duplicate <code>run.failed</code> events on auth failure), which
+  led to a small commit. From there the session drifted into architectural
+  territory — an essay about ontologies and p-adic distance, extended to
+  composed-valuation queries against real data, and finally to setting up
+  <code>agent-reports</code> as a durable place for these HTML docs.
+</p>
+
+<h2>What landed</h2>
+
+<div class="ledger">
+<span class="commit">08CC782F</span>  templedb : claude_code provider stdin + dedupe fix
+<span class="commit">635CB52D</span>  templedb : graph frecency + nixos two-level reorg
+             (also: cleared 29 phantom vcs_working_state rows via SQL — not a commit)
+<span class="commit">E3EB2015</span>  agent-reports: initial project + first 2 HTML reports
+<span class="commit">190A5DE9</span>  agent-reports: read-only viewing surface sketch
+<span class="commit">(pending)</span>  templedb : reports/ integration + delete standalone project
+</div>
+
+<p>
+  Concrete new capabilities:
+</p>
+<ul>
+  <li><strong>Frecency-ranked candidates</strong> on every <code>graph</code>
+      subcommand when positional args are omitted. Migration 081 added
+      <code>graph_query_log</code>. Verified with a bias test: <code>WORKER_URL</code>
+      (base rank last, 1 project) jumped to top after 20 recent queries.</li>
+  <li><strong>Two-level nesting</strong> in <code>templedb nixos</code>
+      (5 groups: <code>system</code>, <code>config</code>, <code>packages</code>,
+      <code>dotfiles</code>, <code>host</code>) with permanent flat-name aliases.
+      Byte-identical output verified between old and new forms.</li>
+  <li><strong>Reports as a first-class CLI</strong>. <code>templedb reports
+      {list, view, new, reindex}</code>. Reports live at
+      <code>reports/</code> inside the templedb project itself; the standalone
+      <code>agent-reports</code> project has been deleted.</li>
+  <li>Three self-contained HTML docs, now under
+      <code>templedb/reports/</code>:
+    <ul>
+      <li><code>2026-08-07-templedb-as-ontology-in-disguise.html</code></li>
+      <li><code>2026-08-08-composed-valuations.html</code></li>
+      <li><code>2026-08-08-readonly-viewing-surface.html</code></li>
+    </ul>
+  </li>
+</ul>
+
+<h2>What I noticed about my process</h2>
+
+<h3><span>Parallel-with-isolation worked</span> <span class="tag win">keep doing</span></h3>
+<p>
+  For frecency + nixos reorg, launched the reorg as a background agent
+  instructed to write its finished output to <code>/tmp/nixos_reorg.py</code>
+  without touching the DB. I applied it after frecency landed. The agent hit
+  an API stream timeout at ~48 minutes but had already written the file, so
+  nothing was lost. Reviewing before applying caught a design choice I'd have
+  made differently (Strategy B / dual registration) but that turned out fine.
+</p>
+<div class="callout win">
+  <span class="label">Pattern to keep</span>
+  When two independent tasks are on the plate, spawn one as a subagent whose
+  <em>only</em> output is a file in <code>/tmp/</code>. Serializing DB writes to
+  the parent keeps SQLite happy; parallel drafting recovers the wall-clock
+  savings. The instruction "don't touch the DB or shared checkout, just write
+  <code>/tmp/output.py</code>" is what makes it safe.
+</div>
+
+<h3><span><code>--verify</code> on every <code>file set</code></span> <span class="tag win">keep doing</span></h3>
+<p>
+  Given the documented FUSE truncation risk, I used
+  <code>templedb file set … --verify</code> on every non-trivial write this
+  session and also byte-count-compared roundtrips
+  (<code>wc -c</code> of input vs <code>file cat | wc -c</code>) for the
+  ~15-20 KB reports. Nothing truncated. Cheap habit, worth continuing on
+  everything larger than a one-line edit.
+</p>
+
+<h3><span>Wrote to the wrong path in <code>regenerate_index</code></span> <span class="tag miss">didn't</span></h3>
+<p>
+  Passed <code>"index.html"</code> to <code>templedb file set</code> when I
+  meant <code>"reports/index.html"</code>. Result: an unwanted
+  <code>index.html</code> at project root pointing at reports as if the whole
+  project were a report index. Caught it two commands later when the extracted
+  view showed 4 entries instead of 3, one of which was a self-link.
+</p>
+<div class="callout miss">
+  <span class="label">Root cause</span>
+  I wrote the CLI's <code>_regenerate_index</code> and the calling
+  <code>regenerate_index</code> method with the string <code>"index.html"</code>
+  hardcoded in <em>two places</em> (the tempfile name and the destination
+  path). The tempfile only needs a leaf name; the destination needs the full
+  path. Muscle memory smeared the two. Fix would be a single
+  <code>INDEX_PATH = f"{REPORT_DIR}/index.html"</code> constant so the two
+  couldn't drift apart.
+</div>
+
+<h3><span>Verified memory instead of trusting it</span> <span class="tag win">keep doing</span></h3>
+<p>
+  While writing the ontology doc I referenced
+  <code>templedb nix who-uses</code> based on a memory entry. When the user
+  asked about it, I ran <code>templedb nix --help</code> — command doesn't
+  exist. Neither does the equivalent under <code>templedb nixos</code>. Fixed
+  the memory in place with a <strong>NEVER SHIPPED</strong> flag. The
+  <em>verify-before-cite</em> rule the memory system has caught this one; without
+  it the ontology doc's "distance functions in the CLI" list would have
+  contained a phantom.
+</p>
+
+<h3><span>Composed queries produced an unexpected finding</span> <span class="tag win">keep doing</span></h3>
+<p>
+  Ran the composed-valuation queries assuming they'd be illustrative. One of
+  them — "for pairs of AST builds on different hosts, do any share an output
+  hash?" — returned <em>zero</em>. All 27 build hashes are host-unique. That's
+  a real architectural finding (content-addressed identity is not being
+  exploited at the AST emit layer) that neither the ontology essay nor the
+  usual grep-around workflow would have surfaced. The pattern:
+  <strong>composed queries against structural data often produce useful
+  negative results.</strong> "Nothing shares" is signal too.
+</p>
+
+<h3><span>Wrote a lot of prose today</span> <span class="tag watch">notice</span></h3>
+<p>
+  Three ~15-20 KB HTML docs plus this recap. Prose-to-code ratio was
+  unusually high because the work was analysis-heavy. That's a legitimate mode
+  — the doc arguing that TempleDB is an ontology in disguise is where the
+  "AST builds have no cross-host reuse" observation eventually came from. But
+  it's worth noticing that four hours of writing produced roughly one
+  followable insight (the AST reuse finding), whereas the earlier bug fix
+  produced a shipped, verified behavior change in about 20 minutes. Both are
+  worthwhile; neither substitutes for the other. Recognizing which mode I'm
+  in matters.
+</p>
+
+<h3><span>Resisted scope creep on the phantom cleanup</span> <span class="tag win">keep doing</span></h3>
+<p>
+  After the claude_code fix committed, the 29 phantom <code>modified</code>
+  rows were still there. I asked before sweeping them into the same or the
+  next commit. User confirmed a separate cleanup; that got its own explicit
+  SQL step with a diagnostic first ("all 29 have NULL content, safe to
+  clear"). The alternative — quietly cleaning them during commit — would have
+  buried the diagnostic. Small choice, but the transparent version was worth
+  the extra round trip.
+</p>
+
+<h3><span>Bug I introduced would have shipped without the smoke test</span> <span class="tag watch">notice</span></h3>
+<p>
+  The <code>regenerate_index</code> path bug wasn't caught by any syntax check
+  or unit test — it required actually running the CLI end-to-end and eyeballing
+  the output. Habitual smoke-tests-after-write is what saved it. Without them,
+  a broken index page would have quietly sat in the DB until someone opened
+  it in a browser. This is a general property: my Python edits pass parse
+  checks and roundtrip successfully into the DB, but neither of those catches
+  a logically-wrong string constant. End-to-end runs are the safety net.
+</p>
+
+<h3><span>Didn't fix the parent-level candidate hint</span> <span class="tag miss">didn't</span></h3>
+<p>
+  When I made <code>templedb graph &lt;sub&gt; [POSITIONAL]</code> print
+  candidates on missing arg, I only helped users who typed the subcommand.
+  <code>templedb graph</code> alone still prints an argparse error because
+  <code>subparsers</code> is <code>required=True</code>. Same UX gap I set out
+  to fix, one level up. Would take another 20 lines. Not urgent, but I set the
+  bar and didn't clear it fully.
+</p>
+
+<h2>Open threads (flagged but not done)</h2>
+<ul>
+  <li><strong>Tier A of the read-only viewing surface</strong> — chmod +
+      <code>view</code> verb + <code>~/temple-ro/</code> symlink. Report exists
+      (<a href="2026-08-08-readonly-viewing-surface.html">read-only viewing
+      surface</a>) but nothing implemented. Recommended ~60 LOC.</li>
+  <li><strong>41 phantom <code>deleted</code>-state rows</strong> on
+      <code>templedb/main</code>. Not user-visible, but latent metadata. Never
+      audited whether any represent real deletions.</li>
+  <li><strong>Root cause of phantom rows</strong> — the 29 <code>modified</code>
+      rows I cleared had NULL content and stale hash pointers. Something writes
+      to <code>vcs_working_state</code> with just a hash and no body. Unknown
+      writer, likely will re-accumulate.</li>
+  <li><strong><code>templedb nix</code> subcommand tree</strong> — service
+      exists (<code>src/services/nix_store_service.py</code>) with scan,
+      generations, closure, who-uses, gc-roots, stats, mark-invalid, cache.
+      Only the CLI wrapper is missing. Memory now flags this.</li>
+  <li><strong>AST builds share no cross-host hashes</strong> — real
+      architectural finding from query 4 of the composed-valuations doc. No
+      action taken. Emit strategy could be refactored to hash subtrees
+      separately so hosts that share config get shared store paths.</li>
+  <li><strong>Session recording</strong> — this recap is manual. Nothing in
+      the harness produces it automatically; I remembered because the user
+      just told me to.</li>
+</ul>
+
+<h2>Concrete followups (in decreasing expected value)</h2>
+<ol>
+  <li><strong>Fix the <code>regenerate_index</code> path constant</strong> —
+      trivial, single-line, prevents the same bug recurring. 5 minutes.</li>
+  <li><strong>Ship Tier A of the read-only viewing surface</strong> —
+      <code>~60 LOC</code>, eliminates the FUSE-write footgun for viewing
+      workflows. Half a session.</li>
+  <li><strong>Handle the parent-level candidate hint</strong> — make
+      <code>templedb graph</code> alone print the list of subcommands with
+      one-line summaries rather than an argparse error. ~20 LOC.</li>
+  <li><strong>Wire the nix service to a CLI</strong>
+      (<code>templedb nix {scan, generations, closure, who-uses, ...}</code>).
+      Service exists, so this is CLI shim work — 100-200 LOC across the
+      subcommand tree. Would let the AST build-reuse finding become
+      actionable.</li>
+  <li><strong>Audit the 41 deleted-state rows</strong> and figure out what
+      writes NULL-content <code>modified</code> rows so the phantoms stop
+      re-accumulating. Diagnostic first, fix second.</li>
+</ol>
+
+<h2>Meta-meta: what this format wants to become</h2>
+<p>
+  This is the first session recap. As they accumulate, patterns should emerge
+  that don't fit in a single report — recurring bug shapes ("I write to wrong
+  path" happened at least twice), recurring wins ("--verify saved me"),
+  drifts in scope. Some options for making that legible:
+</p>
+<ul>
+  <li>Tag each observation with a controlled vocabulary
+      (<code>path-bug</code>, <code>trust-verified</code>, <code>scope-creep</code>,
+      <code>parallel-agent-worked</code>) and grep across recaps to see
+      frequencies.</li>
+  <li>Have <code>templedb reports</code> produce a "meta index" that groups
+      observations across recaps by tag.</li>
+  <li>At the end of each recap, explicitly ask "does anything here contradict
+      a previous recap's assertion?" as a self-check for drift.</li>
+</ul>
+<p>
+  For now, one recap is not a series. But writing this made me notice at
+  least three things I would not have surfaced otherwise (the parent-level
+  candidate gap, the "prose-heavy sessions produce fewer discrete wins per
+  hour" observation, and the wrong-path-constant bug pattern). If future
+  recaps produce even one non-obvious observation each, the format earns its
+  keep.
+</p>
+
+<div class="close">
+  First metacognition report. Ledger of five commits (four landed, one pending
+  for this session's own report). Three concrete process patterns worth
+  keeping (parallel-with-isolation, <code>--verify</code>, verify-memory-before-citing).
+  Two admitted misses (wrong-path bug; parent-level candidate hint left
+  undone). Five open threads, five ranked followups. Next recap should include
+  a check against the followups list to see how many actually got picked up.
+</div>
+
+</body>
+</html>

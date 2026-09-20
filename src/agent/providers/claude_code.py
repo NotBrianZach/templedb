@@ -1,0 +1,576 @@
+"""ClaudeCodeProvider - real Claude Code CLI integration.
+
+Launches Claude Code as a subprocess with --output-format stream-json,
+parses the streaming events, and converts them into normalized Temple Agent events.
+"""
+import json
+import os
+import shutil
+import select
+import subprocess
+import time
+
+from logger import get_logger
+from agent.events import (
+    make_event,
+    RUN_STARTED, RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED,
+    ASSISTANT_STARTED, ASSISTANT_DELTA, ASSISTANT_COMPLETED,
+    TOOL_STARTED, TOOL_COMPLETED, TOOL_FAILED,
+    PROVIDER_RATE_LIMITED, PROVIDER_LOGIN_REQUIRED,
+)
+from agent.providers.base import BaseProvider
+
+logger = get_logger("ClaudeCodeProvider")
+
+# Max seconds of stdout silence tolerated while at least one tool_use is
+# still open. Set just above Claude's own max Bash timeout (600s) so a
+# legit long-running tool can return its result before we preempt, but
+# anything past this is almost certainly wedged. See 2026-09-17 session
+# 282 incident: a Bash `until` loop kept claude blocked in epoll_wait for
+# 4h+ with no terminal event. Override for tests via
+# TEMPLEDB_AGENT_IDLE_TIMEOUT_SEC.
+IDLE_TIMEOUT_SEC = int(os.environ.get("TEMPLEDB_AGENT_IDLE_TIMEOUT_SEC", "620"))
+
+
+def _find_claude():
+    """Find the claude CLI executable."""
+    path = shutil.which("claude")
+    if path:
+        return path
+    for candidate in [
+        os.path.expanduser("~/.nix-profile/bin/claude"),
+        "/run/current-system/sw/bin/claude",
+    ]:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+class ClaudeCodeProvider(BaseProvider):
+    """Real Claude Code CLI provider."""
+
+    def __init__(self, config=None):
+        self._config = config or {}
+        self._claude_path = self._config.get("executable") or _find_claude()
+        self._process = None
+        self._cancelled = False
+        self._session_id = None
+        self._model = None
+        self._active_tools = {}  # tool_use_id -> {name, input, start_time}
+
+    def doctor(self):
+        details = []
+        if not self._claude_path:
+            return {"ok": False, "details": ["Claude Code CLI not found"],
+                    "error": "Install Claude Code: npm install -g @anthropic-ai/claude-code"}
+        details.append(f"CLI: {self._claude_path}")
+        try:
+            result = subprocess.run(
+                [self._claude_path, "--version"],
+                capture_output=True, text=True, timeout=5)
+            details.append(f"Version: {result.stdout.strip()}")
+        except Exception as e:
+            details.append(f"Version check failed: {e}")
+        try:
+            result = subprocess.run(
+                [self._claude_path, "-p", "--output-format", "json",
+                 "--bare", "--max-budget-usd", "0", "test"],
+                capture_output=True, text=True, timeout=10)
+            if "login" in result.stdout.lower():
+                return {"ok": False, "details": details,
+                        "error": "Not logged in. Run: claude auth login"}
+            details.append("Auth: OK")
+        except subprocess.TimeoutExpired:
+            details.append("Auth: timeout (may be OK)")
+        except Exception as e:
+            details.append(f"Auth check: {e}")
+        return {"ok": True, "details": details}
+
+    def start(self, session_external_id=None, model=None):
+        self._model = model
+        if session_external_id:
+            self._session_id = session_external_id
+            return {"external_session_id": session_external_id}
+        return {"external_session_id": None}
+
+    # System prompt tail that tells Claude to prefer our MCP tools over the
+    # built-ins that don't work in -p mode. Kept short — appended to the
+    # existing default system prompt.
+    _AGENT_SYSTEM_PROMPT = (
+        "You are running inside Emacs via TempleDB. "
+        "When you need to ask the user a multiple-choice question, use the "
+        "mcp__templedb__templedb_ask_user tool INSTEAD of AskUserQuestion. "
+        "AskUserQuestion has no UI in this environment and will be "
+        "auto-cancelled. "
+        "When you want to send a one-way informational message to the user "
+        "(e.g. a status update or observation that doesn't need a decision), "
+        "use mcp__templedb__templedb_message_user. "
+        # Agent-writable sections in the Emacs buffer — the user sees these
+        # at a glance without scrolling the conversation, so use them to
+        # externalise state you would otherwise inline in your reply.
+        "The Emacs buffer has agent-writable sections you should populate "
+        "instead of inlining the content in your reply text: "
+        "call mcp__templedb__templedb_agent_note_finding for concrete "
+        "non-obvious facts you discovered (a * Findings section); "
+        "mcp__templedb__templedb_agent_todo_add for follow-up actions the "
+        "user or you should take later (* Todo); "
+        "mcp__templedb__templedb_agent_question_add for open questions you "
+        "identified but aren't answering right now (* Open Questions). "
+        "Use each only when it genuinely applies — don't manufacture entries "
+        "just to fill sections. "
+        # Suggested next prompts — always at the end of the turn.
+        "Near the end of every assistant turn, after your main reply, call "
+        "mcp__templedb__templedb_agent_suggest_next_prompts once with 2–4 "
+        "short concrete follow-up prompts the user is likely to want next "
+        "(e.g. 'run the tests', 'commit and publish', 'show the diff'). "
+        "Each suggestion should be ≤ 60 chars and will replace * Next Prompt "
+        "when the user clicks it. Skip this only when the run failed or the "
+        "user explicitly ended the thread. "
+        # Self-kill footgun guard (incident 2026-09-13, session 282).
+        "You are running inside a `templedb ai agent serve --stdio` "
+        "subprocess. Do NOT `kill` PIDs of any `ai agent serve` process "
+        "found via ps/pgrep — even ones that look stale — because you may "
+        "be looking at your own parent server (see "
+        "$TEMPLEDB_AGENT_SERVER_PID) and terminating it will crash this "
+        "run mid-turn. Use `templedb ai agent stop-stale [--dry-run]` "
+        "instead; it auto-excludes the current process's ancestor chain."
+    )
+
+    def _write_mcp_config(self, agent_session_id):
+        """Write a per-session mcp-config JSON that exposes the templedb MCP
+        server with our agent session id in env. Claude Code loads this via
+        --mcp-config. Returns the config file path (never cleaned up — small,
+        under /tmp, harmless if it leaks)."""
+        import tempfile
+        templedb_bin = shutil.which("templedb")
+        if not templedb_bin:
+            return None
+        cfg = {
+            "mcpServers": {
+                "templedb": {
+                    "command": templedb_bin,
+                    "args": ["ai", "mcp", "serve"],
+                    "env": {"TEMPLEDB_AGENT_SESSION_ID": str(agent_session_id)},
+                }
+            }
+        }
+        fd, path = tempfile.mkstemp(
+            prefix=f"templedb-agent-mcp-{agent_session_id}-",
+            suffix=".json",
+        )
+        with os.fdopen(fd, "w") as f:
+            json.dump(cfg, f)
+        return path
+
+    def send(self, messages, context=None):
+        self._cancelled = False
+        self._active_tools = {}
+
+        if not messages:
+            return
+        if not self._claude_path:
+            yield make_event(RUN_FAILED, summary="Claude Code CLI not found",
+                             error="Install Claude Code")
+            return
+
+        last_message = messages[-1].get("content_text", "")
+
+        cmd = [self._claude_path, "-p",
+               "--output-format", "stream-json",
+               "--verbose",
+               "--include-partial-messages"]
+        if self._model:
+            cmd.extend(["--model", self._model])
+        if self._session_id:
+            cmd.extend(["--resume", self._session_id])
+        cmd.append("--dangerously-skip-permissions")
+
+        # If the service passed our agent session id, wire the MCP bridge so
+        # Claude can ask the user via templedb_ask_user / templedb_message_user
+        # instead of the auto-cancelled AskUserQuestion.
+        agent_session_id = (context or {}).get("agent_session_id")
+        if agent_session_id is not None:
+            mcp_config_path = self._write_mcp_config(agent_session_id)
+            if mcp_config_path:
+                cmd.extend(["--mcp-config", mcp_config_path])
+                cmd.extend(["--append-system-prompt", self._AGENT_SYSTEM_PROMPT])
+
+        # `--` ends option parsing; without it, a prompt starting with `-`
+        # (e.g. a bullet pasted from a reply) is misread as an unknown option
+        # and Claude exits with code 1 before doing anything.
+        cmd.append("--")
+        cmd.append(last_message)
+
+        logger.info(f"Launching Claude: {' '.join(cmd[:6])}...")
+        yield make_event(RUN_STARTED, summary="Sending to Claude Code")
+
+        try:
+            # stdin=DEVNULL: our parent stdin is the Emacs↔serve JSON pipe; if
+            # Claude inherits it, `claude -p` waits 3s for prompt-on-stdin data
+            # and prints a warning that gets mistaken for the real error.
+            # Advertise our own PID so Bash tools that call
+            # `templedb ai agent stop-stale` can filter this server out.
+            child_env = dict(os.environ)
+            child_env["TEMPLEDB_AGENT_SERVER_PID"] = str(os.getpid())
+            self._process = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1,
+                cwd=context.get("cwd") if context else None,
+                env=child_env,
+            )
+
+            assistant_started = False
+            accumulated_text = []
+            terminal_emitted = False
+
+            # Liveness-checked line reader. Naive `for line in stdout` blocks
+            # forever if Claude dies while a grandchild still holds the pipe
+            # write end open — no EOF ever arrives, no terminal event ever
+            # emitted, emacs sees the run as still-running. We poll for data
+            # with a 1s timeout, and every timeout we check if the child is
+            # still alive. If it exited, drain any buffered stdout and stop.
+            stdout = self._process.stdout
+            drain = False
+            last_stdout_at = time.time()
+            while True:
+                if self._cancelled:
+                    self._kill_process()
+                    yield make_event(RUN_INTERRUPTED, summary="Cancelled by user")
+                    return
+
+                ready, _, _ = select.select([stdout], [], [], 1.0)
+                if ready:
+                    line = stdout.readline()
+                    if not line:
+                        # EOF — Claude closed stdout cleanly.
+                        break
+                    last_stdout_at = time.time()
+                elif self._process.poll() is not None:
+                    # Child exited but stdout might still have buffered data
+                    # from a grandchild or late flush. Drain once, then stop.
+                    if drain:
+                        break
+                    drain = True
+                    remainder = stdout.read() or ""
+                    if not remainder:
+                        break
+                    # Push each remainder line through the same normalizer.
+                    for line in remainder.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        for normalized in self._normalize_claude_event(
+                                event, assistant_started, accumulated_text):
+                            ntype = normalized.get("type")
+                            if ntype == ASSISTANT_STARTED:
+                                assistant_started = True
+                            if ntype in (RUN_FAILED, PROVIDER_LOGIN_REQUIRED):
+                                terminal_emitted = True
+                            yield normalized
+                    break
+                else:
+                    # No data, child still alive. If we've been silent past
+                    # the idle timeout AND at least one tool_use is still
+                    # open, the child tool is almost certainly wedged (see
+                    # 2026-09-17 session 282: a Bash `until` loop kept
+                    # claude blocked in epoll_wait for 4h+ with no terminal
+                    # event). Kill the subprocess and surface RUN_FAILED so
+                    # the run doesn't sit in `running` indefinitely.
+                    idle = time.time() - last_stdout_at
+                    if self._active_tools and idle > IDLE_TIMEOUT_SEC:
+                        open_ids = list(self._active_tools.keys())
+                        logger.warning(
+                            "Claude stdout idle %.0fs with %d open tool_use(s): %s — killing",
+                            idle, len(open_ids), open_ids,
+                        )
+                        self._kill_process()
+                        terminal_emitted = True
+                        yield make_event(
+                            RUN_FAILED,
+                            summary=f"No output for {int(idle)}s with open tool_use(s); tool likely wedged",
+                            error=f"idle_timeout; open_tools={open_ids}",
+                        )
+                        break
+                    continue
+
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                for normalized in self._normalize_claude_event(
+                        event, assistant_started, accumulated_text):
+                    ntype = normalized.get("type")
+                    if ntype == ASSISTANT_STARTED:
+                        assistant_started = True
+                    if ntype in (RUN_FAILED, PROVIDER_LOGIN_REQUIRED):
+                        terminal_emitted = True
+                    yield normalized
+
+            # Bounded wait — reap the zombie without risking an indefinite
+            # block if the child is somehow still winding down.
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "Claude subprocess didn't exit within 5s of stdout EOF; "
+                    "sending SIGKILL to prevent zombie",
+                )
+                self._process.kill()
+                self._process.wait()
+
+            if self._process.returncode == 0:
+                if accumulated_text:
+                    yield make_event(ASSISTANT_COMPLETED,
+                                     summary="Response complete",
+                                     full_text="".join(accumulated_text))
+                yield make_event(RUN_COMPLETED, summary="Done")
+            elif not terminal_emitted:
+                stderr = self._process.stderr.read() if self._process.stderr else ""
+                yield make_event(RUN_FAILED,
+                                 summary=f"Claude exited with code {self._process.returncode}",
+                                 error=stderr[:500])
+        except Exception as e:
+            logger.error(f"Claude provider error: {e}")
+            yield make_event(RUN_FAILED, summary=f"Error: {e}", error=str(e))
+        finally:
+            self._process = None
+
+    def _normalize_claude_event(self, event, assistant_started, accumulated_text):
+        event_type = event.get("type", "")
+        subtype = event.get("subtype", "")
+
+        if event_type == "system" and subtype == "init":
+            self._session_id = event.get("session_id")
+            return
+
+        elif event_type == "assistant":
+            message = event.get("message", {})
+            content = message.get("content", [])
+
+            error = event.get("error")
+            if error == "authentication_failed":
+                yield make_event(PROVIDER_LOGIN_REQUIRED,
+                                 summary="Login required. Run: claude auth login")
+                yield make_event(RUN_FAILED,
+                                 summary="Login required. Run: claude auth login",
+                                 error="authentication_failed")
+                return
+
+            for block in content:
+                block_type = block.get("type", "")
+
+                if block_type == "text":
+                    text = block.get("text", "")
+                    if text:
+                        if not assistant_started:
+                            yield make_event(ASSISTANT_STARTED,
+                                             summary="Generating response")
+                        full_so_far = "".join(accumulated_text)
+                        if text.startswith(full_so_far):
+                            delta = text[len(full_so_far):]
+                        else:
+                            delta = text
+                        if delta:
+                            accumulated_text.clear()
+                            accumulated_text.append(text)
+                            yield make_event(ASSISTANT_DELTA, text=delta)
+
+                elif block_type == "tool_use":
+                    tool_id = block.get("id", "")
+                    tool_name = block.get("name", "tool")
+                    tool_input = block.get("input", {})
+
+                    # Track this tool for matching with results
+                    self._active_tools[tool_id] = {
+                        "name": tool_name,
+                        "input": tool_input,
+                        "start_time": time.time(),
+                    }
+
+                    summary = _tool_summary(tool_name, tool_input)
+                    input_text = _tool_input_display(tool_name, tool_input)
+
+                    yield make_event(TOOL_STARTED,
+                                     summary=summary,
+                                     tool_name=tool_name,
+                                     tool_id=tool_id,
+                                     tool_input=input_text)
+
+                elif block_type == "tool_result":
+                    tool_use_id = block.get("tool_use_id", "")
+                    is_error = block.get("is_error", False)
+                    result_content = block.get("content", "")
+
+                    # Extract text from result
+                    output_text = ""
+                    if isinstance(result_content, list):
+                        parts = []
+                        for item in result_content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                parts.append(item.get("text", ""))
+                            elif isinstance(item, str):
+                                parts.append(item)
+                        output_text = "\n".join(parts)
+                    elif isinstance(result_content, str):
+                        output_text = result_content
+
+                    # Get timing from tracked tool
+                    tool_info = self._active_tools.pop(tool_use_id, {})
+                    tool_name = tool_info.get("name", "tool")
+                    duration = None
+                    if tool_info.get("start_time"):
+                        duration = round(time.time() - tool_info["start_time"], 1)
+
+                    summary = _tool_summary(tool_name, tool_info.get("input", {}))
+
+                    if is_error:
+                        yield make_event(TOOL_FAILED,
+                                         summary=summary,
+                                         tool_name=tool_name,
+                                         tool_id=tool_use_id,
+                                         tool_output=output_text[:2000],
+                                         duration=duration)
+                    else:
+                        yield make_event(TOOL_COMPLETED,
+                                         summary=summary,
+                                         tool_name=tool_name,
+                                         tool_id=tool_use_id,
+                                         tool_output=output_text[:2000],
+                                         duration=duration)
+
+        elif event_type == "rate_limit_event":
+            info = event.get("rate_limit_info", {})
+            if info.get("status", "") != "allowed":
+                yield make_event(PROVIDER_RATE_LIMITED,
+                                 summary="Rate limited",
+                                 resets_at=info.get("resetsAt"))
+
+        elif event_type == "result":
+            is_error = event.get("is_error", False)
+            if is_error:
+                result_text = event.get("result", "Unknown error")
+                if "login" in result_text.lower():
+                    yield make_event(PROVIDER_LOGIN_REQUIRED,
+                                     summary="Login required. Run: claude auth login")
+                    yield make_event(RUN_FAILED,
+                                     summary="Login required. Run: claude auth login",
+                                     error=result_text)
+                else:
+                    yield make_event(RUN_FAILED, summary=result_text, error=result_text)
+
+    def cancel(self):
+        self._cancelled = True
+        self._kill_process()
+
+    def _kill_process(self):
+        if self._process and self._process.poll() is None:
+            try:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
+            except Exception as e:
+                logger.warning(f"Error killing Claude process: {e}")
+
+    def cleanup(self):
+        self._kill_process()
+        self._cancelled = False
+        self._process = None
+        self._active_tools = {}
+
+
+def _tool_summary(tool_name, tool_input):
+    """Human-readable one-line summary for a tool use."""
+    if tool_name in ("Read", "read"):
+        path = tool_input.get("file_path", "file")
+        return f"Read({_short_path(path)})"
+    elif tool_name in ("Edit", "edit"):
+        return f"Edit({_short_path(tool_input.get('file_path', 'file'))})"
+    elif tool_name in ("Write", "write"):
+        return f"Write({_short_path(tool_input.get('file_path', 'file'))})"
+    elif tool_name in ("Bash", "bash"):
+        cmd = tool_input.get("command", "")
+        desc = tool_input.get("description", "")
+        label = desc if desc else cmd[:60]
+        return f"Bash({label})"
+    elif tool_name in ("Grep", "grep"):
+        return f"Grep({tool_input.get('pattern', '')})"
+    elif tool_name in ("Glob", "glob"):
+        return f"Glob({tool_input.get('pattern', '')})"
+    elif tool_name in ("WebSearch", "web_search"):
+        return f"WebSearch({tool_input.get('query', '')})"
+    elif tool_name in ("WebFetch", "web_fetch"):
+        return f"WebFetch"
+    elif tool_name == "ToolSearch":
+        return f"ToolSearch({tool_input.get('query', '')})"
+    elif tool_name in ("Task", "TaskCreate"):
+        return f"Task({tool_input.get('description', '')[:40]})"
+    elif tool_name == "Agent":
+        return f"Agent({tool_input.get('description', '')[:40]})"
+    else:
+        return tool_name
+
+
+def _tool_input_display(tool_name, tool_input):
+    """Format tool input for display in the Org buffer."""
+    if tool_name in ("Bash", "bash"):
+        return tool_input.get("command", "")
+    elif tool_name in ("Read", "read"):
+        path = tool_input.get("file_path", "")
+        parts = [path]
+        if tool_input.get("offset"):
+            parts.append(f"offset: {tool_input['offset']}")
+        if tool_input.get("limit"):
+            parts.append(f"limit: {tool_input['limit']}")
+        return "\n".join(parts) if len(parts) > 1 else path
+    elif tool_name in ("Edit", "edit"):
+        path = tool_input.get("file_path", "")
+        old = tool_input.get("old_string", "")
+        new = tool_input.get("new_string", "")
+        if old and new:
+            return f"{path}\n-{_truncate(old, 100)}\n+{_truncate(new, 100)}"
+        return path
+    elif tool_name in ("Write", "write"):
+        path = tool_input.get("file_path", "")
+        content = tool_input.get("content", "")
+        return f"{path} ({len(content)} chars)"
+    elif tool_name in ("Grep", "grep"):
+        parts = [f"pattern: {tool_input.get('pattern', '')}"]
+        if tool_input.get("path"):
+            parts.append(f"path: {tool_input['path']}")
+        if tool_input.get("glob"):
+            parts.append(f"glob: {tool_input['glob']}")
+        return "\n".join(parts)
+    elif tool_name in ("Glob", "glob"):
+        return tool_input.get("pattern", "")
+    else:
+        # Generic: show as compact JSON
+        return json.dumps(tool_input, indent=2)[:500]
+
+
+def _short_path(path):
+    """Shorten a file path for display."""
+    if not path:
+        return ""
+    parts = path.split("/")
+    if len(parts) > 3:
+        return "/".join(["..."] + parts[-3:])
+    return path
+
+
+def _truncate(text, max_len):
+    """Truncate text with ellipsis."""
+    text = text.replace("\n", "\\n")
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text

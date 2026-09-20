@@ -1,0 +1,43 @@
+-- Migration 105: sessions declare their own lifetime and reap policy
+--
+-- Motivation: right now every publish output ends with
+--   "N file(s) staged in other sessions were not included"
+-- and N grows monotonically. Those rows are almost always orphaned by
+-- sessions that ended without being cleaned up — but there's no
+-- declarative way to say "this session should have expired by now,
+-- so its stages are stale and safe to orphan."
+--
+-- Fix: sessions declare their expected lifetime and what to do with
+-- their staged rows on expiry. A doctor invariant flags sessions that
+-- exceeded their declared lifetime while still marked active. A
+-- reconcile handler (later migration) actions them per the declared
+-- reap_policy.
+--
+-- Both columns nullable. Interpretation:
+--   expected_lifetime_seconds NULL → treated as 86400 (24h)
+--   reap_policy NULL              → treated as 'orphan_stages'
+--
+-- reap_policy values (documented not enforced):
+--   'orphan_stages'  — set ended_at, ended_reason='stale-timeout';
+--                       vcs_working_state rows keep their content but
+--                       lose their staged_by_session_id (so they
+--                       re-surface as "modified" in vcs status). No
+--                       data loss.
+--   'preserve'       — set ended_at, ended_reason='stale-timeout';
+--                       leave staged_by_session_id intact for manual
+--                       review. This is the safe default for anything
+--                       whose stages should survive session death.
+--   'discard'        — set ended_at + delete the vcs_working_state
+--                       rows staged by this session. USE WITH CARE:
+--                       data-loss policy, appropriate only for known-
+--                       transient sessions (e.g. per-invocation
+--                       agent-context sessions with short lifetimes).
+--
+-- Design: reports/2026-09-19-2012-declarative-reframe-*.html §2.
+
+ALTER TABLE vcs_sessions ADD COLUMN expected_lifetime_seconds INTEGER;
+ALTER TABLE vcs_sessions ADD COLUMN reap_policy TEXT;
+
+-- No index needed — doctor invariant does a full-table scan on active
+-- sessions (<< 1000 rows in practice), and reap decisions are
+-- single-row lookups.

@@ -1,0 +1,847 @@
+#!/usr/bin/env python3
+"""
+TempleDB Sync Engine — cr-sqlite CRDT sync between machines.
+
+Uses cr-sqlite for conflict-free replication and supports multiple
+transport layers:
+  - Direct TCP (Tailscale/LAN)
+  - GCS bucket (async/offline)
+  - HTTP relay (future)
+
+Architecture:
+  1. Load cr-sqlite extension into the DB
+  2. Mark tables as CRRs (conflict-free replicated relations)
+  3. Exchange changesets between peers via chosen transport
+"""
+
+import base64
+import json
+import logging
+import os
+import socket
+import sqlite3
+import struct
+import threading
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+
+logger = logging.getLogger(__name__)
+
+# Shadow tables for sync — mirrors of main tables without UNIQUE constraints.
+# cr-sqlite needs tables without unique indexes (besides PK).
+# We sync the shadow tables, then reconcile to main tables.
+SYNC_SHADOW_SCHEMA = {
+    "sync_system_config": """
+        CREATE TABLE IF NOT EXISTS sync_system_config (
+            id INTEGER PRIMARY KEY NOT NULL,
+            key TEXT DEFAULT '',
+            value TEXT DEFAULT '',
+            updated_at TEXT DEFAULT ''
+        )
+    """,
+    "sync_projects": """
+        CREATE TABLE IF NOT EXISTS sync_projects (
+            id INTEGER PRIMARY KEY NOT NULL,
+            slug TEXT DEFAULT '',
+            name TEXT DEFAULT '',
+            repo_url TEXT DEFAULT '',
+            project_type TEXT DEFAULT '',
+            is_nix_project INTEGER DEFAULT 0,
+            project_category TEXT DEFAULT ''
+        )
+    """,
+    "sync_environment_variables": """
+        CREATE TABLE IF NOT EXISTS sync_environment_variables (
+            id INTEGER PRIMARY KEY NOT NULL,
+            scope_type TEXT DEFAULT '',
+            scope_id INTEGER DEFAULT 0,
+            var_name TEXT DEFAULT '',
+            var_value TEXT DEFAULT '',
+            is_secret INTEGER DEFAULT 0,
+            updated_at TEXT DEFAULT ''
+        )
+    """,
+    "sync_vcs_commits": """
+        CREATE TABLE IF NOT EXISTS sync_vcs_commits (
+            id INTEGER PRIMARY KEY NOT NULL,
+            project_id INTEGER DEFAULT 0,
+            branch_id INTEGER DEFAULT 0,
+            commit_hash TEXT DEFAULT '',
+            author TEXT DEFAULT '',
+            commit_message TEXT DEFAULT '',
+            commit_timestamp TEXT DEFAULT ''
+        )
+    """,
+    "sync_nixos_config": """
+        CREATE TABLE IF NOT EXISTS sync_nixos_config (
+            id INTEGER PRIMARY KEY NOT NULL,
+            key TEXT DEFAULT '',
+            value TEXT DEFAULT '',
+            host TEXT DEFAULT '',
+            updated_at TEXT DEFAULT ''
+        )
+    """,
+    "sync_vcs_branches": """
+        CREATE TABLE IF NOT EXISTS sync_vcs_branches (
+            id INTEGER PRIMARY KEY NOT NULL,
+            project_id INTEGER DEFAULT 0,
+            branch_name TEXT DEFAULT '',
+            is_default INTEGER DEFAULT 0,
+            head_commit_id INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT ''
+        )
+    """,
+    # Q5 fleet-scope entity graph. Natural-key composite PKs (mig 102)
+    # so concurrent inserts on different sites don't collide the way
+    # surrogate ROWIDs did (session recap 9). Populated only for
+    # sync_scope='fleet' rows; machine-local kinds (Symbol, StorePath,
+    # Derivation, ToolCall, AgentSession) stay out of the CRR.
+    "sync_entities": """
+        CREATE TABLE IF NOT EXISTS sync_entities (
+            kind             TEXT NOT NULL,
+            external_ref     TEXT NOT NULL,
+            source_authority TEXT NOT NULL DEFAULT '',
+            label            TEXT NOT NULL DEFAULT '',
+            observed_at      TEXT NOT NULL DEFAULT '',
+            created_at       TEXT NOT NULL DEFAULT '',
+            attributes_json  TEXT NOT NULL DEFAULT '',
+            sync_scope       TEXT NOT NULL DEFAULT 'fleet',
+            PRIMARY KEY (kind, external_ref)
+        ) WITHOUT ROWID
+    """,
+    "sync_relations": """
+        CREATE TABLE IF NOT EXISTS sync_relations (
+            from_kind         TEXT NOT NULL,
+            from_external_ref TEXT NOT NULL,
+            kind              TEXT NOT NULL,
+            to_kind           TEXT NOT NULL,
+            to_external_ref   TEXT NOT NULL,
+            source_authority  TEXT NOT NULL DEFAULT '',
+            observed_at       TEXT NOT NULL DEFAULT '',
+            attributes_json   TEXT NOT NULL DEFAULT '',
+            sync_scope        TEXT NOT NULL DEFAULT 'fleet',
+            PRIMARY KEY (from_kind, from_external_ref, kind, to_kind, to_external_ref)
+        ) WITHOUT ROWID
+    """,
+}
+
+# Mapping from shadow table → (main table, key columns for upsert)
+SHADOW_TO_MAIN = {
+    "sync_system_config": ("system_config", "key"),
+    "sync_projects": ("projects", "slug"),
+    "sync_environment_variables": ("environment_variables", "scope_type, scope_id, var_name"),
+    "sync_vcs_commits": ("vcs_commits", "commit_hash"),
+    "sync_nixos_config": ("system_config", "key"),
+    "sync_vcs_branches": ("vcs_branches", "project_id, branch_name"),
+    "sync_entities": ("entities", "kind, external_ref"),
+    "sync_relations": ("relations", "from_kind, from_external_ref, kind, to_kind, to_external_ref"),
+}
+
+def _find_crsqlite():
+    """Find the crsqlite extension. Priority:
+
+    1. TEMPLEDB_CRSQLITE_PATH env var (explicit override).
+    2. lib/crsqlite.so relative to the source root (dev checkout layout).
+    3. Nix profile lib dirs (home-manager-path, user profile, etc.) —
+       the nix packaging exposes crsqlite via extraPackages, not in
+       templedb's own lib/, so we scan the profile's lib/ for it.
+    4. Bare 'crsqlite' name (assume it's on the dynamic loader search
+       path — LD_LIBRARY_PATH or a system-wide install).
+
+    conn.load_extension() appends '.so' automatically, so return the
+    path WITHOUT the suffix (SQLite convention).
+    """
+    env_path = os.environ.get('TEMPLEDB_CRSQLITE_PATH')
+    if env_path:
+        return env_path
+
+    # Dev layout: templedb repo root has lib/crsqlite.so.
+    local = Path(__file__).parent.parent / "lib" / "crsqlite"
+    if Path(str(local) + ".so").exists():
+        return str(local)
+
+    # Nix profile layout: crsqlite.so is shipped via home-manager's
+    # `programs.templedb.extraPackages`, landing in the home-manager
+    # profile's lib/ (NOT the user profile). Scan the standard paths.
+    candidates = [
+        Path.home() / ".local" / "state" / "nix" / "profiles"
+            / "home-manager" / "home-path" / "lib" / "crsqlite.so",
+        Path.home() / ".nix-profile" / "lib" / "crsqlite.so",
+        Path("/run/current-system/sw/lib/crsqlite.so"),
+        Path("/nix/var/nix/profiles/default/lib/crsqlite.so"),
+    ]
+    for c in candidates:
+        try:
+            if c.exists():
+                return str(c)[:-3]  # strip .so, sqlite adds it back
+            # ~/.nix-profile may itself be a symlink; resolve and
+            # search the resolved lib/ directory for any crsqlite.so.
+            if c.parent.exists():
+                for f in c.parent.glob("crsqlite*.so"):
+                    return str(f)[:-3]
+        except OSError:
+            continue
+
+    return "crsqlite"  # last resort — dynamic loader search
+
+CRSQLITE_PATH = _find_crsqlite()
+
+
+def _get_db_path():
+    if 'TEMPLEDB_PATH' in os.environ:
+        return os.environ['TEMPLEDB_PATH']
+    sudo_user = os.environ.get('SUDO_USER')
+    if sudo_user:
+        return f'/home/{sudo_user}/.local/share/templedb/templedb.sqlite'
+    return os.path.expanduser("~/.local/share/templedb/templedb.sqlite")
+
+
+class SyncEngine:
+    """Core sync engine using cr-sqlite CRDTs."""
+
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or _get_db_path()
+        self._conn = None
+        self._initialized = False
+
+    def _connect(self) -> sqlite3.Connection:
+        # Thread-local connections for safety
+        if not hasattr(self, '_local'):
+            self._local = threading.local()
+        if not hasattr(self._local, 'conn') or self._local.conn is None:
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=OFF")
+            try:
+                conn.enable_load_extension(True)
+                conn.load_extension(CRSQLITE_PATH)
+            except Exception as e:
+                logger.error(f"Failed to load cr-sqlite: {e}")
+                raise
+            self._local.conn = conn
+        return self._local.conn
+
+    def initialize(self) -> Dict[str, Any]:
+        """Initialize cr-sqlite CRRs using shadow sync tables.
+
+        Creates shadow tables (no UNIQUE constraints) and marks them
+        as CRRs for sync. Populates from main tables on first run.
+        Idempotent.
+        """
+        conn = self._connect()
+        initialized = []
+        skipped = []
+        errors = []
+
+        # Step 1: Create shadow tables
+        for table_name, ddl in SYNC_SHADOW_SCHEMA.items():
+            try:
+                conn.execute(ddl)
+            except Exception as e:
+                errors.append((table_name, f"create failed: {e}"))
+
+        conn.commit()
+
+        # Step 2: Mark shadow tables as CRRs
+        for table_name in SYNC_SHADOW_SCHEMA:
+            try:
+                conn.execute(f"SELECT crsql_as_crr('{table_name}')")
+                initialized.append(table_name)
+            except sqlite3.OperationalError as e:
+                err_str = str(e).lower()
+                if "already a crr" in err_str or "is a crr" in err_str:
+                    skipped.append(table_name)
+                else:
+                    errors.append((table_name, str(e)))
+
+        # Step 3: Populate shadow tables from main tables (first run)
+        self._populate_shadow_tables(conn)
+
+        conn.execute("PRAGMA foreign_keys=ON")
+
+        site_id = conn.execute("SELECT crsql_site_id()").fetchone()[0]
+        db_version = conn.execute("SELECT crsql_db_version()").fetchone()[0]
+
+        self._initialized = True
+        return {
+            "site_id": site_id.hex() if isinstance(site_id, bytes) else str(site_id),
+            "db_version": db_version,
+            "initialized": initialized,
+            "skipped": skipped,
+            "errors": errors,
+        }
+
+    def _populate_shadow_tables(self, conn):
+        """Copy data from main tables to shadow tables (initial sync)."""
+        # system_config → sync_system_config
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_system_config (id, key, value, updated_at)
+            SELECT rowid, key, value, updated_at FROM system_config
+        """)
+
+        # projects → sync_projects
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_projects (id, slug, name, repo_url, project_type, is_nix_project, project_category)
+            SELECT id, slug, name, repo_url, project_type, is_nix_project, project_category FROM projects
+        """)
+
+        # environment_variables → sync_environment_variables
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_environment_variables (id, scope_type, scope_id, var_name, var_value, is_secret, updated_at)
+            SELECT id, scope_type, scope_id, var_name, var_value, is_secret, updated_at FROM environment_variables
+        """)
+
+        # vcs_commits → sync_vcs_commits
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_vcs_commits (id, project_id, branch_id, commit_hash, author, commit_message, commit_timestamp)
+            SELECT id, project_id, branch_id, commit_hash, author, commit_message, commit_timestamp FROM vcs_commits
+        """)
+
+        # vcs_branches → sync_vcs_branches
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_vcs_branches (id, project_id, branch_name, is_default, head_commit_id, created_at)
+            SELECT id, project_id, branch_name, is_default, COALESCE(head_commit_id, 0), created_at FROM vcs_branches
+        """)
+
+        # Host-scoped system_config → sync_nixos_config
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_nixos_config (id, key, value, host, updated_at)
+            SELECT rowid, key, value,
+                   CASE WHEN key LIKE '%.%' AND key NOT LIKE 'nixos.%' AND key NOT LIKE 'gcs.%' AND key NOT LIKE 'git_%' AND key NOT LIKE 'woofs.%'
+                        THEN substr(key, 1, instr(key, '.') - 1) ELSE NULL END,
+                   updated_at
+            FROM system_config
+            WHERE key LIKE '%.%'
+        """)
+
+        # entities → sync_entities (fleet-scope, natural-key PK).
+        # Skip rows with NULL external_ref (can't be part of the
+        # natural PK); trigger and adapter conventions treat every
+        # fleet entity as having an external_ref, so this is a safety
+        # filter rather than a data-loss risk.
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_entities (
+                kind, external_ref, source_authority, label,
+                observed_at, created_at, attributes_json, sync_scope
+            )
+            SELECT kind, external_ref, source_authority,
+                   COALESCE(label, ''),
+                   observed_at, created_at,
+                   COALESCE(attributes_json, ''),
+                   sync_scope
+              FROM entities
+             WHERE sync_scope = 'fleet'
+               AND external_ref IS NOT NULL
+        """)
+
+        # relations → sync_relations (fleet iff both endpoints fleet).
+        # relations.sync_scope column exists (mig 099) but no ingest
+        # adapter populates it, so scope is derived here from the
+        # endpoints. Endpoint natural keys are read from the JOINed
+        # entities so peer sync doesn't need any local ID translation.
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_relations (
+                from_kind, from_external_ref, kind,
+                to_kind, to_external_ref,
+                source_authority, observed_at, attributes_json, sync_scope
+            )
+            SELECT ef.kind, ef.external_ref, r.kind,
+                   et.kind, et.external_ref,
+                   r.source_authority, r.observed_at,
+                   COALESCE(r.attributes_json, ''),
+                   'fleet'
+              FROM relations r
+              JOIN entities ef ON ef.id = r.from_entity_id
+              JOIN entities et ON et.id = r.to_entity_id
+             WHERE ef.sync_scope = 'fleet'
+               AND et.sync_scope = 'fleet'
+               AND ef.external_ref IS NOT NULL
+               AND et.external_ref IS NOT NULL
+        """)
+
+        conn.commit()
+
+    def reconcile_to_main(self, delete_missing: bool = False):
+        """Apply shadow table changes back to main tables after sync.
+
+        When ``delete_missing`` is True, also delete main-table rows
+        whose natural key is no longer present in the shadow — i.e.
+        propagate CRSql tombstones through to ``entities`` and
+        ``relations``. Guarded by a non-empty-shadow check so a fresh
+        peer that hasn't run ``sync init`` yet can't accidentally
+        wipe the local fleet with an empty ``sync_entities``.
+
+        Default is False: INSERT+UPDATE only. Callers that want the
+        symmetric "sync means sync" behavior must opt in explicitly.
+        """
+        conn = self._connect()
+
+        # sync_system_config → system_config
+        conn.execute("""
+            INSERT OR REPLACE INTO system_config (key, value, updated_at)
+            SELECT key, value, updated_at FROM sync_system_config
+            WHERE key IS NOT NULL
+        """)
+
+        # sync_projects → projects (update existing, don't create new — IDs may differ)
+        rows = conn.execute("SELECT * FROM sync_projects").fetchall()
+        for r in rows:
+            existing = conn.execute(
+                "SELECT id FROM projects WHERE slug = ?", (r["slug"],)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE projects SET name=?, repo_url=?, project_type=?, is_nix_project=?, project_category=? WHERE slug=?",
+                    (r["name"], r["repo_url"], r["project_type"], r["is_nix_project"], r["project_category"], r["slug"])
+                )
+
+        # sync_entities → entities. Both sides key on (kind,
+        # external_ref) so no ID translation is needed. Local
+        # surrogate IDs are preserved on the ON CONFLICT UPDATE path.
+        # Delete propagation is opt-in via delete_missing (see below).
+        conn.execute("""
+            INSERT INTO entities (
+                kind, external_ref, source_authority, label,
+                observed_at, created_at, attributes_json, sync_scope
+            )
+            SELECT kind, external_ref, source_authority, label,
+                   observed_at, created_at, attributes_json, sync_scope
+              FROM sync_entities
+             WHERE true
+            ON CONFLICT(kind, external_ref) DO UPDATE SET
+                source_authority = excluded.source_authority,
+                label            = excluded.label,
+                observed_at      = excluded.observed_at,
+                attributes_json  = excluded.attributes_json,
+                sync_scope       = excluded.sync_scope
+             WHERE excluded.observed_at > entities.observed_at
+        """)
+
+        # sync_relations → relations. Shadow stores endpoint natural
+        # keys, so JOIN directly to local entities by (kind,
+        # external_ref) to get the local surrogate IDs. Rows whose
+        # endpoints haven't been reconciled locally yet are skipped;
+        # they land on the next reconcile pass once the entity
+        # projection above catches up.
+        conn.execute("""
+            INSERT INTO relations (
+                from_entity_id, kind, to_entity_id,
+                source_authority, observed_at, attributes_json, sync_scope
+            )
+            SELECT ef.id, sr.kind, et.id,
+                   sr.source_authority, sr.observed_at,
+                   sr.attributes_json, sr.sync_scope
+              FROM sync_relations sr
+              JOIN entities ef ON ef.kind = sr.from_kind
+                              AND ef.external_ref = sr.from_external_ref
+              JOIN entities et ON et.kind = sr.to_kind
+                              AND et.external_ref = sr.to_external_ref
+             WHERE true
+            ON CONFLICT(from_entity_id, kind, to_entity_id) DO UPDATE SET
+                source_authority = excluded.source_authority,
+                observed_at      = excluded.observed_at,
+                attributes_json  = excluded.attributes_json,
+                sync_scope       = excluded.sync_scope
+             WHERE excluded.observed_at > relations.observed_at
+        """)
+
+        # Optional: propagate deletes. Only runs when the caller opts
+        # in AND the shadow is non-empty. The non-empty guard is the
+        # safety net for a fresh peer that hasn't run `sync init` — an
+        # empty shadow would otherwise mean "no fleet entities exist
+        # anywhere," and this pass would helpfully wipe the local
+        # graph. Once init has populated sync_entities from main, the
+        # count is 3k+ and the guard passes.
+        if delete_missing:
+            n_shadow = conn.execute(
+                "SELECT COUNT(*) FROM sync_entities"
+            ).fetchone()[0]
+            if n_shadow == 0:
+                logger.warning(
+                    "reconcile_to_main(delete_missing=True): sync_entities "
+                    "is empty; skipping delete pass. Run `templedb sync "
+                    "init` first to populate the shadow."
+                )
+            else:
+                # Relations must go before entities — FK ON DELETE
+                # CASCADE would take care of it if we deleted entities
+                # first, but doing relations explicitly means the
+                # counters below are meaningful.
+                n_rel = conn.execute("""
+                    DELETE FROM relations
+                     WHERE sync_scope = 'fleet'
+                       AND (from_entity_id, kind, to_entity_id) NOT IN (
+                           SELECT ef.id, sr.kind, et.id
+                             FROM sync_relations sr
+                             JOIN entities ef ON ef.kind = sr.from_kind
+                                             AND ef.external_ref = sr.from_external_ref
+                             JOIN entities et ON et.kind = sr.to_kind
+                                             AND et.external_ref = sr.to_external_ref
+                       )
+                """).rowcount
+
+                n_ent = conn.execute("""
+                    DELETE FROM entities
+                     WHERE sync_scope = 'fleet'
+                       AND external_ref IS NOT NULL
+                       AND (kind, external_ref) NOT IN (
+                           SELECT kind, external_ref FROM sync_entities
+                       )
+                """).rowcount
+
+                if n_ent or n_rel:
+                    logger.info(
+                        f"reconcile_to_main(delete_missing=True): "
+                        f"pruned {n_ent} entities, {n_rel} relations "
+                        f"absent from shadow of {n_shadow} rows"
+                    )
+
+        conn.commit()
+        logger.info("Reconciled shadow tables to main tables")
+
+    def get_changes(self, since_version: int = 0) -> Tuple[List[dict], int]:
+        """Get all changes since a given version.
+
+        Returns (changes, current_db_version).
+        """
+        conn = self._connect()
+        if not self._initialized:
+            self.initialize()
+
+        rows = conn.execute(
+            "SELECT [table], [pk], [cid], [val], [col_version], "
+            "[db_version], [site_id], [cl], [seq] "
+            "FROM crsql_changes WHERE db_version > ?",
+            (since_version,)
+        ).fetchall()
+
+        changes = []
+        for r in rows:
+            changes.append({
+                "table": r[0],
+                "pk": base64.b64encode(r[1]).decode() if isinstance(r[1], bytes) else r[1],
+                "cid": r[2],
+                "val": r[3],
+                "col_version": r[4],
+                "db_version": r[5],
+                "site_id": base64.b64encode(r[6]).decode() if isinstance(r[6], bytes) else r[6],
+                "cl": r[7],
+                "seq": r[8],
+            })
+
+        db_version = conn.execute("SELECT crsql_db_version()").fetchone()[0]
+        return changes, db_version
+
+    def apply_changes(self, changes: List[dict]) -> int:
+        """Apply changes from a remote peer. Returns count applied."""
+        conn = self._connect()
+        if not self._initialized:
+            self.initialize()
+
+        applied = 0
+        for c in changes:
+            try:
+                pk = base64.b64decode(c["pk"]) if isinstance(c["pk"], str) else c["pk"]
+                site_id = base64.b64decode(c["site_id"]) if isinstance(c["site_id"], str) else c["site_id"]
+
+                conn.execute(
+                    "INSERT INTO crsql_changes ([table], [pk], [cid], [val], "
+                    "[col_version], [db_version], [site_id], [cl], [seq]) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (c["table"], pk, c["cid"], c["val"],
+                     c["col_version"], c["db_version"], site_id, c["cl"], c["seq"])
+                )
+                applied += 1
+            except Exception as e:
+                logger.debug(f"Failed to apply change: {e}")
+
+        conn.commit()
+        return applied
+
+    def get_site_id(self) -> str:
+        conn = self._connect()
+        site_id = conn.execute("SELECT crsql_site_id()").fetchone()[0]
+        return site_id.hex() if isinstance(site_id, bytes) else str(site_id)
+
+    def get_db_version(self) -> int:
+        conn = self._connect()
+        return conn.execute("SELECT crsql_db_version()").fetchone()[0]
+
+    def close(self):
+        if hasattr(self, '_local') and hasattr(self._local, 'conn') and self._local.conn:
+            try:
+                self._local.conn.execute("SELECT crsql_finalize()")
+            except Exception:
+                pass
+            self._local.conn.close()
+            self._local.conn = None
+
+
+# ── TCP Sync (Tailscale/LAN) ─────────────────────────────────────────────────
+
+DEFAULT_SYNC_PORT = 9420
+
+
+class SyncServer:
+    """TCP sync server — listens for peer connections and exchanges changesets."""
+
+    def __init__(self, engine: SyncEngine, port: int = DEFAULT_SYNC_PORT):
+        self.engine = engine
+        self.port = port
+        self._running = False
+
+    def start(self, background: bool = True):
+        """Start the sync server."""
+        self._running = True
+        if background:
+            t = threading.Thread(target=self._serve, daemon=True)
+            t.start()
+            return t
+        else:
+            self._serve()
+
+    def stop(self):
+        self._running = False
+
+    def _serve(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.settimeout(1.0)
+        sock.bind(("0.0.0.0", self.port))
+        sock.listen(5)
+
+        logger.info(f"Sync server listening on port {self.port}")
+
+        while self._running:
+            try:
+                client, addr = sock.accept()
+                logger.info(f"Sync connection from {addr}")
+                threading.Thread(
+                    target=self._handle_client, args=(client, addr), daemon=True
+                ).start()
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self._running:
+                    logger.error(f"Server error: {e}")
+
+        sock.close()
+
+    def _handle_client(self, client: socket.socket, addr):
+        """Handle a sync request from a peer."""
+        try:
+            client.settimeout(30.0)
+
+            # Read request
+            data = self._recv_message(client)
+            request = json.loads(data)
+
+            if request.get("action") == "pull":
+                # Peer wants our changes since their version
+                since = request.get("since_version", 0)
+                changes, version = self.engine.get_changes(since)
+                response = {
+                    "changes": changes,
+                    "db_version": version,
+                    "site_id": self.engine.get_site_id(),
+                }
+                self._send_message(client, json.dumps(response))
+
+            elif request.get("action") == "push":
+                # Peer is sending us changes
+                changes = request.get("changes", [])
+                applied = self.engine.apply_changes(changes)
+                response = {
+                    "applied": applied,
+                    "db_version": self.engine.get_db_version(),
+                    "site_id": self.engine.get_site_id(),
+                }
+                self._send_message(client, json.dumps(response))
+
+            elif request.get("action") == "sync":
+                # Full bidirectional sync
+                # 1. Apply their changes
+                their_changes = request.get("changes", [])
+                applied = self.engine.apply_changes(their_changes)
+
+                # 2. Send our changes since their version
+                since = request.get("since_version", 0)
+                our_changes, our_version = self.engine.get_changes(since)
+
+                response = {
+                    "applied": applied,
+                    "changes": our_changes,
+                    "db_version": our_version,
+                    "site_id": self.engine.get_site_id(),
+                }
+                self._send_message(client, json.dumps(response))
+
+            elif request.get("action") == "ping":
+                response = {
+                    "site_id": self.engine.get_site_id(),
+                    "db_version": self.engine.get_db_version(),
+                    "hostname": socket.gethostname(),
+                }
+                self._send_message(client, json.dumps(response))
+
+        except Exception as e:
+            logger.error(f"Client handler error: {e}")
+        finally:
+            client.close()
+
+    def _send_message(self, sock: socket.socket, data: str):
+        encoded = data.encode("utf-8")
+        sock.sendall(struct.pack("!I", len(encoded)) + encoded)
+
+    def _recv_message(self, sock: socket.socket) -> str:
+        header = self._recv_exact(sock, 4)
+        length = struct.unpack("!I", header)[0]
+        return self._recv_exact(sock, length).decode("utf-8")
+
+    def _recv_exact(self, sock: socket.socket, n: int) -> bytes:
+        data = b""
+        while len(data) < n:
+            chunk = sock.recv(n - len(data))
+            if not chunk:
+                raise ConnectionError("Connection closed")
+            data += chunk
+        return data
+
+
+class SyncClient:
+    """TCP sync client — connects to a peer and exchanges changesets."""
+
+    def __init__(self, engine: SyncEngine):
+        self.engine = engine
+
+    def ping(self, host: str, port: int = DEFAULT_SYNC_PORT) -> Optional[dict]:
+        """Ping a peer to check connectivity."""
+        try:
+            return self._request(host, port, {"action": "ping"})
+        except Exception as e:
+            return None
+
+    def pull(self, host: str, port: int = DEFAULT_SYNC_PORT,
+             since_version: int = 0) -> dict:
+        """Pull changes from a peer."""
+        response = self._request(host, port, {
+            "action": "pull",
+            "since_version": since_version,
+        })
+        if response and response.get("changes"):
+            applied = self.engine.apply_changes(response["changes"])
+            response["local_applied"] = applied
+        return response
+
+    def push(self, host: str, port: int = DEFAULT_SYNC_PORT,
+             since_version: int = 0) -> dict:
+        """Push local changes to a peer."""
+        changes, version = self.engine.get_changes(since_version)
+        response = self._request(host, port, {
+            "action": "push",
+            "changes": changes,
+        })
+        return response
+
+    def sync(self, host: str, port: int = DEFAULT_SYNC_PORT,
+             since_version: int = 0) -> dict:
+        """Full bidirectional sync with a peer."""
+        our_changes, our_version = self.engine.get_changes(since_version)
+
+        response = self._request(host, port, {
+            "action": "sync",
+            "changes": our_changes,
+            "since_version": since_version,
+        })
+
+        if response and response.get("changes"):
+            applied = self.engine.apply_changes(response["changes"])
+            response["local_applied"] = applied
+
+        return response
+
+    def _request(self, host: str, port: int, data: dict) -> dict:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(30.0)
+        try:
+            sock.connect((host, port))
+            # Send
+            encoded = json.dumps(data).encode("utf-8")
+            sock.sendall(struct.pack("!I", len(encoded)) + encoded)
+            # Receive
+            header = b""
+            while len(header) < 4:
+                header += sock.recv(4 - len(header))
+            length = struct.unpack("!I", header)[0]
+            response_data = b""
+            while len(response_data) < length:
+                response_data += sock.recv(length - len(response_data))
+            return json.loads(response_data.decode("utf-8"))
+        finally:
+            sock.close()
+
+
+# ── Peer Discovery (Tailscale) ────────────────────────────────────────────────
+
+def discover_tailscale_peers() -> List[dict]:
+    """Find other TempleDB instances on the Tailscale network."""
+    import subprocess
+
+    peers = []
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return []
+
+        status = json.loads(result.stdout)
+
+        # Get our own addresses
+        self_node = status.get("Self", {})
+        self_name = self_node.get("HostName", "")
+
+        # Check each peer
+        for node_id, peer in status.get("Peer", {}).items():
+            if not peer.get("Online"):
+                continue
+
+            hostname = peer.get("HostName", "")
+            addresses = peer.get("TailscaleIPs", [])
+            if not addresses:
+                continue
+
+            ip = addresses[0]  # First Tailscale IP
+
+            peers.append({
+                "hostname": hostname,
+                "ip": ip,
+                "os": peer.get("OS", ""),
+                "online": True,
+                "node_id": node_id,
+            })
+
+    except FileNotFoundError:
+        logger.debug("tailscale not found on PATH")
+    except Exception as e:
+        logger.debug(f"Tailscale discovery failed: {e}")
+
+    return peers
+
+
+def probe_peer(ip: str, port: int = DEFAULT_SYNC_PORT) -> Optional[dict]:
+    """Check if a peer is running TempleDB sync on the given IP."""
+    try:
+        engine = SyncEngine.__new__(SyncEngine)
+        engine.db_path = None
+        engine._conn = None
+        engine._initialized = False
+
+        client = SyncClient(engine)
+        result = client.ping(ip, port)
+        return result
+    except Exception:
+        return None

@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Workflow walkthrough across comparable systems: where TempleDB earns its keep</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  h4 { color: #b0b0d0; font-size: 0.92rem; margin: 1.1rem 0 0.3rem; font-weight: 600; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.neutral { border-left-color: var(--muted); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  .callout.neutral .label { color: var(--muted); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.88em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); color: var(--muted); font-weight: 500; }
+  .dim { color: var(--muted); }
+  .yes { color: var(--pos); font-weight: 600; }
+  .no { color: var(--neg); }
+  .partial { color: var(--warn); }
+  .workflow-card {
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 0.9rem 1.15rem; margin: 1.2rem 0; background: var(--panel);
+  }
+  .workflow-card h3 { margin-top: 0; color: var(--pos); }
+  .tool-row {
+    margin: 0.5rem 0; padding: 0.3rem 0;
+    border-top: 1px dashed rgba(128, 128, 160, 0.25);
+  }
+  .tool-row:first-of-type { border-top: none; }
+  .tool-name { color: #b0b0d0; font-weight: 600; display: inline-block; min-width: 8em; }
+</style>
+</head>
+<body>
+
+<h1>Workflow walkthrough across comparable systems: where TempleDB earns its keep</h1>
+<p class="lede">
+  Written after Phase 0 shipped (<code>templedb file where</code> + gitignore-aware materialize). Now that the initial observer-plan tranche is proving out, this report pauses to ask the harder question the design docs deferred: <strong>does TempleDB actually fill a gap no existing tool occupies, or is it a slightly-different way of doing what already exists?</strong> Walks each of the six workflow use cases from the <em>workflows before and after</em> report through nine comparable systems (Backstage, Sourcegraph, Terraform, Fossil, LSP, Nix, Datomic, Obsidian, Bazel) and asks: for this workflow, would that tool solve it, and if not, why not? The honest answer per workflow is different. Some are genuinely novel; some are redundant with tools you might already have; some are combinations that don&rsquo;t exist together anywhere else. Ends with a matrix, an honest niche statement, and the reiterated next-steps queue.
+</p>
+
+<h2>Verdict summary</h2>
+
+<p>The seven workflows compressed to one line each. Detail per workflow follows below.</p>
+
+<table class="matrix">
+  <tr><th>Workflow</th><th>Verdict</th></tr>
+  <tr><td>A. Multi-agent parallel refactor</td><td><span class="yes">Genuinely novel</span> &mdash; no tool has intent-queue semantics for parallel agent-driven edits</td></tr>
+  <tr><td>B. Deploy archaeology (&ldquo;was this bug in prod?&rdquo;)</td><td><span class="partial">Redundant with GitOps, novel otherwise</span> &mdash; ArgoCD/Flux solve it if adopted; most personal setups aren&rsquo;t GitOps</td></tr>
+  <tr><td>C. Cross-project impact analysis</td><td><span class="partial">Redundant with Sourcegraph</span> &mdash; Phase 4 SCIP adoption is the right response: consume, don&rsquo;t reinvent</td></tr>
+  <tr><td>D. Broken deploy investigation</td><td><span class="yes">Novel for NixOS-personal niche</span> &mdash; Terraform-refresh-shaped, ported to a domain nobody covers</td></tr>
+  <tr><td>E. New contributor onboarding</td><td><span class="partial">Redundant at 1-project scale</span>; approaches Backstage territory at multi-project personal scale</td></tr>
+  <tr><td>F. Report / decision archaeology</td><td><span class="yes">Genuinely novel</span> &mdash; Obsidian close for docs, ADRs close for humans, neither queryable across code</td></tr>
+  <tr><td>G. Meta-session workflow (agent + edit + snapshot + deploy + reports)</td><td><span class="yes">Uniquely combined</span> &mdash; each capability exists in some tool; the combination doesn&rsquo;t exist elsewhere</td></tr>
+</table>
+
+<div class="callout neutral">
+  <span class="label">Aggregate takeaway</span>
+  Three genuinely novel workflows (A, D, F), one uniquely-combined workflow (G), three redundant-with-something-else workflows (B, C, E). Redundancy is not necessarily bad &mdash; for C we adopt SCIP rather than reinvent, and for E we accept git+nix as the base and layer TempleDB above. The novel four are where TempleDB earns its distinctive keep.
+</div>
+
+<h2>The comparison set, briefly recapped</h2>
+
+<p>
+  From the previous reflection, TempleDB triangulates against nine reference systems. Recapping each in one line so the walkthrough below reads standalone:
+</p>
+
+<table class="matrix">
+  <tr><th>Tool</th><th>Role in this comparison</th></tr>
+  <tr><td><strong>Backstage</strong></td><td>Spotify&rsquo;s org-scale dev portal &mdash; software catalog, TechDocs, deployments, ownership</td></tr>
+  <tr><td><strong>Sourcegraph</strong></td><td>Multi-repo code search + navigation, SCIP-backed semantic index</td></tr>
+  <tr><td><strong>Terraform state</strong></td><td>Model of infrastructure with drift detection via <code>terraform refresh</code></td></tr>
+  <tr><td><strong>Fossil</strong></td><td>SCM by SQLite&rsquo;s author &mdash; VCS + wiki + issues in one DB file</td></tr>
+  <tr><td><strong>LSP servers</strong></td><td>In-editor semantic model of one project (rust-analyzer, gopls, tsserver)</td></tr>
+  <tr><td><strong>Nix</strong></td><td>Content-addressed derivations + immutable store + provenance from deriv to output</td></tr>
+  <tr><td><strong>Datomic / XTDB</strong></td><td>Bitemporal entity graph DB with time-travel queries</td></tr>
+  <tr><td><strong>Obsidian / Roam</strong></td><td>Personal knowledge management via bidirectional links across markdown notes</td></tr>
+  <tr><td><strong>Bazel</strong></td><td>Cross-project build graph with fine-grained dep tracking</td></tr>
+</table>
+
+<h2>Workflow A &mdash; multi-agent parallel refactor</h2>
+
+<p>Three agents in three sessions rename <code>foo_bar</code> &rarr; <code>foo_baz</code> across templedb, bza, and woofsledger. Need to see each agent&rsquo;s proposed changes, cherry-pick or reject, apply safely without stomping.</p>
+
+<div class="workflow-card">
+<div class="tool-row"><span class="tool-name">Backstage</span> No editing surface at all. Read-only catalog of what exists.</div>
+<div class="tool-row"><span class="tool-name">Sourcegraph</span> Read-only; can help you <em>find</em> the callsites (batch changes exist as an add-on but write back to individual PRs, not multi-agent staging).</div>
+<div class="tool-row"><span class="tool-name">Terraform state</span> Single-writer state file with locks. Multi-agent means multi-lock-contention, not multi-intent-queue.</div>
+<div class="tool-row"><span class="tool-name">Fossil</span> Has branches like git. Each agent gets its own branch; merge conflicts at commit time. No native concept of &ldquo;proposed but not yet applied.&rdquo;</div>
+<div class="tool-row"><span class="tool-name">LSP</span> Per-editor, in-process. Refactor lives in one editor session; no cross-session coordination.</div>
+<div class="tool-row"><span class="tool-name">Nix</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Datomic</span> Could model intents as datoms (transactions), but no UI or CLI ergonomics for it.</div>
+<div class="tool-row"><span class="tool-name">Obsidian</span> Not applicable to code editing.</div>
+<div class="tool-row"><span class="tool-name">Bazel</span> Not applicable to editing.</div>
+<div class="tool-row"><span class="tool-name">TempleDB</span> <span class="yes">Session-scoped VCS staging is already implemented</span>; <code>EditIntent</code> abstraction (Phase 2) formalizes the dry-run and cherry-pick surface.</div>
+</div>
+
+<div class="callout win">
+  <span class="label">Verdict</span>
+  <strong>Genuinely novel.</strong> No existing tool has intent-queue semantics for parallel agent-driven edits. The closest thing is git branches + PRs, which introduces significant overhead per agent and has no dry-run/cherry-pick vocabulary at the intent level. This is one of TempleDB&rsquo;s strongest niches.
+</div>
+
+<h2>Workflow B &mdash; deploy archaeology ("was this bug in prod?")</h2>
+
+<p>The question surfaces after every regression: given a bug you just found, was it in the deployed build, and if so, since when?</p>
+
+<div class="workflow-card">
+<div class="tool-row"><span class="tool-name">Backstage</span> <span class="partial">Partial</span> &mdash; if the org configured service&rarr;deploy relations in the catalog. Usually manual and stale.</div>
+<div class="tool-row"><span class="tool-name">Sourcegraph</span> Knows source but not deployments. Can&rsquo;t answer.</div>
+<div class="tool-row"><span class="tool-name">Terraform state</span> If deployment IS a Terraform resource, history is in state. Rare for app-level deploys.</div>
+<div class="tool-row"><span class="tool-name">Fossil</span> Has commit history; nothing about deployments.</div>
+<div class="tool-row"><span class="tool-name">LSP</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Nix</span> <span class="partial">Partial</span> &mdash; <code>/run/current-system</code> is a symlink to the running store path; <code>nix-store --query --deriver</code> traces to a derivation; but the derivation-to-source-commit link isn&rsquo;t automatically preserved.</div>
+<div class="tool-row"><span class="tool-name">Datomic</span> If you were disciplined about writing deploy events as datoms, yes.</div>
+<div class="tool-row"><span class="tool-name">Obsidian</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Bazel</span> Knows build graph; not deploy history.</div>
+<div class="tool-row"><span class="tool-name">ArgoCD / Flux</span> (bonus comparable) <span class="yes">Yes</span> &mdash; GitOps loop records commit&rarr;deploy pairs. Requires GitOps workflow adoption.</div>
+<div class="tool-row"><span class="tool-name">TempleDB</span> <span class="yes">Yes, once Phase 3 lands</span>: <code>Deployment &rarr; StorePath &rarr; Derivation &rarr; Commit &rarr; FileSnapshot &rarr; function-symbol</code> as one graph query.</div>
+</div>
+
+<div class="callout win">
+  <span class="label">Verdict</span>
+  <strong>Redundant with a full GitOps setup, novel otherwise.</strong> If you already run ArgoCD or Flux and have the discipline to keep the loop clean, deploy archaeology is solved. If you don&rsquo;t (which is most personal setups and many small teams), no existing tool spans the code&rarr;build&rarr;deploy&rarr;symbol chain cheaply. TempleDB earns its keep for the non-GitOps case, which is most of the world.
+</div>
+
+<h2>Workflow C &mdash; cross-project impact analysis</h2>
+
+<p>Renaming a function in a shared library. Which projects call it?</p>
+
+<div class="workflow-card">
+<div class="tool-row"><span class="tool-name">Backstage</span> Catalog knows service&rarr;service dependencies at the config level, not code level.</div>
+<div class="tool-row"><span class="tool-name">Sourcegraph</span> <span class="yes">Yes, this is literally its use case.</span> SCIP-backed &ldquo;Find references&rdquo; across every indexed repo.</div>
+<div class="tool-row"><span class="tool-name">Terraform state</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Fossil</span> Not applicable at the semantic level.</div>
+<div class="tool-row"><span class="tool-name">LSP</span> <span class="partial">Yes but single-project</span>. Multi-project requires either monorepo-aware LSP or manual project-per-project search.</div>
+<div class="tool-row"><span class="tool-name">Nix</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Datomic</span> Only if you ingested the code facts as datoms.</div>
+<div class="tool-row"><span class="tool-name">Obsidian</span> Not applicable to code.</div>
+<div class="tool-row"><span class="tool-name">Bazel</span> <span class="partial">Partial</span> &mdash; knows target-level deps, not symbol-level. &ldquo;Which binary depends on this library&rdquo; yes; &ldquo;which function calls this function&rdquo; no.</div>
+<div class="tool-row"><span class="tool-name">TempleDB</span> <span class="yes">Yes via Phase 4 SCIP adoption</span>; already partially via <code>graph who-uses</code> for languages the current scanner handles.</div>
+</div>
+
+<div class="callout warn">
+  <span class="label">Verdict</span>
+  <strong>Redundant with Sourcegraph.</strong> If you self-host Sourcegraph or use their SaaS, this is solved. TempleDB&rsquo;s move here is to adopt SCIP so it consumes the same facts Sourcegraph does, rather than reinvent semantic indexing. The value TempleDB adds on top is <em>combining</em> code facts with deploy/agent/decision facts in one graph &mdash; the cross-domain query is what neither tool alone can do.
+</div>
+
+<h2>Workflow D &mdash; broken deploy investigation</h2>
+
+<p>3am, a deploy went sideways. You&rsquo;re trying to figure out where reality diverged from what the DB thinks.</p>
+
+<div class="workflow-card">
+<div class="tool-row"><span class="tool-name">Backstage</span> Shows deployment status if the catalog is fresh. No reconcile.</div>
+<div class="tool-row"><span class="tool-name">Sourcegraph</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Terraform state</span> <span class="yes">Yes for infrastructure</span> &mdash; <code>terraform refresh</code> is exactly this. Reports drift between recorded state and actual cloud state. Doesn&rsquo;t extend to app-level (NixOS generation, running processes, secrets on disk).</div>
+<div class="tool-row"><span class="tool-name">Fossil</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">LSP</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Nix</span> <span class="partial">Partial</span> &mdash; <code>nixos-rebuild --rollback</code> reverts, doesn&rsquo;t explain drift.</div>
+<div class="tool-row"><span class="tool-name">Kubernetes controllers</span> (bonus comparable) Reconcile loop is exactly this pattern for pods.</div>
+<div class="tool-row"><span class="tool-name">Datomic</span> Not without ingest adapters.</div>
+<div class="tool-row"><span class="tool-name">Obsidian</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Bazel</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">TempleDB</span> <span class="yes">Yes via <code>templedb doctor entities --host X</code></span> (Phase 3). Extends the Terraform pattern from infra to NixOS + processes + secrets + generations.</div>
+</div>
+
+<div class="callout win">
+  <span class="label">Verdict</span>
+  <strong>Novel for the NixOS-personal-server niche.</strong> Terraform solves this for cloud infra; Kubernetes solves it for containers. Neither speaks NixOS generations or per-machine on-disk state. TempleDB&rsquo;s <code>doctor entities</code> is a straight port of the reconcile pattern to a domain nobody else covers. Load-bearing insight: this MUST ship in Phase 3, not later, or TempleDB slips into the &ldquo;coordinator without reconcile&rdquo; anti-pattern that has bitten every metastore.
+</div>
+
+<h2>Workflow E &mdash; new contributor onboarding</h2>
+
+<p>Someone wants to work on templedb from scratch. Or future-you on a new machine.</p>
+
+<div class="workflow-card">
+<div class="tool-row"><span class="tool-name">Backstage</span> <span class="yes">Yes, this is a headline feature</span> &mdash; Software Templates + Software Catalog + TechDocs = one-stop &ldquo;here&rsquo;s our world.&rdquo;</div>
+<div class="tool-row"><span class="tool-name">Sourcegraph</span> Not applicable; assumes you already have the repo.</div>
+<div class="tool-row"><span class="tool-name">Terraform state</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Fossil</span> Single-file clone is unusually clean.</div>
+<div class="tool-row"><span class="tool-name">LSP</span> Not applicable directly; assumes editor + project already exist.</div>
+<div class="tool-row"><span class="tool-name">Nix</span> <span class="yes">Yes for build environment reproducibility</span>. <code>nix develop</code> gives you every dep pinned. Doesn&rsquo;t document intent or architecture.</div>
+<div class="tool-row"><span class="tool-name">Datomic</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Obsidian</span> If the docs are in an Obsidian vault, yes at the docs level.</div>
+<div class="tool-row"><span class="tool-name">Bazel</span> Deterministic build; not architecture docs.</div>
+<div class="tool-row"><span class="tool-name">TempleDB</span> Would look like Backstage-for-one: <code>templedb project list</code> shows every project; <code>templedb graph explain project/X</code> gives you the entity/relation map; reports/ archive gives you the design history. Currently under-documented, mostly latent.</div>
+</div>
+
+<div class="callout warn">
+  <span class="label">Verdict</span>
+  <strong>Redundant with git+nix in the small case; approaches Backstage territory in the multi-project case.</strong> For one project, <code>git clone + nix build</code> wins. For a developer&rsquo;s whole ambient world (5+ projects, several machines, custom NixOS config), TempleDB is closer to Backstage in spirit and could genuinely be the &ldquo;here&rsquo;s the map of everything&rdquo; onboarding surface no other tool provides at personal scale.
+</div>
+
+<h2>Workflow F &mdash; report / decision archaeology</h2>
+
+<p>&ldquo;Which of these design reports actually got implemented?&rdquo;</p>
+
+<div class="workflow-card">
+<div class="tool-row"><span class="tool-name">Backstage</span> TechDocs feature stores docs but doesn&rsquo;t link them to commits programmatically.</div>
+<div class="tool-row"><span class="tool-name">Sourcegraph</span> Can search across docs and code, but no explicit motivate/implement relation.</div>
+<div class="tool-row"><span class="tool-name">Terraform state</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Fossil</span> Wiki + commits in one DB; could link by convention but no first-class relation.</div>
+<div class="tool-row"><span class="tool-name">LSP</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Nix</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Datomic</span> If modeled as datoms yes; no product does this out of the box.</div>
+<div class="tool-row"><span class="tool-name">Obsidian / Roam</span> <span class="yes">Yes, this is what PKM does</span> &mdash; bidirectional links let you jump from Decision to referenced Commit note. But the &ldquo;commit&rdquo; is a plain-text link, not a live git object.</div>
+<div class="tool-row"><span class="tool-name">ADRs</span> (bonus comparable) Filesystem convention (<code>docs/adr/NNNN-title.md</code>). Human-readable, not queryable, no reverse index.</div>
+<div class="tool-row"><span class="tool-name">Bazel</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">TempleDB</span> <span class="yes">Yes via Phase 3 entity graph</span>: <code>Report &rarr; motivated &rarr; Decision &rarr; implemented-in &rarr; Commit</code> as a first-class query. Combines Obsidian&rsquo;s link semantics with live-code awareness.</div>
+</div>
+
+<div class="callout win">
+  <span class="label">Verdict</span>
+  <strong>Genuinely novel.</strong> Obsidian gets close for the docs-linked-to-docs case; ADRs get close for the human-readable case; neither is queryable across &ldquo;code that was written to implement decision X.&rdquo; TempleDB&rsquo;s entity graph makes this a two-line CLI query. This is one of the more interesting workflows because it&rsquo;s something a lot of teams want and no one has really shipped.
+</div>
+
+<h2>Workflow G &mdash; this session (meta example)</h2>
+
+<p>The workflow that produced this report: agent-driven editing, testing, snapshotting, deploy prep, and report shipping across multiple back-and-forth iterations with a human.</p>
+
+<div class="workflow-card">
+<div class="tool-row"><span class="tool-name">Backstage</span> No editing or agent surface.</div>
+<div class="tool-row"><span class="tool-name">Sourcegraph</span> Read-only.</div>
+<div class="tool-row"><span class="tool-name">Terraform state</span> Not applicable.</div>
+<div class="tool-row"><span class="tool-name">Fossil</span> Provides SCM but no agent runtime, no MCP, no report registry.</div>
+<div class="tool-row"><span class="tool-name">LSP</span> Provides editor semantics but no persistence or agent coordination.</div>
+<div class="tool-row"><span class="tool-name">Nix</span> Provides build but no editing loop.</div>
+<div class="tool-row"><span class="tool-name">Datomic</span> Provides DB but no CLI/agent glue.</div>
+<div class="tool-row"><span class="tool-name">Obsidian</span> Provides doc storage but no code awareness.</div>
+<div class="tool-row"><span class="tool-name">Bazel</span> Provides build but no editing / reports / agents.</div>
+<div class="tool-row"><span class="tool-name">TempleDB</span> <span class="yes">The only tool that spans agent + edit + snapshot + deploy prep + report shipping in one integrated surface.</span></div>
+</div>
+
+<div class="callout win">
+  <span class="label">Verdict</span>
+  <strong>Uniquely combined.</strong> Each individual capability exists in some tool; the specific combination doesn&rsquo;t exist elsewhere. This is the most defensible thing about TempleDB &mdash; not any one capability, but the specific stack of capabilities converging on a single developer&rsquo;s workflow.
+</div>
+
+<h2>Summary matrix</h2>
+
+<p>Compressing the seven workflows against the ten comparables:</p>
+
+<table class="matrix">
+  <tr>
+    <th></th>
+    <th>A. Multi-agent refactor</th>
+    <th>B. Deploy archaeology</th>
+    <th>C. Cross-project impact</th>
+    <th>D. Broken deploy</th>
+    <th>E. Onboarding</th>
+    <th>F. Report&harr;code</th>
+    <th>G. Meta-session</th>
+  </tr>
+  <tr>
+    <td><strong>Backstage</strong></td>
+    <td class="no">no</td><td class="partial">partial</td><td class="no">no</td><td class="partial">partial</td><td class="yes">yes</td><td class="partial">partial</td><td class="no">no</td>
+  </tr>
+  <tr>
+    <td><strong>Sourcegraph</strong></td>
+    <td class="no">no</td><td class="no">no</td><td class="yes">yes</td><td class="no">no</td><td class="no">no</td><td class="partial">partial</td><td class="no">no</td>
+  </tr>
+  <tr>
+    <td><strong>Terraform</strong></td>
+    <td class="no">no</td><td class="partial">partial</td><td class="no">no</td><td class="yes">yes (infra)</td><td class="no">no</td><td class="no">no</td><td class="no">no</td>
+  </tr>
+  <tr>
+    <td><strong>Fossil</strong></td>
+    <td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="partial">partial</td><td class="partial">partial</td><td class="no">no</td>
+  </tr>
+  <tr>
+    <td><strong>LSP</strong></td>
+    <td class="no">no</td><td class="no">no</td><td class="partial">partial (single-proj)</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="no">no</td>
+  </tr>
+  <tr>
+    <td><strong>Nix</strong></td>
+    <td class="no">no</td><td class="partial">partial</td><td class="no">no</td><td class="partial">partial (rollback)</td><td class="yes">yes (build)</td><td class="no">no</td><td class="no">no</td>
+  </tr>
+  <tr>
+    <td><strong>Datomic</strong></td>
+    <td class="partial">latent</td><td class="partial">latent</td><td class="partial">latent</td><td class="partial">latent</td><td class="no">no</td><td class="partial">latent</td><td class="no">no</td>
+  </tr>
+  <tr>
+    <td><strong>Obsidian</strong></td>
+    <td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="partial">partial</td><td class="yes">yes (docs)</td><td class="no">no</td>
+  </tr>
+  <tr>
+    <td><strong>Bazel</strong></td>
+    <td class="no">no</td><td class="no">no</td><td class="partial">partial (targets)</td><td class="no">no</td><td class="partial">partial (build)</td><td class="no">no</td><td class="no">no</td>
+  </tr>
+  <tr>
+    <td><strong>TempleDB</strong></td>
+    <td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes (via SCIP)</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td>
+  </tr>
+</table>
+
+<p>
+  The matrix isn&rsquo;t self-flattery &mdash; several &ldquo;yes&rdquo; cells for TempleDB depend on phases not yet built. What it shows is the <em>coverage shape</em>, not the <em>capability quality</em>. Sourcegraph is a better semantic-search product than TempleDB will ever be, at that single task. Backstage is a better software-catalog product for org-scale teams. But no single row in this matrix covers as many columns as TempleDB&rsquo;s row does &mdash; and that is the specific gap TempleDB fills.
+</p>
+
+<h2>The honest niche</h2>
+
+<div class="callout win">
+  <span class="label">Where TempleDB earns its keep</span>
+  <ul>
+    <li><strong>Multi-agent parallel edit coordination</strong> &mdash; session-scoped staging + intent queue is unique.</li>
+    <li><strong>Report&harr;code archaeology</strong> &mdash; design decisions as first-class graph entities, queryable across the code they motivated.</li>
+    <li><strong>NixOS-native drift reconcile</strong> &mdash; Terraform-refresh-shaped tool for personal NixOS setups.</li>
+    <li><strong>Meta-session workflows</strong> &mdash; agent + edit + snapshot + deploy prep + report shipping in one surface.</li>
+    <li><strong>Cross-domain graph queries</strong> &mdash; the &ldquo;which motivating decision led to the code running on this machine&rdquo; class of question is TempleDB&rsquo;s alone.</li>
+  </ul>
+</div>
+
+<div class="callout warn">
+  <span class="label">Where TempleDB is redundant</span>
+  <ul>
+    <li><strong>Cross-project semantic code search</strong> &mdash; Sourcegraph is better if you have it. Phase 4 mitigates by adopting SCIP rather than reinventing.</li>
+    <li><strong>GitOps-shaped deploy archaeology</strong> &mdash; ArgoCD/Flux solve it if you&rsquo;re disciplined about the pipeline.</li>
+    <li><strong>Small-team software catalog</strong> &mdash; Backstage exists and is more polished, if you&rsquo;re at that scale.</li>
+    <li><strong>Static analysis at the sub-language level</strong> &mdash; language-specific tools (rust-analyzer, gopls) are deeper and always will be.</li>
+  </ul>
+</div>
+
+<div class="callout neutral">
+  <span class="label">The honest scope statement</span>
+  TempleDB is a personal knowledge graph for software engineering, sized for a single developer with several projects, custom NixOS infrastructure, and AI agents in the loop. The specific combination of scope + scale + agent integration doesn&rsquo;t exist elsewhere. Individual capabilities are redundant with best-of-breed tools; the integration is not.
+</div>
+
+<h2>What Phase 0 changed about this picture</h2>
+
+<p>
+  Phase 0 shipped two tiny things (<code>file where</code>, gitignore-aware materialize) and one non-shipped item (<code>TEMPLEDB_DEV_MODE_EMACS</code>). Concretely small; conceptually load-bearing. Together they ratified the observer identity in code, not just in reports: TempleDB now diagnoses drift instead of trying to make drift impossible, and materialize respects the working tree instead of asserting authority over it. The five phases that follow build on that stance rather than fight it.
+</p>
+
+<h2>Next steps, re-iterated</h2>
+
+<p>
+  Nothing about the plan changes; the reflection confirms rather than perturbs. Priorities in order:
+</p>
+
+<ol>
+  <li><strong>Finish Phase 0.</strong> The <code>TEMPLEDB_DEV_MODE_EMACS</code> symlink escape hatch for the Spacemacs layer. ~1&ndash;2 hours. Closes the tranche and removes the last known daily-friction item where the Emacs layer stays stale relative to the checkout.</li>
+  <li><strong>Phase 1 &mdash; <code>SourceSnapshot</code>.</strong> Weeks 3&ndash;4. Reframe <code>file_contents</code> as immutable historical observation via a view; add <code>store_path &rarr; source_snapshot</code> provenance edges. Groundwork for the graph model.</li>
+  <li><strong>Phase 2 &mdash; <code>EditIntent</code>.</strong> Weeks 5&ndash;6. New table + CLI (<code>templedb intent {create, list, apply, cancel, dry-run, revert}</code>). Makes Workflow A tractable end-to-end.</li>
+  <li><strong>Phase 3 &mdash; entity/relation model + <code>doctor entities</code>.</strong> Weeks 7&ndash;10. Biggest phase. This is where TempleDB earns the &ldquo;semantic fabric&rdquo; identity across workflows B, D, F, and G.</li>
+  <li><strong>Phase 4 &mdash; SCIP + ingestion discipline.</strong> Weeks 11&ndash;13. Delegates workflow C to the SCIP ecosystem; formalizes each authority&rsquo;s ingestion algebra as a first-class concept.</li>
+  <li><strong>Phase 5 &mdash; retire authority-over-source.</strong> Weeks 14&ndash;16. Vocabulary shift, docs update, FUSE removal from the mental model.</li>
+</ol>
+
+<p>
+  The recommended immediate next step is item 1: close Phase 0 with the Emacs symlink hatch. It&rsquo;s small enough to do inside a single session, completes the observer-plan tranche, and gives a natural pause point to see how the Phase 0 fixes hold up in a few weeks of daily use before committing to Phase 1&rsquo;s architectural work.
+</p>
+
+</body>
+</html>

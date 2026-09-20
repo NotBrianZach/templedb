@@ -1,0 +1,118 @@
+# TempleDB Nix Package
+# Self-contained package definition for TempleDB
+# Can be used in NixOS configurations or imported as a flake
+
+{ pkgs ? import <nixpkgs> {}, lib ? pkgs.lib }:
+
+pkgs.python3Packages.buildPythonApplication rec {
+  pname = "templedb";
+  # Keep in sync with src/cli/_version.py (pyproject reads the version from there).
+  version = "0.7.0";
+
+  pyproject = true;
+  build-system = with pkgs.python3Packages; [ setuptools ];
+
+  # Filter source to only include files needed for build
+  # This prevents unnecessary rebuilds when non-source files change
+  src = lib.sourceFilesBySuffices (lib.cleanSource ./.) [
+    ".py"
+    ".toml"
+    ".md"
+    ".sql"
+    "tdb"  # Include the tdb wrapper script
+  ];
+
+  propagatedBuildInputs = with pkgs.python3Packages; [
+    # Core dependencies
+    pyyaml
+    textual
+    rich
+
+    # Vibe coding dependencies
+    aiohttp      # Async web server for vibe server
+    watchdog     # File system monitoring
+    websockets   # WebSocket protocol support
+    requests     # HTTP client for API calls
+
+    # Secret management
+    cryptography # For RSA encryption
+
+    # Code intelligence dependencies
+    tree-sitter  # AST parsing
+    networkx     # Graph analysis
+    igraph       # Fast graph algorithms
+    leidenalg    # Community detection
+
+    # Git server dependencies
+    dulwich      # Pure Python git implementation
+
+    # Optional dependencies
+    # tqdm  # Progress bars for large operations
+  ];
+
+  # System dependencies
+  buildInputs = with pkgs; [
+    sqlite
+    git
+    age  # For secret management
+  ];
+
+  # Runtime tools the CLI shells out to (git auto-commit during `nixos generate`,
+  # age/sops for secrets, sqlite for the DB). buildInputs alone only makes these
+  # available at build time, so put them on the wrapped CLI's runtime PATH.
+  makeWrapperArgs = [
+    "--prefix" "PATH" ":" "${lib.makeBinPath (with pkgs; [ git age sqlite sops ])}"
+  ];
+
+  # Don't run tests during build (for now)
+  doCheck = false;
+
+  # Install the tdb wrapper script + bundle SQL migrations.
+  #
+  # setuptools' package-data only picks up files INSIDE packages;
+  # `migrations/` lives at the project root, so it isn't installed by
+  # default. Copy them into the site-packages tree so `migrator.py`
+  # can find them at runtime without needing TEMPLEDB_DEV_MODE=1.
+  # See `_find_migrations_dir` in src/migrator.py.
+  postInstall = ''
+    # Copy tdb wrapper (templedb entry point is created automatically by setuptools)
+    cp ${./tdb} $out/bin/tdb
+    chmod +x $out/bin/tdb
+
+    # Fix tdb to use installed templedb instead of relative path
+    substituteInPlace $out/bin/tdb \
+      --replace './templedb' 'templedb'
+
+    # Bundle SQL migrations next to migrator.py so the Migrator can
+    # find them in a stock nix install. --- Nix builds are hermetic;
+    # the layout under site-packages is: migrator.py + migrations/.
+    site_packages=$(find $out/lib -maxdepth 3 -name site-packages -type d | head -n 1)
+    if [ -n "$site_packages" ]; then
+      mkdir -p "$site_packages/migrations"
+      cp migrations/*.sql "$site_packages/migrations/"
+    fi
+  '';
+
+  nativeBuildInputs = [ pkgs.makeWrapper ];
+
+  meta = with lib; {
+    description = "Database-native development environment and project manager";
+    longDescription = ''
+      TempleDB is a database-native approach to managing development projects,
+      environments, secrets, and deployments. It provides version control,
+      dependency tracking, and reproducible environments backed by SQLite.
+
+      Features:
+      - Project management with Git integration
+      - Cathedral package format for portable project distribution
+      - Nix environment generation
+      - Age-encrypted secret management
+      - Deployment orchestration
+      - NixOS integration
+    '';
+    homepage = "https://github.com/yourusername/templedb";
+    license = licenses.mit;
+    maintainers = [];
+    platforms = platforms.unix;
+  };
+}

@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>From observer to integrator: TempleDB implementation plan</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); color: var(--muted); font-weight: 500; }
+  .dim { color: var(--muted); }
+  .math {
+    background: var(--panel); padding: 0.55rem 1rem; border-radius: 4px;
+    margin: 0.6rem 0; font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.88em; color: #d8d8ff;
+  }
+  .phase {
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 0.85rem 1.1rem; margin: 1rem 0; background: var(--panel);
+  }
+  .phase h3 { margin-top: 0; color: var(--pos); }
+  .phase .weeks { color: var(--muted); font-size: 0.82em; font-weight: 500; }
+</style>
+</head>
+<body>
+
+<h1>From observer to integrator: TempleDB implementation plan</h1>
+<p class="lede">
+  Sharpens yesterday&rsquo;s observer proposal against a strong external critique and lands on a concrete phased implementation. The critique makes three moves that reshape the recommendation without invalidating any of its steps: <strong>(1)</strong> reframe the problem as <em>authority per fact</em> rather than <em>authority per system</em>; <strong>(2)</strong> replace the CAP analogy with a bidirectional-lens / view-maintenance framing that names the real defect (materialize is a poorly-lawed lens); <strong>(3)</strong> introduce <code>EditIntent</code> as a first-class abstraction so agent-mediated writes survive the retreat from authority-over-bytes. The refined vision: TempleDB is not a static analyzer plus agent state, but the <strong>semantic and provenance fabric connecting several authoritative worlds</strong>. Five phases, ~4 months of incremental work, no phase breaks a consumer.
+</p>
+
+<h2>What survives from the observer proposal</h2>
+
+<p>
+  Everything concrete. The engineering recommendations from yesterday still land unchanged:
+</p>
+
+<ul>
+  <li><code>templedb file where</code> as a drift diagnostic</li>
+  <li>Materialize made gitignore-aware and incremental (fixes yesterday&rsquo;s <code>.authinfo.gpg</code> sweep at the root)</li>
+  <li>Emacs layer symlink escape hatch (<code>TEMPLEDB_DEV_MODE_EMACS=1</code>)</li>
+  <li>Watcher via inotify triggering incremental <code>graph build-deps</code></li>
+  <li>SourceSnapshot reframing of <code>file_contents</code></li>
+  <li>SCIP for language-agnostic code facts</li>
+</ul>
+
+<p>
+  What the critique does is reshape the <em>framing</em> and add <em>two structural pieces</em> the observer proposal was missing. Those pieces (<code>EditIntent</code> and the entity/relation model) turn the recommendation from &ldquo;retreat to a well-known pattern&rdquo; into &ldquo;occupy a more interesting position no other tool holds.&rdquo;
+</p>
+
+<h2>The theoretical refinement: authority per fact</h2>
+
+<p>
+  &ldquo;Source of truth&rdquo; is a scalar phrasing for a per-fact property. Every candidate authority in our stack is authoritative for <em>some</em> facts and not others:
+</p>
+
+<table class="matrix">
+  <tr><th>Fact</th><th>Natural authority</th></tr>
+  <tr><td>Bytes of <code>foo.nix</code> at rev <code>abc</code></td><td>Git</td></tr>
+  <tr><td>Which symbols <code>foo.nix</code> defines</td><td>TempleDB (derived, computed by parser)</td></tr>
+  <tr><td>Which symbols <code>foo.nix</code> imports from <code>bar.nix</code></td><td>TempleDB (derived)</td></tr>
+  <tr><td>Agent 17 is editing <code>foo.nix</code> in session <em>S</em></td><td>TempleDB (agent runtime)</td></tr>
+  <tr><td>Deployment 42 was built from commit <code>abc</code></td><td>TempleDB (deployment history)</td></tr>
+  <tr><td>Nix store path <code>/nix/store/xyz</code> is a build output</td><td>Nix (produced it)</td></tr>
+  <tr><td>Store path <code>/nix/store/xyz</code> came from deployment 42</td><td>TempleDB (provenance)</td></tr>
+  <tr><td>Machine <code>zMothership3</code> is running store path <code>/nix/store/xyz</code></td><td>NixOS on the machine (running state) + TempleDB (recorded observation)</td></tr>
+  <tr><td>Report <em>R</em> motivated decision <em>D</em></td><td>TempleDB (authored, stored)</td></tr>
+</table>
+
+<p>
+  The right question is not &ldquo;who owns source?&rdquo; It is &ldquo;which fact needs which authority?&rdquo; TempleDB&rsquo;s job is to hold the facts with no natural home elsewhere, and to <strong>record the graph across facts stored by different authorities</strong>. That last piece &mdash; the graph across authorities &mdash; is what makes TempleDB not-Sourcegraph and not-a-metastore.
+</p>
+
+<h2>Lenses, not CAP</h2>
+
+<p>
+  The CAP framing yesterday was technically wrong. CAP is about distributed replicated systems under network partitions with a particular meaning of consistency. Three co-located representations of source on one machine are not CAP-relevant. The honest framework is <strong>bidirectional synchronization / view maintenance / cache coherence</strong>, and specifically the theory of <em>lenses</em>.
+</p>
+
+<p>A lens between structure <em>S</em> and view <em>V</em> is a pair:</p>
+
+<div class="math">
+get : S &rarr; V<br>
+put : S &times; V &rarr; S
+</div>
+
+<p>
+  with laws that make the round-trip well-behaved:
+</p>
+
+<div class="math">
+put-get :  get(put(s, v)) = v<br>
+get-put :  put(s, get(s)) = s
+</div>
+
+<p>
+  The <code>put-get</code> law says &ldquo;if I write <em>v</em> back through the lens, reading it should give <em>v</em>.&rdquo; The <code>get-put</code> law says &ldquo;if I read out what&rsquo;s there and write it back unchanged, nothing changes.&rdquo; These sound trivial. In practice they are hard.
+</p>
+
+<p>
+  This names TempleDB&rsquo;s defect precisely. <code>templedb project checkout</code> is a <code>put</code>: it takes DB state and produces filesystem state. <code>templedb project scan</code> is a <code>get</code>: it reads filesystem state back into DB. Every observed materialize bug is a violated lens law:
+</p>
+
+<ul>
+  <li><code>.authinfo.gpg</code> deletion: the working tree had an untracked file the DB didn&rsquo;t know about. <code>put</code> deleted it. Then <code>get</code> observed &ldquo;file missing&rdquo; and recorded it. <code>put-get</code> violated: writing the DB state didn&rsquo;t round-trip through the observation.</li>
+  <li>Comment / whitespace drift when re-emitting Nix from AST: <code>get(source) = ast</code>, but <code>put(source, ast)</code> produces different bytes. <code>get-put</code> violated.</li>
+  <li>Gitignored file handling: gitignore rules are part of the checkout&rsquo;s reality but not part of the DB&rsquo;s state. Any lens that ignores gitignore is fighting the working tree constantly.</li>
+</ul>
+
+<div class="callout win">
+  <span class="label">The mathematical heart of the fix</span>
+  The observer pattern deletes <code>put</code>. What remains is a <em>view</em> (a get-only lens, or in more general terms a fold). Views have no laws to violate. This is not a retreat &mdash; it&rsquo;s picking the safest, best-understood shape from lens theory.
+</div>
+
+<p>
+  There are richer lens theories (aligned lenses, symmetric lenses, edit lenses) that handle more complex round-trips. They come with more complex laws and correspondingly more implementation subtlety. The observer position picks the trivially-lawed shape and gets much of the benefit without any of the maintenance tax.
+</p>
+
+<h2>EditIntent: the missing structural piece</h2>
+
+<p>
+  Yesterday&rsquo;s proposal demoted <code>templedb file set</code> to &ldquo;internal shortcut.&rdquo; That&rsquo;s wrong, and the critique caught it. Agent-mediated editing is not a corner case; it&rsquo;s a first-class use case that deserves a first-class abstraction. But <strong>the thing TempleDB owns should be the edit transaction, not the resulting bytes</strong>.
+</p>
+
+<p>Concretely, introduce a new entity:</p>
+
+<div class="math">
+EditIntent = (id, session, base_revision, patch, author, timestamp, status)
+</div>
+
+<p>and one operation:</p>
+
+<div class="math">
+apply : GitCheckout &times; EditIntent &rarr; GitCheckout'
+</div>
+
+<p>
+  After which the normal observer chain resumes:
+</p>
+
+<div class="math">
+GitCheckout' &rarr; SourceSnapshot' &rarr; SemanticGraph'
+</div>
+
+<p>
+  This is CQRS + event sourcing applied to source editing. It has three concrete wins:
+</p>
+
+<ol>
+  <li><strong>Session-scoped staging preserved.</strong> Parallel agents each own their intent queue. No agent&rsquo;s intent is applied until it commits, and no commit sweeps another&rsquo;s uncommitted intents. The current <code>vcs_working_state</code> table is <em>already almost this</em>, just under a different name and coupled to raw file content.</li>
+  <li><strong>Provenance is trivial.</strong> A deployment can point at the exact chain of intents that produced its source tree. &ldquo;Which agent&rsquo;s edit ended up in production?&rdquo; becomes a graph query.</li>
+  <li><strong>Undo and dry-run become natural.</strong> Cancel an intent before apply. Preview an intent&rsquo;s effect without touching the checkout. Reverse an applied intent by applying its inverse patch.</li>
+</ol>
+
+<p>
+  My addition to this piece: <strong>TempleDB already partially does this.</strong> <code>vcs_working_state</code> is essentially an intent queue keyed on session. <code>templedb file set</code> is essentially <code>intent create &amp;&amp; intent apply immediately</code>. Formalizing the pattern isn&rsquo;t inventing something new &mdash; it&rsquo;s naming a shape that already exists and rebuilding the surface API around it.
+</p>
+
+<h2>TempleDB as semantic integration layer</h2>
+
+<p>
+  The most interesting refinement in the critique is the entity/relation model. TempleDB&rsquo;s ambition should not be to <em>absorb</em> Git and Nix and Emacs and the filesystem, but to be the graph that <strong>knows how their objects correspond</strong>.
+</p>
+
+<p>Fundamental object: <code>Entity</code>. Kinds include:</p>
+
+<pre>Repository   Commit          File            FileSnapshot
+ASTNode      Symbol          Package         Import
+Derivation   StorePath       BuildOutput
+Machine      Deployment      Generation
+Session      Agent           EditIntent      ToolCall
+Report       Decision        Secret          Config</pre>
+
+<p>Fundamental relation: typed edges between entities:</p>
+
+<pre>File             defines           Symbol
+Symbol           calls             Symbol
+Symbol           references        Symbol
+Commit           contains          FileSnapshot
+Commit           parent-of         Commit
+Derivation       built-from        Commit
+Derivation       produces          StorePath
+Deployment       installed         StorePath
+Deployment       targets           Machine
+Session          proposed          EditIntent
+EditIntent       applied-to        Commit
+Report           motivated         Decision
+Decision         implemented-in    Commit</pre>
+
+<p>
+  Every entity carries a <code>source_authority</code> field indicating which system is canonical for its bytes/state. Every relation carries an <code>observed_at</code> timestamp and an <code>observed_by</code> field indicating which ingestion algebra recorded it. This gives you two things nothing else in the stack has:
+</p>
+
+<ol>
+  <li><strong>Cross-authority provenance.</strong> &ldquo;Which store path is running on this machine, from which deployment, from which commit, from which agent-session-and-intent-chain, motivated by which report?&rdquo; is a five-hop graph query.</li>
+  <li><strong>Freshness telemetry.</strong> Every fact&rsquo;s <code>observed_at</code> tells you how stale it is relative to its authority. Drift becomes measurable, not just detectable.</li>
+</ol>
+
+<h3>Industry analogs and their failure modes</h3>
+
+<p>
+  The role &ldquo;coordinator/integrator holding metadata about foreign systems&rdquo; is well-known:
+</p>
+
+<table class="matrix">
+  <tr><th>System</th><th>Owns</th><th>Defers to</th><th>Failure mode</th></tr>
+  <tr><td>Hive / Iceberg / Unity Catalog</td><td>Table metadata, schemas, partitions</td><td>S3 / HDFS for data</td><td>Metastore staleness silently breaks queries</td></tr>
+  <tr><td>Istio / Linkerd</td><td>Routing / policy / observability</td><td>The services themselves</td><td>Control-plane outage takes down the mesh</td></tr>
+  <tr><td>Terraform / Pulumi state</td><td>Infrastructure model</td><td>The clouds</td><td>State-vs-reality drift; state locks; state corruption</td></tr>
+  <tr><td>dbt / Cube semantic layer</td><td>Metric definitions</td><td>Warehouses for data</td><td>Semantic-layer divergence from raw table changes</td></tr>
+</table>
+
+<p>
+  Every one of these systems succeeded by being <em>disciplined about what it owns</em>. Every one has been bitten by staleness relative to underlying authorities. The universal lesson: <strong>a coordinator needs a reconcile story from day one</strong>. Not &ldquo;we&rsquo;ll add it later.&rdquo; The reconcile story is core.
+</p>
+
+<p>
+  Concretely for TempleDB: a <code>templedb doctor entities</code> command that walks the graph and, for every entity claiming to have an external authority, asks that authority whether the fact is still current. Git for commit facts, nix-store for store-path facts, machine SSH for running-generation facts. Anything stale is flagged; anything missing is flagged. This is not an addon &mdash; it&rsquo;s the equivalent of <code>terraform refresh</code> and it&rsquo;s load-bearing.
+</p>
+
+<h2>SCIP as one ingestion algebra, not the ingestion algebra</h2>
+
+<p>
+  The critique reframed SCIP as &ldquo;one ingestion algebra into a larger knowledge graph&rdquo; rather than merely an interop format. That&rsquo;s the right elevation. It also implies a design principle: <strong>every authority publishes into TempleDB via a well-defined ingestion algebra</strong>. Candidates:
+</p>
+
+<table class="matrix">
+  <tr><th>Authority</th><th>Ingestion algebra</th><th>Facts published</th></tr>
+  <tr><td>Git</td><td>Commit walker + tree diff</td><td>Commit, FileSnapshot, contains, parent-of</td></tr>
+  <tr><td>Nix</td><td>nix-store queries + eval trace</td><td>Derivation, StorePath, built-from, produces, closure-refs</td></tr>
+  <tr><td>NixOS on a machine</td><td>SSH probe of <code>/run/current-system</code></td><td>Generation, running-on, deployed-at</td></tr>
+  <tr><td>Agent runtime</td><td>Direct DB write (native)</td><td>Session, ToolCall, EditIntent, proposed, applied-to</td></tr>
+  <tr><td>Language servers</td><td>SCIP / LSIF export</td><td>Symbol, defines, calls, references</td></tr>
+  <tr><td>Author (human)</td><td>Report writer + decision markup</td><td>Report, Decision, motivated, implemented-in</td></tr>
+</table>
+
+<p>
+  Each row is a distinct implementation of the same shape: read from an authority, translate to the TempleDB entity/relation model, upsert. Each shape needs its own freshness policy: git is cheap to re-scan, SSH probes are expensive, SCIP files can be large. The design principle: <strong>keep ingestion adapters small and swap-able</strong>, so upstream schema changes hurt one adapter at a time.
+</p>
+
+<h2>The implementation plan</h2>
+
+<p>
+  Five phases, sequential but each a coherent stand-alone deliverable. Total ~4 months. Every phase ships something usable. No phase requires the AST parser to be complete. No phase breaks existing consumers.
+</p>
+
+<div class="phase">
+<h3>Phase 0 &mdash; acute pain <span class="weeks">(weeks 1&ndash;2)</span></h3>
+<p>
+  Not architectural, but load-bearing for daily work. Ships as three PRs.
+</p>
+<ul>
+  <li><code>templedb file where &lt;slug&gt; &lt;path&gt;</code> &mdash; walks the static mirror list, prints hashes with drift/immutable/match color coding.</li>
+  <li>Materialize made gitignore-aware. Untracked-but-gitignored files in the checkout are preserved. Yesterday&rsquo;s <code>.authinfo.gpg</code> sweep becomes structurally impossible.</li>
+  <li><code>TEMPLEDB_DEV_MODE_EMACS=1</code> symlink swap for the Spacemacs layer path, mirroring the existing dev-mode for the CLI.</li>
+</ul>
+<p><em>Ships:</em> daily friction drops by roughly an order of magnitude.</p>
+</div>
+
+<div class="phase">
+<h3>Phase 1 &mdash; SourceSnapshot <span class="weeks">(weeks 3&ndash;4)</span></h3>
+<p>
+  Reframe <code>file_contents</code> as immutable historical observation, not authoring surface.
+</p>
+<ul>
+  <li>Migration: add a view <code>source_snapshots</code> over <code>file_contents</code> exposing <code>(repo, revision, path, hash, content, observed_at, source_authority)</code>.</li>
+  <li>Document: &ldquo;<code>file_contents</code> is a snapshot table. The current row for a path is the most recent observation, not authoritative bytes.&rdquo;</li>
+  <li>New query surface: <code>templedb source snapshot at &lt;slug&gt; &lt;path&gt; --rev &lt;commit&gt;</code>.</li>
+  <li>Add <code>store_path &rarr; source_snapshot</code> relation for build provenance.</li>
+</ul>
+<p><em>Ships:</em> the vocabulary shift, plus one immediately-useful query (&ldquo;what did this file look like when the currently-deployed system was built?&rdquo;).</p>
+</div>
+
+<div class="phase">
+<h3>Phase 2 &mdash; EditIntent <span class="weeks">(weeks 5&ndash;6)</span></h3>
+<p>
+  Formalize CQRS for source edits.
+</p>
+<ul>
+  <li>New table: <code>edit_intents (id, session_id, base_revision, patch_content, author, created_at, applied_at, status)</code>.</li>
+  <li>New CLI: <code>templedb intent {create, list, apply, cancel, dry-run, describe}</code>.</li>
+  <li>Update <code>templedb file set</code> to be a thin wrapper: creates an intent, applies it immediately, and prints the intent id for later reference.</li>
+  <li>Update the agent MCP tools to produce intents rather than direct writes. Session-scoped by construction.</li>
+  <li>Wire <code>vcs_working_state</code> to reference intents rather than store raw content (backward-compatible via view).</li>
+  <li>Undo command: <code>templedb intent revert &lt;id&gt;</code> applies the inverse patch.</li>
+</ul>
+<p><em>Ships:</em> every agent edit is now trace-able and reversible. Parallel-agent staging remains uncorrupted by construction.</p>
+</div>
+
+<div class="phase">
+<h3>Phase 3 &mdash; entity/relation model <span class="weeks">(weeks 7&ndash;10)</span></h3>
+<p>
+  Move toward the semantic integration layer.
+</p>
+<ul>
+  <li>New tables: <code>entities (id, kind, external_ref, source_authority, observed_at)</code> and <code>relations (from_id, kind, to_id, source_authority, observed_at)</code>.</li>
+  <li>Migration: existing typed tables (agent_sessions, project_files, vcs_commits, config_nodes, nix_store_paths, deployments) become materialized views over the entity graph. Zero-downtime; old queries keep working.</li>
+  <li><code>templedb graph explore &lt;entity&gt;</code> &mdash; walk relations outward. <code>templedb graph query</code> &mdash; ad-hoc traversal.</li>
+  <li>Ingestion algebras registered explicitly: <code>templedb ingest {git, nix, ssh-probe, scip, agent, report}</code>.</li>
+  <li><code>templedb doctor entities</code> &mdash; the reconcile story. Walks each entity, asks its authority whether the fact is still current, flags drift.</li>
+</ul>
+<p><em>Ships:</em> cross-authority provenance queries. The five-hop &ldquo;what motivated the code running on this machine&rdquo; query becomes real.</p>
+</div>
+
+<div class="phase">
+<h3>Phase 4 &mdash; SCIP + ingestion discipline <span class="weeks">(weeks 11&ndash;13)</span></h3>
+<p>
+  Externalize the code-facts ingestion algebra.
+</p>
+<ul>
+  <li>Adopt SCIP schema for code facts across languages.</li>
+  <li>Wire <code>scip-python</code>, <code>scip-typescript</code>, <code>scip-nix</code> (via existing tree-sitter-nix) as adapters.</li>
+  <li><code>graph search / who-uses / callers / importers</code> become SCIP queries; templedb-native tables remain for what SCIP doesn&rsquo;t cover.</li>
+  <li>Document each ingestion algebra&rsquo;s freshness policy explicitly: git = cheap to re-scan on commit; SCIP = expensive, run on push; SSH probe = manual or scheduled.</li>
+</ul>
+<p><em>Ships:</em> external tools can consume TempleDB code queries via SCIP. Language coverage grows with the SCIP ecosystem, not with our parser budget.</p>
+</div>
+
+<div class="phase">
+<h3>Phase 5 &mdash; retire authority-over-source <span class="weeks">(weeks 14&ndash;16)</span></h3>
+<p>
+  The final vocabulary shift.
+</p>
+<ul>
+  <li>FUSE mount permanently retired (already de facto).</li>
+  <li><code>file_contents</code> for source rows becomes optional. If SourceSnapshot has provenance, we don&rsquo;t always need the bytes; we can re-obtain them from git.</li>
+  <li>Documentation and CLAUDE.md updated: &ldquo;TempleDB observes source, owns intents, holds the graph.&rdquo;</li>
+  <li>The <code>templedb write path broken</code>-class memories become historical curiosities.</li>
+</ul>
+<p><em>Ships:</em> the ownership question is settled. The drift-bug family is closed by construction.</p>
+</div>
+
+<h2>Risks I want to name explicitly</h2>
+
+<div class="callout warn">
+  <span class="label">Coordinator becomes a bottleneck</span>
+  Every metastore / mesh / config coordinator becomes a critical path. When TempleDB is stale, users get confused. When it&rsquo;s inconsistent with underlying authorities, users get burned. Mitigation: the reconcile story (<code>templedb doctor entities</code>) has to ship in Phase 3, not later, and it has to be cheap enough to run frequently.
+</div>
+
+<div class="callout warn">
+  <span class="label">Ingestion algebra explosion</span>
+  Every new authority (a new build tool, a new VCS backend, a new language server) needs an adapter. Adapters rot when upstream schemas change. Mitigation: adapters are small, isolated, and can be updated one at a time. Budget maintenance time per adapter as a first-class expense.
+</div>
+
+<div class="callout warn">
+  <span class="label">The EditIntent + apply loop is still a lens</span>
+  The observer pattern for source deletes <code>put</code>. But <code>apply(checkout, intent)</code> is a form of <code>put</code>, and its round-trip <code>get(apply(checkout, intent))</code> has to produce the observed effect we predicted. Mitigation: property-based tests on the intent-apply-observe cycle. For any intent, apply-then-scan should produce a snapshot that matches the intent&rsquo;s declared effect.
+</div>
+
+<div class="callout warn">
+  <span class="label">Two-step intent workflow adds latency for agents</span>
+  Currently <code>templedb file set</code> is one call. Under Phase 2 it becomes <code>create + apply</code>. On the fast path this doesn&rsquo;t matter (single-call convenience wrapper). On the slow path (multi-agent coordination, review workflows) the two-step is a feature. Design the API so the fast path is one call and the slow path composes.
+</div>
+
+<div class="callout warn">
+  <span class="label">Storage cost of the entity graph</span>
+  If we register every symbol, every relation, every observation with a timestamp, the graph grows fast. Mitigation: partition by domain (code facts vs deployment facts vs report facts), garbage-collect superseded observations aggressively, and offer opt-in retention policies per ingestion algebra.
+</div>
+
+<h2>What TempleDB becomes</h2>
+
+<p>
+  Refined from the critique:
+</p>
+
+<div class="callout win">
+  <span class="label">The one-sentence vision</span>
+  TempleDB is the semantic and provenance fabric connecting several authoritative worlds &mdash; git for source, nix for artifacts, agents for intent, machines for running state, humans for decisions &mdash; with a knowledge graph that traces every fact back to its ingesting authority and every derived answer back to its source snapshot.
+</div>
+
+<p>
+  This is more ambitious than &ldquo;static analyzer plus agent state&rdquo; and more disciplined than &ldquo;database as universal source of truth.&rdquo; It has industry precedent (metastores, meshes, semantic layers) and known failure modes (staleness, coordinator bottleneck, adapter rot). The failure modes are budget-able; the elegance-and-hostility of the DB-as-truth model is not.
+</p>
+
+<h2>What I&rsquo;m taking from the critique, credited</h2>
+
+<p>
+  Three moves in the critique that I&rsquo;m incorporating wholesale:
+</p>
+
+<ol>
+  <li><strong>Authority per fact.</strong> Replaces &ldquo;source of truth&rdquo; as the framing concept. Cleaner, and it dissolves the &ldquo;identity crisis&rdquo; framing into something more precise.</li>
+  <li><strong>Lenses replace CAP.</strong> Names the defect (poorly-lawed put), justifies the observer position (deletes put, no laws to break), and points at the extension (EditIntent&rsquo;s apply is a new put whose laws we must test).</li>
+  <li><strong>EditIntent as first-class abstraction.</strong> Fixes yesterday&rsquo;s under-service of the agent-writes use case without re-introducing DB-owns-bytes.</li>
+</ol>
+
+<p>
+  My additions on top:
+</p>
+
+<ol>
+  <li><strong>The observer pattern is the &ldquo;get-only lens&rdquo;</strong> &mdash; naming which shape from lens theory we&rsquo;re picking makes the choice defensible in terms other than aesthetics.</li>
+  <li><strong>vcs_working_state is already an intent queue in disguise.</strong> Phase 2 is less &ldquo;introduce a new pattern&rdquo; and more &ldquo;name the pattern we accidentally built.&rdquo;</li>
+  <li><strong>The reconcile story is load-bearing from day one.</strong> Every industry coordinator that skipped this became a source of subtle bugs. <code>templedb doctor entities</code> ships in Phase 3, not later.</li>
+  <li><strong>Ingestion algebras multiply and rot.</strong> This is a real ongoing cost that needs a budget, not a footnote.</li>
+</ol>
+
+<h2>What&rsquo;s next</h2>
+
+<p>
+  If accepted: Phase 0 in the next two weeks. <code>templedb file where</code>, gitignore-aware materialize, and the Emacs symlink escape hatch. Those three ship independently, buy most of the daily-life improvement, and don&rsquo;t commit us to the larger direction until we&rsquo;ve seen how Phase 0 lands.
+</p>
+
+<p>
+  The rest is a quarter of incremental work. Nothing in it is urgent, nothing blocks any other improvement, and the direction survives being paused. That&rsquo;s the mark of a plan that fits the complexity budget rather than fights it.
+</p>
+
+</body>
+</html>

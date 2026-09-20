@@ -1,0 +1,1647 @@
+#!/usr/bin/env python3
+"""
+TempleDB MCP Server - Model Context Protocol integration for Claude Code
+
+Exposes templedb operations as native tools that Claude can invoke directly.
+Uses stdio transport for local integration.
+"""
+
+import sys
+import json
+import re
+import logging
+import os
+import sqlite3
+from typing import Any, Dict, List, Optional
+from pathlib import Path
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from repositories import ProjectRepository
+from llm_context import TempleDBContext
+from config import DB_PATH, PROJECT_ROOT
+from logger import get_logger
+
+# Configure logging to stderr so stdout is clean for MCP protocol.
+# NOTE: `logging.basicConfig(...)` is a no-op if the root logger already
+# has handlers (which it will, because importing `config` above triggered
+# `logger.setup_logging`). Rebuild handlers explicitly.
+_root = logging.getLogger()
+_root.handlers.clear()
+_root.setLevel(logging.INFO)
+_h = logging.StreamHandler(sys.stderr)
+_h.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+_root.addHandler(_h)
+logger = get_logger(__name__)
+
+
+# MCP Error Codes (following JSON-RPC 2.0 conventions)
+# Standard JSON-RPC errors: -32768 to -32000 (reserved)
+# Application-specific errors: -32000 to -32099
+class ErrorCode:
+    """MCP Error codes for TempleDB operations"""
+    # Project errors (-32010 to -32019)
+    PROJECT_NOT_FOUND = -32010
+    PROJECT_ALREADY_EXISTS = -32011
+    PROJECT_IMPORT_FAILED = -32012
+    PROJECT_SYNC_FAILED = -32013
+
+    # Query errors (-32020 to -32029)
+    QUERY_FAILED = -32020
+    QUERY_INVALID = -32021
+
+    # VCS errors (-32030 to -32039)
+    VCS_OPERATION_FAILED = -32030
+    VCS_NO_CHANGES = -32031
+    VCS_CONFLICT = -32032
+
+    # Secret errors (-32040 to -32049)
+    SECRET_NOT_FOUND = -32040
+    SECRET_DECRYPT_FAILED = -32041
+    SECRET_ENCRYPT_FAILED = -32042
+    SECRET_KEY_NOT_FOUND = -32043
+
+    # Cathedral errors (-32050 to -32059)
+    CATHEDRAL_EXPORT_FAILED = -32050
+    CATHEDRAL_IMPORT_FAILED = -32051
+    CATHEDRAL_INVALID_PACKAGE = -32052
+
+    # Deployment errors (-32060 to -32069)
+    DEPLOYMENT_FAILED = -32060
+    DEPLOYMENT_TARGET_NOT_FOUND = -32061
+
+    # Environment errors (-32070 to -32079)
+    ENV_VAR_NOT_FOUND = -32070
+    ENV_VAR_INVALID = -32071
+
+    # Workflow errors (-32080 to -32089)
+    WORKFLOW_NOT_FOUND = -32080
+    WORKFLOW_INVALID = -32081
+    WORKFLOW_EXECUTION_FAILED = -32082
+    WORKFLOW_VALIDATION_FAILED = -32083
+
+    # Generic application errors
+    INTERNAL_ERROR = -32000
+    VALIDATION_ERROR = -32001
+    NOT_FOUND = -32002
+    PERMISSION_DENIED = -32003
+
+
+class MCPServer:
+    """MCP Server implementation for TempleDB"""
+
+    def __init__(self):
+        """Initialize MCP server with templedb repositories"""
+        self.project_repo = ProjectRepository()
+        self.context_gen = TempleDBContext(DB_PATH)
+
+        # MCP protocol version
+        self.protocol_version = "2024-11-05"
+
+        # Get TempleDB root directory (where ./templedb script lives)
+        # PROJECT_ROOT is already the templeDB directory (not src/)
+        self.templedb_root = PROJECT_ROOT
+
+        # SQLite connection for reuse (with thread check)
+        self._db_conn = None
+
+        # Default project context (for context switching feature)
+        self._default_project = None
+
+        # ── Core MCP tools (minimal set — use templedb_cli for everything else) ──
+        self.tools = {
+            # Universal CLI wrapper — covers ALL commands
+            "templedb_cli": self.tool_cli,
+            # Direct DB query (can't do via CLI)
+            "templedb_query": self.tool_query,
+            # High-frequency project operations
+            "templedb_project_list": self.tool_project_list,
+            "templedb_project_show": self.tool_project_show,
+            # VCS (used constantly during coding sessions)
+            "templedb_vcs_status": self.tool_vcs_status,
+            "templedb_vcs_commit": self.tool_vcs_commit,
+            # Context generation for sessions
+            "templedb_context_generate": self.tool_context_generate,
+            # Cross-project search (unique to TempleDB)
+            "templedb_graph_search": self.tool_graph_search,
+            # System config (quick get/set without CLI string composition)
+            "templedb_config_get": self.tool_config_get,
+            "templedb_config_set": self.tool_config_set,
+            # Deploy pipeline (triggers, rollback, multi-target)
+            "templedb_deploy": self.tool_deploy,
+            # Secret/key management
+            "templedb_secret": self.tool_secret,
+            # Agent bridge: user round-trip (ask) + one-way (message).
+            # See migration 080. Only useful under `templedb ai agent`.
+            "templedb_ask_user":                self.tool_ask_user,
+            "templedb_message_user":            self.tool_message_user,
+            # Autonomous-agent email check-ins (migration 106). Send-only;
+            # supports decision-points via polling on a stable notification id.
+            "templedb_agent_notify_email":      self.tool_agent_notify_email,
+            # Agent-writable sections (only useful when Claude runs under
+            # `templedb ai agent`; each tool no-ops with a clear error
+            # message when TEMPLEDB_AGENT_SESSION_ID isn't set).
+            "templedb_agent_note_finding":      self.tool_agent_note_finding,
+            "templedb_agent_todo_add":          self.tool_agent_todo_add,
+            "templedb_agent_todo_done":         self.tool_agent_todo_done,
+            "templedb_agent_question_add":      self.tool_agent_question_add,
+            "templedb_agent_question_answered": self.tool_agent_question_answered,
+            "templedb_agent_section_write":     self.tool_agent_section_write,
+            # Read-only cross-session search over agent-owned state.
+            "templedb_agent_search_sections":   self.tool_agent_search_sections,
+        }
+
+    def _get_db_connection(self):
+        """Get or create database connection (reusable for queries)"""
+        if self._db_conn is None:
+            self._db_conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
+            self._db_conn.row_factory = sqlite3.Row
+            # Enable WAL mode for concurrent access
+            self._db_conn.execute("PRAGMA journal_mode=WAL")
+            self._db_conn.execute("PRAGMA busy_timeout=30000")
+            self._db_conn.execute("PRAGMA synchronous=NORMAL")
+            self._db_conn.execute("PRAGMA cache_size=-64000")
+            self._db_conn.execute("PRAGMA foreign_keys=ON")
+        return self._db_conn
+
+    def _release_db_connection(self):
+        """Commit (or rollback on failure) any open transaction on the shared connection.
+
+        Called after every request handler so long-lived MCP server sessions never
+        hold an uncommitted write transaction between requests — which would block
+        all writers in other processes indefinitely.
+        """
+        if self._db_conn is not None:
+            try:
+                self._db_conn.commit()
+            except Exception:
+                try:
+                    self._db_conn.rollback()
+                except Exception:
+                    pass
+
+    def _run_templedb_cli(self, args: List[str]) -> Dict[str, Any]:
+        """Run templedb CLI command and return result.
+
+        Args:
+            args: Command arguments (e.g., ["project", "list"])
+
+        Returns:
+            Dict with stdout, stderr, returncode
+        """
+        import subprocess
+
+        cmd = [str(self.templedb_root / "templedb")] + args
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(self.templedb_root)
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "returncode": result.returncode
+            }
+        except Exception as e:
+            return {
+                "stdout": "",
+                "stderr": str(e),
+                "returncode": 1
+            }
+
+    def _error_response(self, message: str, error_code: int = None, details: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Create a standardized error response.
+
+        Args:
+            message: Error message
+            error_code: Optional error code from ErrorCode class
+            details: Optional additional error details
+
+        Returns:
+            MCP error response dict
+        """
+        error_data = {
+            "type": "text",
+            "text": message
+        }
+
+        if error_code is not None:
+            error_data["error_code"] = error_code
+
+        if details:
+            error_data["details"] = details
+
+        return {
+            "content": [error_data],
+            "isError": True
+        }
+
+    def _success_response(self, data: Any, format_json: bool = True) -> Dict[str, Any]:
+        """Create a standardized success response.
+
+        Args:
+            data: Response data (will be JSON-encoded if format_json=True)
+            format_json: Whether to JSON-encode the data
+
+        Returns:
+            MCP success response dict
+        """
+        if format_json and not isinstance(data, str):
+            text = json.dumps(data, indent=2)
+        else:
+            text = str(data)
+
+        return {
+            "content": [{
+                "type": "text",
+                "text": text
+            }]
+        }
+
+    def get_tool_definitions(self) -> List[Dict[str, Any]]:
+        """Return MCP tool definitions — minimal core set.
+
+        Only 10 tools exposed. Use templedb_cli for everything else.
+        This saves ~6000 context tokens vs the old 77-tool set.
+        """
+        return [
+            {
+                "name": "templedb_cli",
+                "description": "Run any TempleDB CLI command. Covers ALL TempleDB operations: nixos, graph, sync, network, backup, deploy, vcs, env, secret, config, mount, etc. Returns stdout/stderr/exit_code. Examples: 'project list', 'vcs status myproject --refresh', 'nixos host clone src dest', 'graph who-uses SUPABASE_URL', 'backup gcs', 'sync status'.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "CLI command and arguments (without 'templedb' prefix)"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            },
+            {
+                "name": "templedb_query",
+                "description": "Execute a read-only SQL query against the TempleDB SQLite database. For exploring data, checking state, or custom analysis.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sql": {"type": "string", "description": "SQL query to execute (SELECT only)"},
+                        "params": {"type": "array", "items": {"type": "string"}, "description": "Query parameters"}
+                    },
+                    "required": ["sql"]
+                }
+            },
+            {
+                "name": "templedb_project_list",
+                "description": "List all projects tracked in TempleDB with file counts and metadata.",
+                "inputSchema": {"type": "object", "properties": {}, "required": []}
+            },
+            {
+                "name": "templedb_project_show",
+                "description": "Show detailed information about a specific project.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name or slug"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_vcs_status",
+                "description": "Show VCS working directory status for a project (staged, modified, added, deleted files).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {"type": "string", "description": "Project slug"},
+                        "refresh": {"type": "boolean", "description": "Re-scan filesystem for changes"}
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_vcs_commit",
+                "description": "Create a VCS commit for staged changes in a project.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {"type": "string", "description": "Project slug"},
+                        "message": {"type": "string", "description": "Commit message"},
+                        "author": {"type": "string", "description": "Author name"},
+                        "stage_all": {"type": "boolean", "description": "Stage all changes before committing"}
+                    },
+                    "required": ["project", "message"]
+                }
+            },
+            {
+                "name": "templedb_context_generate",
+                "description": "Generate LLM context for a project — file listing, structure, key metadata.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {"type": "string", "description": "Project slug"}
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "templedb_graph_search",
+                "description": "Fuzzy search across ALL projects, files, env vars, secrets, commits, symbols, and config. Returns categorized results.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"}
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "templedb_config_get",
+                "description": "Get a system_config value by key.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string", "description": "Config key (e.g. 'nixos.flake_output')"}
+                    },
+                    "required": ["key"]
+                }
+            },
+            {
+                "name": "templedb_config_set",
+                "description": "Set a system_config key-value pair. Host-scoped by default (prefixes active host). Use scope='global' for keys shared across all hosts.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string", "description": "Config key"},
+                        "value": {"type": "string", "description": "Config value"},
+                        "scope": {"type": "string", "enum": ["host", "global"], "description": "Scope: 'host' (default, prefixes active host) or 'global'"},
+                        "host": {"type": "string", "description": "Target a specific host (default: active host from nixos.flake_output)"}
+                    },
+                    "required": ["key", "value"]
+                }
+            },
+            {
+                "name": "templedb_deploy",
+                "description": "Deploy pipeline operations: run deployments, manage triggers (auto-deploy on commit), list history, rollback. Supports multi-target and commit-specific deploys.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["run", "status", "history", "rollback", "trigger_list", "trigger_add", "trigger_remove", "notify_list"], "description": "Deploy action"},
+                        "project": {"type": "string", "description": "Project slug"},
+                        "target": {"type": "string", "description": "Deployment target (e.g., production, staging)"},
+                        "commit": {"type": "string", "description": "Specific commit hash to deploy (for 'run')"},
+                        "branch": {"type": "string", "description": "Branch pattern (for trigger_add) or branch to deploy from"},
+                        "all_targets": {"type": "boolean", "description": "Deploy to all targets (for 'run')"},
+                        "dry_run": {"type": "boolean", "description": "Simulate without deploying"},
+                        "trigger_id": {"type": "integer", "description": "Trigger ID (for trigger_remove)"}
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "templedb_secret",
+                "description": "Secret and key management: set/get/list secrets, manage encryption keys, export for deployment.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["get", "set", "list", "delete", "export", "key_list", "key_info", "key_test"], "description": "Secret action"},
+                        "project": {"type": "string", "description": "Project slug"},
+                        "name": {"type": "string", "description": "Secret name"},
+                        "value": {"type": "string", "description": "Secret value (for 'set')"},
+                        "keys": {"type": "string", "description": "Comma-separated encryption key names (for 'set')"},
+                        "format": {"type": "string", "enum": ["shell", "dotenv", "json", "yaml"], "description": "Export format"},
+                        "key_name": {"type": "string", "description": "Key name (for key_info, key_test)"}
+                    },
+                    "required": ["action"]
+                }
+            },
+            # ── Agent bridge: user round-trip + one-way message ──────────
+            # Requires TEMPLEDB_AGENT_SESSION_ID; routes through
+            # agent_pending_asks (migration 080).
+            {
+                "name": "templedb_ask_user",
+                "description":
+                    "Ask the user a multiple-choice question and wait for the answer. "
+                    "Use this INSTEAD of AskUserQuestion when running under TempleDB / Emacs "
+                    "— AskUserQuestion has no working UI in this environment and gets "
+                    "auto-cancelled. Requires TEMPLEDB_AGENT_SESSION_ID env (set by the "
+                    "agent provider when it launches Claude). Blocks for up to 600s waiting "
+                    "for a response; if the user doesn't answer, returns an error and you "
+                    "should either ask again or proceed with a reasonable default and note "
+                    "what you assumed. Question shape mirrors AskUserQuestion: each has "
+                    "{question, header, options: [{label, description}], multiSelect}.",
+                "inputSchema": {"type": "object", "properties": {
+                    "questions": {"type": "array", "minItems": 1, "items": {
+                        "type": "object", "properties": {
+                            "question":    {"type": "string"},
+                            "header":      {"type": "string"},
+                            "multiSelect": {"type": "boolean", "default": False},
+                            "options": {"type": "array", "items": {
+                                "type": "object", "properties": {
+                                    "label":       {"type": "string"},
+                                    "description": {"type": "string"},
+                                }, "required": ["label"]}}}}}}, "required": ["questions"]}
+            },
+            {
+                "name": "templedb_message_user",
+                "description":
+                    "Send a one-way, informational message to the user without asking "
+                    "anything back. Renders as a distinct entry in the Emacs conversation "
+                    "buffer. Use for out-of-band status updates, quick notices, or "
+                    "surfacing findings that don't need a decision from the user. Requires "
+                    "TEMPLEDB_AGENT_SESSION_ID env. Returns 'delivered' immediately.",
+                "inputSchema": {"type": "object", "properties": {
+                    "header": {"type": "string", "description": "Short label (max ~12 chars)"},
+                    "body":   {"type": "string", "description": "Message body (markdown ok)"},
+                }, "required": ["body"]}
+            },
+            {
+                "name": "templedb_agent_notify_email",
+                "description":
+                    "Send-only email check-in for long-running / autonomous agent runs. "
+                    "Use when there is no interactive UI attached (scheduled runs, "
+                    "background tasks) and you need to reach the user out-of-band. "
+                    "The row is queued in agent_notifications; a drain worker "
+                    "(`templedb ai agent notify drain` or the scheduler tick) sends "
+                    "it via SMTP. Prefer templedb_message_user when running under "
+                    "Emacs — that reaches the user immediately without going through "
+                    "email. kind values: 'progress' | 'error' | 'final' | 'decision'. "
+                    "For kind='decision', pass decision_default ('approve'|'deny') "
+                    "and optional wait_seconds; the call blocks until the user runs "
+                    "`templedb ai agent notify decide <id> approve|deny` or the "
+                    "timeout expires (default 900s), then returns the outcome. "
+                    "For other kinds, returns immediately with the queued id.",
+                "inputSchema": {"type": "object", "properties": {
+                    "subject":          {"type": "string", "description": "Email subject line"},
+                    "body":             {"type": "string", "description": "Body (markdown ok)"},
+                    "kind":             {"type": "string", "enum": ["progress", "error", "final", "decision"], "default": "progress"},
+                    "decision_default": {"type": "string", "enum": ["approve", "deny"], "description": "Only for kind='decision': what to do if the user doesn't respond in time"},
+                    "wait_seconds":     {"type": "integer", "default": 900, "description": "Only for kind='decision': how long to wait for a user decision before falling back to decision_default"},
+                }, "required": ["subject", "body"]}
+            },
+            # ── Agent-writable sections (Phase D) ────────────────────────
+            # Each of these writes a structured entry into a dedicated
+            # Emacs section that the user can read at a glance without
+            # scrolling the conversation. Use these to externalise state
+            # that would otherwise clutter your reply text.
+            # All require TEMPLEDB_AGENT_SESSION_ID (set by the agent
+            # provider when Claude runs under `templedb ai agent`); if
+            # unset, the tools return a clear error rather than silently
+            # dropping the data. State persists to agent_session_sections
+            # and survives session close/reopen.
+            {
+                "name": "templedb_agent_note_finding",
+                "description": "Record a discovery you made during this session into the * Findings section of the Emacs agent buffer. Use for concrete, non-obvious facts worth surfacing (e.g. 'the auth cookie sets SameSite=None only in prod'). Prefer this over inlining findings in your reply when the user is likely to want to scan them later. refs is optional — pass file paths or tool_ids that back up the claim.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "One-line finding summary"},
+                        "refs": {"type": "array", "items": {"type": "string"}, "description": "Optional file paths or tool_ids"}
+                    },
+                    "required": ["text"]
+                }
+            },
+            {
+                "name": "templedb_agent_todo_add",
+                "description": "Add a todo item to the * Todo section. Use for actions the user should take (or that you should take later) that don't fit in the current run.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "priority": {"type": "string", "enum": ["low", "medium", "high"]}
+                    },
+                    "required": ["text"]
+                }
+            },
+            {
+                "name": "templedb_agent_todo_done",
+                "description": "Mark a todo item as done by its id. Use when you completed a previously-added todo in a later turn.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"]
+                }
+            },
+            {
+                "name": "templedb_agent_question_add",
+                "description": "Flag an open question in the * Open Questions section. Use when you identified something you (or the user) will need to answer later but not right now — don't clutter the reply text with them.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"]
+                }
+            },
+            {
+                "name": "templedb_agent_question_answered",
+                "description": "Mark an open question as answered by its id. Optionally include the answer text so it appears next to the question.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "answer": {"type": "string"}
+                    },
+                    "required": ["id"]
+                }
+            },
+            {
+                "name": "templedb_agent_section_write",
+                "description": "Write to a dynamic, agent-invented section. Use this when the content doesn't fit Findings/Todo/Open Questions and would be useful as its own section in the Emacs buffer (e.g. 'Blockers', 'Decisions', 'Session Recap'). Section is created on first write. mode: 'append' (default) or 'replace' (clear the section first).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "section": {"type": "string", "description": "Section name (e.g. 'Blockers')"},
+                        "text":    {"type": "string", "description": "Entry text"},
+                        "mode":    {"type": "string", "enum": ["append", "replace"], "default": "append"}
+                    },
+                    "required": ["section", "text"]
+                }
+            },
+            {
+                "name": "templedb_agent_search_sections",
+                "description":
+                    "Substring-search across every session's agent-owned sections "
+                    "(Findings, Todo, Open Questions, dynamic:*). Use when the user "
+                    "asks about something you might have flagged in a past session "
+                    "— e.g. 'did we ever record anything about the auth cookie?'. "
+                    "Cheap and read-only. Case-insensitive. Empty query returns "
+                    "most-recent entries. Restrict by section or project when you "
+                    "know which bucket to look in.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query":   {"type": "string", "description": "Substring (case-insensitive). Empty for recency-only."},
+                        "section": {"type": "string", "description": "Optional: 'findings' | 'todo' | 'open-questions' | 'dynamic:NAME'"},
+                        "project": {"type": "string", "description": "Optional: restrict to this project slug"},
+                        "limit":   {"type": "integer", "description": "Max rows (default 50)", "default": 50}
+                    },
+                    "required": []
+                }
+            },
+        ]
+
+    # ── Legacy tool definitions removed ──────────────────────────────────
+    # The following 67 tools were removed and consolidated into templedb_cli:
+    # project_import, project_sync, commit_list, commit_create,
+    # search_files, search_content, vcs_add/reset/log/edit/discard/diff/branch,
+    # file_get, file_set, deploy, env_get/set/list,
+    # config_list/delete, secret_list/export/show_keys,
+    # cathedral_export/import/inspect,
+    # fleet_network_create/list/info, fleet_machine_add/list,
+    # fleet_deploy/status/check/diff,
+    # code_search/show_symbol/show_clusters/impact_analysis/
+    # extract_symbols/build_graph/detect_clusters/index_search,
+    # workflow_execute/status/list/validate,
+    # context_set_default/get_default, schema_explore,
+    # readme_scan/create/add_topic/add_reference/generate_index/
+    # find_related/verify_links/list,
+    # mount_status, db_status/migrate, git_export,
+    # dotfiles_list, bootstrap_status,
+    # graph_deps, nixos_host_list, nixos_generate_all
+    #
+    # Use templedb_cli({command: "..."}) for any of these.
+
+    # Keep old method stubs so the code doesn't break if something
+    # references them internally. They're just not exposed as MCP tools.
+
+    def _LEGACY_get_tool_definitions(self):
+        """Old 77-tool definition list — kept for reference only."""
+        pass
+
+    def get_resource_definitions(self) -> List[Dict[str, Any]]:
+        """Return MCP resource definitions"""
+        return [
+            {
+                "uri": "templedb://schema",
+                "name": "TempleDB Schema",
+                "description": "Complete database schema overview including all tables and their structures",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "templedb://projects",
+                "name": "Projects List",
+                "description": "List of all tracked projects with metadata",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "templedb://config",
+                "name": "System Configuration",
+                "description": "TempleDB system configuration settings",
+                "mimeType": "application/json"
+            }
+        ]
+
+    def read_resource(self, uri: str) -> Dict[str, Any]:
+        """Read a resource by URI"""
+        try:
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+
+            if uri == "templedb://schema":
+                # Return complete schema
+                cursor.execute("""
+                    SELECT name, type, sql
+                    FROM sqlite_master
+                    WHERE type IN ('table', 'view', 'index')
+                    AND name NOT LIKE 'sqlite_%'
+                    ORDER BY type, name
+                """)
+                objects = cursor.fetchall()
+
+                schema_data = {
+                    "tables": [],
+                    "views": [],
+                    "indexes": []
+                }
+
+                for row in objects:
+                    obj = {
+                        "name": row["name"],
+                        "sql": row["sql"]
+                    }
+                    if row["type"] == "table":
+                        schema_data["tables"].append(obj)
+                    elif row["type"] == "view":
+                        schema_data["views"].append(obj)
+                    elif row["type"] == "index":
+                        schema_data["indexes"].append(obj)
+
+                return self._success_response(schema_data)
+
+            elif uri == "templedb://projects":
+                # Return all projects
+                cursor.execute("""
+                    SELECT
+                        p.id,
+                        p.name,
+                        p.slug,
+                        p.repo_url,
+                        p.created_at,
+                        COUNT(DISTINCT f.id) as file_count,
+                        COUNT(DISTINCT c.id) as commit_count
+                    FROM projects p
+                    LEFT JOIN project_files f ON f.project_id = p.id
+                    LEFT JOIN vcs_commits c ON c.project_id = p.id
+                    GROUP BY p.id
+                    ORDER BY p.created_at DESC
+                """)
+                projects = cursor.fetchall()
+
+                projects_data = {
+                    "total": len(projects),
+                    "projects": [dict(row) for row in projects]
+                }
+
+                return self._success_response(projects_data)
+
+            elif uri == "templedb://config":
+                # Return system config
+                cursor.execute("""
+                    SELECT key, value, description, updated_at
+                    FROM system_config
+                    ORDER BY key
+                """)
+                configs = cursor.fetchall()
+
+                config_data = {
+                    "total": len(configs),
+                    "settings": [dict(row) for row in configs]
+                }
+
+                return self._success_response(config_data)
+
+            elif uri.startswith("templedb://project/"):
+                # Project-specific resource: templedb://project/{slug}/schema
+                parts = uri.split("/")
+                if len(parts) >= 4:
+                    project_slug = parts[3]
+
+                    cursor.execute("""
+                        SELECT id, name, slug FROM projects
+                        WHERE slug = ?
+                    """, (project_slug,))
+                    project = cursor.fetchone()
+
+                    if not project:
+                        return self._error_response(
+                            f"Project '{project_slug}' not found",
+                            ErrorCode.PROJECT_NOT_FOUND,
+                            {"project": project_slug}
+                        )
+
+                    # If asking for schema
+                    if len(parts) >= 5 and parts[4] == "schema":
+                        cursor.execute("""
+                            SELECT
+                                CASE
+                                    WHEN INSTR(file_name, '.') > 0
+                                    THEN SUBSTR(file_name, INSTR(file_name, '.'))
+                                    ELSE '(no extension)'
+                                END as extension,
+                                COUNT(*) as count
+                            FROM project_files
+                            WHERE project_id = ?
+                            GROUP BY extension
+                            ORDER BY count DESC
+                        """, (project["id"],))
+                        file_types = cursor.fetchall()
+
+                        cursor.execute("""
+                            SELECT COUNT(*) as count FROM vcs_commits
+                            WHERE project_id = ?
+                        """, (project["id"],))
+                        commit_count = cursor.fetchone()["count"]
+
+                        project_data = {
+                            "project": dict(project),
+                            "file_types": [dict(row) for row in file_types],
+                            "total_commits": commit_count
+                        }
+
+                        return self._success_response(project_data)
+
+            # Unknown resource
+            return self._error_response(
+                f"Resource not found: {uri}",
+                ErrorCode.NOT_FOUND,
+                {"uri": uri}
+            )
+
+        except Exception as e:
+            logger.error(f"Error reading resource {uri}: {e}")
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    # Tool implementations
+
+    def tool_project_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List all projects"""
+        try:
+            projects = self.project_repo.get_all()
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(projects, indent=2)
+                    }
+                ]
+            }
+        except Exception as e:
+            logger.error(f"Error listing projects: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_project_show(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show project details"""
+        try:
+            project_name = args["project"]
+
+            # Try to get by slug first, then by name
+            project = self.project_repo.get_by_slug(project_name)
+            if not project:
+                # Try as ID if numeric
+                try:
+                    project_id = int(project_name)
+                    project = self.project_repo.get_by_id(project_id)
+                except ValueError:
+                    pass
+
+            if not project:
+                return self._error_response(
+                    f"Project '{project_name}' not found",
+                    error_code=ErrorCode.PROJECT_NOT_FOUND,
+                    details={"project": project_name}
+                )
+
+            # Get additional details
+            stats = self.project_repo.get_statistics(project['id'])
+            if stats:
+                project['stats'] = stats
+
+            return self._success_response(project)
+
+        except Exception as e:
+            logger.error(f"Error showing project: {e}", exc_info=True)
+            return self._error_response(
+                f"Internal error: {str(e)}",
+                error_code=ErrorCode.INTERNAL_ERROR
+            )
+
+    def tool_query(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute SQL query"""
+        try:
+            query = args.get("sql", args.get("query"))
+            if not query:
+                return self._error_response("Missing 'sql' parameter")
+            format_type = args.get("format", "json")
+
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+            # Block write queries - this is a read-only tool
+            if re.search(r'\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE)\b', query, re.IGNORECASE):
+                return self._error_response("Write queries are not allowed. Use dedicated tools for modifications.")
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+            results = [dict(row) for row in rows]
+
+            if format_type == "json":
+                output = json.dumps(results, indent=2)
+            elif format_type == "table":
+                # Simple table format
+                if results:
+                    headers = list(results[0].keys())
+                    lines = [" | ".join(headers)]
+                    lines.append("-" * len(lines[0]))
+                    for row in results:
+                        lines.append(" | ".join(str(row[h]) for h in headers))
+                    output = "\n".join(lines)
+                else:
+                    output = "No results"
+            elif format_type == "csv":
+                if results:
+                    import csv
+                    import io
+                    output_io = io.StringIO()
+                    writer = csv.DictWriter(output_io, fieldnames=results[0].keys())
+                    writer.writeheader()
+                    writer.writerows(results)
+                    output = output_io.getvalue()
+                else:
+                    output = ""
+            else:
+                output = json.dumps(results, indent=2)
+
+            return {
+                "content": [{"type": "text", "text": output}]
+            }
+        except Exception as e:
+            logger.error(f"Error executing query: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_context_generate(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate LLM context for project"""
+        try:
+            project_name = args["project"]
+            max_files = args.get("max_files", 50)
+
+            context_data = self.context_gen.generate_project_context(project_name, max_files=max_files)
+
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(context_data, indent=2)
+                    }
+                ]
+            }
+        except Exception as e:
+            logger.error(f"Error generating context: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Show VCS status for project"""
+        try:
+            project_name = args["project"]
+
+            import subprocess
+            result = subprocess.run(
+                ["./templedb", "vcs", "status", project_name],
+                capture_output=True, text=True, cwd=str(self.templedb_root)
+            )
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Status check failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout}]
+            }
+        except Exception as e:
+            logger.error(f"Error checking status: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_vcs_commit(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a commit"""
+        try:
+            project_name = args["project"]
+            message = args["message"]
+            author = args.get("author", "templedb")
+            commit_all = args.get("stage_all", args.get("all", False))
+
+            import subprocess
+            # Stage all files first if requested (commit has no --all flag; add does)
+            if commit_all:
+                add_cmd = ["./templedb", "vcs", "add", "-p", project_name, "--all"]
+                add_result = subprocess.run(add_cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
+                if add_result.returncode != 0:
+                    return {
+                        "content": [{"type": "text", "text": f"Commit failed (staging step): {add_result.stderr}"}],
+                        "isError": True
+                    }
+
+            cmd = ["./templedb", "vcs", "commit", "-p", project_name, "-m", message, "-a", author]
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Commit failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or "Commit created successfully"}]
+            }
+        except Exception as e:
+            logger.error(f"Error creating commit: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy project"""
+        try:
+            project_name = args["project"]
+            target = args.get("target", "default")
+            dry_run = args.get("dry_run", False)
+            only = args.get("only", None)
+
+            import subprocess
+            cmd = ["./templedb", "deploy", "run", project_name]
+            if target:
+                cmd.extend(["--target", target])
+            if dry_run:
+                cmd.append("--dry-run")
+            if only:
+                cmd.extend(["--only", only])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
+
+            if result.returncode != 0:
+                return {
+                    "content": [{"type": "text", "text": f"Deployment failed: {result.stderr}"}],
+                    "isError": True
+                }
+
+            return {
+                "content": [{"type": "text", "text": result.stdout or "Deployment completed successfully"}]
+            }
+        except Exception as e:
+            logger.error(f"Error deploying project: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_config_get(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get system config value (simple key-value store)"""
+        try:
+            key = args["key"]
+
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT key, value, description, updated_at
+                FROM system_config
+                WHERE key = ?
+            """, (key,))
+
+            row = cursor.fetchone()
+            if not row:
+                return {
+                    "content": [{"type": "text", "text": f"Config key '{key}' not found"}],
+                    "isError": True
+                }
+
+            result = dict(row)
+            return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+
+        except Exception as e:
+            logger.error(f"Error getting config: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_config_set(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Set system config value, host-scoped by default."""
+        try:
+            key = args["key"]
+            value = args["value"]
+            description = args.get("description", "")
+            scope = args.get("scope", "host")
+
+            conn = self._get_db_connection()
+            cursor = conn.cursor()
+
+            if scope != "global":
+                host = args.get("host")
+                if not host:
+                    row = cursor.execute(
+                        "SELECT value FROM system_config WHERE key = 'nixos.flake_output'"
+                    ).fetchone()
+                    host = row[0] if row else None
+
+                if host:
+                    key = f"{host}.{key}"
+
+            cursor.execute("""
+                INSERT OR REPLACE INTO system_config
+                (key, value, description, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """, (key, value, description))
+
+            conn.commit()
+
+            return {
+                "content": [{"type": "text", "text": f"Set config {key}={value}"}]
+            }
+
+        except Exception as e:
+            logger.error(f"Error setting config: {e}")
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    # Fleet deployment tools
+
+    # ========================================================================
+    # CODE INTELLIGENCE TOOLS (Phase 1.7)
+    # ========================================================================
+
+    # ========================================================================
+    # WORKFLOW ORCHESTRATION TOOLS (Phase 2.2)
+    # ========================================================================
+
+    def _list_available_workflows(self) -> str:
+        """Helper to list available workflow names"""
+        workflows_dir = self.templedb_root / "workflows"
+        if not workflows_dir.exists():
+            return "none"
+        workflow_files = list(workflows_dir.glob("*.yaml"))
+        return ", ".join([f.stem for f in workflow_files]) if workflow_files else "none"
+
+    # Context Management Tools
+
+    def handle_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Handle incoming MCP message"""
+        msg_type = message.get("method")
+        msg_id = message.get("id")
+        params = message.get("params", {})
+
+        try:
+            if msg_type == "initialize":
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "protocolVersion": self.protocol_version,
+                        "capabilities": {
+                            "tools": {},
+                            "resources": {}
+                        },
+                        "serverInfo": {
+                            "name": "templedb",
+                            "version": "1.1.0"
+                        }
+                    }
+                }
+
+            elif msg_type == "tools/list":
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "tools": self.get_tool_definitions()
+                    }
+                }
+
+            elif msg_type == "resources/list":
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "resources": self.get_resource_definitions()
+                    }
+                }
+
+            elif msg_type == "resources/read":
+                uri = params.get("uri")
+                if not uri:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "Missing required parameter: uri"
+                        }
+                    }
+
+                try:
+                    result = self.read_resource(uri)
+                finally:
+                    self._release_db_connection()
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": result
+                }
+
+            elif msg_type == "tools/call":
+                tool_name = params.get("name")
+                tool_args = params.get("arguments", {})
+
+                if tool_name not in self.tools:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {
+                            "code": -32601,
+                            "message": f"Tool not found: {tool_name}"
+                        }
+                    }
+
+                tool_func = self.tools[tool_name]
+                try:
+                    result = tool_func(tool_args)
+                finally:
+                    # Ensure no open transaction lingers between requests
+                    self._release_db_connection()
+
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": result
+                }
+
+            else:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {
+                        "code": -32601,
+                        "message": f"Method not found: {msg_type}"
+                    }
+                }
+
+        except Exception as e:
+            logger.error(f"Error handling message: {e}", exc_info=True)
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {
+                    "code": -32603,
+                    "message": f"Internal error: {str(e)}"
+                }
+            }
+
+    def run(self):
+        """Run MCP server on stdin/stdout"""
+        logger.info("TempleDB MCP Server starting...")
+        logger.info(f"Protocol version: {self.protocol_version}")
+        logger.info(f"Registered {len(self.tools)} tools")
+
+        try:
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    message = json.loads(line)
+                    logger.debug(f"Received message: {message.get('method')}")
+
+                    response = self.handle_message(message)
+                    if response:
+                        output = json.dumps(response)
+                        print(output, flush=True)
+                        logger.debug(f"Sent response for: {message.get('method')}")
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON: {e}")
+                    continue
+                except Exception as e:
+                    logger.error(f"Error processing message: {e}", exc_info=True)
+                    continue
+
+        except KeyboardInterrupt:
+            logger.info("MCP Server shutting down...")
+        except Exception as e:
+            logger.error(f"Fatal error: {e}", exc_info=True)
+            sys.exit(1)
+
+    # ========================================================================
+    # File Operations Tools
+    # ========================================================================
+
+    # ========================================================================
+    # README Cross-Reference System Tools
+    # ========================================================================
+
+    # ── New tools: mount, db, git-export, dotfiles, bootstrap ─────────
+
+    def tool_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy pipeline operations — delegates to CLI."""
+        try:
+            action = args["action"]
+            project = args.get("project", "")
+
+            cmd_map = {
+                "run": f"deploy run {project}",
+                "status": f"deploy status {project}",
+                "history": f"deploy history {project}",
+                "rollback": f"deploy rollback {project}",
+                "trigger_list": f"deploy trigger list {project}",
+                "trigger_add": f"deploy trigger add {project} {args.get('branch', 'main')} {args.get('target', 'production')}",
+                "trigger_remove": f"deploy trigger remove {args.get('trigger_id', '')}",
+                "notify_list": f"deploy notify list",
+            }
+
+            cmd = cmd_map.get(action, f"deploy {action} {project}")
+
+            # Add optional flags
+            if args.get("target") and action == "run":
+                cmd += f" --target {args['target']}"
+            if args.get("commit") and action == "run":
+                cmd += f" --commit {args['commit']}"
+            if args.get("branch") and action == "run":
+                cmd += f" --branch {args['branch']}"
+            if args.get("all_targets") and action == "run":
+                cmd += " --all-targets"
+            if args.get("dry_run"):
+                cmd += " --dry-run"
+
+            return self.tool_cli({"command": cmd.strip()})
+
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    def tool_secret(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Secret and key management — delegates to CLI."""
+        try:
+            action = args["action"]
+            project = args.get("project", "")
+
+            cmd_map = {
+                "get": f"env secret get {project} {args.get('name', '')}",
+                "set": f"env secret set {project} {args.get('name', '')} {args.get('value', '')} --keys {args.get('keys', '')}",
+                "list": f"env secret list {project}",
+                "delete": f"env secret delete {project} {args.get('name', '')}",
+                "export": f"env secret export {project} --format {args.get('format', 'dotenv')}",
+                "key_list": "env key list",
+                "key_info": f"env key info {args.get('key_name', '')}",
+                "key_test": f"env key test {args.get('key_name', '')}",
+            }
+
+            cmd = cmd_map.get(action, f"env secret {action} {project}")
+            return self.tool_cli({"command": cmd.strip()})
+
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+
+    # ── Agent bridge tools (ask / message) ──────────────────────────────
+    # Round-trip through agent_pending_asks (migration 080). The MCP tool
+    # inserts, the agent service polls, Emacs prompts / renders, Emacs
+    # writes the response back into the row, and the tool returns.
+    # Broken before this commit because it lived only in the dead
+    # templedb_launcher.py; fixed by moving into MCPServer alongside
+    # the Phase D section tools.
+
+    def tool_ask_user(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        sid = self._agent_session_id("templedb_ask_user")
+        if isinstance(sid, dict): return sid
+        questions = args.get("questions") or []
+        if not isinstance(questions, list) or not questions:
+            return {"content": [{"type": "text",
+                "text": "questions must be a non-empty list"}], "isError": True}
+        import uuid, time
+        from agent import store as _store
+        ask_id = uuid.uuid4().hex
+        _store.create_pending_ask(ask_id, sid, "question", {"questions": questions})
+        # Poll for the user's response; give up after 600s.
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            row = _store.get_pending_ask(ask_id)
+            if row and row.get("status") == "responded":
+                try:
+                    resp = json.loads(row["response"])
+                except (ValueError, TypeError):
+                    resp = {"raw": row.get("response")}
+                return {"content": [{"type": "text", "text": json.dumps(resp)}]}
+            time.sleep(0.2)
+        return {"content": [{"type": "text",
+            "text": "User did not respond in time. Try asking again or proceed "
+                    "with a reasonable default and note what you assumed."}],
+            "isError": True}
+
+    def tool_message_user(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        sid = self._agent_session_id("templedb_message_user")
+        if isinstance(sid, dict): return sid
+        header = args.get("header") or "Message"
+        body = args.get("body") or ""
+        import uuid
+        from agent import store as _store
+        ask_id = uuid.uuid4().hex
+        _store.create_pending_ask(ask_id, sid, "message",
+                                  {"header": header, "body": body})
+        # One-way — don't wait for a response.
+        return {"content": [{"type": "text", "text": "delivered"}]}
+
+    def tool_agent_notify_email(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Enqueue an outbound email check-in. For kind='decision' also
+        polls for the user's approve/deny and returns the outcome.
+
+        Unlike the Emacs-only tools above, session id is optional here
+        (falls back to NULL) so autonomous / cron-triggered runs without
+        TEMPLEDB_AGENT_SESSION_ID can still notify."""
+        import os as _os
+        import time as _time
+        from agent import store as _store
+
+        subject = (args.get("subject") or "").strip()
+        body = args.get("body") or ""
+        kind = args.get("kind") or "progress"
+        if not subject:
+            return {"content": [{"type": "text",
+                "text": "subject is required"}], "isError": True}
+        if kind not in ("progress", "error", "final", "decision"):
+            return {"content": [{"type": "text",
+                "text": f"invalid kind: {kind!r}"}], "isError": True}
+
+        sid_env = _os.environ.get("TEMPLEDB_AGENT_SESSION_ID")
+        session_id = None
+        if sid_env:
+            try:
+                session_id = int(sid_env)
+            except ValueError:
+                session_id = None
+
+        pending_until = None
+        decision_default = None
+        wait_seconds = None
+        if kind == "decision":
+            decision_default = args.get("decision_default")
+            if decision_default not in ("approve", "deny"):
+                return {"content": [{"type": "text",
+                    "text": "decision_default must be 'approve' or 'deny' "
+                            "for kind='decision'"}], "isError": True}
+            wait_seconds = int(args.get("wait_seconds") or 900)
+            from datetime import datetime, timedelta
+            pending_until = (datetime.utcnow() +
+                             timedelta(seconds=wait_seconds)
+                             ).strftime("%Y-%m-%d %H:%M:%S")
+
+        row_id = _store.create_notification(
+            session_id=session_id,
+            kind=kind,
+            subject=subject,
+            body_md=body,
+            pending_until=pending_until,
+            decision_default=decision_default,
+        )
+
+        # Best-effort synchronous send so the user gets the email now,
+        # rather than waiting for the next drain tick. Failures here
+        # are non-fatal — the row stays in the queue with send_error
+        # set, and the next drain retries.
+        try:
+            from services.email_service import EmailService
+            EmailService().drain(limit=5)
+        except Exception:
+            pass
+
+        if kind != "decision":
+            return {"content": [{"type": "text",
+                "text": json.dumps({"id": row_id, "queued": True})}]}
+
+        # Decision-point: poll until decided or timed out.
+        deadline = _time.time() + wait_seconds
+        while _time.time() < deadline:
+            row = _store.get_notification(row_id)
+            if row and row["decided_at"]:
+                return {"content": [{"type": "text", "text": json.dumps({
+                    "id": row_id,
+                    "decision": row["decision"],
+                    "decided_at": row["decided_at"],
+                })}]}
+            _time.sleep(1.0)
+
+        # Timeout — record and return the default.
+        _store.decide_notification(row_id, "timeout")
+        return {"content": [{"type": "text", "text": json.dumps({
+            "id": row_id,
+            "decision": "timeout",
+            "fallback": decision_default,
+        })}]}
+
+    # ── Agent-writable section tools (Phase D) ──────────────────────────
+    # Each of these writes to agent_session_sections (persistence) AND
+    # enqueues a JSON-line event on agent_pending_events. The agent
+    # service's poll loop delivers the event to Emacs, which mutates the
+    # corresponding section in the buffer. Round-trip is: MCP call →
+    # DB persist → poll loop → Emacs event → section re-render.
+
+    def _agent_session_id(self, tool_name: str) -> Any:
+        """Return the active agent session id or an error response dict."""
+        sid = os.environ.get("TEMPLEDB_AGENT_SESSION_ID")
+        if not sid:
+            return {"content": [{"type": "text",
+                "text": f"{tool_name} requires TEMPLEDB_AGENT_SESSION_ID env "
+                        "(only available when Claude runs under `templedb ai agent`)"}],
+                "isError": True}
+        try:
+            return int(sid)
+        except ValueError:
+            return {"content": [{"type": "text",
+                "text": f"TEMPLEDB_AGENT_SESSION_ID={sid!r} is not an int"}],
+                "isError": True}
+
+    def _agent_persist_and_emit(self, session_id, section, entry_id,
+                                entry_dict, event_type, event_payload,
+                                summary=None):
+        """Shared write path: upsert entry + enqueue Emacs event."""
+        from agent import store as _store
+        _store.upsert_section_entry(session_id, section, entry_id, entry_dict)
+        _store.create_pending_event(session_id, event_type, event_payload, summary)
+
+    def tool_agent_note_finding(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        sid = self._agent_session_id("templedb_agent_note_finding")
+        if isinstance(sid, dict): return sid
+        text = (args.get("text") or "").strip()
+        if not text:
+            return {"content": [{"type": "text", "text": "text is required"}], "isError": True}
+        refs = args.get("refs") or []
+        import uuid
+        entry_id = uuid.uuid4().hex[:12]
+        self._agent_persist_and_emit(
+            sid, "findings", entry_id,
+            {"text": text, "refs": refs},
+            "agent.section.finding.add",
+            {"id": entry_id, "text": text, "refs": refs},
+            summary="Finding recorded",
+        )
+        return {"content": [{"type": "text", "text": f"finding {entry_id} recorded"}]}
+
+    def tool_agent_todo_add(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        sid = self._agent_session_id("templedb_agent_todo_add")
+        if isinstance(sid, dict): return sid
+        text = (args.get("text") or "").strip()
+        if not text:
+            return {"content": [{"type": "text", "text": "text is required"}], "isError": True}
+        priority = args.get("priority")
+        import uuid
+        entry_id = uuid.uuid4().hex[:12]
+        payload = {"id": entry_id, "text": text}
+        if priority:
+            payload["priority"] = priority
+        self._agent_persist_and_emit(
+            sid, "todo", entry_id,
+            {"text": text, "priority": priority, "done": False},
+            "agent.section.todo.add", payload,
+            summary="Todo added",
+        )
+        return {"content": [{"type": "text", "text": f"todo {entry_id} added"}]}
+
+    def tool_agent_todo_done(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        sid = self._agent_session_id("templedb_agent_todo_done")
+        if isinstance(sid, dict): return sid
+        entry_id = args.get("id")
+        if not entry_id:
+            return {"content": [{"type": "text", "text": "id is required"}], "isError": True}
+        from agent import store as _store
+        _store.merge_section_entry(sid, "todo", entry_id, {"done": True})
+        _store.create_pending_event(sid, "agent.section.todo.done", {"id": entry_id})
+        return {"content": [{"type": "text", "text": f"todo {entry_id} marked done"}]}
+
+    def tool_agent_question_add(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        sid = self._agent_session_id("templedb_agent_question_add")
+        if isinstance(sid, dict): return sid
+        text = (args.get("text") or "").strip()
+        if not text:
+            return {"content": [{"type": "text", "text": "text is required"}], "isError": True}
+        import uuid
+        entry_id = uuid.uuid4().hex[:12]
+        self._agent_persist_and_emit(
+            sid, "open-questions", entry_id,
+            {"text": text, "answered": False},
+            "agent.section.question.add",
+            {"id": entry_id, "text": text},
+            summary="Question flagged",
+        )
+        return {"content": [{"type": "text", "text": f"question {entry_id} added"}]}
+
+    def tool_agent_question_answered(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        sid = self._agent_session_id("templedb_agent_question_answered")
+        if isinstance(sid, dict): return sid
+        entry_id = args.get("id")
+        answer = args.get("answer")
+        if not entry_id:
+            return {"content": [{"type": "text", "text": "id is required"}], "isError": True}
+        from agent import store as _store
+        _store.merge_section_entry(sid, "open-questions", entry_id,
+                                   {"answered": True, "answer": answer})
+        _store.create_pending_event(sid, "agent.section.question.answered",
+                                    {"id": entry_id, "answer": answer})
+        return {"content": [{"type": "text", "text": f"question {entry_id} answered"}]}
+
+    def tool_agent_section_write(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        sid = self._agent_session_id("templedb_agent_section_write")
+        if isinstance(sid, dict): return sid
+        section_name = (args.get("section") or "").strip()
+        text = (args.get("text") or "").strip()
+        mode = args.get("mode") or "append"
+        if not section_name or not text:
+            return {"content": [{"type": "text",
+                "text": "section and text are required"}], "isError": True}
+        import uuid
+        entry_id = uuid.uuid4().hex[:12]
+        db_section = f"dynamic:{section_name}"
+        from agent import store as _store
+        if mode == "replace":
+            _store.remove_section(sid, db_section)
+        _store.upsert_section_entry(sid, db_section, entry_id, {"text": text})
+        _store.create_pending_event(
+            sid, "agent.section.dynamic.write",
+            {"section": section_name, "id": entry_id, "text": text, "mode": mode})
+        return {"content": [{"type": "text",
+            "text": f"wrote to '{section_name}' ({mode})"}]}
+
+    def tool_agent_search_sections(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Cross-session read-only search over agent-owned sections.
+        Does NOT require TEMPLEDB_AGENT_SESSION_ID — usable outside
+        the agent context (e.g. from the CLI wrapper for humans)."""
+        query = args.get("query") or ""
+        section = args.get("section")
+        project = args.get("project")
+        try:
+            limit = int(args.get("limit") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        from agent import store as _store
+        rows = _store.search_sections_across_sessions(
+            query=query, section=section, project_slug=project, limit=limit)
+        # Format for the model: JSON is the most token-efficient shape.
+        # Include enough per-hit context to be useful without the model
+        # having to make a follow-up query.
+        payload = {
+            "match_count": len(rows),
+            "hits": [
+                {
+                    "session_id": r["session_id"],
+                    "project": r["project_slug"],
+                    "section": r["section"],
+                    "entry_id": r["entry_id"],
+                    "text": r["entry"].get("text"),
+                    "created_at": r["created_at"],
+                    **({k: r["entry"][k] for k in
+                        ("refs", "priority", "done", "answered", "answer")
+                        if k in r["entry"]}),
+                }
+                for r in rows
+            ],
+        }
+        return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
+    def tool_cli(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Run any TempleDB CLI command."""
+        try:
+            import subprocess, shlex, shutil
+            command = args["command"]
+            cmd_parts = shlex.split(command)
+
+            # Find templedb binary
+            templedb = shutil.which("templedb")
+            if not templedb:
+                templedb_path = Path(__file__).parent.parent / "result" / "bin" / "templedb"
+                if templedb_path.exists():
+                    templedb = str(templedb_path)
+                else:
+                    templedb = str(Path(__file__).parent.parent / "templedb")
+
+            result = subprocess.run(
+                [templedb] + cmd_parts,
+                capture_output=True, text=True, timeout=120
+            )
+            return self._success_response({
+                "exit_code": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "command": f"templedb {command}",
+            })
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+    def tool_graph_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Search across everything."""
+        try:
+            from knowledge_graph import search_everywhere
+            results = search_everywhere(args["query"], limit=30)
+            return self._success_response(results)
+        except Exception as e:
+            return self._error_response(str(e), ErrorCode.INTERNAL_ERROR)
+
+def main():
+    """Entry point for MCP server"""
+    server = MCPServer()
+    server.run()
+
+
+if __name__ == "__main__":
+    main()

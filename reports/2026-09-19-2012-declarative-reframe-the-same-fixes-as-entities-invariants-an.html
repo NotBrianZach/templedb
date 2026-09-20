@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>declarative reframe — the same fixes as entities, invariants, and reconcile</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  .before, .after {
+    padding: 0.9rem 1.1rem; margin: 0.7rem 0;
+    border-radius: 5px; border: 1px solid var(--border);
+  }
+  .before { background: rgba(233, 69, 96, 0.06); }
+  .after  { background: rgba(110, 207, 122, 0.06); }
+  .before .tag, .after .tag {
+    display: inline-block; font-size: 0.72rem; font-weight: bold;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 1px 7px; border-radius: 3px; margin-right: 0.55rem;
+  }
+  .before .tag { background: #e94560; color: #0a0a14; }
+  .after  .tag { background: #6ecf7a; color: #0a0a14; }
+  .heading { color: #b0b0d0; font-weight: bold;
+             text-transform: uppercase; font-size: 0.72rem;
+             letter-spacing: 0.08em; margin: 1rem 0 0.4rem; }
+  .quiet { color: var(--muted); }
+  ul.primitives li { margin: 0.35rem 0; }
+  ul.primitives li code:first-of-type { color: #e6c46b; }
+</style>
+</head>
+<body>
+
+<h1>declarative reframe — the same fixes as entities, invariants, and reconcile</h1>
+<p class="lede">
+  Companion to <a href="2026-09-19-1753-deploy-chain-observability-agent-session-ergonomics-followup.html">the imperative followup spec</a>.
+  Same six problems, reframed as facts, relationships, and invariants
+  inside the existing templedb entity graph — instead of new CLI verbs,
+  print statements, and shell heuristics. The declarative version is
+  smaller in total surface, composes better with what's already there,
+  and doesn't leak behavior into the caller's environment.
+</p>
+
+<h2>Side-by-side, at a glance</h2>
+
+<table style="border-collapse: collapse; width: 100%; margin: 0.8rem 0; font-size: 0.87em;">
+  <tr style="border-bottom: 1px solid var(--border);">
+    <th style="text-align: left; padding: 0.45rem 0.6rem; color: var(--muted); text-transform: uppercase; font-size: 0.7rem; width: 46%;">Imperative version</th>
+    <th style="text-align: left; padding: 0.45rem 0.6rem; color: var(--muted); text-transform: uppercase; font-size: 0.7rem;">Declarative version</th>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.45rem 0.6rem;">Auto-detect agent context + write pin file</td>
+    <td style="padding: 0.45rem 0.6rem;">Sessions get a <code>context</code> column;
+        <code>TEMPLEDB_CONTEXT=claude-agent</code> in env declares
+        identity — no detection</td>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.45rem 0.6rem;"><code>vcs session gc</code> CLI verb</td>
+    <td style="padding: 0.45rem 0.6rem;">Sessions declare lifetime + reap policy at
+        creation; doctor invariant + existing reconcile timer enforce</td>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.45rem 0.6rem;"><code>--expect-rev</code> flag on publish</td>
+    <td style="padding: 0.45rem 0.6rem;">Deploy stages become entities; invariant #12
+        checks each stage's input hash == prior stage's output hash</td>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.45rem 0.6rem;">Stage hash print-logging at each boundary</td>
+    <td style="padding: 0.45rem 0.6rem;">Same stage entities carry those hashes durably;
+        provenance queryable across the chain</td>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.45rem 0.6rem;"><code>file trace</code> walks symlinks + probes
+        filesystems at query time</td>
+    <td style="padding: 0.45rem 0.6rem;"><code>File :mirrored_at Location</code>
+        relationships; trace is a graph query; new mirror kinds = new
+        ingest adapters</td>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.45rem 0.6rem;"><code>templedb.devMode</code> global nix flag</td>
+    <td style="padding: 0.45rem 0.6rem;">Files have <code>edit_mode</code> attribute;
+        home.nix reads per-file; <code>file mark --edit-mode
+        live-symlink</code> sets it</td>
+  </tr>
+</table>
+
+<p>
+  <strong>Net footprint of the declarative version</strong>: 1 new table
+  (<code>deploy_stage_runs</code>), 1 new CLI verb (<code>file mark</code>),
+  and 3 new columns across 2 existing tables. Everything else piggybacks
+  on <code>doctor</code>, <code>reconcile</code>, <code>provenance</code>,
+  <code>vcs session start</code>, and the ingest-adapter pattern.
+  Compare against the imperative spec: 4 new CLI verbs / flags, 30+ new
+  print statements, 2 new shell heuristics, plus a new nix module.
+</p>
+
+<h2>Why declarative here</h2>
+
+<p>
+  Templedb already has a declarative substrate. Per the CLAUDE.md
+  header: "TempleDB observes source (git is authoritative), owns
+  intents + relationships + the cross-authority knowledge graph. Six
+  ingest adapters keep the graph in sync (hourly systemd timer). Ten
+  doctor invariants + one active-probe reconcile (daily systemd timer)
+  detect drift." My original followup spec bolted six imperative CLI
+  features on top of that, when in most cases the right move is to
+  extend the graph and add invariants.
+</p>
+
+<p>
+  Signs a fix wants to be declarative: (a) it detects state at runtime
+  and mutates something; (b) it involves cross-project or cross-stage
+  reasoning; (c) it's about "the world should look like X" not "run X."
+  All six of the previous specs check at least two of those boxes.
+</p>
+
+<h3>The primitives we're leveraging</h3>
+
+<ul class="primitives">
+  <li><code>entities</code> — typed nodes (files, projects, hosts,
+      commits, sessions, deploy stages, mirror locations). Already 12k+
+      populated by ingest adapters.</li>
+  <li><code>relationships</code> — typed edges
+      (<code>:contains</code>, <code>:mirrors</code>, <code>:derived_from</code>,
+      <code>:consumes</code>). The "seven-hop chain" for templedb-agent.el
+      is literally a path through this graph, we just haven't modeled
+      the hops yet.</li>
+  <li><code>intents</code> — writes recorded as facts
+      (<code>edit_intents</code>) with author + session + hash + timestamp.
+      A commit is "apply all applied intents matching filter."</li>
+  <li><code>doctor invariants</code> — declarative predicates checked on
+      a schedule ("no file has drift between DB and checkout that isn't
+      explained by an unapplied intent"). Ten exist; adding an eleventh
+      is idiomatic.</li>
+  <li><code>reconcile</code> — active drift correction where the fix is
+      unambiguous. Daily timer.</li>
+  <li><code>provenance</code> — cross-authority queries
+      (<code>templedb provenance machine &lt;host&gt;</code> already exists).
+      "What motivated this artifact" is a graph traversal.</li>
+</ul>
+
+<h2>§1 → Agent sessions as declared context</h2>
+
+<div class="before">
+  <span class="tag">Imperative</span>
+  <p>Detect "agent context" at runtime via env-var sniffing +
+    TTY absence heuristic. If detected AND no pin, auto-write a session
+    pin file. Log a hint. Expire in 4h. Special-case <code>doctor</code>
+    check for stale auto-pins.</p>
+</div>
+
+<div class="after">
+  <span class="tag">Declarative</span>
+  <p><strong>Sessions get a <code>context</code> attribute; sessions are
+    derived from context, not from PID.</strong></p>
+  <p>Add one nullable column to <code>vcs_sessions</code>:
+    <code>context TEXT</code>. When
+    <code>TEMPLEDB_CONTEXT=&lt;name&gt;</code> is set in env, session
+    resolution matches on <code>(author, host, context)</code> instead of
+    <code>(author, host, sid)</code>. Set-once, share across shells, no
+    file pin, no runtime heuristics.</p>
+  <p>Claude Code's setup writes
+    <code>TEMPLEDB_CONTEXT=claude-agent</code> into its Bash tool env
+    (once, in <code>~/.claude/settings.json</code>). Every subsequent
+    <code>templedb</code> call joins that session by name. No detection,
+    no pin file, no expiration timer — the environment declares the
+    session identity.</p>
+  <p><span class="quiet">The current SID / pin mechanism stays for
+    interactive humans who want it. But agents get named contexts as
+    the canonical path.</span></p>
+</div>
+
+<h3>What changes</h3>
+<ul>
+  <li>Migration: <code>ALTER TABLE vcs_sessions ADD COLUMN context TEXT</code>.</li>
+  <li><code>VCSService.get_current_session()</code>: check env
+      <code>TEMPLEDB_CONTEXT</code> before SID; upsert a session with that
+      context name.</li>
+  <li>Docs: add one line to CLAUDE.md pointing at
+      <code>TEMPLEDB_CONTEXT</code>. Done.</li>
+</ul>
+
+<h2>§2 → Sessions have a declared lifetime</h2>
+
+<div class="before">
+  <span class="tag">Imperative</span>
+  <p>Ship <code>vcs session gc</code> subcommand. User (or timer) runs
+    it periodically. Command imperatively enumerates candidates and
+    reaps them.</p>
+</div>
+
+<div class="after">
+  <span class="tag">Declarative</span>
+  <p><strong>Sessions declare their lifetime; a doctor invariant
+    enforces it.</strong></p>
+  <p>Add columns to <code>vcs_sessions</code>:
+    <code>expected_lifetime_seconds INT</code> and
+    <code>reap_policy TEXT</code>
+    (<code>'orphan_stages' | 'preserve' | 'discard'</code>). Default:
+    24h + <code>orphan_stages</code>.</p>
+  <p>New doctor invariant #11:
+    <em>"No session is past its expected_lifetime with unended state."</em>
+    Doctor reports violations. Reconcile (already daily) resolves them
+    per each session's declared <code>reap_policy</code> — orphaning
+    working-state rows, preserving them for manual review, or
+    discarding entirely.</p>
+  <p>No new CLI verb. The <code>gc</code> becomes a policy, not an
+    action. Users tune it per session at creation time.</p>
+</div>
+
+<h3>What changes</h3>
+<ul>
+  <li>Migration: two columns + backfill (<code>24h/orphan_stages</code>
+      for existing rows).</li>
+  <li>New invariant + reconcile handler in the existing doctor/reconcile
+      infra.</li>
+  <li>Session-create flags: <code>--lifetime 4h</code>,
+      <code>--on-expiry orphan_stages</code>.</li>
+</ul>
+
+<h2>§3 + §4 → Deploy stages are entities in the graph</h2>
+
+<div class="before">
+  <span class="tag">Imperative</span>
+  <p><code>--expect-rev</code> flag on publish, plus print-statement
+    hash logging at each stage. Users write shell scripts that call
+    publish → parse output → pass hash forward. Assertion is a runtime
+    flag.</p>
+</div>
+
+<div class="after">
+  <span class="tag">Declarative</span>
+  <p><strong>Every stage is an entity; stages record their inputs and
+    outputs as relationships. The deploy chain is a graph, and drift
+    is a query.</strong></p>
+  <p>Templedb already tracks <code>system_deployments</code> and
+    <code>nix_generations</code>. Extend that pattern: every stage of the
+    chain writes a row when it runs, with <code>input_hash</code> and
+    <code>output_hash</code>. Stages: <code>file_set</code>, <code>vcs_commit</code>,
+    <code>materialize</code>, <code>git_push</code>, <code>flake_resolve</code>,
+    <code>nix_build</code>, <code>system_switch</code>.</p>
+  <p>Once stages are entities:</p>
+  <ul>
+    <li><strong>Invariant #12:</strong> "Each stage's declared input hash
+        must equal the previous stage's declared output hash." Doctor
+        reports mismatches. No runtime assertion needed — the check runs
+        offline, deterministically.</li>
+    <li><strong>Provenance query</strong>: given a running binary's nix
+        store hash, walk backward through the stage graph to the
+        originating <code>edit_intent</code>. "Why is this file this
+        way?" becomes a graph traversal, not a shell archaeology dig.</li>
+    <li><strong>No <code>--expect-rev</code> flag needed.</strong> If
+        rebuild's <code>flake_resolve</code> stage records
+        <code>output_hash != publish.git_push.output_hash</code>, the
+        invariant flags it. Publish's job is to state its facts, not
+        to police downstream stages.</li>
+  </ul>
+</div>
+
+<h3>What changes</h3>
+<ul>
+  <li>New tables: <code>deploy_stage_runs (id, stage_kind, slug,
+      started_at, input_hash, output_hash, prev_stage_run_id,
+      metadata_json)</code>.</li>
+  <li>Each existing stage gains a small "record my run" call. Cheaper
+      than print statements because it's already in the SQL boundary.</li>
+  <li>One new invariant in doctor, one new provenance query, and
+      <code>templedb file trace</code> (see §5) reads from these entities
+      instead of walking symlinks.</li>
+</ul>
+
+<h2>§5 → File mirrors are relationships</h2>
+
+<div class="before">
+  <span class="tag">Imperative</span>
+  <p><code>templedb file trace</code> walks symlinks and probes
+    filesystem paths at query time. Each hop is discovered procedurally.
+    Hash comparison happens on the fly.</p>
+</div>
+
+<div class="after">
+  <span class="tag">Declarative</span>
+  <p><strong>Each mirror is a
+    <code>File :mirrored_at Location</code> relationship with a declared
+    <code>derivation_rule</code>. The graph knows the chain; trace is a
+    query.</strong></p>
+  <p>Model:</p>
+  <pre>File (slug, path)
+  :mirrored_at (rule="materialize")   → CheckoutMirror
+  :mirrored_at (rule="edit-workspace") → EditWorkspaceMirror
+  :mirrored_at (rule="home-manager-overlay",
+                via="templedb-spacemacs-layer") → NixStoreMirror
+  :mirrored_at (rule="symlink",
+                via="/home/zach/.emacs.d/private/local-layers")
+                                       → LiveOverlaySymlink</pre>
+  <p>Relationships are populated by ingest adapters (one per
+    derivation-rule kind). Doctor invariant: "For each
+    <code>File</code>, all <code>:mirrored_at</code> targets agree on
+    content hash <em>unless</em> the mirror's rule declares expected
+    lag (e.g. <code>home-manager-overlay</code> is expected to lag until
+    the next rebuild)."</p>
+  <p><code>templedb file trace &lt;slug&gt; &lt;path&gt;</code> becomes a
+    one-shot graph query, not a symlink walk. Adding a new mirror kind
+    (e.g. someone else's Emacs config, another host's copy) just means
+    adding a new ingest adapter.</p>
+</div>
+
+<h3>What changes</h3>
+<ul>
+  <li>Extend the existing entity graph with <code>MirrorLocation</code>
+      entity kind and <code>:mirrored_at</code> relationship.</li>
+  <li>New ingest adapters: <code>checkout_mirror</code>,
+      <code>edit_workspace_mirror</code>, <code>nix_store_mirror</code>,
+      <code>symlink_overlay_mirror</code>. Each ~30 LOC.</li>
+  <li>Invariant + reconcile: expected-vs-observed hash per relationship.</li>
+  <li><code>templedb file trace</code> is thin over the query — no
+      symlink walking, no runtime filesystem probing.</li>
+</ul>
+
+<h2>§6 → Files declare their edit mode</h2>
+
+<div class="before">
+  <span class="tag">Imperative</span>
+  <p>Toggle <code>templedb.devMode = true</code> in home.nix; conditional
+    branch generates a symlink vs. copy. Global switch, not per-file.</p>
+</div>
+
+<div class="after">
+  <span class="tag">Declarative</span>
+  <p><strong>Files carry an <code>edit_mode</code> attribute in DB;
+    consumers (home.nix, etc.) read the attribute.</strong></p>
+  <p>Add <code>edit_mode TEXT</code> column to <code>project_files</code>:
+    <code>'immutable' | 'hot-reload' | 'live-symlink'</code>.
+    Default: <code>immutable</code>.</p>
+  <p>Home.nix's Spacemacs layer generator queries
+    <code>templedb file ls --edit-mode live-symlink</code> for each
+    project and emits symlinks for those specifically. Everything else
+    goes through the normal materialize path.</p>
+  <p>Marking a file hot-reload becomes:
+    <code>templedb file mark --edit-mode live-symlink templedb integrations/emacs/templedb-agent.el</code>.
+    The mark is a persistent fact; every subsequent
+    rebuild picks it up automatically. No <code>templedb.devMode</code>
+    global flag, no imperative override — the file's own metadata
+    declares its treatment.</p>
+</div>
+
+<h3>What changes</h3>
+<ul>
+  <li>One column, one CLI verb (<code>file mark</code>).</li>
+  <li>Home.nix reads a new templedb-generated JSON manifest listing
+      live-symlink files.</li>
+  <li>Doctor invariant: "Every <code>live-symlink</code> file has a
+      valid backing FUSE path." If FUSE is unmounted, doctor reports.</li>
+</ul>
+
+<h2>Priority ranking (declarative version)</h2>
+
+<table class="rank" style="border-collapse: collapse; width: 100%; margin: 0.8rem 0; font-size: 0.87em;">
+  <tr style="border-bottom: 1px solid var(--border);">
+    <th style="text-align: left; padding: 0.4rem 0.6rem; color: var(--muted); text-transform: uppercase; font-size: 0.7rem;">Rank</th>
+    <th style="text-align: left; padding: 0.4rem 0.6rem; color: var(--muted); text-transform: uppercase; font-size: 0.7rem;">§</th>
+    <th style="text-align: left; padding: 0.4rem 0.6rem; color: var(--muted); text-transform: uppercase; font-size: 0.7rem;">Change</th>
+    <th style="text-align: left; padding: 0.4rem 0.6rem; color: var(--muted); text-transform: uppercase; font-size: 0.7rem;">Extends</th>
+    <th style="text-align: left; padding: 0.4rem 0.6rem; color: var(--muted); text-transform: uppercase; font-size: 0.7rem;">Adds</th>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.4rem 0.6rem;">1</td>
+    <td style="padding: 0.4rem 0.6rem;">§1</td>
+    <td style="padding: 0.4rem 0.6rem;">Sessions gain <code>context</code></td>
+    <td style="padding: 0.4rem 0.6rem;">Existing <code>vcs_sessions</code></td>
+    <td style="padding: 0.4rem 0.6rem;">1 col, 10 LOC</td>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.4rem 0.6rem;">2</td>
+    <td style="padding: 0.4rem 0.6rem;">§3+§4</td>
+    <td style="padding: 0.4rem 0.6rem;">Deploy stages become entities</td>
+    <td style="padding: 0.4rem 0.6rem;">Existing entity graph +
+        <code>system_deployments</code>, <code>nix_generations</code></td>
+    <td style="padding: 0.4rem 0.6rem;">1 table, invariant #12,
+        stage-record hooks</td>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.4rem 0.6rem;">3</td>
+    <td style="padding: 0.4rem 0.6rem;">§5</td>
+    <td style="padding: 0.4rem 0.6rem;">Mirrors as relationships</td>
+    <td style="padding: 0.4rem 0.6rem;">Existing entity graph +
+        ingest-adapter pattern</td>
+    <td style="padding: 0.4rem 0.6rem;">One entity kind, 4 adapters,
+        invariant #13</td>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.4rem 0.6rem;">4</td>
+    <td style="padding: 0.4rem 0.6rem;">§2</td>
+    <td style="padding: 0.4rem 0.6rem;">Sessions declare lifetime</td>
+    <td style="padding: 0.4rem 0.6rem;">Existing doctor/reconcile</td>
+    <td style="padding: 0.4rem 0.6rem;">2 cols, invariant #14</td>
+  </tr>
+  <tr style="border-bottom: 1px solid var(--border);">
+    <td style="padding: 0.4rem 0.6rem;">5</td>
+    <td style="padding: 0.4rem 0.6rem;">§6</td>
+    <td style="padding: 0.4rem 0.6rem;">Files declare edit mode</td>
+    <td style="padding: 0.4rem 0.6rem;">Existing <code>project_files</code></td>
+    <td style="padding: 0.4rem 0.6rem;">1 col, home.nix generator</td>
+  </tr>
+</table>
+
+<p>
+  Notice: every rank is an <em>extension</em> of an existing primitive
+  rather than a new imperative feature. Total new tables: 1. Total new
+  CLI verbs: 1 (<code>file mark</code>) — everything else piggybacks on
+  existing commands (<code>doctor</code>, <code>reconcile</code>,
+  <code>provenance</code>, <code>vcs session start</code>).
+</p>
+
+<h2>What this buys you over the imperative version</h2>
+
+<ul>
+  <li><strong>Uniform observability.</strong> Everything shows up in
+      <code>templedb summary</code> / doctor / provenance. No new
+      subcommands to remember.</li>
+  <li><strong>Automatic scheduled enforcement.</strong> Doctor's daily
+      timer already exists. Adding invariants is close to free.
+      Manually-run <code>gc</code> commands, print-log grepping, and
+      shell-script assertions all evaporate.</li>
+  <li><strong>Cross-cutting queries fall out.</strong> "Which projects
+      have live-symlinked files?" "Which files drifted this week?"
+      "Why is this store path what it is?" All graph queries against
+      the same substrate.</li>
+  <li><strong>State, not behavior, is what gets copied around.</strong>
+      Right now, agents need to know a bunch of imperative rituals
+      (pin your session, pass <code>--commit</code>, run
+      <code>publish --pin-input</code>). In the declarative version,
+      the agent sets <code>TEMPLEDB_CONTEXT</code> and everything else
+      is inferred from graph facts.</li>
+  <li><strong>Adding a new mirror / stage / file-mode is one adapter,
+      not a code path through five files.</strong> New mirror kind?
+      One ingest adapter. New deploy stage? One record-run call. New
+      edit mode? One enum value. The extension points are declarative,
+      not surgical.</li>
+</ul>
+
+<h2>The imperative pieces that remain</h2>
+
+<p>
+  A few things stay imperative because they're inherently side-effectful
+  or interactive:
+</p>
+<ul>
+  <li><strong>Writes themselves.</strong> <code>file set</code> still
+      mutates content_blobs. Nothing to do about that; a write is a
+      write.</li>
+  <li><strong>Publish's push to remote mirrors.</strong> Network I/O,
+      not modelable purely as a graph fact. But its <em>outcome</em>
+      (git push landed → remote_head = X) can be recorded as a stage
+      run.</li>
+  <li><strong>Nix's rebuild.</strong> External process, opaque to
+      templedb except for its recorded outputs. That's fine — templedb
+      declares intents and observes outcomes; it doesn't own the
+      builder.</li>
+</ul>
+
+<p>
+  Even for these, the framing changes: templedb's job is to record
+  facts about them, not to orchestrate them imperatively.
+</p>
+
+<h2>Meta</h2>
+
+<p>
+  Reframing this made me notice: the imperative spec was, in effect,
+  papering over the fact that templedb's declarative substrate isn't
+  being fully exercised. Sessions, deploy stages, and file mirrors are
+  all things that <em>could</em> already be first-class entities but
+  aren't yet. Once they are, the "fix" reduces to "add an invariant."
+  That's the same pattern the earlier Phase-3 migration to
+  observer/integrator followed — pull mutable procedural state up into
+  the graph, then let doctor and reconcile do the enforcement.
+</p>
+
+<p>
+  If we go this direction, the natural next step after landing §1/§3+§4
+  is to look for other imperative pockets that should be declarative
+  facts. My hunch: <code>project_tests</code>,
+  <code>fleet_deployments</code>, and the various nix cache / eval-cache
+  timers are candidates. But that's a different session.
+</p>
+
+</body>
+</html>

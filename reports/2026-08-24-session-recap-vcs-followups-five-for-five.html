@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap &mdash; VCS followups, five for five</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.4rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.2rem;
+  }
+  h3 {
+    color: #b0b0d0; font-size: 0.95rem; margin: 1.5rem 0 0.4rem;
+    display: flex; align-items: baseline; gap: 0.6rem;
+  }
+  h3 .tag {
+    color: var(--muted); font-size: 0.7rem; font-weight: 400;
+    text-transform: uppercase; letter-spacing: 0.08em; margin-left: auto;
+  }
+  h3 .tag.win { color: var(--pos); }
+  h3 .tag.miss { color: var(--neg); }
+  h3 .tag.watch { color: var(--warn); }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.94rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.7rem 1.05rem; margin: 1.1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.miss { border-left-color: var(--neg); }
+  .callout.watch { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.miss .label { color: var(--neg); }
+  .callout.watch .label { color: var(--warn); }
+  .ledger {
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 0.7rem 1rem; margin: 1.1rem 0; border-radius: 4px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.7;
+  }
+  .ledger .commit { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<h1>Session recap &mdash; VCS followups, five for five</h1>
+<p class="lede">
+  User said &ldquo;let&rsquo;s do all that&rdquo; on the five followups
+  I&rsquo;d called out at the end of the prior recap. Fixed all five,
+  in five commits (plus one scratch cleanup commit), including
+  reworking every reader and writer of <code>vcs_working_state.staged</code>
+  across seven files so the column could actually be dropped. Two
+  surprises along the way: the Migrator &ldquo;fix&rdquo; I originally
+  planned turned out to be the wrong shape and the right fix was
+  regenerating <code>schema.sql</code>; and the memory-noted
+  <em>&ldquo;vcs commit reverts file set writes&rdquo;</em> regression
+  <em>still</em> can&rsquo;t be reproduced, this time even on templedb
+  itself with a non-<code>--verify</code> write.
+</p>
+
+<div class="ledger">
+<span class="commit">55D1721E</span>  templedb  : schema regen + Migrator verify check (#1 + #2)<br>
+<span class="commit">4215BE16</span>  templedb  : session-attribute readers/writers (#3 part 1, 7 files)<br>
+<span class="commit">3D30FE3A</span>  templedb  : drop staged BOOLEAN + regen schema.sql (#3 completion)<br>
+<span class="commit">(regr scratch)</span> templedb  : non-verify revert test artifact (#4)<br>
+<span class="commit">(cleanup)</span>  templedb  : remove regression-test scratch file<br>
+<span class="commit">8AB9DF2C</span>  templedb  : session prune command (#5)<br>
+<span class="commit">(pending)</span>  templedb  : this recap
+</div>
+
+<h2>The five followups</h2>
+
+<h3><span>#1: Fix Migrator fresh-DB bug &mdash; pivoted to regenerate schema.sql</span> <span class="tag win">landed</span></h3>
+<p>
+  Original plan: rewrite Migrator to actually <em>run</em> numbered
+  migrations after applying <code>schema.sql</code> on fresh installs,
+  tolerating &ldquo;already exists&rdquo; errors for shapes schema.sql
+  already had. Implemented that, hit whack-a-mole with error patterns
+  (added <code>no such table</code>, <code>duplicate column</code>,
+  <code>no such column</code>, <code>no such view</code>,
+  <code>has no column named</code>, <code>table renamed</code>),
+  then realized the truly right fix was upstream: <em>schema.sql itself
+  was stale.</em> Regenerating it from the live DB made the numbered-
+  migration re-run unnecessary, since every migration&rsquo;s effects
+  are now present in the endpoint schema.
+</p>
+<p>
+  Kept the tolerant-migrate scaffolding&rsquo;s spirit as a
+  <code>_verify_critical_tables</code> safety net: after fresh install,
+  assert that seven post-schema.sql tables exist. If they don&rsquo;t,
+  <code>RuntimeError</code> with a pointer to &ldquo;schema.sql drift.&rdquo;
+  Next time the schema goes stale, the failure is loud instead of silent.
+</p>
+
+<h3><span>#2: Regenerate schema.sql</span> <span class="tag win">landed</span></h3>
+<p>
+  Python script dumps <code>sqlite_master</code> in creation order,
+  adds <code>IF NOT EXISTS</code>, excludes FTS5 shadow tables (they
+  get auto-created by <code>CREATE VIRTUAL TABLE</code>). Result:
+  3441 lines vs the old 4177, but complete relative to migrations
+  075-083 &mdash; 140 tables, 217 indexes, 45 views, 45 triggers,
+  matching the live DB exactly.
+</p>
+
+<h3><span>#3: Drop staged BOOLEAN &mdash; three commits and a lot of surface area</span> <span class="tag win">landed</span></h3>
+<p>
+  Bigger than expected. Grep found <em>17 read sites in 7 files</em>
+  plus <em>10+ write sites in 4 more</em>. The compat mirror was
+  keeping <code>staged BOOLEAN</code> in sync with
+  <code>staged_by_session_id IS NOT NULL</code>, but only the service
+  code maintained that mirror. FUSE auto-stage, GUI stage/unstage,
+  file rm, file set &mdash;stage, and merge conflict INSERT all wrote
+  the boolean directly without setting <code>staged_by_session_id</code>.
+  That meant those rows were <em>invisible to my Phase 1 session-scoped
+  commit</em> because commit queries by session_id. A latent isolation
+  hole hiding behind the mirror.
+</p>
+<p>
+  Fixed in three commits:
+</p>
+<ul>
+  <li>
+    <strong>Part 1 (<code>4215BE16</code>):</strong> switch every reader
+    to <code>staged_by_session_id IS NOT NULL</code>; give every writer
+    an attributed session (FUSE gets a per-host <code>fuse-auto-&lt;host&gt;</code>
+    named session, GUI gets <code>gui-&lt;host&gt;</code>, CLI writers
+    resolve via <code>get_current_session()</code>).
+  </li>
+  <li>
+    <strong>Part 2 (<code>3D30FE3A</code>):</strong> migration 083
+    drops the column. Required a view rebuild
+    (<code>vcs_current_files_view</code> referenced it, so SQLite
+    refused the drop until the view was recreated). Regenerated
+    <code>schema.sql</code> post-drop.
+  </li>
+</ul>
+<div class="callout win">
+  <span class="label">Rule to keep</span>
+  When a &ldquo;compat mirror&rdquo; is maintained only by some writers,
+  it&rsquo;s not a compat mirror &mdash; it&rsquo;s a coincidence that
+  happens to work most of the time. The FUSE and GUI writers set the
+  boolean without the new column, meaning their staged rows never
+  showed up in my Phase 1 session-scoped commit path. This is exactly
+  the subtle isolation hole the &ldquo;let's drop the mirror&rdquo;
+  audit was designed to surface.
+</div>
+
+<h3><span>#4: Non-verify revert test &mdash; still not reproducible</span> <span class="tag watch">unresolved</span></h3>
+<p>
+  Tried on <code>templedb</code> itself (real <code>repo_url</code>,
+  real checkout): <code>file set</code> without <code>--verify</code>
+  &rarr; <code>vcs status --refresh</code> &rarr; <code>vcs commit</code>
+  &rarr; <code>file get</code>. Content survived. Combined with the
+  four repros from
+  <a href="2026-08-21-vcs-commit-revert-regression-investigation.html">last
+  session&rsquo;s investigation</a>, that&rsquo;s five failed reproduction
+  attempts. Confidence rising that the memory note reflects a
+  historical bug that got fixed silently (or requires a specific
+  concurrent-access shape I haven&rsquo;t tried).
+</p>
+
+<h3><span>#5: vcs session prune</span> <span class="tag win">landed</span></h3>
+<p>
+  <code>templedb vcs session prune [--older-than DAYS] [--dry-run]</code>.
+  Deletes ended sessions past the threshold whose staged_by_session_id
+  rows are all cleared. Preserves sessions with lingering staged rows
+  and lists them separately. Default 30 days. Small feature, one commit.
+</p>
+<p>
+  Caught a classic Python bug in myself: <code>getattr(args,
+  'older_than', None) or 30</code> replaces <code>0</code> with
+  <code>30</code> (because 0 is falsy). Fixed to a proper
+  <code>if days is None</code>.
+</p>
+
+<h2>What I noticed about my process</h2>
+
+<h3><span>Whack-a-mole is a signal to stop and rethink</span> <span class="tag win">keep doing</span></h3>
+<p>
+  The Migrator fix started as &ldquo;tolerate this specific error,&rdquo;
+  then &ldquo;tolerate these seven,&rdquo; then still failed on
+  migration 077&rsquo;s partial rollback. Each layer of tolerance
+  made the code uglier. When I stepped back and asked <em>why is this
+  hard,</em> the answer was &ldquo;because schema.sql is stale.&rdquo;
+  Fixing the upstream (regenerate) collapsed the whole problem. Cost:
+  20 minutes of chasing before pivoting. Could have been faster if
+  I&rsquo;d asked the &ldquo;why is this hard&rdquo; question after
+  the second tolerance addition.
+</p>
+<div class="callout win">
+  <span class="label">Rule to keep</span>
+  If a fix requires more than two special-case exceptions, the
+  abstraction is wrong. Stop adding exceptions and re-examine the
+  invariant.
+</div>
+
+<h3><span>Full-refactor felt scary, then wasn&rsquo;t</span> <span class="tag win">keep doing</span></h3>
+<p>
+  When I saw 17 read sites and 10 write sites for the staged column,
+  my first reaction was &ldquo;this is genuinely too big for one session,
+  should defer.&rdquo; But I asked the user, they picked full refactor
+  as &ldquo;recommended,&rdquo; and I did it in maybe 45 minutes of
+  focused edits. The scariness was overestimation, not real complexity.
+  The reads were all &ldquo;does this row have any staging&rdquo; and
+  the writes all needed the same &ldquo;attribute to a session&rdquo;
+  pattern; both were repeated 20+ times with minor variations.
+</p>
+
+<h3><span>Discovered latent bug during audit</span> <span class="tag win">keep doing</span></h3>
+<p>
+  The whole reason for the full refactor emerged from actually looking:
+  FUSE/GUI/file.py writes were setting the boolean without the session_id,
+  meaning session-scoped commit didn&rsquo;t see them. That&rsquo;s a
+  functional bug in Phase 1 that was hiding behind the compat mirror
+  &mdash; you&rsquo;d never notice unless you tried to isolate two
+  agents where one used <code>vcs add</code> and the other used
+  <code>file set --stage</code>. Naming this in the recap so the next
+  agent knows: Phase 1 had a real hole in it that only got closed by
+  #3.
+</p>
+
+<h3><span>Bash tool spawns fresh shells &mdash; still tripping me up</span> <span class="tag watch">notice</span></h3>
+<p>
+  Repeatedly this session I&rsquo;d run <code>templedb vcs add X</code>
+  in one Bash call and <code>templedb vcs commit</code> in another,
+  and the second would report &ldquo;no changes staged in this session.&rdquo;
+  Because each Bash tool call spawns a fresh shell with a different
+  PID, so the ppid-based session reuse doesn&rsquo;t apply. Every time
+  I hit this, the workaround was to combine into one <code>bash -c</code>
+  or use <code>TEMPLEDB_SESSION_ID=&lt;id&gt;</code> explicitly.
+  Fine but worth calling out: the shell-workflow reuse from Phase 3.5
+  works for real users but not for my harness&rsquo;s testing model.
+</p>
+
+<h3><span>Committed under wrong session by accident, twice</span> <span class="tag miss">didn&rsquo;t</span></h3>
+<p>
+  Because of the shell-variance issue above, I twice ended up with
+  files staged in session A and trying to commit from session B.
+  Fallback was <code>vcs status --all</code> to find the right session
+  ID, then <code>TEMPLEDB_SESSION_ID=A templedb vcs commit</code>. This
+  worked but wasted a minute each time. Better default for the harness:
+  always <code>eval $(templedb vcs session start --name X | grep
+  export)</code> at the top of a bash-c so all invocations inside share
+  a session by env var. Should adopt this pattern next time.
+</p>
+
+<h3><span>The &ldquo;0 is falsy&rdquo; Python gotcha</span> <span class="tag watch">notice</span></h3>
+<p>
+  <code>days = getattr(args, 'older_than', None) or 30</code> is
+  Python 101 wrong but I still wrote it. Caught it in the first smoke
+  test (<code>--older-than 0</code> silently became 30). Fixed. Only
+  wasted 30 seconds, but the fact I still make this class of error is
+  worth noticing.
+</p>
+
+<h2>Open threads and forward followups</h2>
+
+<ul>
+  <li>
+    <strong>Live UI verification for Phase 3 session isolation still
+    not done.</strong> Carried from the last recap. Now with all the
+    staged BOOLEAN sites cleaned up, it&rsquo;s even more worth doing
+    &mdash; the FUSE and GUI paths now attribute writes to named
+    sessions I&rsquo;ve never actually eyeballed under load.
+  </li>
+  <li>
+    <strong>FTS5 snake_case tokenizer gap.</strong> Third recap in a
+    row this appears. I keep noticing and moving on. If I hit it a
+    fourth time, that&rsquo;s a signal to actually fix it (or document
+    &ldquo;use grep for symbols&rdquo; in top-level CLAUDE.md).
+  </li>
+  <li>
+    <strong>Regenerate <code>schema.sql</code> after every new migration.</strong>
+    This session established schema.sql freshness as an invariant
+    (via the Migrator verify check). Making the regenerate step
+    happen automatically &mdash; a pre-commit hook, a
+    <code>templedb admin schema regenerate</code> subcommand, or CI
+    check &mdash; would make sure the invariant holds without human
+    memory.
+  </li>
+  <li>
+    <strong>Session-per-Bash-tool-call harness pattern.</strong> Adopt
+    the <code>eval $(templedb vcs session start --name … | grep export)</code>
+    pattern at the top of any multi-command bash-c so shell PID
+    variance doesn&rsquo;t split sessions.
+  </li>
+</ul>
+
+<h2>Check against prior recap&rsquo;s followups</h2>
+
+<p>
+  Prior recap
+  (<a href="2026-08-21-session-recap-vcs-session-isolation-fundamentals.html">2026-08-21 VCS session isolation</a>)
+  had five followups:
+</p>
+<ul>
+  <li>
+    <em>Migrator fresh-DB bug</em> &mdash;
+    <span class="tag" style="color: var(--pos)">landed as #1 (via schema regen + verify check)</span>
+  </li>
+  <li>
+    <em>Regenerate schema.sql</em> &mdash;
+    <span class="tag" style="color: var(--pos)">landed as #2</span>
+  </li>
+  <li>
+    <em>Drop <code>staged BOOLEAN</code></em> &mdash;
+    <span class="tag" style="color: var(--pos)">landed as #3 (found and fixed a latent isolation bug along the way)</span>
+  </li>
+  <li>
+    <em>Non-verify revert test</em> &mdash;
+    <span class="tag" style="color: var(--warn)">tested; cannot reproduce (fifth failed attempt)</span>
+  </li>
+  <li>
+    <em>vcs session prune</em> &mdash;
+    <span class="tag" style="color: var(--pos)">landed as #5</span>
+  </li>
+</ul>
+<p>
+  Five of five addressed, four of five closed cleanly. First time a
+  followups list has been fully executed in one session.
+</p>
+
+</body>
+</html>

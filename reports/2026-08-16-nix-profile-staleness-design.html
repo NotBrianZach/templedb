@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nix-profile staleness: how to stop being surprised by which templedb ran</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --neg: #e97070;
+    --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 {
+    color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem;
+    display: flex; align-items: baseline; gap: 0.6rem;
+  }
+  h3 .tag {
+    color: var(--muted); font-size: 0.7rem; font-weight: 400;
+    text-transform: uppercase; letter-spacing: 0.08em; margin-left: auto;
+  }
+  h3 .tag.pick { color: var(--pos); }
+  h3 .tag.miss { color: var(--neg); }
+  h3 .tag.watch { color: var(--warn); }
+  h3 .tag.later { color: var(--muted); }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  pre code { background: none; padding: 0; color: var(--text); }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  a:hover { color: #a0daff; }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.pick { border-left-color: var(--pos); }
+  .callout.miss { border-left-color: var(--neg); }
+  .callout.watch { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.pick .label { color: var(--pos); }
+  .callout.miss .label { color: var(--neg); }
+  .callout.watch .label { color: var(--warn); }
+  table {
+    width: 100%; border-collapse: collapse; margin: 1rem 0;
+    font-size: 0.87em;
+  }
+  th, td {
+    text-align: left; padding: 0.55rem 0.7rem;
+    border-bottom: 1px solid var(--border); vertical-align: top;
+  }
+  th { color: var(--muted); font-weight: 600; font-size: 0.72rem;
+       text-transform: uppercase; letter-spacing: 0.06em; }
+  td.pos { color: var(--pos); }
+  td.neg { color: var(--neg); }
+  td.mid { color: var(--muted); }
+  .close {
+    margin-top: 3rem; padding-top: 1.5rem;
+    border-top: 1px solid var(--border); color: var(--muted);
+    font-size: 0.9rem; font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<h1>Nix-profile staleness: how to stop being surprised by which templedb ran</h1>
+<p class="lede">
+  Two consecutive session recaps flagged the same pattern: I edit templedb
+  source, test it via <code>templedb ...</code>, see stale behavior, spend
+  10&nbsp;minutes tracing before realizing the running binary is from the last
+  time I built the nix profile — not from what I just wrote to the DB. This
+  report explores the design space for fixing that: nine options across three
+  axes (awareness / freshness / packaging), a recommended phased path, and
+  the smaller nuances that decided it.
+</p>
+
+<h2>The failure mode, precisely</h2>
+
+<p>
+  What breaks isn't "I forgot to rebuild after a change." That framing implies
+  a discipline problem. The actual break happens inside a loop:
+</p>
+<pre><code>1.  Edit src/cli/commands/xxx.py via `templedb file set`
+2.  Refresh the checkout so the DB and disk match
+3.  Run `templedb xxx --help` to verify the flag lands
+4.  Flag not there. Assume typo. Reread source.
+5.  Source is correct. Assume caching. Clear __pycache__.
+6.  Still not there. Trace. Discover /home/zach/.nix-profile/bin/templedb
+    predates the edit.
+7.  Realize: `-m cli` under a frozen PYTHONPATH ignores everything
+    in the checkout.
+</code></pre>
+<p>
+  Steps 4–6 are the wasted time. The user's problem isn't that the code
+  didn't rebuild — it's that <em>they got no signal that they were about to
+  fail</em>. Any good fix has to attack step 3 or 4: either make the running
+  code fresh, or make the staleness visible immediately.
+</p>
+
+<div class="callout watch">
+  <span class="label">Two axes, not one</span>
+  There are actually <strong>two</strong> possible sources of staleness in
+  play, and confusing them leads to bad fixes:
+  <ol>
+    <li><strong>Package staleness</strong> — the nix-profile-installed
+        <code>templedb</code> is older than what's in the DB.</li>
+    <li><strong>Checkout staleness</strong> — the materialized checkout at
+        <code>~/.config/templedb/checkouts/templedb/src</code> is older than
+        the DB.</li>
+  </ol>
+  Fixes that route around package staleness by preferring the checkout still
+  fail if the checkout itself is stale. Any awareness mechanism should watch
+  both.
+</div>
+
+<h2>The design space</h2>
+
+<p>
+  Nine options, grouped by what they attack:
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Option</th>
+      <th>Attacks</th>
+      <th>Effort</th>
+      <th>Behavior change</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>0</td>
+      <td>Discipline (do nothing)</td>
+      <td class="mid">nothing</td>
+      <td class="pos">0 LOC</td>
+      <td class="neg">no</td>
+    </tr>
+    <tr>
+      <td>1</td>
+      <td>Startup staleness banner</td>
+      <td>awareness</td>
+      <td class="pos">~40 LOC</td>
+      <td class="pos">warning only</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>Env-var checkout-priority (<code>TEMPLEDB_DEV_MODE</code>)</td>
+      <td>freshness</td>
+      <td>~30 LOC + PYTHONPATH tweak</td>
+      <td>opt-in only</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>Per-invocation flag (<code>templedb --dev …</code>)</td>
+      <td>freshness</td>
+      <td>~50 LOC</td>
+      <td>opt-in only</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>Two-tier CLI (<code>templedb</code> + <code>templedb-dev</code>)</td>
+      <td>freshness</td>
+      <td>~100 LOC + nix package change</td>
+      <td>additive</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>direnv <code>.envrc</code> in the repo</td>
+      <td>freshness</td>
+      <td>~10 LOC + direnv</td>
+      <td>zero (per-shell)</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td>Auto-rebuild on staleness</td>
+      <td>freshness</td>
+      <td>~150 LOC</td>
+      <td class="neg">invasive</td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td>Systemd watcher rebuilds on HEAD change</td>
+      <td>freshness</td>
+      <td>~200 LOC + systemd unit</td>
+      <td class="neg">invasive</td>
+    </tr>
+    <tr>
+      <td>8</td>
+      <td>Launcher-as-entrypoint (nix package uses templedb_launcher.py)</td>
+      <td>freshness</td>
+      <td>~50 LOC + nix package change</td>
+      <td>changes semantics</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Deeper on each</h2>
+
+<h3><span>0. Discipline</span> <span class="tag miss">skip</span></h3>
+<p>
+  The only option that requires no engineering. It's also the one that
+  provably doesn't work — this pattern showed up in <em>two consecutive
+  session recaps</em> despite each recap flagging it as important to
+  remember. If discipline worked, we wouldn't be having this conversation.
+  Ruling it out isn't laziness; it's honesty about how the failure
+  actually manifests.
+</p>
+
+<h3><span>1. Startup staleness banner</span> <span class="tag pick">phase&nbsp;1</span></h3>
+<p>
+  On each <code>templedb</code> invocation, before dispatching:
+</p>
+<pre><code># In cli/__init__.py:main(), before command dispatch
+if os.environ.get("TEMPLEDB_DEV_MODE"):
+    banner = _check_staleness()
+    if banner: print(banner, file=sys.stderr)
+
+def _check_staleness():
+    """Return a one-line warning if package or checkout is behind DB HEAD."""
+    installed_ver = _installed_package_version()   # from setup.py or a stamp file
+    db_head = _db_head_commit("templedb")           # SELECT head_commit_id ...
+    if installed_ver != db_head:
+        n = _commits_between(installed_ver, db_head)
+        return f"⚠  templedb pkg is {n} commit(s) behind DB HEAD " \
+               f"(run `templedb build && nix profile upgrade templedb`)"
+    return None
+</code></pre>
+<ul>
+  <li><strong>Where</strong> — <code>cli/__init__.py</code>'s <code>main()</code>,
+      before argparse. Runs on every invocation regardless of subcommand.</li>
+  <li><strong>What to check</strong> — package version (stamp file baked in
+      at nix build time), <em>and</em> checkout HEAD if the checkout is
+      referenced. Both axes.</li>
+  <li><strong>When to suppress</strong> — <code>--json</code>,
+      <code>--quiet</code>, or when <code>TEMPLEDB_DEV_MODE</code> is unset.
+      Opt-in avoids nagging users who don't develop templedb itself.</li>
+  <li><strong>Cost</strong> — one SQLite query (~1ms), one file stat.
+      Negligible per invocation.</li>
+</ul>
+<div class="callout pick">
+  <span class="label">Why start here</span>
+  Doesn't <em>fix</em> the problem, but eliminates the 10-minute diagnosis
+  step. That was the actual pain. And it composes with every other option
+  below — even with launcher-as-entrypoint (option 8), the banner still
+  helps by flagging checkout staleness.
+</div>
+
+<h3><span>2. Env-var checkout-priority</span> <span class="tag pick">phase&nbsp;1</span></h3>
+<p>
+  When <code>TEMPLEDB_DEV_MODE=1</code>, prepend the checkout src to
+  <code>sys.path</code> so newer code wins. Implementation is subtle because
+  it has to happen <strong>before any <code>from cli.* import</code></strong>
+  — once a module is imported, changing sys.path doesn't unload it.
+</p>
+<p>
+  Cleanest path: modify the wrapper (or the very first line of
+  <code>cli/__init__.py</code>) to check the env var and manipulate sys.path
+  or PYTHONPATH before further imports:
+</p>
+<pre><code># cli/__init__.py — must be the first executable statement
+import os, sys
+from pathlib import Path
+if os.environ.get("TEMPLEDB_DEV_MODE"):
+    checkout = Path.home() / ".config/templedb/checkouts/templedb/src"
+    if checkout.exists() and str(checkout) not in sys.path:
+        sys.path.insert(0, str(checkout))
+        # Wipe any already-cached cli.* submodules so re-imports come from checkout
+        for mod in list(sys.modules):
+            if mod == "cli" or mod.startswith("cli."):
+                del sys.modules[mod]
+</code></pre>
+<p>
+  Subtle bit: because we're modifying sys.path <em>inside</em>
+  <code>cli/__init__.py</code>, the containing module (<code>cli</code>) is
+  already loaded from the profile package. The wipe-and-reimport dance
+  handles that. Alternative: set <code>PYTHONPATH</code> in your shell rc
+  when <code>TEMPLEDB_DEV_MODE=1</code>, and Python does the priority
+  ordering naturally at import time — no re-import trickery needed.
+</p>
+
+<h3><span>3. Per-invocation flag</span> <span class="tag later">optional</span></h3>
+<p>
+  <code>templedb --dev ai vibe start --tmux</code>. Same mechanism as option
+  2 but explicit per call. Advantages: no hidden state across invocations;
+  scripts can pin behavior. Disadvantages: verbose, and if you forget the
+  flag you're back to the staleness problem — so it doesn't reduce the
+  awareness gap, just gives you a lever to pull once you know you need it.
+  Complements option 1 (banner tells you to add <code>--dev</code>).
+</p>
+
+<h3><span>4. Two-tier CLI</span> <span class="tag later">later</span></h3>
+<p>
+  Ship <code>templedb</code> (frozen, reproducible) and
+  <code>templedb-dev</code> (checkout-priority) as separate binaries in the
+  nix package. Users pick per invocation. Cleanest UX in one respect —
+  behavior is fully determined by the binary name — but doubles the
+  home-manager surface, and users who forget which they invoked have the
+  same problem in a different clothes.
+</p>
+<p>
+  Basically option 2 with visibility bought via binary duplication. Worth
+  considering only if the env-var approach turns out to be confusing in
+  practice.
+</p>
+
+<h3><span>5. direnv .envrc</span> <span class="tag later">nice&nbsp;add-on</span></h3>
+<p>
+  A <code>.envrc</code> at the repo root (well, wherever your templedb
+  checkout lives — for you it's likely <code>~/templeDB</code>) that
+  activates dev mode when you <code>cd</code> in:
+</p>
+<pre><code># .envrc
+export TEMPLEDB_DEV_MODE=1
+</code></pre>
+<p>
+  Requires <code>direnv</code> installed and hooked into your shell (it is,
+  or can be — one home-manager line). Composes perfectly with option 2: the
+  env var mechanism is already there, direnv just automates <em>when</em>
+  it's set. Great "I don't want to think about it" layer for people who
+  work on templedb in a specific directory.
+</p>
+
+<h3><span>6 &amp; 7. Auto-rebuild / systemd watcher</span> <span class="tag miss">skip</span></h3>
+<p>
+  Both fully automate the rebuild step, at real UX cost. A nix rebuild takes
+  30 seconds to several minutes; running one mid-CLI-invocation is
+  intolerable. A background watcher hides the rebuild from you but adds
+  race conditions (nix-profile mid-upgrade while another
+  <code>templedb</code> is running) and failure modes (rebuild fails
+  silently, you don't notice). Overkill for a solo-dev machine. Would revisit
+  if the fleet grows and multiple humans are pushing templedb changes.
+</p>
+
+<h3><span>8. Launcher-as-entrypoint</span> <span class="tag pick">phase&nbsp;2</span></h3>
+<p>
+  The nix package already ships a Python program that does exactly what we
+  want: <code>templedb_launcher.py</code>. It:
+</p>
+<ol>
+  <li>Checks if <code>~/.config/templedb/checkouts/templedb/src</code>
+      exists.</li>
+  <li>If so, prepends it to <code>sys.path</code> — checkout wins.</li>
+  <li>Then imports <code>cli</code> and dispatches.</li>
+</ol>
+<p>
+  Right now that launcher only runs when you invoke
+  <code>/home/zach/templeDB/templedb</code> (the local dev wrapper). The
+  nix-profile-installed <code>templedb</code> uses
+  <code>python3 -m cli</code> directly, bypassing the launcher entirely.
+</p>
+<p>
+  <strong>The fix: bundle a copy of <code>templedb_launcher.py</code> inside
+  the nix package and change the wrapper to invoke it.</strong>
+</p>
+<pre><code># Current nix wrapper (bin/templedb):
+exec python3 -m cli "$@"
+
+# Proposed:
+exec python3 /nix/store/xxx/lib/python3.13/site-packages/_launcher.py "$@"
+</code></pre>
+<p>
+  With this change, the checkout automatically wins whenever it exists —
+  <em>no env var required, no per-invocation flag, no discipline</em>.
+  Everyone with a checkout gets fresh code by default; everyone without a
+  checkout still gets the frozen nix package. The launcher's fallback logic
+  handles both cases without branching from the user's side.
+</p>
+<div class="callout watch">
+  <span class="label">The semantics shift</span>
+  Today: <code>templedb</code> is reproducible; running it on any machine
+  with the same nix generation gives the same behavior. After option 8:
+  <code>templedb</code> is checkout-dependent; two machines with the same
+  nix generation give different behavior if one has a stale checkout and
+  the other doesn't. This is a real trade-off.
+  <br><br>
+  Mitigation: gate the checkout-preference on <code>TEMPLEDB_DEV_MODE=1</code>
+  even in the launcher, so reproducibility is the default and dev mode is
+  opt-in. That collapses option 8 into "option 2, but bundled with the
+  package instead of requiring per-user sys.path setup." Still an
+  improvement because the wire-up work is done once at package time, not
+  per user.
+</div>
+<p>
+  Alternatively, keep option 8 unconditional (checkout always wins if
+  present) and rely on the banner (option 1) to remind you when the checkout
+  is stale. Two-check awareness, single-source freshness.
+</p>
+
+<h2>What actually solves the pattern</h2>
+
+<p>
+  The failure was <em>step 4 of the loop above</em> — assuming a typo when
+  the real cause was staleness. Every option below can be evaluated by how
+  well it attacks that exact moment:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>What happens at step 4?</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>0 Discipline</td><td class="neg">Same loop.</td></tr>
+    <tr>
+      <td>1 Banner</td>
+      <td class="pos">Banner is already visible from step 3. You read it, run
+          the rebuild, done. 30-second recovery instead of 10-minute.</td>
+    </tr>
+    <tr>
+      <td>2 Env-var</td>
+      <td class="pos">If dev mode was set, step 4 never happens — checkout
+          was preferred at step 3.</td>
+    </tr>
+    <tr>
+      <td>3 Per-invocation flag</td>
+      <td class="mid">Only helps if you remembered to pass <code>--dev</code>
+          at step 3. If you forgot, back to the same loop.</td>
+    </tr>
+    <tr>
+      <td>4 Two-tier</td>
+      <td class="mid">Only helps if you invoked <code>templedb-dev</code> at
+          step 3. Otherwise same loop.</td>
+    </tr>
+    <tr>
+      <td>5 direnv</td>
+      <td class="pos">If you're in the repo directory, dev mode is already
+          on. Step 4 never happens.</td>
+    </tr>
+    <tr>
+      <td>6/7 Auto-rebuild</td>
+      <td class="mid">Prevents step 4 but at the cost of an unpredictable
+          latency at step 3.</td>
+    </tr>
+    <tr>
+      <td>8 Launcher-as-entrypoint</td>
+      <td class="pos">Checkout wins by default; step 4 never happens on any
+          machine with a checkout.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Recommendation: a three-phase path</h2>
+
+<div class="callout pick">
+  <span class="label">Phase 1 — cheap and immediate</span>
+  Ship <strong>option 1 (banner)</strong> and <strong>option 2 (env-var
+  checkout-priority)</strong> in the same commit. Roughly 70 LOC total,
+  no packaging changes. Behavior:
+  <br><br>
+  • Default: unchanged. <code>templedb</code> uses the frozen nix package,
+    prints nothing extra.<br>
+  • With <code>TEMPLEDB_DEV_MODE=1</code>: checkout is preferred; a warning
+    prints to stderr if the checkout is behind DB HEAD.<br>
+  • With <code>TEMPLEDB_DEV_MODE=1</code> and no checkout: banner warns
+    that dev mode is on but no checkout exists.
+</div>
+
+<div class="callout pick">
+  <span class="label">Phase 2 — after Phase 1 has been used for a couple weeks</span>
+  Add <strong>option 8 (launcher-as-entrypoint)</strong> — bundle
+  <code>templedb_launcher.py</code> in the nix package and switch the
+  wrapper to invoke it. Keep the <code>TEMPLEDB_DEV_MODE</code> gate so
+  reproducibility remains the default. This collapses phase 1's env-var
+  setup into "just works," and the banner still watches for checkout
+  staleness. Requires touching <code>flake.nix</code> in templedb; scoped
+  to the packaging derivation, no runtime code changes.
+</div>
+
+<div class="callout later">
+  <span class="label">Phase 3 — nice-to-have, low cost</span>
+  Drop an <strong>option 5 (direnv .envrc)</strong> in the templedb repo
+  root. Anyone with direnv gets dev-mode auto-activation when they
+  <code>cd</code> in. Optional; pure convenience layer over phase 1/2.
+</div>
+
+<h2>Non-goals</h2>
+
+<ul>
+  <li><strong>Automatic rebuilds.</strong> Options 6 and 7 both hide the
+      rebuild cost from you at real UX cost. Don't do this. The banner
+      tells you when to rebuild; humans decide when to pay the latency.</li>
+  <li><strong>Making the frozen package behavior go away.</strong> Nix's
+      reproducibility guarantee is why the profile-installed
+      <code>templedb</code> is trustable in the first place. Anything that
+      breaks reproducibility for <em>non-dev</em> users would be net
+      negative.</li>
+  <li><strong>Solving this on other people's machines.</strong> The
+      pattern hits me because I develop templedb <em>on</em> the machine
+      that runs it. Users who only consume templedb (fresh install, no
+      checkout) will never see the staleness problem, and the phase 1/2
+      changes are silent for them.</li>
+</ul>
+
+<h2>Implementation notes to future-me</h2>
+
+<h3>Where to get the "installed package version"</h3>
+<p>
+  For the banner to compare "installed" vs "HEAD," it needs to know its own
+  version. Options:
+</p>
+<ul>
+  <li><strong>Nix package stamp file</strong> — write a
+      <code>_version.py</code> at build time containing the templedb git
+      revision the package was built from. Read it in the banner check.
+      Clean; requires modifying <code>flake.nix</code>.</li>
+  <li><strong>File mtime</strong> — compare
+      <code>datetime.fromtimestamp(Path(sys.modules['cli'].__file__).stat().st_mtime)</code>
+      against the newest vcs_commits.commit_timestamp. Approximate but
+      requires no packaging change.</li>
+  <li><strong>Nix store hash</strong> — walk
+      <code>Path(sys.executable).parent.parent</code> to get the store path,
+      diff against the current profile generation's templedb store path.
+      Fragile.</li>
+</ul>
+<p>
+  Recommend the stamp file for phase 1 (small addition to flake.nix), or
+  the mtime approach if we want to ship without touching the packaging.
+</p>
+
+<h3>Where to put the sys.path manipulation</h3>
+<p>
+  The env-var check needs to run before any <code>cli.commands.*</code>
+  import happens. The absolute earliest place is the top of
+  <code>cli/__init__.py</code>. Second-earliest is a
+  <code>sitecustomize.py</code> in the nix-installed site-packages —
+  runs before any user code but harder to maintain because it's a
+  package-level concern hidden in a Python startup hook.
+</p>
+<p>
+  Path of least surprise: top of <code>cli/__init__.py</code>, before the
+  <code>from cli.commands import ...</code> line. If the env var is set,
+  wipe already-loaded <code>cli.*</code> from <code>sys.modules</code> and
+  re-import. Ten lines.
+</p>
+
+<h3>Banner throttling</h3>
+<p>
+  Even at ~1ms per invocation, printing the banner every time is noisy in
+  scripts. Cheap throttle: cache the last-seen "no staleness" state to
+  <code>~/.cache/templedb/staleness_ok</code> with a 5-minute mtime; if
+  fresh, skip the check entirely. On staleness, always print. Costs one
+  <code>stat</code> per invocation.
+</p>
+
+<h2>What this means for the next few days</h2>
+
+<p>
+  If phase 1 ships (roughly one focused session), the exact loop that
+  showed up in the last two recaps stops showing up. That's the specific
+  followup this report is proposing to <em>close</em>, not to add. If phase
+  2 ships (another session, with a packaging change and a nix rebuild),
+  <code>templedb</code> becomes correctly reactive to the checkout without
+  any env-var setup — a step toward "the CLI just works" as a baseline.
+</p>
+
+<p>
+  If neither ships and a third recap flags the same pattern, that's a
+  signal the problem isn't cost-of-implementation, it's priority. In
+  which case the honest move is to either commit to fixing it or stop
+  pretending I care by mentioning it in every recap.
+</p>
+
+<div class="close">
+  Nine options, three phases, one recommendation. Banner + env-var first
+  (cheap, no packaging change), launcher-as-entrypoint second (real fix,
+  small packaging change). Everything above phase 2 is diminishing returns
+  or actively worse UX. If phase 1 doesn't ship by the third recap that
+  flags this pattern, the problem is priority, not design.
+</div>
+
+</body>
+</html>

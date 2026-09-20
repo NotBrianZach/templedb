@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap 9: CRSql shadows for entity graph — plumbing lands, collision found</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --warn: #e0c060; --neg: #e97070;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.82em; line-height: 1.6; margin: 0.9rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+             font-size: 0.93em; }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.neg { border-left-color: var(--neg); }
+  .callout .label { display: block; font-size: 0.7rem;
+                    text-transform: uppercase; letter-spacing: 0.1em;
+                    margin-bottom: 0.3rem; color: var(--accent); }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  .callout.neg .label { color: var(--neg); }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<h1>Session recap 9: CRSql shadows for entity graph — plumbing lands, collision found</h1>
+<p class="lede">
+  Item 1 from <code>docs/NEXT_SESSION_PICKUPS.md</code>: extend CRSql
+  shadow tables to cover <code>entities</code> and <code>relations</code>.
+  Landed migration 101 + write-through triggers + reconcile extensions
+  + wired the orphaned <code>templedb sync</code> CLI. All 10 checklist
+  steps executed on <code>/tmp/scratch.sqlite</code>; step 10
+  (production migration) held pending resolution of a
+  <strong>shadow.id collision</strong> the two-instance test surfaced.
+  Committed as <code>2F54B2E7</code>. Not yet in production.
+</p>
+
+<h2>What actually got done</h2>
+
+<h3>1. Two shadow tables + full CRR trigger machinery</h3>
+<p>
+  <code>sync_entities</code> and <code>sync_relations</code> follow the
+  standard 7-object CRSql layout (shadow +
+  <code>__crsql_clock</code> + <code>__crsql_pks</code> +
+  <code>_itrig</code>/<code>_utrig</code>/<code>_dtrig</code>). UNIQUE,
+  FK, and CHECK constraints from the main tables are dropped, since
+  CRSql prohibits UNIQUE on CRRs.
+</p>
+
+<h3>2. Scope-filtered population</h3>
+<p>
+  <code>_populate_shadow_tables</code> in <code>sync_engine.py</code>
+  gained two INSERT queries. Entities filter by
+  <code>sync_scope='fleet'</code> directly. Relations derive scope
+  from endpoints, because migration 099 landed
+  <code>relations.sync_scope</code> as a column but no ingest adapter
+  populates it. A relation enters the CRR iff both endpoints are
+  fleet-scope. Result: 3,022 of 30k entities and 3,191 of 40k
+  relations enter the CRR — roughly 10% of the graph, same ballpark
+  the prep report projected.
+</p>
+
+<h3>3. Write-through triggers (migration 101)</h3>
+<p>
+  Six triggers on the main tables propagate fleet-scope writes to
+  the shadows automatically:
+</p>
+<pre>entities_sync_fleet_ins    AFTER INSERT ... WHEN NEW.sync_scope = 'fleet'
+entities_sync_fleet_upd    AFTER UPDATE ... WHEN NEW.sync_scope = 'fleet'
+entities_sync_unfleet      AFTER UPDATE ... WHEN OLD.sync_scope = 'fleet'
+                                          AND NEW.sync_scope IS NOT 'fleet'
+entities_sync_del          AFTER DELETE ...
+
+relations_sync_fleet_ins   AFTER INSERT ... (endpoint-derived scope via subquery)
+relations_sync_fleet_upd   AFTER UPDATE ... (same)
+relations_sync_del         AFTER DELETE ...</pre>
+<p>
+  All six use <code>INSERT ... ON CONFLICT(id) DO UPDATE</code>
+  rather than <code>INSERT OR REPLACE</code>. The <code>REPLACE</code>
+  path is DELETE+INSERT internally, which fires CRSql's <code>dtrig</code>
+  before its <code>itrig</code> and causes a UNIQUE-on-<code>id</code>
+  failure during reconcile-fed cascades. On-conflict-do-update sidesteps
+  that.
+</p>
+
+<h3>4. Reconcile extensions</h3>
+<p>
+  <code>reconcile_to_main()</code> now projects shadow rows into
+  <code>entities</code>/<code>relations</code> using the natural key
+  <code>(kind, external_ref)</code> for entities and translating
+  endpoint IDs through the same natural key for relations. Local
+  IDs are preserved; peer IDs never bleed into local main. Rows
+  whose endpoints don't resolve are silently skipped — the entity
+  reconcile runs first, so the normal case is the endpoint has
+  already landed by the time its relation is projected.
+</p>
+
+<h3>5. Wired the orphaned <code>templedb sync</code> CLI</h3>
+<p>
+  <code>src/cli/commands/sync.py</code> has always defined
+  <code>register(cli)</code> with seven subcommands, but nothing in
+  <code>src/cli/__init__.py</code> called it — so
+  <code>templedb sync init</code> printed <em>Unknown command</em>.
+  Same pattern as the <code>templedb ast</code> orphan fixed in
+  <code>F95251D8</code>. Added the import and the
+  <code>sync.register(cli)</code> line.
+</p>
+
+<h2>The collision that stopped step 10</h2>
+
+<div class="callout neg">
+  <span class="label">Design gap</span>
+  <p>
+    <strong>Two-instance convergence works only when the two DBs'
+    shadow IDs don't collide.</strong> In real fleet use, they will.
+  </p>
+</div>
+
+<p>
+  The two-instance test spun up
+  <code>/tmp/scratch.sqlite</code> and <code>/tmp/scratch2.sqlite</code>
+  (both copies of prod, with the scratch2 <code>crsql_site_id</code>
+  reset so CRSql regenerated a distinct site). A on scratch inserts
+  an entity — SQLite assigns ROWID <code>30460</code>. B on scratch2
+  independently inserts a <em>different</em> entity — SQLite also
+  assigns <code>30460</code>, because the two databases' ROWID
+  counters advanced independently from the same starting point.
+</p>
+<p>
+  When A's changes ship over and land in B's <code>sync_entities</code>,
+  CRSql's last-writer-wins collapses the two <code>id=30460</code>
+  shadow rows into one. The losing row is silently dropped — its
+  entity never reaches B's main table. Post-sync, A has both entities,
+  B has only its own. Test result:
+</p>
+<pre>A: [('conv-A', 'from-A'), ('conv-B', 'from-B')]
+B: [('conv-B', 'from-B')]</pre>
+<p>
+  Repeating the test with <em>explicit non-colliding IDs</em>
+  (<code>INSERT ... (id, ...) VALUES (900001, ...)</code> on A and
+  <code>900002</code> on B) produced full convergence:
+</p>
+<pre>A: [('conv-A-2', 'from-A'), ('conv-B-2', 'from-B')]
+B: [('conv-A-2', 'from-A'), ('conv-B-2', 'from-B')]</pre>
+<p>
+  So the CRSql plumbing, migration, write-through triggers, and
+  reconcile all work correctly. The problem is upstream of any of
+  that: <strong>SQLite ROWID allocation is per-DB, and any two
+  machines making concurrent inserts on the same table will collide
+  on the shadow's PK</strong>.
+</p>
+
+<h3>Options for fixing (deferred to next session)</h3>
+<ul>
+  <li>
+    <strong>Site-prefixed IDs.</strong> Reserve the top bits of the
+    64-bit ROWID for a per-machine site index. Requires either an
+    <code>AFTER INSERT</code> trigger that rewrites the ROWID (SQLite
+    doesn't allow that) or an explicit <code>INSERT (id, …)</code>
+    pattern in every writer with a globally-coordinated site index.
+    Would need adapter changes.
+  </li>
+  <li>
+    <strong>UUID-based IDs on the shadows.</strong> Add a
+    <code>uuid TEXT</code> column to <code>sync_entities</code> and
+    use that as the CRSql PK instead of <code>id</code>. Populate
+    on write-through trigger with <code>hex(randomblob(16))</code>.
+    Doesn't require adapter changes since the write-through trigger
+    owns shadow inserts. Adds a 16-byte column per shadow row
+    (~50KB overhead across all shadows, negligible).
+  </li>
+  <li>
+    <strong>Drop <code>id</code> as PK on the shadows entirely — use
+    <code>(kind, external_ref)</code> for entities and
+    <code>(from_kind, from_ref, kind, to_kind, to_ref)</code> for
+    relations.</strong> CRSql allows composite PKs. Most natural
+    semantically, since the whole reconcile logic already treats
+    natural keys as authoritative. Requires refactoring the shadow
+    DDLs and the write-through triggers to source natural-key values
+    from JOINed entities.
+  </li>
+</ul>
+<p>
+  My inclination: option 3 (natural keys). It eliminates the whole
+  class of ID-space coordination problems and matches the design
+  intent of the observer model — surrogate <code>id</code> columns
+  are local implementation details, not shared truth. Costs a
+  moderate refactor of the write-through triggers.
+</p>
+
+<h2>Also fixed / other notes</h2>
+<ul>
+  <li>
+    Two <code>NEXT_SESSION_PICKUPS</code> hazards confirmed: (a) the
+    <code>templedb sync</code> CLI was orphaned (same as
+    <code>templedb ast</code> and <code>templedb nix</code> before
+    them), and (b) <code>relations.sync_scope</code> is a column
+    that no code populates. Both worked around in this session; both
+    warrant a doctor invariant follow-up.
+  </li>
+  <li>
+    Migration 101 is <strong>safe to apply to prod</strong> on its
+    own — it only adds tables and triggers, no mutation of
+    <code>entities</code> or <code>relations</code>. But
+    <code>sync do-sync</code> should NOT be enabled fleetwide
+    until the ID collision issue is resolved (silent data loss on
+    any concurrent insert). Current fleet is single-host, so no
+    active hazard, but zMothership3 provisioning (also in the
+    pickup notes) becomes conditional on the fix.
+  </li>
+  <li>
+    Time spent: ~1.5h vs the 3-5h estimate in the prep notes. Most
+    of the win came from the prep notes being accurate about what
+    was already built — I didn't have to rediscover it.
+  </li>
+</ul>
+
+<h2>Verification commands</h2>
+<pre># After landing migration 101 (any host with TEMPLEDB_CRSQLITE_PATH set):
+TEMPLEDB_PATH=/tmp/scratch.sqlite templedb sync init
+
+# Row counts should match fleet-scope counts in main:
+python3 -c "import sqlite3; c=sqlite3.connect('/tmp/scratch.sqlite');
+  print('sync_entities:',  c.execute('SELECT COUNT(*) FROM sync_entities').fetchone()[0]);
+  print('sync_relations:', c.execute('SELECT COUNT(*) FROM sync_relations').fetchone()[0])"
+
+# Triggers on main tables (should be 4 for entities, 3 for relations):
+python3 -c "import sqlite3; c=sqlite3.connect('/tmp/scratch.sqlite');
+  [print(r[0]) for r in c.execute(\"SELECT name FROM sqlite_master
+    WHERE type='trigger' AND (name LIKE 'entities_sync%' OR name LIKE 'relations_sync%')
+    ORDER BY name\")]"</pre>
+
+<h2>Metacognition</h2>
+<p>
+  <strong>What I got right:</strong> starting with the safe steps
+  (snapshot, scratch DB, iterate on scratch) before touching anything
+  live. Trusting the prep notes' current-state summary was empirically
+  accurate — it saved me from re-verifying six shadow tables' worth
+  of infrastructure. Catching the CLI orphan pattern from the recent
+  <code>ast</code> fix — same shape of bug, would have been another
+  30-min mystery without pattern recognition. Testing the
+  <code>INSERT OR REPLACE</code> vs <code>ON CONFLICT DO UPDATE</code>
+  distinction before assuming the trigger was right.
+</p>
+<p>
+  <strong>What I should watch for next time:</strong> I ran the
+  two-instance test with the same starting DB — should have realized
+  ROWID collision was structurally guaranteed the moment I set that
+  up. If I had gone through the design implications of "same DB,
+  two independent ROWID allocators" before writing code, I would
+  have flagged the ID collision issue during checklist planning, not
+  at step 9. Ordering: <em>think about the design invariants before
+  the tests</em>, not through the tests.
+</p>
+<p>
+  <strong>Discipline held:</strong> stopped before applying to
+  production, even though the checklist explicitly listed step 10.
+  The pickup notes assumed no material risk from the migration
+  itself — accurate — but the test result changed the risk picture
+  for enabling sync afterward. Better to surface that to the user
+  than to ship and hope.
+</p>
+
+</body>
+</html>

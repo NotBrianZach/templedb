@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VCS commit revert regression &mdash; investigation</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.4rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.2rem;
+  }
+  h3 { color: #b0b0d0; font-size: 0.95rem; margin: 1.5rem 0 0.4rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.94rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.7rem 1.05rem; margin: 1.1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.pos { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.pos .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix {
+    border-collapse: collapse; margin: 0.9rem 0; font-size: 0.87em;
+    width: 100%;
+  }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left;
+  }
+  table.matrix th {
+    color: var(--muted); font-weight: 500; background: var(--code-bg);
+    text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.06em;
+  }
+  table.matrix td.pass { color: var(--pos); }
+  table.matrix td.fail { color: var(--neg); }
+</style>
+</head>
+<body>
+
+<h1>VCS commit revert regression &mdash; investigation</h1>
+<p class="lede">
+  A memory note dated 2026-08-20 says <em>&ldquo;<code>vcs commit -p</code>
+  again reverts <code>file set</code> writes in deployed 0.7.0 binary.
+  Use <code>templedb commit &lt;slug&gt; &lt;fresh-checkout&gt;</code>
+  workflow.&rdquo;</em> I attempted four increasingly-adversarial
+  repros against both my patched dev-mode code and the deployed 0.7.0
+  binary. <strong>None reverted.</strong> Content survived
+  <code>vcs commit</code> in every scenario. This report characterizes
+  the investigation, suggests possible reasons the note doesn&rsquo;t
+  currently repro, and lists what would still be worth verifying.
+</p>
+
+<h2>Repro attempts</h2>
+
+<p>
+  All against a fresh scratch project <code>regr-test</code>. Each row
+  is one full setup: initialize state, do <code>file set</code>, do
+  <code>vcs commit</code>, then <code>file get</code> to see what
+  landed.
+</p>
+
+<table class="matrix">
+  <thead>
+    <tr>
+      <th>Scenario</th>
+      <th>Binary</th>
+      <th>Expected content</th>
+      <th>Actual content</th>
+      <th>Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Baseline: <code>file set</code> &rarr; <code>vcs add</code> &rarr; <code>vcs commit</code></td>
+      <td>Dev-mode (Phase 1+2)</td>
+      <td>v2</td>
+      <td>v2</td>
+      <td class="pass">PASS</td>
+    </tr>
+    <tr>
+      <td><code>file set</code> auto-staged &rarr; <code>vcs commit</code></td>
+      <td>Deployed 0.7.0</td>
+      <td>v3</td>
+      <td>v3</td>
+      <td class="pass">PASS</td>
+    </tr>
+    <tr>
+      <td><code>file set</code> &rarr; <code>vcs status --refresh</code> &rarr; <code>vcs commit</code></td>
+      <td>Deployed 0.7.0</td>
+      <td>v4</td>
+      <td>v4</td>
+      <td class="pass">PASS</td>
+    </tr>
+    <tr>
+      <td><code>file set</code> &rarr; manually corrupt checkout on disk to different content &rarr; <code>vcs status --refresh</code> &rarr; <code>vcs commit</code></td>
+      <td>Deployed 0.7.0</td>
+      <td>v5</td>
+      <td>v5 (not the manually-stale on-disk content)</td>
+      <td class="pass">PASS</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Why my hypothesis didn&rsquo;t bite</h2>
+
+<p>
+  Going into this I expected the failure mode to be:
+</p>
+<ol>
+  <li><code>file set</code> writes <code>file_contents.is_current</code> with new hash H<sub>new</sub>.</li>
+  <li><code>WorkingStateDetector</code> refreshes from checkout (which still has H<sub>old</sub>), sets <code>vcs_working_state.content_hash = H_old</code>.</li>
+  <li><code>vcs commit</code> reads <code>ws.content_hash = H_old</code> and writes <code>file_contents.is_current = H_old</code>. Original write is lost.</li>
+</ol>
+
+<p>
+  In practice, the fourth repro was specifically designed to trigger
+  this and didn&rsquo;t. Reading the deployed <code>vcs commit</code>
+  code, the actual behavior is: when <code>vcs_working_state</code>
+  has a stale <code>content_hash</code> that doesn&rsquo;t match a
+  known blob, commit falls back to the file-on-disk read. My scratch
+  project&rsquo;s <code>WorkingStateDetector</code> was scanning the
+  <em>project repo_url path</em>, not the checkout, so it reported
+  &ldquo;Deleted: 1&rdquo; and the stale checkout content never made
+  it into working state.
+</p>
+
+<div class="callout pos">
+  <span class="label">Working hypothesis, deprecated</span>
+  &ldquo;<em>Commit re-reads working state from the checkout filesystem
+  rather than the DB.</em>&rdquo; Wrong. Commit reads
+  <code>ws.content_hash</code>, and refresh populates that from disk
+  only when the project has a valid repo_url pointing at real files.
+  My scratch project had neither, so the buggy path was never
+  exercised.
+</div>
+
+<h2>What&rsquo;s still worth verifying before ruling out</h2>
+
+<ul>
+  <li>
+    <strong>The templedb project itself.</strong> It has a real
+    <code>repo_url</code> at <code>/home/zach/templeDB</code>, so
+    <code>WorkingStateDetector</code> actually reads files there. If a
+    prior agent&rsquo;s <code>file set</code> wrote content that
+    doesn&rsquo;t match the checkout, and a refresh runs, and then a
+    commit runs &mdash; the stale checkout could theoretically win.
+    Rerunning today with my Phase 1+2 code active, my four commits
+    (<code>04856C82</code>, <code>D29C1D0B</code>, <code>A6615A35</code>,
+    <code>E6DCDE39</code>, <code>C032F453</code>) all preserved intended
+    content. But those all used <code>--verify</code> on
+    <code>file set</code>, which fails loudly if the write didn&rsquo;t
+    stick &mdash; a possibly-relevant guard.
+  </li>
+  <li>
+    <strong>Non-<code>--verify</code> writes.</strong> The memory
+    predates the <code>--verify</code> flag&rsquo;s widespread use.
+    A worth-doing test: on templedb, do a <code>file set</code>
+    <em>without</em> <code>--verify</code>, refresh, commit, verify.
+    If content reverts silently there, <code>--verify</code>
+    successfully guards against the bug rather than fixing it.
+  </li>
+  <li>
+    <strong>FUSE mount interaction.</strong> The memory note mentions
+    &ldquo;<em>Use <code>templedb commit &lt;slug&gt; &lt;fresh-checkout&gt;</code>
+    workflow</em>.&rdquo; That suggests the mount / checkout interaction
+    is part of the failure surface. My repro attempts all used the
+    editable checkout at <code>~/.config/templedb/checkouts/regr-test</code>;
+    haven&rsquo;t tried the FUSE mount path. If the bug lives in the
+    FUSE-write path, I wouldn&rsquo;t see it via checkout writes.
+  </li>
+  <li>
+    <strong>Concurrent access.</strong> If two agents (or one agent and
+    the FUSE server) both hold the DB and race a
+    <code>file set</code> against a <code>commit</code>, isolation
+    could fail. Not testable with a single-shell script.
+  </li>
+</ul>
+
+<h2>Related discovery: shell-workflow session bug</h2>
+
+<p>
+  While setting up the repro I found a real bug my <em>own</em>
+  Phase 1+2 introduced. Sequential shell invocations
+  (<code>templedb vcs add X</code> then <code>templedb vcs commit</code>)
+  each create their own implicit session, because
+  <code>get_current_session()</code>&rsquo;s fallback creates a fresh
+  session every process. <code>add</code>&rsquo;s file lands in
+  session A; <code>commit</code> runs in session B and doesn&rsquo;t
+  see it. The fix is straightforward &mdash; make implicit-session
+  resolution find an existing active session for
+  <code>(author, host, ppid)</code> instead of always creating &mdash;
+  but it&rsquo;s substantial enough to warrant its own scoped change.
+</p>
+
+<div class="callout warn">
+  <span class="label">Recorded as Phase 3.5</span>
+  Real regression I ship-blocked myself with. Users can work around by
+  <code>export TEMPLEDB_SESSION_ID=$(templedb vcs session start --name X)</code>,
+  but that&rsquo;s not a fine default. Real fix: implicit session lookup
+  keyed on (author, host, ppid).
+</div>
+
+<h2>Recommendation</h2>
+
+<ol>
+  <li>
+    Update the memory note to soften the &ldquo;regressed&rdquo;
+    language: characterize as &ldquo;possible under specific conditions
+    not currently reproducible in a controlled scratch project.&rdquo;
+    Keep the <code>--verify</code> guidance because it&rsquo;s useful
+    regardless of whether the underlying bug still exists.
+  </li>
+  <li>
+    <strong>Do the templedb-live non-<code>--verify</code> test</strong>
+    at some point when it&rsquo;s safe to do so on a real project.
+    That&rsquo;s the highest-value remaining diagnostic.
+  </li>
+  <li>
+    <strong>Fix the shell-workflow session bug</strong> (implicit
+    session ppid-scoping) before Phase 5 recap, or explicitly ship
+    Phase 1+2 with a &ldquo;<em>always
+    <code>export TEMPLEDB_SESSION_ID</code></em>&rdquo; caveat in the
+    docs. The former is preferable.
+  </li>
+</ol>
+
+</body>
+</html>

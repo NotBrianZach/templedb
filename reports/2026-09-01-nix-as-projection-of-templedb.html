@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nix as a projection of TempleDB</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14;
+    --pos: #7fd6a0; --neg: #e97070; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.3rem;
+  }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.win { border-left-color: var(--pos); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.win .label { color: var(--pos); }
+  .callout.warn .label { color: var(--warn); }
+  table.matrix { border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9em; width: 100%; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th { background: var(--panel); color: var(--muted); font-weight: 500; }
+  .dim { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>Nix as a projection of TempleDB</h1>
+<p class="lede">
+  Design proposal, not implementation. TempleDB and Nix each behave as
+  if they are the ambient source of truth for the same content
+  (Python source, Emacs .el files, NixOS config). The result is
+  drift: five reproducible &ldquo;edited the wrong copy&rdquo; incidents
+  in the last month. This report argues that the durable fix is to
+  make Nix a projection of TempleDB — the DB emits derivations,
+  the store paths are named views, and drift becomes a category
+  error rather than a bug. Includes the cheaper interim
+  (<code>templedb file where</code> diagnostic), a mirror inventory,
+  and a rough migration path.
+</p>
+
+<h2>Why we keep editing the wrong copy</h2>
+
+<p>Five recent drift bugs, one shape:</p>
+
+<ol>
+  <li><strong>Emacs org-ai layer</strong> — edited under the FUSE mount, but Spacemacs loaded the nix-store copy that hadn&rsquo;t been rebuilt.</li>
+  <li><strong>Migrations dir missing at runtime</strong> — 084 registered in the sequence, applied in dev-mode, but the nix package didn&rsquo;t bundle <code>migrations/*.sql</code>. Fix required editing the flake&rsquo;s <code>installPhase</code>, not the migration.</li>
+  <li><strong>Dead launcher</strong> — <code>templedb_launcher.py</code> registered new MCP tools; the real entrypoint was <code>_launcher.py</code>. Six weeks of <code>templedb_ask_user</code> silently broken.</li>
+  <li><strong>templedb-agent.el</strong> edited in <code>~/.config/templedb/checkouts/templedb/</code> — read-only, materialized output, silently overwritten on next publish.</li>
+  <li><strong>Cursor-hijack fix</strong> — edited in <code>edit-workspaces/</code>, but three <em>other</em> copies live in <code>~/status/</code>, <code>~/temple/</code>, and the nix store spacemacs layer path. Verifying deployment meant grepping ~50 store paths.</li>
+</ol>
+
+<p>
+  The shape is: TempleDB wrote content, some other system had a stale
+  copy, that other system won. The other system is usually Nix
+  (immutable store paths keyed on the flake input rev), sometimes
+  home-manager (symlink forest keyed on the same), sometimes git
+  (materialized checkout as a git repo for external tools). Each
+  wants to be canonical for its slice of reality.
+</p>
+
+<h2>Current mirror inventory</h2>
+
+<p>Every place a piece of templedb content lives right now:</p>
+
+<table class="matrix">
+  <tr><th>Path</th><th>Read?</th><th>Write?</th><th>Refresh</th></tr>
+  <tr><td><code>~/.local/share/templedb/templedb.sqlite</code></td><td>yes</td><td>yes</td><td>—</td></tr>
+  <tr><td><code>~/.config/templedb/checkouts/&lt;slug&gt;/</code></td><td>yes</td><td class="dim">blocked</td><td><code>publish run</code></td></tr>
+  <tr><td><code>~/.config/templedb/edit-workspaces/&lt;slug&gt;/</code></td><td>yes</td><td>yes</td><td><code>templedb edit</code>; commit to sync back</td></tr>
+  <tr><td><code>/nix/store/.../templedb-0.1.0/</code></td><td>yes (CLI runtime)</td><td>immutable</td><td>flake input bump + <code>system-switch</code></td></tr>
+  <tr><td><code>/nix/store/.../templedb-spacemacs-layer/</code></td><td>yes (Emacs load)</td><td>immutable</td><td>same as above</td></tr>
+  <tr><td><code>~/.emacs.d/private/local-layers/templedb/</code></td><td>yes (Spacemacs)</td><td class="dim">symlink</td><td>points at store path</td></tr>
+  <tr><td><code>~/temple/&lt;slug&gt;/</code>, <code>~/status/&lt;slug&gt;/</code></td><td>legacy</td><td>legacy</td><td>drift-prone historical copies</td></tr>
+</table>
+
+<p>
+  Six live locations for one blob, not counting historical
+  <code>~/temple</code> / <code>~/status</code> paths that people
+  still reach for by muscle memory. Consumers vary: Emacs reads the
+  store spacemacs layer, the shell reads the store CLI, external
+  tools might read the git checkout, and I edit the workspace.
+</p>
+
+<h2>The philosophical shape</h2>
+
+<p>
+  Two systems both believe they are the canonical form of the same
+  content:
+</p>
+
+<ul>
+  <li><strong>TempleDB</strong>&rsquo;s claim: content is rows in
+    <code>file_contents</code>; everything else is a projection
+    generated by <code>project checkout</code> / <code>publish run</code>.</li>
+  <li><strong>Nix</strong>&rsquo;s claim: content is store paths
+    keyed on a hash; the &ldquo;source&rdquo; is a flake input
+    revision that points at a git tree.</li>
+</ul>
+
+<p>
+  These are peer authorities. Every mirror is a system asserting
+  its own claim, and every edit has to choose one. The philosophy
+  problem isn&rsquo;t <em>how many</em> mirrors we have; it&rsquo;s
+  that no single authority ordering exists.
+</p>
+
+<div class="callout">
+  <span class="label">Analogy</span>
+  Two authoritative DNS servers with different records for
+  the same name. You can add caching, TTLs, sync jobs — all
+  worthwhile — but nothing dissolves the underlying ambiguity
+  until one server is declared a projection of the other.
+</div>
+
+<h2>The proposal: Nix as a projection</h2>
+
+<p>Invert the authority ordering:</p>
+
+<ul>
+  <li><strong>TempleDB is the single source of truth.</strong> Every
+    piece of content, including the flake that builds templedb
+    itself, lives in the DB.</li>
+  <li><strong>Nix derivations are emitted from DB rows.</strong> Just
+    as the AST-deploy pipeline emits NixOS system config from
+    <code>config_nodes</code>, the templedb flake and its
+    derivations are emitted from a similar table (call it
+    <code>flake_nodes</code>).</li>
+  <li><strong>Store paths are content-addressed views.</strong> The
+    hash of the store path is the fingerprint of the DB slice
+    that produced it. Given a store path, you can traverse back
+    to the exact DB commit hash that emitted it.</li>
+  <li><strong>Edits never happen to a store path.</strong> They
+    happen to DB rows; the store path is rebuilt as a side
+    effect. There is no &ldquo;edit the wrong copy&rdquo; because
+    there is only one place editable copies exist.</li>
+</ul>
+
+<p>
+  This is what the AST-deploy work (docs/AST_DEPLOY_DESIGN.md)
+  already does for NixOS config. The proposal is: extend the same
+  discipline to templedb&rsquo;s own build, then to the spacemacs
+  layer, then to any other derivation templedb owns. The graph
+  becomes one-directional:
+</p>
+
+<pre>DB → AST → nix expression → nix build → store path → runtime consumer</pre>
+
+<p>
+  There are no back-edges. Nix ceases to be a peer and becomes a
+  well-typed export of the DB.
+</p>
+
+<h2>Tradeoffs</h2>
+
+<div class="callout warn">
+  <span class="label">Cost</span>
+  Every derivation templedb owns has to be representable in the AST
+  tables. The parser has known gaps (the &ldquo;outputs FnDef body
+  silently dropped&rdquo; note in memory). Nix is a full language;
+  faithful bidirectional representation is a multi-month project.
+</div>
+
+<div class="callout warn">
+  <span class="label">Risk</span>
+  External consumers of the flake (bza today, hypothetical others)
+  expect a normal git repo with authored <code>.nix</code> files.
+  Turning those into generated artifacts either requires committing
+  the emitted output back to the checkout (loses the &ldquo;single
+  source&rdquo; property from the consumer&rsquo;s perspective) or
+  making consumers speak the DB protocol.
+</div>
+
+<div class="callout win">
+  <span class="label">Payoff</span>
+  &ldquo;Did drift happen?&rdquo; becomes unanswerable in the
+  affirmative — the store path <em>is</em> the current DB by
+  construction. Every &ldquo;edited the wrong copy&rdquo; class
+  bug becomes structurally impossible, not just caught by a
+  linter.
+</div>
+
+<h2>The cheaper interim</h2>
+
+<p>
+  Full Nix-as-projection is a quarter of work. The immediate pain
+  can be solved for a day of work:
+</p>
+
+<ol>
+  <li>
+    <code>templedb file where &lt;slug&gt; &lt;path&gt;</code> —
+    walks a static list of known mirror roots
+    (<code>checkouts/</code>, <code>edit-workspaces/</code>, active
+    nix store paths from <code>~/.nix-profile</code> and
+    <code>~/.emacs.d/private/local-layers/</code>), prints
+    each location&rsquo;s content hash next to the DB&rsquo;s
+    <code>is_current</code> hash. Color drift red, agreement green,
+    immutability blue.
+  </li>
+  <li>
+    Content-hash xattrs on writable mirrors. Every
+    <code>project checkout</code> sets
+    <code>user.templedb.content_hash</code> on each file. Every
+    <code>templedb file set</code> checks the xattr of the mirror
+    and refuses (or warns) if it disagrees with what the DB
+    thinks was there.
+  </li>
+  <li>
+    Retire <code>templedb file edit</code> since
+    <code>templedb edit &lt;slug&gt;</code> covers it — one fewer
+    write verb without touching the mirror problem.
+  </li>
+</ol>
+
+<p>
+  This is drift-<em>visible</em>, not drift-<em>impossible</em>.
+  Cheap, doesn&rsquo;t block the deep fix, buys most of the value.
+</p>
+
+<h2>Migration path (if we commit to the deep fix)</h2>
+
+<ol>
+  <li><strong>Round-trip the templedb flake through the AST tables.</strong>
+    Parser passes on every existing file; emitted output matches
+    original byte-for-byte. Nothing consumes the emitted output
+    yet.</li>
+  <li><strong>Emit the spacemacs layer derivation from the AST.</strong>
+    Home.nix switches from <code>${templedb}/integrations/emacs/...</code>
+    to <code>templedbFlake.packages.spacemacsLayer</code>. First
+    real consumer of a projection.</li>
+  <li><strong>Bootstrap.</strong> The templedb CLI itself is emitted
+    from DB. Requires a chicken-and-egg break: keep one bootstrap
+    flake authored by hand, use it to build a templedb that then
+    emits the &ldquo;real&rdquo; flake. Same trick as Guix&rsquo;s
+    <code>bootstrap-binaries</code>.</li>
+  <li><strong>Deprecate authored flakes.</strong> Every remaining
+    <code>.nix</code> file in the checkout is a bug — the
+    checkout is emitted output, not input.</li>
+</ol>
+
+<h2>Also in this session</h2>
+
+<p>Fixes shipped alongside this report:</p>
+
+<ul>
+  <li><strong>Cursor hijack</strong> — <code>--auto-scroll</code> now
+    checks <code>--section-of-point</code> and no-ops when the
+    user is in an editable section, and doesn&rsquo;t select the
+    target window (<code>set-window-point</code> +
+    <code>set-window-start</code>).</li>
+  <li><strong>First-render flash noise</strong> — highlight-on-write
+    is now suppressed on the first render of each section per
+    buffer session; only real fresh writes flash.</li>
+  <li><strong>Pending events backpressure</strong> — 7-day TTL and
+    500-row batch cap in
+    <code>undispatched_pending_events_for_session</code>, plus a
+    new <code>gc_dispatched_pending_events</code> for periodic
+    cleanup.</li>
+  <li><strong>Write-path verify</strong> — probed
+    <code>templedb file set</code> + <code>vcs commit -p</code>
+    on 0.7.0, marker survived. Memory
+    <code>[[templedb-write-broken]]</code> dropped.</li>
+</ul>
+
+</body>
+</html>

@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session-scoped VCS staging &mdash; design</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --pos: #7fd6a0;
+    --neg: #e97070;
+    --warn: #e0c060;
+    --pick: #7ec7ff;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  h2 {
+    color: var(--accent); font-size: 1.05rem; margin: 2.4rem 0 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-top: 1px solid var(--border); padding-top: 1.2rem;
+  }
+  h3 {
+    color: #b0b0d0; font-size: 0.95rem; margin: 1.5rem 0 0.4rem;
+    display: flex; align-items: baseline; gap: 0.6rem;
+  }
+  h3 .tag {
+    color: var(--muted); font-size: 0.7rem; font-weight: 400;
+    text-transform: uppercase; letter-spacing: 0.08em; margin-left: auto;
+  }
+  h3 .tag.pick { color: var(--pick); }
+  h3 .tag.miss { color: var(--neg); }
+  h3 .tag.watch { color: var(--warn); }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.94rem; }
+  p { margin: 0 0 1rem; }
+  strong { color: #f0f0ff; font-weight: 600; }
+  em { color: #c0c0e0; }
+  code {
+    background: var(--code-bg); color: #b0e0b0;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.87em;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 0.8rem 1rem; border-radius: 5px; overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82em; line-height: 1.55; margin: 0.9rem 0;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout {
+    background: var(--panel); border-left: 3px solid var(--accent);
+    padding: 0.7rem 1.05rem; margin: 1.1rem 0; border-radius: 0 4px 4px 0;
+    font-size: 0.93em;
+  }
+  .callout.pick { border-left-color: var(--pick); }
+  .callout.miss { border-left-color: var(--neg); }
+  .callout.watch { border-left-color: var(--warn); }
+  .callout .label {
+    display: block; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem;
+    color: var(--accent);
+  }
+  .callout.pick .label { color: var(--pick); }
+  .callout.miss .label { color: var(--neg); }
+  .callout.watch .label { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<h1>Session-scoped VCS staging &mdash; design</h1>
+<p class="lede">
+  TempleDB&rsquo;s VCS has one shared staging area per project/branch, so
+  parallel agents sweep each other&rsquo;s in-progress work into their
+  commits (or, worse, commit it under the wrong message). This document
+  proposes replacing the boolean <code>vcs_working_state.staged</code>
+  flag with session-scoped staging keyed off <code>TEMPLEDB_SESSION_ID</code>,
+  drops the dead <code>vcs_staging</code> table on the way through, and
+  outlines how the change ships in phases. Related but separate: the
+  memory-noted <em>&quot;vcs commit reverts file set writes&quot;</em>
+  regression is likely orthogonal and gets its own investigation.
+</p>
+
+<h2>Why it&rsquo;s worth naming as a fundamental</h2>
+
+<p>
+  This session hit the exact pattern that motivated this doc.
+  <code>vcs commit</code> would have swept a different agent&rsquo;s
+  staged <code>src/cli/commands/vibe.py</code> into a commit for the
+  agent Org rendering refactor if I hadn&rsquo;t paused on unfamiliar
+  staged state and asked. The pause-and-ask worked <em>this time</em>
+  because I noticed. It won&rsquo;t always. The fix is structural: make
+  cross-agent sweeps impossible, not require every agent to check every
+  time.
+</p>
+
+<div class="callout pick">
+  <span class="label">The pattern to prevent</span>
+  Agent A stages files X, Y. Agent B stages file Z. Agent B runs
+  <code>vcs commit</code>. The commit contains X, Y, Z under agent
+  B&rsquo;s message.
+</div>
+
+<h2>What&rsquo;s actually in the codebase today</h2>
+
+<p>
+  Findings from <code>src/services/vcs_service.py</code>,
+  <code>src/repositories/vcs_repository.py</code>,
+  <code>src/cli/commands/vcs.py</code>, and
+  <code>migrations/database_vcs_schema.sql</code>:
+</p>
+
+<ul>
+  <li>
+    <strong>Active staging is a boolean flag:</strong>
+    <code>vcs_working_state.staged BOOLEAN DEFAULT 0</code>.
+    <code>stage_files</code> flips it to 1. <code>unstage_files</code>
+    flips it to 0. <code>commit</code> reads all rows where
+    <code>staged = 1</code>. No identity attached anywhere.
+  </li>
+  <li>
+    <strong>A better shape already exists in the schema and is dead
+    code:</strong> the <code>vcs_staging</code> table at line 115 of
+    <code>database_vcs_schema.sql</code> has a <code>staged_by TEXT</code>
+    column. It is <em>never touched by the service</em>. Zero references
+    in <code>vcs_service.py</code>. Vestigial from a v1 design.
+  </li>
+  <li>
+    <strong>Author is resolved at commit time only</strong>, via
+    <code>vcs.py:_get_author</code> which shells out to
+    <code>git config user.name</code>. There is no notion of
+    &ldquo;who staged this row&rdquo; anywhere in the write path.
+  </li>
+  <li>
+    <strong>No session concept exists in the VCS layer.</strong>
+    <code>agent_sessions</code> (migration 073, Temple Agent chat
+    sessions) is unrelated and shouldn&rsquo;t be reused &mdash; it&rsquo;s
+    a heavier lifecycle with providers/models/messages, not a
+    lightweight identity anchor.
+  </li>
+</ul>
+
+<h2>The design space</h2>
+
+<h3><span>0. Discipline &mdash; ask before every commit</span> <span class="tag miss">skip</span></h3>
+<p>
+  Current state. Works when the agent notices; fails silently when it
+  doesn&rsquo;t. Not a fix, it&rsquo;s a hope.
+</p>
+
+<h3><span>1. Per-file commit filter (<code>vcs commit -- &lt;paths&gt;</code>)</span> <span class="tag miss">too narrow</span></h3>
+<p>
+  Mirror <code>git commit -- path1 path2</code>. Smallest possible
+  change. Fixes the immediate blast-radius problem but requires every
+  agent to correctly enumerate its files every commit &mdash; and a
+  forgetful agent still sweeps in others&rsquo; work. It patches the
+  symptom, not the concurrency model.
+</p>
+
+<h3><span>2. Env-var author (<code>TEMPLEDB_AUTHOR</code>)</span> <span class="tag miss">insufficient</span></h3>
+<p>
+  Add a <code>staged_by TEXT</code> column, key it off an env var,
+  scope operations by author. Simpler than sessions, but authors are
+  long-lived. Two parallel invocations from &ldquo;the same agent&rdquo;
+  (same TEMPLEDB_AUTHOR, different windows) still collide. Also loses
+  the audit trail &mdash; can&rsquo;t answer &ldquo;which of Zach&rsquo;s
+  five agents staged this?&rdquo;.
+</p>
+
+<h3><span>3. Session-scoped staging</span> <span class="tag pick">pick</span></h3>
+<p>
+  Introduce a lightweight <code>vcs_sessions</code> table. Each staging
+  operation references a session ID. Sessions have start/end lifecycle,
+  are listable, and can be tagged with a human-readable name for
+  debugging (&ldquo;cleanup-org-render&rdquo;). Env var
+  <code>TEMPLEDB_SESSION_ID</code> identifies the caller; a synthetic
+  session auto-starts on first write op if unset, so single-shell human
+  usage stays frictionless.
+</p>
+<p>
+  Buys us: hard isolation (commit only reads its own session&rsquo;s
+  staged rows), auditability (you can list all sessions and see who
+  staged what), and a natural attachment point for future features like
+  session-scoped locks or session-shaped policy.
+</p>
+
+<h3><span>4. Branch-per-agent</span> <span class="tag miss">too heavy</span></h3>
+<p>
+  Force every agent onto its own branch. Isolation falls out of the
+  branch model &mdash; each branch has its own working state row. But
+  the checkout-switch cost is real, especially in <code>edit mode</code>,
+  and forcing branches makes small collaborative work (&ldquo;three
+  quick edits from three agents on the same branch&rdquo;) needlessly
+  ceremonial. The FUSE branch views feature (memory) enables this but
+  doesn&rsquo;t make it cheap.
+</p>
+
+<h2>Recommended design: session-scoped staging</h2>
+
+<h3>Data model</h3>
+
+<pre><code>CREATE TABLE vcs_sessions (
+    id INTEGER PRIMARY KEY,
+    name TEXT,                    -- optional human label
+    author TEXT NOT NULL,         -- resolved from env / git config at start
+    host TEXT,                    -- socket.gethostname() at start
+    pid INTEGER,                  -- start pid (debugging)
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at TEXT,                -- NULL = active
+    ended_reason TEXT             -- 'explicit-end' | 'commit-cleanup' | 'stale-timeout'
+);
+
+ALTER TABLE vcs_working_state
+    ADD COLUMN staged_by_session_id INTEGER
+        REFERENCES vcs_sessions(id) ON DELETE SET NULL;
+
+DROP TABLE vcs_staging;    -- dead code, never referenced</code></pre>
+
+<p>
+  Rows staged by a session have <code>staged_by_session_id</code> set.
+  Not staged &rArr; <code>NULL</code>. The old <code>staged BOOLEAN</code>
+  column stays for one release as a compat mirror
+  (<code>staged = (staged_by_session_id IS NOT NULL)</code>, maintained
+  by triggers or by the service), then drops in a follow-up migration
+  once nothing reads it.
+</p>
+
+<h3>Session lifecycle</h3>
+
+<ul>
+  <li>
+    <strong>Explicit start:</strong> <code>templedb vcs session start
+    [--name X] [--author Y]</code> creates a row, prints the ID (and
+    optionally an <code>export</code> line for shell eval).
+  </li>
+  <li>
+    <strong>Implicit start:</strong> if a write op runs without
+    <code>TEMPLEDB_SESSION_ID</code>, service auto-creates a session
+    named <code>&lt;host&gt;-&lt;pid&gt;-&lt;short-ts&gt;</code>. The
+    session ID is <em>not</em> re-exported (the process only knows what
+    it needs to know). This preserves the current single-shell zero-friction
+    UX; humans don&rsquo;t need to change their workflow.
+  </li>
+  <li>
+    <strong>Explicit end:</strong> <code>templedb vcs session end [--id
+    N]</code>. Default policy: leave staged rows alone
+    (<code>staged_by_session_id</code> stays set); the row still shows
+    up as &ldquo;staged by ended session X.&rdquo; This is a
+    deliberately safe default &mdash; ending a session should not
+    silently unstage work.
+  </li>
+  <li>
+    <strong>Implicit end at commit:</strong> when a session runs
+    <code>vcs commit</code> and commits all its staged rows, the
+    session gets <code>ended_at</code> set with
+    <code>ended_reason = 'commit-cleanup'</code>. Auto-created implicit
+    sessions do this by default; explicitly-started sessions stay open
+    until <code>session end</code>.
+  </li>
+  <li>
+    <strong>Stale sessions:</strong> <code>vcs session list --stale</code>
+    surfaces sessions older than N days with rows still staged.
+    Cleanup is manual &mdash; automatic reset would risk losing work.
+  </li>
+</ul>
+
+<h3>Identity resolution order</h3>
+
+<ol>
+  <li><code>TEMPLEDB_SESSION_ID</code> env var (must reference a live session row)</li>
+  <li>Auto-created synthetic session (write ops only)</li>
+  <li>Author for the auto-created session: <code>TEMPLEDB_AUTHOR</code> env var, then <code>git config user.name</code>, then <code>&quot;unknown&quot;</code></li>
+</ol>
+
+<h3>Command behavior after the change</h3>
+
+<table style="border-collapse: collapse; margin: 0.9rem 0; font-size: 0.87em; width: 100%;">
+  <thead>
+    <tr>
+      <th style="border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left; color: var(--muted); background: var(--code-bg); text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.06em;">Command</th>
+      <th style="border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left; color: var(--muted); background: var(--code-bg); text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.06em;">Semantics after change</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="border: 1px solid var(--border); padding: 0.35rem 0.6rem;"><code>vcs add</code></td>
+      <td style="border: 1px solid var(--border); padding: 0.35rem 0.6rem;">Sets <code>staged_by_session_id</code> to current session</td>
+    </tr>
+    <tr>
+      <td style="border: 1px solid var(--border); padding: 0.35rem 0.6rem;"><code>vcs reset</code></td>
+      <td style="border: 1px solid var(--border); padding: 0.35rem 0.6rem;">Clears only where <code>staged_by_session_id</code> = current session; refuses (with a clear message) to unstage other sessions&rsquo; rows unless <code>--force</code></td>
+    </tr>
+    <tr>
+      <td style="border: 1px solid var(--border); padding: 0.35rem 0.6rem;"><code>vcs commit</code></td>
+      <td style="border: 1px solid var(--border); padding: 0.35rem 0.6rem;">Commits only rows where <code>staged_by_session_id</code> = current session; clears the session&rsquo;s rows post-commit; ends implicit session</td>
+    </tr>
+    <tr>
+      <td style="border: 1px solid var(--border); padding: 0.35rem 0.6rem;"><code>vcs status</code></td>
+      <td style="border: 1px solid var(--border); padding: 0.35rem 0.6rem;">Default: current session&rsquo;s staged + all modified/untracked. <code>--all</code>: grouped view with session badges (<code>[session #12 zach-refactor]</code>)</td>
+    </tr>
+    <tr>
+      <td style="border: 1px solid var(--border); padding: 0.35rem 0.6rem;"><code>vcs session {start,end,list,current,show}</code></td>
+      <td style="border: 1px solid var(--border); padding: 0.35rem 0.6rem;">New. Lightweight lifecycle management.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Backward compatibility</h3>
+
+<p>
+  The important invariant: a human running templedb in a terminal with
+  no env vars set behaves <em>identically</em> to today. The mechanism:
+</p>
+
+<ul>
+  <li>
+    First write op auto-creates a synthetic session in-process. The
+    session ID lives only on the staged rows.
+  </li>
+  <li>
+    <code>vcs commit</code> in the same process commits those rows. No
+    conflict, no confusion &mdash; there was only one session and it
+    committed everything it staged.
+  </li>
+  <li>
+    Existing scripts and CI runners that do
+    <code>file set X; vcs add X; vcs commit -p project</code> continue
+    to work: each run gets a fresh implicit session, does its own thing,
+    ends at commit.
+  </li>
+</ul>
+
+<p>
+  The <em>only</em> user-visible new failure mode: if two shell sessions
+  on the same machine each set <code>TEMPLEDB_SESSION_ID</code> to
+  <em>the same</em> value (deliberate) and then race, the winner still
+  wins &mdash; because they&rsquo;re one logical session by declaration.
+  That&rsquo;s fine; it&rsquo;s exactly the semantics of &ldquo;same
+  session&rdquo;.
+</p>
+
+<h2>Migration and backfill</h2>
+
+<pre><code>-- migration NNN_add_vcs_sessions.sql
+CREATE TABLE vcs_sessions (...);
+
+ALTER TABLE vcs_working_state
+    ADD COLUMN staged_by_session_id INTEGER
+        REFERENCES vcs_sessions(id) ON DELETE SET NULL;
+
+-- One-time backfill: any existing staged=1 row gets a legacy session
+INSERT INTO vcs_sessions (name, author, started_at, ended_at, ended_reason)
+    VALUES ('legacy-backfill', 'unknown',
+            datetime('now'), datetime('now'), 'backfill');
+
+UPDATE vcs_working_state
+    SET staged_by_session_id = (SELECT id FROM vcs_sessions
+                                WHERE name = 'legacy-backfill' LIMIT 1)
+    WHERE staged = 1;
+
+DROP TABLE vcs_staging;
+
+CREATE INDEX idx_vcs_working_state_staged_session
+    ON vcs_working_state(staged_by_session_id);</code></pre>
+
+<p>
+  The <code>staged BOOLEAN</code> column stays until a follow-up
+  migration confirms nothing reads it. Service reads switch to
+  <code>staged_by_session_id IS NOT NULL</code>; writes maintain both
+  columns temporarily.
+</p>
+
+<h2>The related regression (memory: 2026-08-20)</h2>
+
+<p>
+  Memory notes: <em>&ldquo;vcs commit -p again reverts file set writes
+  in deployed 0.7.0 binary. Use <code>templedb commit &lt;slug&gt;
+  &lt;fresh-checkout&gt;</code> workflow; watch for deletion sweeps and
+  in-flight user work.&rdquo;</em>
+</p>
+
+<p>
+  This session&rsquo;s commits (<code>04856C82</code>,
+  <code>D29C1D0B</code>) did <em>not</em> visibly regress. I verified
+  post-commit that <code>protocol.py</code> still has
+  <code>events_by_run</code>, <code>templedb-agent.el</code> has the
+  new helpers, and <code>org_renderer.py</code> is gone. Possible
+  explanation: I set <code>TEMPLEDB_DEV_MODE=1</code> on every
+  <code>file set</code>, which bypasses the deployed 0.7.0 code path
+  that the regression names. If true, the regression is specifically
+  in the deployed binary&rsquo;s write path, not in the checkout-mode
+  path.
+</p>
+
+<div class="callout watch">
+  <span class="label">Hypothesis to verify</span>
+  The regression may involve <code>commit</code> re-reading working
+  state from the checkout filesystem rather than the DB, so writes made
+  via <code>file set</code> (DB-only) get overwritten by the older
+  checkout content at commit time. If true, the fix is to make
+  <code>commit</code> authoritative on the DB, not the checkout. This is
+  a separate investigation from the staging change.
+</div>
+
+<h3>Interaction with the staging change</h3>
+
+<p>
+  The staging change touches <code>stage_files</code>,
+  <code>unstage_files</code>, and the <code>commit</code> query &mdash;
+  which is exactly where the regression lives, if the hypothesis is
+  right. Doing the two changes together means each PR reviewer sees the
+  full picture; doing them separately means clean revertability if
+  either turns out to be wrong. Recommendation: staging first as its
+  own commits, regression second.
+</p>
+
+<h2>Non-goals</h2>
+
+<ul>
+  <li>
+    <strong>Distributed multi-machine sessions.</strong> This is
+    single-DB, single-node. If you&rsquo;re running two agents against
+    two databases, that&rsquo;s a different problem.
+  </li>
+  <li>
+    <strong>Session &harr; agent-session identity merge.</strong>
+    Temple Agent&rsquo;s <code>agent_sessions</code> table stays a
+    separate concept. A Temple Agent invocation could <em>optionally</em>
+    set <code>TEMPLEDB_SESSION_ID</code> to a value it uses across its
+    templedb calls, but the schemas don&rsquo;t need to know about each
+    other.
+  </li>
+  <li>
+    <strong>Automatic stale-session GC.</strong> Sessions accumulate;
+    listing shows them. Cleanup is manual. Auto-GC would mean auto-
+    unstaging, which risks losing work.
+  </li>
+  <li>
+    <strong>Per-file locking.</strong> Two sessions can each stage the
+    same file. Whichever commits first wins; the loser sees a
+    stale-content error at commit time (this is essentially
+    optimistic concurrency &mdash; matches git&rsquo;s model, not
+    RDBMS-style row-locking).
+  </li>
+</ul>
+
+<h2>Phased implementation plan</h2>
+
+<ol>
+  <li>
+    <strong>Phase 1 &mdash; Schema + service foundation</strong>
+    (one commit). Migration + backfill + drop <code>vcs_staging</code>.
+    Rewire <code>stage_files</code>/<code>unstage_files</code>/
+    <code>get_status</code>/<code>commit</code> to session-scope.
+    Old <code>staged BOOLEAN</code> stays as compat mirror.
+  </li>
+  <li>
+    <strong>Phase 2 &mdash; CLI + env var</strong>
+    (one commit). <code>vcs session {start,end,list,current,show}</code>.
+    <code>TEMPLEDB_SESSION_ID</code> resolution. <code>vcs status</code>
+    session badges. Human-friendly output changes.
+  </li>
+  <li>
+    <strong>Phase 3 &mdash; Regression investigation</strong>. Reproduce
+    on a scratch project. If fix is under an hour post-diagnosis: land it.
+    If bigger: separate design report, defer the fix, ship staging
+    without it.
+  </li>
+  <li>
+    <strong>Phase 4 &mdash; Tests</strong> (one commit).
+    <code>tests/vcs/test_sessions.py</code>: two-session isolation,
+    commit scoping, backfill correctness, backward compat when env is
+    unset. Existing VCS tests must still pass.
+  </li>
+  <li>
+    <strong>Phase 5 &mdash; Docs + session recap</strong> (one commit).
+    Update <code>docs/advanced/STAGING_OPERATIONS.md</code>. Add a
+    <code>TEMPLEDB_SESSION_ID</code> line to top-level CLAUDE.md.
+    Recap HTML per convention.
+  </li>
+</ol>
+
+<h2>Open questions to resolve during Phase 1</h2>
+
+<ul>
+  <li>
+    Whether the <code>staged BOOLEAN</code> compat mirror is maintained
+    by a trigger, by service code, or dropped immediately. Recommendation:
+    service code (fewer moving parts than triggers, more revertible than
+    a same-migration drop).
+  </li>
+  <li>
+    Whether <code>vcs commit</code> should refuse to run if there are
+    <em>other sessions&rsquo;</em> staged rows in the same branch, or
+    silently ignore them. Recommendation: silently ignore (that&rsquo;s
+    the whole point of isolation); print a footer noting <em>&ldquo;3
+    files staged in other sessions were not included&rdquo;</em> so the
+    user can inspect if surprised.
+  </li>
+  <li>
+    Whether <code>vcs reset -a</code> without a session should error or
+    default to current-session-only. Recommendation: default to
+    current-session-only; <code>--force --all</code> to clear everyone.
+  </li>
+</ul>
+
+</body>
+</html>
