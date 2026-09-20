@@ -64,6 +64,10 @@ class EntityCommands(Command):
         # Deployment references bump these implicitly at query time.
         'StorePath':    'machine-local',
         'Derivation':   'machine-local',
+        # Physical file mirror locations (checkout, edit-workspace,
+        # nix-store overlay) — each machine has its own filesystem
+        # layout.
+        'MirrorLocation': 'machine-local',
     }
 
     _ADAPTER_VERSIONS = {
@@ -84,6 +88,11 @@ class EntityCommands(Command):
                              # .()/. descriptor cruft) without breaking
                              # eref stability. Prune scope now covers
                              # defines+uses+imports. 1.1 was uses only.
+        'mirrors': '1.0',    # emits File → :mirrored-at →
+                             # MirrorLocation for checkout and
+                             # edit-workspace copies. Enables the
+                             # declarative "file trace" query per
+                             # 2026-09-19 reframe §5.
     }
 
     # ==== INGEST ==============================================================
@@ -107,6 +116,7 @@ class EntityCommands(Command):
             'deploy': self._ingest_deploy,
             'python': self._ingest_python,
             'scip':   self._ingest_scip,
+            'mirrors': self._ingest_mirrors,
             'all':    self._ingest_all,
         }
         adapter = adapters.get(args.source)
@@ -1792,6 +1802,145 @@ WantedBy=timers.target
             f"{skipped} untracked{prune_suffix}"
         )
         self._last_counts = {'e': added_e, 'r': added_r, 'x': skipped}
+        return 0
+
+    def _ingest_mirrors(self, args) -> int:
+        """Ingest File → :mirrored-at → MirrorLocation relations.
+
+        For each active project_files row, probe the standard mirror
+        locations on disk (checkout, edit-workspace) and record a
+        MirrorLocation entity + a :mirrored-at relation carrying the
+        current filesystem hash + rule name in attributes_json.
+
+        Skips locations that don't exist on disk (not every project has
+        an edit-workspace open; missing != drifted).
+
+        Design: reports/2026-09-19-2012-declarative-reframe-*.html §5.
+        Minimum viable — only checkout + edit-workspace kinds. Later
+        iterations add home-manager-overlay and symlink kinds.
+        """
+        import hashlib as _hashlib
+        import json as _json
+        from pathlib import Path as _Path
+        from db_utils import query_all, query_one, execute
+
+        added_e = 0
+        added_r = 0
+        refreshed = 0
+
+        # Rules — declared, not hardcoded per-loop. Adding a new
+        # mirror kind is one entry here.
+        rules = [
+            ('checkout',
+             _Path.home() / '.config/templedb/checkouts',
+             'materialize'),
+            ('edit-workspace',
+             _Path.home() / '.config/templedb/edit-workspaces',
+             'edit-workspace'),
+        ]
+
+        files = query_all(
+            """SELECT pf.id AS file_id, pf.file_path,
+                      p.slug AS slug, fc.content_hash AS db_hash
+                 FROM project_files pf
+                 JOIN projects p ON p.id = pf.project_id
+            LEFT JOIN file_contents fc
+                   ON fc.file_id = pf.id AND fc.is_current = 1
+                WHERE pf.status = 'active'"""
+        )
+
+        for row in files:
+            file_eref = f"{row['slug']}:{row['file_path']}"
+            # File entity should already exist from the git ingest.
+            file_ent = query_one(
+                "SELECT id FROM entities WHERE kind='File' AND external_ref=?",
+                (file_eref,),
+            )
+            if not file_ent:
+                # Fresh file the git ingest hasn't seen yet — create
+                # the File entity so the relation has somewhere to
+                # point. Non-authoritative; git ingest will refresh.
+                if self._upsert_entity(
+                    'File', file_eref, 'templedb',
+                    label=row['file_path'],
+                ):
+                    added_e += 1
+                file_ent = query_one(
+                    "SELECT id FROM entities WHERE kind='File' "
+                    "AND external_ref=?",
+                    (file_eref,),
+                )
+                if not file_ent:
+                    continue
+
+            for rule_name, root, derivation_rule in rules:
+                disk_path = root / row['slug'] / row['file_path']
+                if not disk_path.exists() or not disk_path.is_file():
+                    continue
+                try:
+                    fs_hash = _hashlib.sha256(
+                        disk_path.read_bytes()
+                    ).hexdigest()
+                except OSError:
+                    continue
+
+                loc_eref = f"{rule_name}:{row['slug']}:{row['file_path']}"
+                loc_label = f"{rule_name} · {row['slug']}/{row['file_path']}"
+                if self._upsert_entity(
+                    'MirrorLocation', loc_eref, 'machine',
+                    label=loc_label,
+                ):
+                    added_e += 1
+
+                loc_ent = query_one(
+                    "SELECT id FROM entities WHERE kind='MirrorLocation' "
+                    "AND external_ref=?",
+                    (loc_eref,),
+                )
+                if not loc_ent:
+                    continue
+
+                # Upsert relation with attributes_json carrying the
+                # current hash + drift status.
+                attrs = _json.dumps({
+                    'rule': derivation_rule,
+                    'fs_hash': fs_hash,
+                    'db_hash': row['db_hash'],
+                    'drift': (row['db_hash'] is not None
+                              and fs_hash != row['db_hash']),
+                    'root': str(root),
+                })
+                existing = query_one(
+                    """SELECT id FROM relations
+                        WHERE from_entity_id=? AND kind=?
+                          AND to_entity_id=?""",
+                    (file_ent['id'], 'mirrored-at', loc_ent['id']),
+                )
+                if existing:
+                    execute(
+                        """UPDATE relations
+                              SET observed_at = datetime('now'),
+                                  attributes_json = ?
+                            WHERE id = ?""",
+                        (attrs, existing['id']),
+                    )
+                    refreshed += 1
+                else:
+                    execute(
+                        """INSERT INTO relations
+                               (from_entity_id, kind, to_entity_id,
+                                source_authority, attributes_json,
+                                sync_scope)
+                             VALUES (?, ?, ?, ?, ?, ?)""",
+                        (file_ent['id'], 'mirrored-at', loc_ent['id'],
+                         'machine', attrs, 'machine-local'),
+                    )
+                    added_r += 1
+
+        print(f"  MirrorLocation entities: +{added_e}")
+        print(f"  mirrored-at relations:   +{added_r} new, "
+              f"{refreshed} refreshed")
+        self._last_counts = {'e': added_e, 'r': added_r}
         return 0
 
     def _ingest_deploy(self, args) -> int:
@@ -3883,7 +4032,7 @@ def register(cli):
     ingest_parser.add_argument(
         'source',
         choices=['git', 'agent', 'intent', 'reports', 'nix', 'deploy',
-                 'python', 'scip', 'all', 'history', 'schedule'],
+                 'python', 'scip', 'mirrors', 'all', 'history', 'schedule'],
         help="Which ingestion adapter to run, or 'history'/'schedule' "
              "for meta-commands",
     )
