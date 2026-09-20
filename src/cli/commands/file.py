@@ -394,14 +394,27 @@ class FileCommands(Command):
 
             # Filter by path prefix if provided
             prefix = getattr(args, 'path', None)
+            # Filter by edit_mode (migration 106). '--edit-mode X'
+            # matches files whose edit_mode = X. Special value
+            # 'non-immutable' matches everything not NULL and not
+            # 'immutable' (i.e. anything that opts out of the default).
+            edit_mode_filter = getattr(args, 'edit_mode', None)
 
             for f in files:
                 fp = f['file_path']
                 if prefix and not fp.startswith(prefix):
                     continue
+                if edit_mode_filter:
+                    em = f.get('edit_mode')
+                    if edit_mode_filter == 'non-immutable':
+                        if em is None or em == 'immutable':
+                            continue
+                    elif em != edit_mode_filter:
+                        continue
                 if getattr(args, 'long', False):
                     size = f.get('lines_of_code', 0) or 0
-                    print(f"{size:>6} loc  {fp}")
+                    em = f.get('edit_mode') or 'immutable'
+                    print(f"{size:>6} loc  {em:<13}  {fp}")
                 else:
                     print(fp)
 
@@ -409,6 +422,51 @@ class FileCommands(Command):
 
         except Exception as e:
             logger.error(f"Failed to list files: {e}")
+            logger.debug("Full error:", exc_info=True)
+            return 1
+
+    def mark(self, args) -> int:
+        """Set the edit_mode attribute on a file (migration 106).
+
+        Values: 'immutable' (default), 'hot-reload', 'live-symlink'.
+        See design doc: reports/2026-09-19-2012-declarative-reframe-*.html §6.
+        """
+        try:
+            project = fuzzy_match_project(args.project, show_matched=False)
+            if not project:
+                logger.error(f"Project '{args.project}' not found")
+                return 1
+            valid = {'immutable', 'hot-reload', 'live-symlink'}
+            if args.edit_mode not in valid:
+                logger.error(
+                    f"Invalid --edit-mode {args.edit_mode!r}. "
+                    f"Must be one of: {sorted(valid)}"
+                )
+                return 1
+            from db_utils import execute, query_one
+            row = query_one(
+                "SELECT id, edit_mode FROM project_files "
+                "WHERE project_id = ? AND file_path = ?",
+                (project['id'], args.file_path),
+            )
+            if not row:
+                logger.error(
+                    f"File not found: {args.project}/{args.file_path}"
+                )
+                return 1
+            new_mode = None if args.edit_mode == 'immutable' else args.edit_mode
+            execute(
+                "UPDATE project_files SET edit_mode = ? WHERE id = ?",
+                (new_mode, row['id']),
+            )
+            print(
+                f"✓ {args.project}/{args.file_path}: "
+                f"edit_mode {row['edit_mode'] or 'immutable'} → "
+                f"{args.edit_mode}"
+            )
+            return 0
+        except Exception as e:
+            logger.error(f"Failed to mark file: {e}")
             logger.debug("Full error:", exc_info=True)
             return 1
 
@@ -906,7 +964,28 @@ def register(cli):
     ls_parser.add_argument('project', help='Project name or pattern')
     ls_parser.add_argument('path', nargs='?', help='Optional path prefix to filter by')
     ls_parser.add_argument('-l', '--long', action='store_true', help='Show detailed info (lines of code)')
+    ls_parser.add_argument('--edit-mode', dest='edit_mode',
+                            choices=['immutable', 'hot-reload',
+                                     'live-symlink', 'non-immutable'],
+                            help='Filter by edit_mode (migration 106). '
+                                 '"non-immutable" matches anything opted '
+                                 'out of the default.')
     cli.commands['file.ls'] = cmd.ls
+
+    # file mark (set the edit_mode attribute on a file — mig 106)
+    mark_parser = file_subparsers.add_parser(
+        'mark',
+        help='Set the edit_mode of a file (immutable | hot-reload | live-symlink)',
+    )
+    mark_parser.add_argument('project', help='Project name or slug')
+    mark_parser.add_argument('file_path', help='File path within project')
+    mark_parser.add_argument('--edit-mode', dest='edit_mode',
+                             required=True,
+                             choices=['immutable', 'hot-reload',
+                                      'live-symlink'],
+                             help='Edit mode to set. See migration 106 '
+                                  'for semantics.')
+    cli.commands['file.mark'] = cmd.mark
 
     # file where (mirror drift diagnostic — Phase 0 of the observer plan)
     where_parser = file_subparsers.add_parser(

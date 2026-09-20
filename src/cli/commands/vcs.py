@@ -393,6 +393,27 @@ class VCSCommands(Command):
         session = self.service.get_current_session()
         sid = session['id']
 
+        # Defensive orphan reap. `vcs_working_state.file_id` has an
+        # ON DELETE CASCADE FK to project_files(id), but sync_engine.py
+        # and some migrations disable FK enforcement while doing bulk
+        # deletes — those paths can leave working_state rows pointing
+        # at files that no longer exist. When commit tries to record
+        # them in vcs_file_states, the FK there fires and the whole
+        # commit aborts (session recap 2026-09-19: hit exactly this).
+        # Rather than crash, reap the dangling rows and continue.
+        try:
+            orphaned = self.vcs_repo.execute("""
+                DELETE FROM vcs_working_state
+                 WHERE staged_by_session_id = ?
+                   AND file_id NOT IN (SELECT id FROM project_files)
+            """, (sid,))
+            if orphaned:
+                logger.debug(
+                    f"reaped orphaned working_state row(s) for session {sid}"
+                )
+        except Exception as e:
+            logger.debug(f"orphan reap skipped (non-fatal): {e}")
+
         # Stage recording (migration 104 / deploy_stage_runs). Capture
         # parent commit up front so the no-changes exit path can still
         # emit a 'noop' with a meaningful input hash.

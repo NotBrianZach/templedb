@@ -3196,6 +3196,8 @@ WantedBy=timers.target
              self._check_no_expired_active_sessions),
             ('deploy_stages_have_no_stale_runs',
              self._check_no_stale_deploy_stage_runs),
+            ('working_state_references_valid_files',
+             self._check_working_state_files_exist),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -3518,6 +3520,33 @@ WantedBy=timers.target
             f"stage run #{r['id']} ({r['stage_kind']} on {r['slug']}) "
             f"stuck since {r['started_at']} "
             f"(input={r['input12'] or 'none'})"
+            for r in rows
+        ]
+
+    def _check_working_state_files_exist(self):
+        """Invariant: every vcs_working_state.file_id resolves to an
+        existing project_files row.
+
+        The FK has ON DELETE CASCADE, but sync_engine and some
+        migrations bulk-delete with FKs disabled — leaving orphaned
+        working_state rows that blow up commit's vcs_file_states insert
+        (same FK, fires when commit tries to record the row). Caught
+        this class of bug the hard way in session recap 2026-09-19.
+        Vcs commit now defensively reaps them; this check catches
+        drift between reaps."""
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT ws.id, ws.file_id, ws.staged_by_session_id,
+                      ws.state, ws.project_id
+                 FROM vcs_working_state ws
+            LEFT JOIN project_files pf ON pf.id = ws.file_id
+                WHERE pf.id IS NULL
+                LIMIT 50"""
+        )
+        return [
+            f"working_state #{r['id']} (project={r['project_id']}, "
+            f"state={r['state']}, session={r['staged_by_session_id']}) "
+            f"references missing project_files.id={r['file_id']}"
             for r in rows
         ]
 

@@ -114,7 +114,7 @@ MIGRATION_SEQUENCE = [
     "103_vcs_sessions_context.sql",
     "104_deploy_stage_runs.sql",
     "105_vcs_sessions_lifetime.sql",
-    "106_agent_notifications.sql",
+    "106_project_files_edit_mode.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",
