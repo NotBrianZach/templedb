@@ -29,29 +29,59 @@ logger = get_logger(__name__)
 DEFAULT_WORKSPACE_ROOT = Path.home() / ".config" / "templedb" / "edit-workspaces"
 
 
-def _session_workspace_component() -> str:
-    """Sanitized filesystem component from TEMPLEDB_SESSION, or '' if unset.
+def _sanitize_session_component(name: str) -> str:
+    """Sanitize a session name into a safe filesystem path component.
 
-    Restricting to [a-zA-Z0-9._-] keeps agent-chosen session names from
-    breaking out of the workspace root (e.g. `../evil`) and keeps paths
-    portable across filesystems.
+    Restricting to [a-zA-Z0-9._-] keeps chosen session names from
+    breaking out of the workspace root (e.g. `../evil`) and keeps
+    paths portable across filesystems.
     """
-    session_name = os.environ.get("TEMPLEDB_SESSION", "").strip()
-    if not session_name:
-        return ""
-    return re.sub(r"[^a-zA-Z0-9._-]", "_", session_name)
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", name)
+
+
+def _resolve_workspace_session_name() -> str:
+    """Pick the session component for the workspace path.
+
+    Priority:
+      1. TEMPLEDB_SESSION env var — the declared name (agents).
+      2. Current session's `name` field via VCSService — auto-derived
+         SID-based name for humans, one per terminal.
+      3. Fallback 'default' — used only if session resolution fails
+         (fresh install without vcs_sessions rows, corner cases).
+
+    This is called every time a workspace path is derived, so it must
+    not raise; on any error, fall back to 'default' so the workspace
+    is still usable.
+    """
+    explicit = os.environ.get("TEMPLEDB_SESSION", "").strip()
+    if explicit:
+        return _sanitize_session_component(explicit)
+    try:
+        from services.context import ServiceContext
+        session = ServiceContext().get_vcs_service().get_current_session()
+        raw_name = session.get('name') or 'default'
+        return _sanitize_session_component(raw_name)
+    except Exception:
+        return 'default'
 
 
 def edit_workspace_path(slug: str) -> Path:
-    """Return the default edit-workspace path for a slug, honoring TEMPLEDB_SESSION.
+    """Return the default edit-workspace path for a slug.
 
-    Shared with other modules (mcp_daemon, claude.py hint text, etc.)
-    so their printed hints match what `templedb edit` actually creates
-    when TEMPLEDB_SESSION is set.
+    Always includes a session subdirectory now (previously only when
+    TEMPLEDB_SESSION was set): humans get per-terminal isolation via
+    their auto-derived session name, agents get their declared name.
+    Removes the class of contention where two shells / two agents on
+    the same slug clobber each other's writable trees.
+
+    Legacy per-slug workspaces at edit-workspaces/<slug>/ (no session
+    subdirectory) are orphaned by this change but not touched -- the
+    user can `rm -rf` them when convenient.
+
+    Shared with mcp_daemon, claude.py hint text, etc. so their
+    printed hints match what `templedb edit` actually creates.
     """
-    base = DEFAULT_WORKSPACE_ROOT / slug
-    ctx = _session_workspace_component()
-    return (base / ctx) if ctx else base
+    return DEFAULT_WORKSPACE_ROOT / slug / _resolve_workspace_session_name()
 
 
 class EditCommands:

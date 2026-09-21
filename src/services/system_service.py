@@ -940,7 +940,7 @@ class SystemService:
 
         return result
 
-    def switch_system(self, project_slug: str, dry_run: bool = False, with_home_manager: bool = False, verbose: bool = False, show_trace: bool = False, no_update_lock_file: bool = False, quiet: bool = False, checkout_path: Optional[Path] = None) -> Dict[str, Any]:
+    def switch_system(self, project_slug: str, dry_run: bool = False, with_home_manager: bool = False, verbose: bool = False, show_trace: bool = False, no_update_lock_file: bool = False, quiet: bool = False, checkout_path: Optional[Path] = None, force: bool = False) -> Dict[str, Any]:
         """Switch to system configuration (permanent)
 
         This activates the configuration and adds it to boot menu.
@@ -952,6 +952,13 @@ class SystemService:
             with_home_manager: If True, also rebuild home-manager after NixOS
             checkout_path: Pre-materialized checkout path. If provided, skips
                           redundant materialize_from_db() call.
+            force: If True, materialize overwrites local changes in the
+                   checkout. If False (default) and the checkout diverges
+                   from DB, abort with a clear diff so the caller can
+                   commit the local changes to DB before proceeding --
+                   otherwise the switch would silently build against
+                   whatever mix of on-disk edits and stale DB content
+                   exists in the checkout tree.
 
         Returns:
             Dict with rebuild results including home-manager if applicable
@@ -963,12 +970,30 @@ class SystemService:
                 "or configure passwordless sudo for this user."
             )
 
-        # Use pre-materialized path if provided, otherwise materialize
+        # Use pre-materialized path if provided, otherwise materialize.
+        # force=True lets materialize overwrite local edits; without it,
+        # a conflict aborts the switch entirely rather than falling back
+        # to the possibly-inconsistent existing checkout (the old
+        # behavior was silent and confusing: user runs sudo sed on
+        # /etc/nixos/flake.nix; switch materializes DB over it silently
+        # if there was no other divergence; user's build uses stale
+        # inputs and they don't know why).
         if checkout_path is None:
-            checkout_path = self.materialize_from_db(project_slug)
+            checkout_path = self.materialize_from_db(project_slug, force=force)
             if not checkout_path:
-                # Fall back to existing checkout
-                checkout_path = self.get_project_checkout_path(project_slug)
+                # materialize refused because of a conflict AND force=False.
+                # Bail with a pointer to the two escapes rather than
+                # papering over with a stale checkout.
+                raise SystemServiceError(
+                    f"Refusing to switch: {project_slug} checkout has local "
+                    f"changes that differ from DB (see warnings above).\n"
+                    f"Fix one of:\n"
+                    f"  A. Persist those edits to DB:\n"
+                    f"     templedb file set {project_slug} <path> --content \"...\"\n"
+                    f"     Then re-run the switch.\n"
+                    f"  B. Discard the local edits and use the DB copy:\n"
+                    f"     Re-run with --force."
+                )
 
         if not checkout_path:
             raise SystemServiceError(

@@ -613,6 +613,7 @@ class NixOSCommand(Command):
             show_trace = getattr(args, 'show_trace', False)
             no_update_lock = getattr(args, 'no_update_lock_file', False)
             yes = getattr(args, 'yes', False)
+            force = getattr(args, 'force', False)
 
             service = SystemService()
             print(f"🚀 Switching to system configuration: {args.slug}")
@@ -640,6 +641,7 @@ class NixOSCommand(Command):
                 verbose=verbose,
                 show_trace=show_trace,
                 no_update_lock_file=no_update_lock,
+                force=force,
             )
 
             if result['success']:
@@ -2197,7 +2199,17 @@ def register(cli):
         p.add_argument('--with-home-manager', action='store_true')
         p.add_argument('--verbose', '-v', action='store_true')
         p.add_argument('--show-trace', action='store_true')
-        p.add_argument('--yes', '-y', action='store_true')
+        p.add_argument('--yes', '-y', action='store_true',
+                       help='Skip the "activate configuration?" prompt. Does '
+                            'NOT bypass local-changes checks — pair with '
+                            '--force to overwrite checkout files that diverge '
+                            'from DB.')
+        p.add_argument('--force', '-f', action='store_true',
+                       help='Overwrite local changes in the checkout during '
+                            'materialize (default: abort with a diff). Use '
+                            'this when the checkout has stale edits you know '
+                            'you want to discard; otherwise commit them to '
+                            'DB via `templedb file set <slug> <path>` first.')
         p.add_argument('--no-update-lock-file', dest='no_update_lock_file', action='store_true')
 
     def _args_system_status(p):
