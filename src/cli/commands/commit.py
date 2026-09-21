@@ -44,6 +44,31 @@ class CommitCommand:
         self.file_repo = FileRepository()
         self.checkout_repo = CheckoutRepository()
         self.vcs_repo = VCSRepository()
+        self._service_ctx = None
+
+    def _get_service_context(self):
+        """Lazily construct a ServiceContext for session/VCS service access."""
+        if self._service_ctx is None:
+            from services.context import ServiceContext
+            self._service_ctx = ServiceContext()
+        return self._service_ctx
+
+    def _resolve_session_id(self) -> Optional[int]:
+        """Return the current session's id, or None if unavailable.
+
+        Session resolution can legitimately fail (fresh install with no
+        sessions table populated yet, or a corner case in the pin flow).
+        Falling back to session_id=NULL keeps the commit correct — it
+        just lands as an already-published commit rather than a
+        session-owned one, which matches pre-Phase-B behavior.
+        """
+        try:
+            session = self._get_service_context().get_vcs_service().get_current_session()
+            return session['id']
+        except Exception as e:
+            logger.warning(f"Could not resolve session for commit "
+                           f"(session_id will be NULL): {e}")
+            return None
 
     def _collect_commit_metadata(self, args, changes: Dict) -> Dict:
         """
@@ -322,6 +347,51 @@ class CommitCommand:
                     author=author,
                     message=message
                 )
+
+                # Phase B: tag the commit with its owning session and
+                # advance the session's private HEAD for this branch.
+                # session_id=NULL means "already published" (matches
+                # pre-Phase-B behavior); publish (fast-forward-or-fail)
+                # clears session_id on the range at reconciliation time.
+                session_id = self._resolve_session_id()
+                if session_id is not None:
+                    self.vcs_repo.execute(
+                        "UPDATE vcs_commits SET session_id = ? WHERE id = ?",
+                        (session_id, commit_id),
+                        commit=False,
+                    )
+                    existing_head = self.vcs_repo.query_one(
+                        "SELECT id FROM vcs_session_heads "
+                        "WHERE session_id = ? AND branch_id = ?",
+                        (session_id, branch_id),
+                    )
+                    if existing_head:
+                        # Session already has a private tip on this branch;
+                        # advance it. base_commit_id stays pinned to the
+                        # shared HEAD at session start.
+                        self.vcs_repo.execute(
+                            "UPDATE vcs_session_heads "
+                            "SET head_commit_id = ?, updated_at = datetime('now') "
+                            "WHERE id = ?",
+                            (commit_id, existing_head['id']),
+                            commit=False,
+                        )
+                    else:
+                        # First commit for this session on this branch —
+                        # seed base_commit_id with the shared HEAD (may
+                        # be NULL if the branch is empty).
+                        shared = self.vcs_repo.query_one(
+                            "SELECT head_commit_id FROM vcs_branches WHERE id = ?",
+                            (branch_id,),
+                        )
+                        base_commit_id = shared['head_commit_id'] if shared else None
+                        self.vcs_repo.execute(
+                            "INSERT INTO vcs_session_heads "
+                            "(session_id, branch_id, head_commit_id, base_commit_id) "
+                            "VALUES (?, ?, ?, ?)",
+                            (session_id, branch_id, commit_id, base_commit_id),
+                            commit=False,
+                        )
 
                 # Collect and store commit metadata
                 metadata = self._collect_commit_metadata(args, changes)
@@ -722,14 +792,19 @@ class CommitCommand:
            `templedb commit <slug> <workspace>`, the scan sees
            workspace_hash != db_hash and calls it "modified" —
            which would silently overwrite the file-set write with
-           the stale workspace bytes. Instead, we look for applied
-           EditIntents whose new_content_hash equals the current DB
-           hash but does NOT equal the workspace hash. That signals
-           "DB is ahead of workspace" and we abort.
+           the stale workspace bytes.
+
+           Fix 2026-09-20: consult the checkout snapshot before firing
+           the intent conflict. If snapshot.content_hash equals the
+           current DB hash, the workspace WAS materialized with the
+           intent-applied content and the user's edit is a legitimate
+           progression, not a revert. Only fire if the snapshot is
+           missing or lags the DB — that's the true "DB moved forward
+           while workspace was stale" case the check exists to catch.
         """
         conflicts = []
 
-        # Get checkout info (used for version-based check only)
+        # Get checkout info (used by both checks now).
         checkout = self.checkout_repo.get_by_path(project_id, str(workspace_dir))
 
         for change in modified_files:
@@ -746,12 +821,19 @@ class CommitCommand:
                 WHERE fc.file_id = ? AND fc.is_current = 1
             """, (change.file_id,))
 
+            # Snapshot at last checkout/refresh — records what the DB
+            # had for this file when the workspace was materialized.
+            # Used by BOTH checks: version-based (classic) and
+            # intent-based (are we ahead or just editing on top?).
+            snapshot = None
+            if checkout:
+                snapshot = self.checkout_repo.get_snapshot(checkout['id'], change.file_id)
+
             # ------ Check 2 (intent-based): file set silently ahead? ------
             # Look up any applied EditIntent whose new_content_hash
             # matches the current DB blob for this file. If the
             # workspace hash doesn't match either the DB blob OR the
-            # intent's new hash, the workspace is stale and about to
-            # revert a `file set` write.
+            # intent's new hash, the workspace COULD be stale.
             intent_ahead = self.file_repo.query_one("""
                 SELECT id, applied_at, new_content_hash
                   FROM edit_intents
@@ -763,8 +845,20 @@ class CommitCommand:
                  LIMIT 1
             """, (project_id, change.file_path,
                   current['content_hash'] if current else None))
+            # Only flag as an intent conflict if the snapshot is
+            # missing OR older than the current DB blob. If
+            # snapshot.content_hash == current.content_hash, the
+            # workspace saw the intent-applied content at materialize
+            # time and the current diff is just legitimate editing on
+            # top — no revert risk.
+            workspace_saw_current = bool(
+                snapshot
+                and current
+                and snapshot['content_hash'] == current['content_hash']
+            )
             if intent_ahead and current \
-                    and change.content.hash_sha256 != current['content_hash']:
+                    and change.content.hash_sha256 != current['content_hash'] \
+                    and not workspace_saw_current:
                 conflicts.append({
                     'file_path': change.file_path,
                     'file_id': change.file_id,
@@ -784,9 +878,8 @@ class CommitCommand:
                 continue  # don't double-report via version check below
 
             # ------ Check 1 (version-based, classic) ------
-            if not checkout:
+            if not checkout or not snapshot:
                 continue
-            snapshot = self.checkout_repo.get_snapshot(checkout['id'], change.file_id)
             if snapshot and current:
                 if current['version'] != snapshot['version']:
                     conflicts.append({

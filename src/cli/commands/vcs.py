@@ -512,10 +512,33 @@ class VCSCommands(Command):
                 VALUES (?, ?, 0)
             """, (commit_id, branch['head_commit_id']), commit=False)
 
-        # Update branch head
-        self.vcs_repo.execute(
-            "UPDATE vcs_branches SET head_commit_id = ? WHERE id = ?",
-            (commit_id, branch['id']), commit=False)
+        # Update branch head with a compare-and-swap keyed on the
+        # HEAD we read into `branch` above. Two concurrent `vcs commit`
+        # runs could otherwise both pass the create_commit step and
+        # the second's UPDATE silently overwrite the first's HEAD --
+        # the same TOCTOU class Phase C's publish_session_head CAS
+        # fixed. On rowcount=0 someone else advanced HEAD; abort with
+        # a clear error rather than clobbering it.
+        from db_utils import get_connection
+        _conn = get_connection()
+        _cur = _conn.execute(
+            "UPDATE vcs_branches SET head_commit_id = ? "
+            "WHERE id = ? AND head_commit_id IS ?",
+            (commit_id, branch['id'], branch.get('head_commit_id')),
+        )
+        if _cur.rowcount == 0:
+            from cli.json_output import emit_error
+            _shared = self.vcs_repo.query_one(
+                "SELECT head_commit_id FROM vcs_branches WHERE id = ?",
+                (branch['id'],),
+            )
+            return emit_error(
+                args, "HEAD_RACE",
+                f"Branch HEAD advanced concurrently "
+                f"(expected {branch.get('head_commit_id')}, "
+                f"now {_shared['head_commit_id'] if _shared else 'unknown'}). "
+                f"Refresh with `templedb vcs status <slug> --refresh` and retry.",
+            )
 
         # Create file states and update file_contents
         for file in staged:
@@ -767,6 +790,7 @@ class VCSCommands(Command):
                 "staged_by_others": status.get('staged_by_others', []),
                 "modified": status.get('modified', []),
                 "untracked": status.get('untracked', []),
+                "pending_session_commits": status.get('pending_session_commits', 0),
                 "clean": not (status.get('staged') or status.get('modified') or status.get('untracked')),
                 "checkout": checkout_info,
                 "all_sessions_view": grouped,
@@ -777,6 +801,13 @@ class VCSCommands(Command):
                 if d.get('session_id'):
                     label = d.get('session_name') or 'unnamed'
                     print(f"Session: #{d['session_id']} ({label})")
+                pending = d.get('pending_session_commits', 0)
+                if pending:
+                    print(
+                        f"Pending publish: {pending} commit(s) in this session — "
+                        f"run `templedb publish {d['project']}` to fast-forward "
+                        f"onto shared HEAD (or `templedb vcs log --session` to view)."
+                    )
                 if d['checkout']:
                     c = d['checkout']
                     mode = "writable (edit mode)" if c['writable'] else "read-only"
@@ -841,7 +872,43 @@ class VCSCommands(Command):
 
         limit = args.n if hasattr(args, 'n') and args.n else 10
         branch_filter = getattr(args, 'branch', None)
-        commits = self.vcs_repo.get_commit_history(project['id'], branch_name=branch_filter, limit=limit)
+
+        # Visibility: default is published view (session_id IS NULL);
+        # --session extends to the current session's private commits;
+        # --all shows everything regardless of session ownership.
+        session_flag = getattr(args, 'session', False)
+        all_flag = getattr(args, 'all_sessions', False)
+        if all_flag:
+            visibility = 'all'
+            current_session_id = None
+        elif session_flag:
+            visibility = 'session'
+            current_session_id = self.service.get_current_session()['id']
+        else:
+            visibility = 'published'
+            current_session_id = None
+
+        commits = self.vcs_repo.get_commit_history(
+            project['id'],
+            branch_name=branch_filter,
+            limit=limit,
+            visibility=visibility,
+            session_id=current_session_id,
+        )
+
+        # Pending-session-commits count on the current branch (surfaces
+        # the distinction between published view and session view).
+        pending = 0
+        if visibility == 'published':
+            branch = self.vcs_repo.get_active_branch(project['id'])
+            if branch:
+                sess = self.service.get_current_session()
+                row = self.vcs_repo.query_one(
+                    "SELECT COUNT(*) AS n FROM vcs_commits "
+                    "WHERE project_id = ? AND branch_id = ? AND session_id = ?",
+                    (project['id'], branch['id'], sess['id']),
+                )
+                pending = int(row['n']) if row else 0
 
         items = [
             {
@@ -850,17 +917,32 @@ class VCSCommands(Command):
                 "author": c['author'],
                 "date": c['commit_timestamp'],
                 "message": c['commit_message'],
+                "session_id": c.get('session_id'),
             }
             for c in (commits or [])
         ]
 
+        view_label = {
+            'published': 'published view',
+            'session': 'session view (published + your unpublished commits)',
+            'all': 'all commits (no session filter)',
+        }[visibility]
+
         def _human(items):
+            print(f"\nCommit log for {project['slug']} [{view_label}]")
+            if visibility == 'published' and pending:
+                print(
+                    f"  * {pending} pending commit(s) in your session "
+                    f"— re-run with --session to include, or `templedb publish` "
+                    f"to fast-forward onto shared HEAD."
+                )
+            print()
             if not items:
                 print("No commits found")
                 return
-            print(f"\nCommit log for {project['slug']}\n")
             for c in items:
-                print(f"commit {c['hash']}")
+                marker = " (session)" if c['session_id'] is not None else ""
+                print(f"commit {c['hash']}{marker}")
                 print(f"Branch: {c['branch']}")
                 print(f"Author: {c['author']}")
                 print(f"Date:   {c['date']}")
@@ -2091,6 +2173,13 @@ def register(cli):
     log_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
     log_parser.add_argument('-n', type=int, help='Number of commits to show')
     log_parser.add_argument('--branch', '-b', help='Filter by branch name')
+    log_parser.add_argument('--session', action='store_true',
+                            help="Include the current session's unpublished commits "
+                                 "(default view hides them). Prefer `templedb publish` "
+                                 "to fast-forward them onto shared HEAD instead.")
+    log_parser.add_argument('--all-sessions', dest='all_sessions', action='store_true',
+                            help="Show every commit regardless of session ownership "
+                                 "(published + all sessions' unpublished commits).")
     cli.commands['vcs.log'] = cmd.log
 
     # vcs branch

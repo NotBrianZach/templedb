@@ -114,7 +114,10 @@ MIGRATION_SEQUENCE = [
     "103_vcs_sessions_context.sql",
     "104_deploy_stage_runs.sql",
     "105_vcs_sessions_lifetime.sql",
+    "106_agent_notifications.sql",
     "106_project_files_edit_mode.sql",
+    "107_vcs_session_heads.sql",
+    "108_rename_context_to_name.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",
@@ -148,10 +151,12 @@ class Migrator:
         self.migrations_dir = MIGRATIONS_DIR
 
     def _connect(self) -> sqlite3.Connection:
+        from db_utils import apply_standard_pragmas
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        # Migrations don't insert into sync-tracked tables; skip crsqlite
+        # load so a fresh DB migration doesn't require the extension.
+        apply_standard_pragmas(conn, load_crsqlite=False)
         return conn
 
     def _ensure_version_table(self, conn: sqlite3.Connection):

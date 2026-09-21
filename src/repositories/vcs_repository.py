@@ -130,7 +130,8 @@ class VCSRepository(BaseRepository):
         """, (commit_id, file_id, change_type, old_hash, new_hash, old_path, new_path), commit=False)
 
     def get_commit_history(self, project_id: int, branch_name: Optional[str] = None,
-                          limit: int = 50) -> List[Dict[str, Any]]:
+                          limit: int = 50, visibility: str = 'published',
+                          session_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Get commit history for a project.
 
@@ -138,30 +139,33 @@ class VCSRepository(BaseRepository):
             project_id: Project ID
             branch_name: Optional branch name to filter by
             limit: Maximum number of commits to return (default: 50)
+            visibility: 'published' (default) shows only commits with
+                session_id IS NULL — the shared branch view; 'session'
+                additionally includes commits owned by `session_id`;
+                'all' includes everything (unfiltered by session).
+            session_id: required when visibility='session'.
 
         Returns:
             List of commit dictionaries ordered by timestamp DESC
         """
-        if branch_name:
-            logger.debug(f"Getting commit history for project {project_id}, branch {branch_name}")
-            return self.query_all("""
-                SELECT
-                    c.id,
-                    c.commit_hash,
-                    c.author,
-                    c.commit_message,
-                    c.commit_timestamp,
-                    b.branch_name,
-                    COALESCE((SELECT COUNT(*) FROM vcs_file_states WHERE commit_id = c.id), (SELECT COUNT(*) FROM commit_files WHERE commit_id = c.id)) as files_changed
-                FROM vcs_commits c
-                JOIN vcs_branches b ON c.branch_id = b.id
-                WHERE c.project_id = ? AND b.branch_name = ?
-                ORDER BY c.commit_timestamp DESC
-                LIMIT ?
-            """, (project_id, branch_name, limit))
+        # Compose the session-visibility WHERE fragment.
+        if visibility == 'published':
+            visibility_clause = "AND c.session_id IS NULL"
+            visibility_params: tuple = ()
+        elif visibility == 'session':
+            if session_id is None:
+                raise ValueError("visibility='session' requires session_id")
+            visibility_clause = "AND (c.session_id IS NULL OR c.session_id = ?)"
+            visibility_params = (session_id,)
+        elif visibility == 'all':
+            visibility_clause = ""
+            visibility_params = ()
         else:
-            logger.debug(f"Getting commit history for project {project_id}")
-            return self.query_all("""
+            raise ValueError(f"unknown visibility: {visibility!r}")
+
+        if branch_name:
+            logger.debug(f"Getting commit history for project {project_id}, branch {branch_name}, visibility={visibility}")
+            return self.query_all(f"""
                 SELECT
                     c.id,
                     c.commit_hash,
@@ -169,13 +173,32 @@ class VCSRepository(BaseRepository):
                     c.commit_message,
                     c.commit_timestamp,
                     b.branch_name,
+                    c.session_id,
                     COALESCE((SELECT COUNT(*) FROM vcs_file_states WHERE commit_id = c.id), (SELECT COUNT(*) FROM commit_files WHERE commit_id = c.id)) as files_changed
                 FROM vcs_commits c
                 JOIN vcs_branches b ON c.branch_id = b.id
-                WHERE c.project_id = ?
+                WHERE c.project_id = ? AND b.branch_name = ? {visibility_clause}
                 ORDER BY c.commit_timestamp DESC
                 LIMIT ?
-            """, (project_id, limit))
+            """, (project_id, branch_name, *visibility_params, limit))
+        else:
+            logger.debug(f"Getting commit history for project {project_id}, visibility={visibility}")
+            return self.query_all(f"""
+                SELECT
+                    c.id,
+                    c.commit_hash,
+                    c.author,
+                    c.commit_message,
+                    c.commit_timestamp,
+                    b.branch_name,
+                    c.session_id,
+                    COALESCE((SELECT COUNT(*) FROM vcs_file_states WHERE commit_id = c.id), (SELECT COUNT(*) FROM commit_files WHERE commit_id = c.id)) as files_changed
+                FROM vcs_commits c
+                JOIN vcs_branches b ON c.branch_id = b.id
+                WHERE c.project_id = ? {visibility_clause}
+                ORDER BY c.commit_timestamp DESC
+                LIMIT ?
+            """, (project_id, *visibility_params, limit))
 
     def get_commit_files(self, commit_id: int) -> List[Dict[str, Any]]:
         """

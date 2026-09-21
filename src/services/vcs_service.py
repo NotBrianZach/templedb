@@ -277,38 +277,38 @@ class VCSService(BaseService):
         author = self._resolve_author()
         host = socket.gethostname()
 
-        # Step 2.5 (declared identity — migration 103): TEMPLEDB_CONTEXT.
-        # Sessions sharing (author, host, context) share identity, even
+        # Step 2.5 (declared identity — migration 103 introduced this,
+        # migration 108 renamed context->name): TEMPLEDB_SESSION.
+        # Sessions sharing (author, host, name) share identity even
         # across fresh shells with different session-leader PIDs. This
         # is the agent-workflow answer: one env var in the wrapper's
         # settings, no pin file, no runtime detection. If two agents
-        # want isolation on the same host, they pick different contexts.
-        context = os.environ.get("TEMPLEDB_CONTEXT", "").strip()
-        if context:
+        # want isolation on the same host, they pick different names.
+        session_name = os.environ.get("TEMPLEDB_SESSION", "").strip()
+        if session_name:
             existing = self.vcs_repo.query_one(
                 """
                 SELECT * FROM vcs_sessions
                  WHERE ended_at IS NULL
-                   AND author = ? AND host = ? AND context = ?
+                   AND author = ? AND host = ? AND name = ?
                  ORDER BY id DESC LIMIT 1
                 """,
-                (author, host, context),
+                (author, host, session_name),
             )
             if existing:
                 self._current_session = dict(existing)
                 return self._current_session
-            # No existing session for this context — auto-create one.
-            # Name mirrors the context for legibility in `session list`.
+            # No existing session for this name — auto-create one.
             try:
                 key_pid = os.getsid(0)
             except (AttributeError, OSError):
                 key_pid = os.getppid()
             self.vcs_repo.execute(
                 """
-                INSERT INTO vcs_sessions (name, author, host, pid, context)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vcs_sessions (name, author, host, pid)
+                VALUES (?, ?, ?, ?)
                 """,
-                (f"context:{context}", author, host, key_pid, context),
+                (session_name, author, host, key_pid),
             )
             row = self.vcs_repo.query_one(
                 "SELECT * FROM vcs_sessions WHERE id = last_insert_rowid()"
@@ -410,7 +410,21 @@ class VCSService(BaseService):
     def end_session(
         self, session_id: int, reason: str = "explicit-end"
     ) -> Dict[str, Any]:
-        """Mark a session ended. Does not unstage the session's rows."""
+        """Mark a session ended. Does not unstage the session's rows.
+
+        If the session has reap_policy='discard' AND a non-empty name,
+        also removes any Phase-D per-session workspace directories
+        (edit-workspaces/<slug>/<sanitized-name>/) belonging to it.
+        Policies 'orphan_stages' / 'preserve' / NULL leave the
+        directories alone -- reap_policy is only meant to authorize
+        deletion for known-transient sessions.
+        """
+        # Look up before ending so we still have name + reap_policy
+        # (session could be raced-deleted otherwise).
+        before = self.vcs_repo.query_one(
+            "SELECT name, reap_policy FROM vcs_sessions WHERE id = ?",
+            (session_id,),
+        )
         self.vcs_repo.execute(
             """
             UPDATE vcs_sessions
@@ -419,10 +433,44 @@ class VCSService(BaseService):
             """,
             (reason, session_id),
         )
+        if before and before['name'] and before['reap_policy'] == 'discard':
+            self._reap_session_workspaces(before['name'])
         row = self.vcs_repo.query_one(
             "SELECT * FROM vcs_sessions WHERE id = ?", (session_id,)
         )
         return dict(row) if row else {}
+
+    @staticmethod
+    def _reap_session_workspaces(session_name: str) -> None:
+        """Remove edit-workspaces/*/<sanitized-name>/ trees for this session.
+
+        Mirrors the sanitizer in cli.commands.edit._session_workspace_component
+        so it deletes exactly the directories `templedb edit` would have
+        created for a session with this name.
+        """
+        import re
+        import shutil
+        from pathlib import Path
+        sanitized = re.sub(r"[^a-zA-Z0-9._-]", "_", session_name)
+        if not sanitized:
+            return
+        root = Path.home() / ".config" / "templedb" / "edit-workspaces"
+        if not root.exists():
+            return
+        # Log with the service logger if the module has one; falls back
+        # to the global logger otherwise.
+        from logger import get_logger as _get_logger
+        _log = _get_logger(__name__)
+        for slug_dir in root.iterdir():
+            if not slug_dir.is_dir():
+                continue
+            candidate = slug_dir / sanitized
+            if candidate.is_dir():
+                try:
+                    shutil.rmtree(candidate)
+                    _log.info(f"Reaped session workspace: {candidate}")
+                except OSError as e:
+                    _log.warning(f"Could not reap {candidate}: {e}")
 
     def list_sessions(self, active_only: bool = False) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM vcs_sessions"
@@ -520,6 +568,127 @@ class VCSService(BaseService):
                 tuple(ids),
             )
         return {'ended': ended, 'dry_run': dry_run}
+
+    def publish_session_head(
+        self,
+        project_id: int,
+        branch_id: int,
+        session_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Fast-forward the session's private HEAD onto the shared branch HEAD.
+
+        Phase B of the session-scoping work. Sessions accumulate commits
+        under their own vcs_session_heads row; this method reconciles
+        that private tip back into the shared branch, or refuses if the
+        shared HEAD has moved past the session's fork point.
+
+        Args:
+            project_id: unused here (branch_id is unique across projects)
+                but taken so callers can pass the shape they already have.
+            branch_id: branch to reconcile
+            session_id: session whose head is being published; defaults
+                to the current session.
+
+        Returns:
+            {
+                'ok': bool,
+                'action': 'fast-forwarded' | 'no-op' | 'diverged',
+                'from_commit_id': Optional[int],
+                'to_commit_id': Optional[int],
+                'commits_published': int,   # number of vcs_commits rows whose session_id was cleared
+                'shared_head': Optional[int],
+                'session_base': Optional[int],
+                'reason': Optional[str],
+            }
+
+        Fast-forward is refused when shared HEAD != session_base — the
+        caller must reconcile (rebase / merge / fetch-then-recommit)
+        before publishing. This is the intentional "fail" side of
+        fast-forward-or-fail.
+        """
+        if session_id is None:
+            session_id = self.get_current_session()['id']
+
+        session_head = self.vcs_repo.query_one(
+            "SELECT id, head_commit_id, base_commit_id FROM vcs_session_heads "
+            "WHERE session_id = ? AND branch_id = ?",
+            (session_id, branch_id),
+        )
+        if not session_head:
+            return {
+                'ok': True,
+                'action': 'no-op',
+                'from_commit_id': None,
+                'to_commit_id': None,
+                'commits_published': 0,
+                'shared_head': None,
+                'session_base': None,
+                'reason': 'no vcs_session_heads row for (session, branch)',
+            }
+
+        # Fast-forward is a compare-and-swap on vcs_branches.head_commit_id:
+        # advance the shared HEAD only if it still equals the session's
+        # fork point. `IS` (not `=`) matches NULL correctly (a session
+        # that started on an empty branch has base_commit_id IS NULL).
+        # Reading + updating separately would race — two concurrent
+        # publishers could both pass a pre-check and the second would
+        # silently overwrite the first's HEAD.
+        from db_utils import get_connection
+        conn = get_connection()
+        cursor = conn.execute(
+            "UPDATE vcs_branches SET head_commit_id = ? "
+            "WHERE id = ? AND head_commit_id IS ?",
+            (session_head['head_commit_id'], branch_id,
+             session_head['base_commit_id']),
+        )
+        if cursor.rowcount == 0:
+            # Read the current shared HEAD so callers get a useful
+            # diagnostic (what we expected vs what we got).
+            shared_after = self.vcs_repo.query_one(
+                "SELECT head_commit_id FROM vcs_branches WHERE id = ?",
+                (branch_id,),
+            )
+            shared_now = shared_after['head_commit_id'] if shared_after else None
+            return {
+                'ok': False,
+                'action': 'diverged',
+                'from_commit_id': session_head['base_commit_id'],
+                'to_commit_id': session_head['head_commit_id'],
+                'commits_published': 0,
+                'shared_head': shared_now,
+                'session_base': session_head['base_commit_id'],
+                'reason': (
+                    f'shared HEAD moved from {session_head["base_commit_id"]} '
+                    f'to {shared_now}; session must reconcile before publish'
+                ),
+            }
+        # Count first so we can report it; then clear.
+        published = self.vcs_repo.query_one(
+            "SELECT COUNT(*) AS n FROM vcs_commits "
+            "WHERE session_id = ? AND branch_id = ?",
+            (session_id, branch_id),
+        )
+        n_published = int(published['n']) if published else 0
+        self.vcs_repo.execute(
+            "UPDATE vcs_commits SET session_id = NULL "
+            "WHERE session_id = ? AND branch_id = ?",
+            (session_id, branch_id),
+            commit=False,
+        )
+        self.vcs_repo.execute(
+            "DELETE FROM vcs_session_heads WHERE id = ?",
+            (session_head['id'],),
+        )
+        return {
+            'ok': True,
+            'action': 'fast-forwarded',
+            'from_commit_id': session_head['base_commit_id'],
+            'to_commit_id': session_head['head_commit_id'],
+            'commits_published': n_published,
+            'shared_head': session_head['head_commit_id'],
+            'session_base': session_head['base_commit_id'],
+            'reason': None,
+        }
 
     def _refresh_ws_row_from_disk(
         self, ws_row_id: int, project: dict, file_path: str
@@ -891,6 +1060,17 @@ class VCSService(BaseService):
                     and f['state'] == 'modified']
         untracked = [f['file_path'] for f in working_state if f['state'] == 'added']
 
+        # Count of this session's unpublished commits on the current
+        # branch (rows in vcs_commits with session_id = sid, branch_id
+        # = current). Surfaces the published-vs-session view distinction
+        # so agents can see how much is waiting on `templedb publish`.
+        pending_row = self.vcs_repo.query_one(
+            "SELECT COUNT(*) AS n FROM vcs_commits "
+            "WHERE project_id = ? AND branch_id = ? AND session_id = ?",
+            (project['id'], branch['id'], sid),
+        )
+        pending_session_commits = int(pending_row['n']) if pending_row else 0
+
         return {
             'has_branch': True,
             'branch': branch['branch_name'],
@@ -899,5 +1079,6 @@ class VCSService(BaseService):
             'staged': staged,
             'staged_by_others': staged_by_others,
             'modified': modified,
-            'untracked': untracked
+            'untracked': untracked,
+            'pending_session_commits': pending_session_commits,
         }

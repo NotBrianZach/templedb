@@ -207,13 +207,17 @@ class SyncEngine:
 
     def _connect(self) -> sqlite3.Connection:
         # Thread-local connections for safety
+        from db_utils import apply_standard_pragmas
         if not hasattr(self, '_local'):
             self._local = threading.local()
         if not hasattr(self._local, 'conn') or self._local.conn is None:
             conn = sqlite3.connect(self.db_path, timeout=30.0)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=OFF")
+            # FKs off during crsql_as_crr init (crsqlite mutates schema);
+            # sync_engine.initialize() flips them back on at end of init.
+            # Load crsqlite ourselves — this module owns the canonical
+            # extension-path resolution.
+            apply_standard_pragmas(conn, foreign_keys=False, load_crsqlite=False)
             try:
                 conn.enable_load_extension(True)
                 conn.load_extension(CRSQLITE_PATH)

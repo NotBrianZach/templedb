@@ -173,12 +173,13 @@ class HookEngine:
                 rel_path = rest
 
             if slug:
+                from cli.commands.edit import edit_workspace_path
+                ws = edit_workspace_path(slug)
                 hint = (
                     f"Open a writable workspace instead:\n"
                     f"    templedb edit {slug}\n"
-                    f"then edit files under ~/.config/templedb/edit-workspaces/{slug}/ "
-                    f"and commit with:\n"
-                    f"    templedb commit {slug} ~/.config/templedb/edit-workspaces/{slug} -m \"...\"\n"
+                    f"then edit files under {ws}/ and commit with:\n"
+                    f"    templedb commit {slug} {ws} -m \"...\"\n"
                 )
             else:
                 hint = (

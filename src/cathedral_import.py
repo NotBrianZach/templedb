@@ -50,9 +50,10 @@ class CathedralImporter:
         self.conn = None
 
     def __enter__(self):
-        self.conn = sqlite3.connect(str(self.db_path))
+        from db_utils import apply_standard_pragmas
+        self.conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
+        apply_standard_pragmas(self.conn)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

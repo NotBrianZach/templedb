@@ -74,6 +74,36 @@ class CheckoutCommand:
                 logger.warning("No files found in project")
                 return 0
 
+            # Purge stray tracked-type files that aren't in DB. Without
+            # this, files left behind by prior sessions (or manual
+            # scratch work) survive the refresh and show up as "Added"
+            # in the next commit -- confusing at best, wrong
+            # attribution at worst.
+            #
+            # Only runs on --force (i.e., re-materialize on top of an
+            # existing tree). Only touches files whose extensions are
+            # recognized by the scanner (FILE_TYPE_PATTERNS); hidden
+            # files, .git internals, and unknown-type user artifacts
+            # are left alone.
+            if args.force and target_dir.exists():
+                from importer.scanner import FileScanner as _Scanner
+                _scanner_probe = _Scanner(target_dir)
+                expected_paths = {file['file_path'] for file in files}
+                purged = 0
+                for scanned in _scanner_probe.scan_directory():
+                    rel = str(scanned.relative_path)
+                    if rel in expected_paths:
+                        continue
+                    stray = target_dir / rel
+                    try:
+                        stray.unlink()
+                        purged += 1
+                        logger.debug(f"Purged stray file: {rel}")
+                    except OSError as e:
+                        logger.warning(f"Could not purge stray file {rel}: {e}")
+                if purged:
+                    logger.info(f"Purged {purged} stray file(s) not in DB")
+
             # Write files to filesystem
             logger.info(f"Writing {len(files)} files to filesystem...")
             files_written = 0

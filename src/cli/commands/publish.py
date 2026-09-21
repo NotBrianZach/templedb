@@ -81,6 +81,49 @@ class PublishCommands(Command):
         except Exception as e:
             print(f"  VCS commit skipped: {e}")
 
+        # Step 1.5: Reconcile session HEADs into shared branch HEAD
+        # (fast-forward-or-fail). Phase B of session-scoped VCS.
+        #
+        # If the current session has private commits on the default
+        # branch (via vcs_session_heads), fast-forward the shared HEAD
+        # onto the session's tip. Refuse to publish if the shared HEAD
+        # has moved past the session's fork point — the caller must
+        # reconcile first.
+        try:
+            from services.context import ServiceContext
+            _ctx = ServiceContext()
+            vcs_service = _ctx.get_vcs_service()
+            if branch:
+                result = vcs_service.publish_session_head(
+                    project_id=proj["id"],
+                    branch_id=branch["id"],
+                )
+                if result['action'] == 'fast-forwarded':
+                    print(
+                        f"  Fast-forwarded session HEAD "
+                        f"({result['commits_published']} commit(s) published)"
+                    )
+                elif result['action'] == 'no-op':
+                    pass  # nothing to reconcile
+                elif result['action'] == 'diverged':
+                    print(
+                        f"  Cannot publish: {result['reason']}",
+                        file=sys.stderr,
+                    )
+                    print(
+                        f"  Session tip: {result['to_commit_id']}\n"
+                        f"  Shared HEAD: {result['shared_head']}\n"
+                        f"  Session base: {result['session_base']}\n"
+                        f"  Reconcile: rebase this session's commits onto "
+                        f"the current shared HEAD before publish.",
+                        file=sys.stderr,
+                    )
+                    return 1
+        except Exception as e:
+            # Reconciliation failure shouldn't wedge publish for users
+            # who aren't using per-session HEADs yet. Log and continue.
+            logger.warning(f"Session-head reconciliation skipped: {e}")
+
         # Step 2: Materialize to checkout (git repo for daemon + push).
         # Always force: publish IS the authoritative DB→checkout write.
         # The checkout is chmod'd read-only by lock_checkout(), so the

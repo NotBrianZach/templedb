@@ -3635,7 +3635,7 @@ WantedBy=timers.target
         )
         return [
             f"session #{r['id']} "
-            f"('{r['name'] or r['context'] or 'unnamed'}') "
+            f"('{r['name'] or 'unnamed'}') "
             f"expired: started {r['started_at']}, "
             f"lifetime {r['lifetime_s']}s, "
             f"policy={r['policy']}, "

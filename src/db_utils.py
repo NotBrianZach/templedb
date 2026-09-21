@@ -57,39 +57,48 @@ def safe_copy_db(src=None, dst=None):
 _thread_local = threading.local()
 
 
+def apply_standard_pragmas(
+    conn: sqlite3.Connection,
+    *,
+    foreign_keys: bool = True,
+    mmap: bool = True,
+    load_crsqlite: bool = True,
+) -> None:
+    """Apply TempleDB's standard SQLite pragmas to a fresh connection.
+
+    Route every long-lived connection through this helper so tuning
+    changes (busy_timeout, journal_mode, synchronous) land in one
+    place. Callers with special needs pass flags: sync_engine turns
+    foreign_keys off during crsqlite init; migrator skips crsqlite
+    loading on fresh DBs.
+    """
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=-64000")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    if mmap:
+        conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")
+    if load_crsqlite:
+        # Best-effort: sync-tracked table INSERTs need this loaded so
+        # crsql_internal_sync_bit resolves inside triggers. Fresh
+        # installs without the extension still work for non-sync writes.
+        try:
+            from sync_engine import CRSQLITE_PATH as _CRSQLITE_PATH
+            conn.enable_load_extension(True)
+            conn.load_extension(_CRSQLITE_PATH)
+            conn.enable_load_extension(False)
+        except Exception:
+            pass
+
+
 def get_connection() -> sqlite3.Connection:
     """Get thread-local database connection (connection pooling)"""
     if not hasattr(_thread_local, 'connection'):
         _thread_local.connection = sqlite3.connect(DB_PATH, timeout=30.0)
         _thread_local.connection.row_factory = sqlite3.Row
-        # Enable foreign keys (required for CASCADE deletes)
-        _thread_local.connection.execute("PRAGMA foreign_keys=ON")
-        # Enable performance optimizations
-        _thread_local.connection.execute("PRAGMA journal_mode=WAL")
-        _thread_local.connection.execute("PRAGMA synchronous=NORMAL")
-        _thread_local.connection.execute("PRAGMA cache_size=-64000")  # 64MB cache
-        _thread_local.connection.execute("PRAGMA temp_store=MEMORY")
-        _thread_local.connection.execute("PRAGMA mmap_size=268435456")  # 256MB mmap
-        _thread_local.connection.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
-        # Load cr-sqlite extension so INSERTs into sync-tracked tables
-        # (entities, relations, etc.) don't blow up on the
-        # crsql_internal_sync_bit function reference in their triggers.
-        # Best-effort — failing to load leaves the connection usable
-        # for everything except sync-tracked writes. sync_engine.py
-        # has the canonical extension-finder logic; import it lazily
-        # here to avoid circular imports and to keep the db_utils
-        # module import-safe on hosts without cr-sqlite.
-        try:
-            from sync_engine import CRSQLITE_PATH as _CRSQLITE_PATH
-            _thread_local.connection.enable_load_extension(True)
-            _thread_local.connection.load_extension(_CRSQLITE_PATH)
-            _thread_local.connection.enable_load_extension(False)
-        except Exception:
-            # No cr-sqlite available (fresh install, dev env without
-            # extraPackages, etc.). Only reads and writes to
-            # non-sync-tracked tables will work; that's still most
-            # of templedb.
-            pass
+        apply_standard_pragmas(_thread_local.connection)
     return _thread_local.connection
 
 
@@ -111,13 +120,7 @@ def get_simple_connection(db_path: str = None, row_factory: bool = False) -> sql
     if row_factory:
         conn.row_factory = sqlite3.Row
 
-    # CRITICAL: Enable WAL mode for concurrent access
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
-    conn.execute("PRAGMA temp_store=MEMORY")
-    conn.execute("PRAGMA foreign_keys=ON")
+    apply_standard_pragmas(conn, mmap=False, load_crsqlite=False)
 
     return conn
 
