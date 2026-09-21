@@ -457,20 +457,14 @@ class VCSCommands(Command):
                       f"see 'templedb vcs status --all')")
                 # Common footgun: an agent staged in one Bash tool call
                 # and now tries to commit from another. Point them at
-                # the pin file so add + commit share a session.
-                pin_info = self.service.get_session_pin_info()
-                if not pin_info:
-                    print("  If your stage lives in another session "
-                          "because this call came from a fresh shell")
-                    print("  (e.g. an agent Bash tool), pin a session "
-                          "up front so future calls share it:")
-                    print(f"    templedb vcs session start --pin --name "
-                          f"agent-{project['slug']}")
-                    print("    # stage + commit follow in any shell:")
-                    print(f"    templedb vcs add -p {project['slug']} "
-                          "<files>")
-                    print(f"    templedb vcs commit -p {project['slug']} "
-                          "-m \"...\"")
+                # TEMPLEDB_SESSION so add + commit share a session across
+                # fresh shells.
+                if not os.environ.get("TEMPLEDB_SESSION", "").strip():
+                    print(f"  Sessions look scattered — set TEMPLEDB_SESSION in "
+                          f"the launcher env so future calls share identity:")
+                    print(f"    export TEMPLEDB_SESSION=agent-{project['slug']}")
+                    print(f"    templedb vcs add -p {project['slug']} <files>")
+                    print(f"    templedb vcs commit -p {project['slug']} -m \"...\"")
             print(f"  Check status:  templedb vcs status {project['slug']} --refresh")
             print(f"  Stage files:   templedb vcs add -p {project['slug']} --all")
             _stage_end(_stage_run_id, output_hash=_stage_parent_hash,
@@ -1910,51 +1904,10 @@ class VCSCommands(Command):
         print(f"Started session #{session['id']} ({session['name'] or 'unnamed'})")
         print(f"  Author: {session['author']}")
         print(f"  Host:   {session['host']}  PID: {session['pid']}")
-        if getattr(args, 'pin', False):
-            self.service.pin_current_session(session_id=session['id'])
-            pin_path = self.service._session_pin_path()
-            print(f"  Pinned: {pin_path}")
-            print()
-            print("  Subsequent `templedb` calls on this host will "
-                  "resolve to this session")
-            print("  automatically — even in fresh shells / under "
-                  "setsid — until you run")
-            print("  `templedb vcs session unpin` or the pin expires "
-                  "in 24h.")
-        else:
-            print()
-            print(f"  export TEMPLEDB_SESSION_ID={session['id']}")
-            print("  (Or re-run with --pin to persist a filesystem "
-                  "pin instead — needed for")
-            print("   agent-driven workflows where env vars don't "
-                  "cross Bash-tool invocations.)")
-        return 0
-
-    def session_pin(self, args) -> int:
-        """Pin the current (or a given) session so future invocations
-        share it across setsid / new shells / lost env vars."""
-        session_id = getattr(args, 'id', None)
-        if session_id is not None:
-            try:
-                session_id = int(session_id)
-            except (TypeError, ValueError):
-                print("session pin id must be an integer", file=sys.stderr)
-                return 1
-        session = self.service.pin_current_session(session_id=session_id)
-        pin_path = self.service._session_pin_path()
-        print(f"Pinned session #{session['id']} "
-              f"({session.get('name') or 'unnamed'}) "
-              f"→ {pin_path}")
-        return 0
-
-    def session_unpin(self, args) -> int:
-        """Remove the filesystem session pin."""
-        removed = self.service.unpin_session()
-        pin_path = self.service._session_pin_path()
-        if removed:
-            print(f"Unpinned. (Removed {pin_path})")
-        else:
-            print(f"No pin was set. (Would be at {pin_path})")
+        print()
+        print(f"  export TEMPLEDB_SESSION_ID={session['id']}")
+        print(f"  # or TEMPLEDB_SESSION={session['name'] or '<pick-a-name>'} "
+              "for declarative sharing across fresh shells")
         return 0
 
     def session_end(self, args) -> int:
@@ -1990,17 +1943,6 @@ class VCSCommands(Command):
         print(f"  Started: {session.get('started_at')}")
         if session.get('ended_at'):
             print(f"  Ended:  {session['ended_at']} ({session.get('ended_reason')})")
-
-        pin_info = self.service.get_session_pin_info()
-        if pin_info and pin_info.get("session_id") == session["id"]:
-            pin_path = self.service._session_pin_path()
-            print(f"  Pinned: yes ({pin_path})")
-        elif pin_info:
-            print(f"  Pinned: session #{pin_info.get('session_id')} "
-                  "(different — not applied; stale or "
-                  "cross-author/host)")
-        else:
-            print(f"  Pinned: no")
         return 0
 
     def session_show(self, args) -> int:
@@ -2035,6 +1977,28 @@ class VCSCommands(Command):
                 print(f"  {r['slug']:<20} {r['file_path']}")
         else:
             print("\nNo staged files.")
+        return 0
+
+    def session_gc(self, args) -> int:
+        """Reap stale sessions per their declared reap_policy.
+
+        Ends sessions whose started_at exceeds their declared
+        expected_lifetime_seconds (default 24h) and applies each
+        session's reap_policy to its vcs_working_state rows.
+        """
+        dry_run = bool(getattr(args, 'dry_run', False))
+        result = self.service.reap_stale_sessions(dry_run=dry_run)
+        reaped = result['reaped']
+        if not reaped:
+            print("No stale sessions to reap.")
+            return 0
+        verb = "Would reap" if dry_run else "Reaped"
+        print(f"{verb} {len(reaped)} session(s):")
+        for r in reaped:
+            name = r.get('name') or 'unnamed'
+            print(f"  #{r['id']:<5} {name:<40} policy={r['policy']:<14} "
+                  f"orphaned={r['orphaned']} discarded={r['discarded']} "
+                  f"preserved={r['preserved']}")
         return 0
 
     def session_prune(self, args) -> int:
@@ -2122,29 +2086,7 @@ def register(cli):
     ss_start = session_sub.add_parser('start', help='Start a new staging session')
     ss_start.add_argument('--name', help='Optional human label for the session')
     ss_start.add_argument('--author', help='Override the resolved author')
-    ss_start.add_argument(
-        '--pin', action='store_true',
-        help='Persist a filesystem pin so subsequent templedb calls '
-             'on this host resolve to this session even under setsid / '
-             'new shells / lost env vars (agent-safe).',
-    )
     cli.commands['vcs.session.start'] = cmd.session_start
-
-    ss_pin = session_sub.add_parser(
-        'pin',
-        help='Pin the current (or given) session to '
-             '$XDG_STATE_HOME/templedb/session.pin so subsequent '
-             'invocations share it — needed under setsid or when env '
-             'vars are not inherited.',
-    )
-    ss_pin.add_argument('id', nargs='?', help='Session ID to pin '
-                        '(default: current)')
-    cli.commands['vcs.session.pin'] = cmd.session_pin
-
-    ss_unpin = session_sub.add_parser(
-        'unpin', help='Remove the filesystem session pin.'
-    )
-    cli.commands['vcs.session.unpin'] = cmd.session_unpin
 
     ss_end = session_sub.add_parser('end', help='End a staging session')
     ss_end.add_argument('id', help='Session ID to end')
@@ -2167,6 +2109,17 @@ def register(cli):
     ss_prune.add_argument('--dry-run', action='store_true',
                           help='Show what would be pruned without deleting')
     cli.commands['vcs.session.prune'] = cmd.session_prune
+
+    ss_gc = session_sub.add_parser(
+        'gc',
+        help="Reap stale sessions per each session's declared reap_policy. "
+             "End sessions past their expected_lifetime_seconds and apply "
+             "orphan/discard/preserve policy to their staged rows -- resolves "
+             "the 'N file(s) staged in other sessions' growth on every publish.",
+    )
+    ss_gc.add_argument('--dry-run', action='store_true',
+                       help='Show what would be reaped without acting')
+    cli.commands['vcs.session.gc'] = cmd.session_gc
 
     # vcs log
     log_parser = subparsers.add_parser('log', help='Show commit history')

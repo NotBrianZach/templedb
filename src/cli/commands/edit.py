@@ -108,14 +108,24 @@ class EditCommands:
                 slug, str(workspace), "--writable",
             ]
             if not first_time:
-                checkout_args.append("--force")
+                # Refresh over an existing workspace requires an explicit
+                # --force: without it, checkout aborts if local edits
+                # diverge from DB and points at `file set` / `commit`. This
+                # mirrors the switch --force pattern -- no silent revert.
+                if not args.force:
+                    print("  (refreshing over existing workspace; if local "
+                          "edits diverge from DB, checkout will abort and "
+                          "show a diff. Re-run with --force to overwrite.)")
+                else:
+                    checkout_args.append("--force")
             rc = subprocess.call(checkout_args)
             if rc != 0:
                 logger.error(f"Checkout failed with exit {rc}")
                 return rc
         else:
             print(f"Reusing workspace at {workspace}")
-            print("  (pass --refresh to re-materialize from DB)")
+            print("  (pass --refresh to re-materialize from DB; "
+                  "add --force to overwrite local edits)")
 
         target = str(workspace)
         if args.path:
@@ -162,8 +172,13 @@ def register(cli):
                         help='Override workspace path '
                              '(default: ~/.config/templedb/edit-workspaces/<slug>)')
     parser.add_argument('--refresh', action='store_true',
-                        help='Re-materialize workspace from DB (--force checkout). '
-                             'Overwrites local edits!')
+                        help='Re-materialize workspace from DB. Aborts if '
+                             'local edits diverge unless --force is also '
+                             'passed.')
+    parser.add_argument('--force', action='store_true',
+                        help='Overwrite local edits during --refresh (default: '
+                             'abort with a diff and require explicit --force). '
+                             'Has no effect without --refresh.')
     parser.add_argument('--no-editor', action='store_true',
                         help="Don't launch $EDITOR; just prepare the workspace and print hints")
     cli.commands['edit'] = cmd.edit

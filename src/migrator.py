@@ -53,71 +53,12 @@ def _find_migrations_dir():
 
 MIGRATIONS_DIR = _find_migrations_dir()
 
-# Ordered list of numbered migrations to apply AFTER schema.sql
-# This is the canonical sequence — add new migrations at the end.
-MIGRATION_SEQUENCE = [
-    "015_add_var_tag_scope.sql",
-    "030_vibe_claude_interactions.sql",
-    "032_add_encryption_and_system_config.sql",
-    "033_remove_secret_blobs_project_id.sql",
-    "034_add_deployment_cache.sql",
-    "035_add_code_intelligence_graph.sql",
-    "036_add_nixops4_integration.sql",
-    "039_create_unified_views.sql",
-    "042_add_nixos_managed_packages.sql",
-    "044_add_checkout_edit_sessions.sql",
-    "045_add_git_server_config.sql",
-    "046_add_nix_first_support.sql",
-    "047_drop_orphaned_convoy_trigger.sql",
-    "048_add_readme_cross_reference_system.sql",
-    "049_add_deployment_tracking.sql",
-    "050_add_deployment_scripts.sql",
-    "063_drop_quiz_tables_rename_vibe_sessions.sql",
-    "064_add_branch_operations.sql",
-    "065_add_deployment_pipeline.sql",
-    "066_rename_nixops4_to_fleet.sql",
-    "067_add_edge_function_deployments.sql",
-    "068_add_blue_green_state.sql",
-    "069_add_project_tests.sql",
-    "070_drop_work_items.sql",
-    "072_fix_dangling_work_items_fks.sql",
-    "073_add_temple_agent.sql",
-    "074_drop_unused_tables_and_views.sql",
-    "075_nix_store_integration.sql",
-    "076_agent_work_log.sql",
-    "077_config_compiler.sql",
-    "078_config_compiler_full_nix_ast.sql",
-    "079_ast_builds.sql",
-    "080_agent_pending_asks.sql",
-    "081_graph_query_log.sql",
-    "082_vcs_sessions.sql",
-    "083_drop_staged_boolean.sql",
-    "084_agent_sections.sql",
-    "085_agent_user_edits.sql",
-    "086_source_snapshots_view.sql",
-    "087_edit_intents.sql",
-    "088_vcs_working_state_intent_id.sql",
-    "089_entities_and_relations.sql",
-    "090_report_implementations.sql",
-    "091_ingestion_runs.sql",
-    "092_invariant_checks.sql",
-    "093_handoff_notes.sql",
-    "094_tool_calls.sql",
-    "095_reconcile_runs.sql",
-    "096_adapter_version.sql",
-    "097_observations_archive.sql",
-    "098_entities_attributes_json.sql",
-    "099_sync_scope.sql",
-    "100_hygiene_snapshots.sql",
-    "101_sync_entities_relations.sql",
-    "102_sync_natural_key_pks.sql",
-    "103_vcs_sessions_context.sql",
-    "104_deploy_stage_runs.sql",
-    "105_vcs_sessions_lifetime.sql",
-    "106_agent_notifications.sql",
-    "106_project_files_edit_mode.sql",
-    "107_vcs_session_heads.sql",
-    "108_rename_context_to_name.sql",
+# Non-versioned base files applied on fresh installs. schema.sql is the
+# consolidated superset for everything up through the last regenerate;
+# the *_schema.sql files are pre-migration-framework fragments retained
+# for legacy DBs. Order matters (base tables before views).
+BASE_FILES = [
+    "schema.sql",
     "config_links_schema.sql",
     "database_vcs_schema.sql",
     "file_tracking_schema.sql",
@@ -125,6 +66,62 @@ MIGRATION_SEQUENCE = [
     "vcs_metadata_schema.sql",
     "views.sql",
 ]
+
+# Numbered migrations are discovered by scanning MIGRATIONS_DIR for files
+# matching this pattern. Version comes from the filename prefix; two
+# files claiming the same version is a fatal error (see _discover_migrations).
+_NUMBERED_MIGRATION_RE = re.compile(r'^(\d+)_.+\.sql$')
+
+
+def _discover_migrations(applied_filenames: Optional[set] = None) -> List[Tuple[int, str]]:
+    """Scan MIGRATIONS_DIR for numbered migration files.
+
+    Returns [(version, filename)] sorted by (version, filename). Filenames
+    must match ``<int>_<slug>.sql``; anything else is ignored (base
+    files, archived/ subdir, arbitrary .sql fixtures).
+
+    Collision handling:
+      * If applied_filenames is None: strict mode -- any two files
+        claiming the same version fail loud.
+      * If applied_filenames is provided: same-version files are tolerated
+        iff every colliding file is already in schema_version. This
+        exists for historical drift (e.g. 106_agent_notifications.sql
+        and 106_project_files_edit_mode.sql both landed in the
+        production DB before this checker existed). Unapplied
+        collisions still fail -- ambiguous apply order would diverge
+        across installs.
+    """
+    groups: Dict[int, List[str]] = {}
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        m = _NUMBERED_MIGRATION_RE.match(path.name)
+        if not m:
+            continue
+        version = int(m.group(1))
+        groups.setdefault(version, []).append(path.name)
+
+    resolved: List[Tuple[int, str]] = []
+    for version, filenames in sorted(groups.items()):
+        if len(filenames) == 1:
+            resolved.append((version, filenames[0]))
+            continue
+        # Collision. Tolerate iff every file is already applied.
+        if applied_filenames is not None \
+                and all(f in applied_filenames for f in filenames):
+            logger.warning(
+                f"Migration version {version:03d} has {len(filenames)} "
+                f"files (historical drift): {filenames}. All already "
+                f"applied; skipping re-apply. Rename to distinct versions "
+                f"if you plan to touch these again."
+            )
+            for f in filenames:
+                resolved.append((version, f))
+            continue
+        raise RuntimeError(
+            f"Migration version collision at {version:03d}: {filenames}. "
+            f"At least one is unapplied. Rename before running -- "
+            f"ambiguous order would diverge across installs."
+        )
+    return resolved
 
 
 def _file_hash(path: Path) -> str:
@@ -257,6 +254,12 @@ class Migrator:
         applied_count = 0
         skipped_count = 0
 
+        # Discover numbered migrations from the filesystem. Raises on
+        # unapplied duplicate version prefixes so we fail loud instead
+        # of picking an ambiguous winner (already-applied duplicates
+        # are tolerated with a warning -- see _discover_migrations).
+        numbered = _discover_migrations(applied_filenames=set(applied.keys()))
+
         if fresh:
             # Fresh install: schema.sql is the canonical superset. Mark
             # all numbered migrations as applied via 'via-schema.sql' so
@@ -281,13 +284,13 @@ class Migrator:
                         conn.close()
                         return (0, 0)
 
-                for i, filename in enumerate(MIGRATION_SEQUENCE, start=1):
+                for version, filename in numbered:
                     if filename not in applied:
                         if not dry_run:
                             conn.execute(
                                 "INSERT OR IGNORE INTO schema_version (version, filename, file_hash, applied_at) "
                                 "VALUES (?, ?, 'via-schema.sql', datetime('now'))",
-                                (i, filename),
+                                (version, filename),
                             )
                         skipped_count += 1
 
@@ -297,7 +300,7 @@ class Migrator:
                     self._verify_critical_tables(conn)
         else:
             # Existing DB — apply only missing numbered migrations
-            for i, filename in enumerate(MIGRATION_SEQUENCE, start=1):
+            for version, filename in numbered:
                 if filename in applied:
                     skipped_count += 1
                     continue
@@ -307,7 +310,7 @@ class Migrator:
                     applied_count += 1
                 else:
                     print(f"  Applying: {filename}")
-                    if self._apply_file(conn, filename, i):
+                    if self._apply_file(conn, filename, version):
                         applied_count += 1
                     else:
                         print(f"  STOPPED at {filename} due to error")
@@ -336,8 +339,20 @@ class Migrator:
             "file_hash": schema_info["file_hash"] if schema_info else None,
         })
 
-        # Numbered migrations
-        for filename in MIGRATION_SEQUENCE:
+        # Numbered migrations (discovered from filesystem). Pass applied
+        # set so historical same-version drift shows as a warning
+        # rather than raising.
+        for _version, filename in _discover_migrations(applied_filenames=set(applied.keys())):
+            info = applied.get(filename)
+            result.append({
+                "filename": filename,
+                "applied": info is not None,
+                "applied_at": info["applied_at"] if info else None,
+                "file_hash": info["file_hash"] if info else None,
+            })
+
+        # Base fragments (retained for legacy DBs pre-migration-framework)
+        for filename in BASE_FILES[1:]:  # skip schema.sql (already shown)
             info = applied.get(filename)
             result.append({
                 "filename": filename,
@@ -368,13 +383,14 @@ class Migrator:
             )
             stamped += 1
 
-        # Stamp all numbered migrations
-        for i, filename in enumerate(MIGRATION_SEQUENCE, start=1):
+        # Stamp all numbered migrations. Pass applied set so historical
+        # same-version drift is tolerated (all-applied → warning).
+        for version, filename in _discover_migrations(applied_filenames=set(applied.keys())):
             if filename not in applied:
                 conn.execute(
                     "INSERT OR IGNORE INTO schema_version (version, filename, file_hash, applied_at) "
                     "VALUES (?, ?, 'pre-existing', datetime('now'))",
-                    (i, filename),
+                    (version, filename),
                 )
                 stamped += 1
 

@@ -468,11 +468,34 @@ class GitHistoryImporter:
         commit = self.vcs_repo.get_commit_by_hash(self.project_id, ref.commit_hash)
 
         if commit:
-            self.vcs_repo.execute("""
-                UPDATE vcs_branches
-                SET head_commit_id = ?
-                WHERE id = ?
-            """, (commit['id'], branch_id), commit=False)
+            # HEAD update uses CAS for consistency with the Phase C
+            # publish_session_head + cli/commands/vcs.py:517 patterns.
+            # Import is normally single-writer per project (concurrent
+            # imports would be user error), so on a lost race we log
+            # and force the imported value anyway -- git import is
+            # authoritative for its ref.
+            prev = self.vcs_repo.query_one(
+                "SELECT head_commit_id FROM vcs_branches WHERE id = ?",
+                (branch_id,),
+            )
+            prev_head = prev['head_commit_id'] if prev else None
+            from db_utils import get_connection
+            cur = get_connection().execute(
+                "UPDATE vcs_branches SET head_commit_id = ? "
+                "WHERE id = ? AND head_commit_id IS ?",
+                (commit['id'], branch_id, prev_head),
+            )
+            if cur.rowcount == 0:
+                logger.warning(
+                    f"vcs_branches.head_commit_id for branch {branch_id} "
+                    f"advanced concurrently during import; forcing to "
+                    f"imported ref {commit['commit_hash'][:8]}"
+                )
+                self.vcs_repo.execute(
+                    "UPDATE vcs_branches SET head_commit_id = ? WHERE id = ?",
+                    (commit['id'], branch_id),
+                    commit=False,
+                )
 
     def _import_tag(self, ref: GitRef):
         """Import a tag reference"""

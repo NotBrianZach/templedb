@@ -65,17 +65,24 @@ class PublishCommands(Command):
                 ).fetchone()
 
                 if staged and staged["n"] > 0:
-                    # Use the CLI to commit (handles all the logic)
-                    r = subprocess.run(
-                        [sys.executable, "-m", "cli", "vcs", "commit",
-                         "-p", project_slug, "-m", message, "-a", "TempleDB"],
-                        cwd=str(Path(__file__).parent.parent.parent.parent),
-                        capture_output=True, text=True
+                    # In-process commit -- was subprocessing `templedb -m cli
+                    # vcs commit` which forks a full CLI, re-parses argv, and
+                    # loses exception detail. Call the same VCSCommands.commit
+                    # directly with a minimal argparse Namespace.
+                    from argparse import Namespace
+                    from cli.commands.vcs import VCSCommands
+                    vcs_cmd = VCSCommands()
+                    commit_args = Namespace(
+                        project=project_slug,
+                        message=message,
+                        author="TempleDB",
+                        branch=None,
                     )
-                    if r.returncode == 0:
+                    rc = vcs_cmd.commit(commit_args)
+                    if rc == 0:
                         print(f"  Committed: {message}")
                     else:
-                        print(f"  Commit: {r.stderr.strip() or r.stdout.strip() or 'no changes'}")
+                        print(f"  Commit failed (exit {rc}); continuing with materialize")
                 else:
                     print(f"  No staged changes to commit")
         except Exception as e:
