@@ -183,6 +183,27 @@ def _find_crsqlite():
         except OSError:
             continue
 
+    # Generation-indirect layout. The paths above are all symlinks into
+    # /nix/store, and a home-manager generation that drops the crsqlite
+    # package leaves every one of them dangling while a *superseded*
+    # generation still holds the library. Resolve the live generation and
+    # search it directly, then fall back to the other store paths the
+    # profile symlinks currently point at.
+    for gen in (
+        Path.home() / ".local" / "state" / "nix" / "profiles" / "home-manager",
+        Path.home() / ".nix-profile",
+    ):
+        try:
+            if not gen.exists():
+                continue
+            for lib in (gen.resolve() / "home-path" / "lib",
+                        gen.resolve() / "lib"):
+                if lib.is_dir():
+                    for f in sorted(lib.glob("crsqlite*.so")):
+                        return str(f)[:-3]
+        except OSError:
+            continue
+
     return "crsqlite"  # last resort — dynamic loader search
 
 CRSQLITE_PATH = _find_crsqlite()

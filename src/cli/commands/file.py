@@ -839,18 +839,39 @@ class FileCommands(Command):
         except Exception as e:
             logger.debug(f"Auto-stage failed (non-fatal): {e}")
 
-        # Mirror the write to the checkout dir if it exists, so a subsequent
+        # Mirror the write to the ACTIVE checkout so a subsequent
         # `vcs status --refresh` doesn't flag the file as disk-stale (it
         # scans the checkout, and without this the disk-scan hash disagrees
-        # with the DB blob we just wrote). Cosmetic — commit correctness is
-        # already covered by the auto-stage above — but avoids confusing
-        # "modified" entries in status for files only edited via `file set`.
+        # with the DB blob we just wrote).
+        #
+        # This is NOT cosmetic, despite what this comment used to claim.
+        # The refresh classifies a staged file with no file on disk as
+        # state='deleted', and `vcs commit` hard-deletes the
+        # project_files row for anything in that state. So a missed
+        # mirror doesn't just produce a confusing status line — it makes
+        # the next commit silently destroy the file while reporting
+        # success. Cost a full report on 2026-09-24 (commit 7A3BF285
+        # announced "Files: 2" and committed one).
+        #
+        # The path must come from the active checkout record, not a
+        # hardcoded ~/.config/templedb/checkouts/<slug>. When a project is
+        # in edit mode the live working directory is
+        # ~/.config/templedb/edit-workspaces/<slug>/<stamp>/, and the old
+        # hardcoded path pointed at a stale read-only tree that the
+        # refresh never scans — which is exactly how the write went
+        # missing.
         try:
             import os
-            checkout = os.path.expanduser(
-                f"~/.config/templedb/checkouts/{project_slug}"
-            )
-            if os.path.isdir(checkout):
+            checkout = None
+            try:
+                from sync.manager import SyncManager
+                checkout = str(SyncManager(project_slug).get_checkout_path())
+            except Exception as e:
+                logger.debug(f"Active checkout lookup failed: {e}")
+                checkout = os.path.expanduser(
+                    f"~/.config/templedb/checkouts/{project_slug}"
+                )
+            if checkout and os.path.isdir(checkout):
                 target = os.path.join(checkout, file_path)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 # Atomic write via tmp + rename to avoid partial reads.
@@ -858,8 +879,18 @@ class FileCommands(Command):
                 with open(tmp, "w", encoding="utf-8") as f:
                     f.write(content)
                 os.replace(tmp, target)
+            else:
+                logger.warning(
+                    "No checkout directory for '%s' — %s was written to the "
+                    "database but not mirrored to disk. A later `vcs commit` "
+                    "may treat it as deleted.", project_slug, file_path)
         except Exception as e:
-            logger.debug(f"Checkout mirror failed (non-fatal): {e}")
+            # Deliberately louder than the old debug(): a failed mirror is
+            # a data-loss precondition, not a cosmetic miss.
+            logger.warning(
+                "Checkout mirror failed for %s (%s). The database write "
+                "succeeded; verify with `templedb file cat` after "
+                "committing.", file_path, e)
 
 
 def register(cli):

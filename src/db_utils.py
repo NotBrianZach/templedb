@@ -28,6 +28,36 @@ def _get_db_path():
 
 DB_PATH = _get_db_path()
 
+# Set by apply_standard_pragmas() when the cr-sqlite extension fails to
+# load: None means loaded (or never attempted), a string is the reason.
+# `templedb doctor` / `summary` read this to report extension health
+# instead of waiting for a trigger to fail mid-write.
+CRSQLITE_LOAD_ERROR: Optional[str] = None
+_CRSQLITE_WARNED = False
+
+_CRSQLITE_SYMBOLS = ("crsql_internal_sync_bit", "crsql_")
+
+
+def explain_crsqlite_error(exc: BaseException) -> Optional[str]:
+    """Translate a cr-sqlite trigger failure into an actionable message.
+
+    SQLite reports a missing extension as `no such function:
+    crsql_internal_sync_bit` from inside a trigger, naming an internal
+    symbol rather than the actual problem. Callers that touch sync_*
+    tables should run their OperationalError through this and surface the
+    result. Returns None if the error is unrelated to cr-sqlite.
+    """
+    msg = str(exc)
+    if not any(sym in msg for sym in _CRSQLITE_SYMBOLS):
+        return None
+    detail = CRSQLITE_LOAD_ERROR or "extension was not loaded on this connection"
+    return (
+        "cr-sqlite extension is not loaded, so writes to sync-tracked "
+        f"tables cannot succeed ({detail}). Install the crsqlite library "
+        "or point TEMPLEDB_CRSQLITE_PATH at it (path without the .so "
+        f"suffix). Original error: {msg}"
+    )
+
 
 def wal_checkpoint(db_path=None):
     """Flush WAL to main DB file. MUST be called before copying the DB file.
@@ -84,13 +114,34 @@ def apply_standard_pragmas(
         # Best-effort: sync-tracked table INSERTs need this loaded so
         # crsql_internal_sync_bit resolves inside triggers. Fresh
         # installs without the extension still work for non-sync writes.
+        #
+        # The failure stays non-fatal (fresh installs must keep working),
+        # but it is NOT swallowed: it is recorded in CRSQLITE_LOAD_ERROR
+        # and warned about once per process. Silently passing here cost
+        # ten days of hourly `ingest git` failures in 2026-09, because the
+        # only symptom was a trigger blowing up much later with
+        # "no such function: crsql_internal_sync_bit" — an internal symbol
+        # that names neither the real problem nor its fix.
+        global CRSQLITE_LOAD_ERROR, _CRSQLITE_WARNED
+        _tried = "<unresolved>"
         try:
             from sync_engine import CRSQLITE_PATH as _CRSQLITE_PATH
+            _tried = _CRSQLITE_PATH
             conn.enable_load_extension(True)
             conn.load_extension(_CRSQLITE_PATH)
             conn.enable_load_extension(False)
-        except Exception:
-            pass
+            CRSQLITE_LOAD_ERROR = None
+        except Exception as exc:
+            CRSQLITE_LOAD_ERROR = f"{exc} (tried: {_tried})"
+            if not _CRSQLITE_WARNED:
+                _CRSQLITE_WARNED = True
+                logger.warning(
+                    "cr-sqlite extension not loaded (%s). Reads and "
+                    "non-sync writes work; any write to a sync_* table "
+                    "will fail with 'no such function: "
+                    "crsql_internal_sync_bit'. Set TEMPLEDB_CRSQLITE_PATH "
+                    "to the crsqlite library (without the .so suffix) to "
+                    "fix.", CRSQLITE_LOAD_ERROR)
 
 
 def get_connection() -> sqlite3.Connection:

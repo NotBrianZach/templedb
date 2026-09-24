@@ -26,6 +26,35 @@
             tree-sitter-python
             tree-sitter-javascript
           ]);
+
+          # cr-sqlite extension, loaded at runtime for CRDT sync.
+          # _find_crsqlite() in src/sync_engine.py probes
+          # <profile>/lib/crsqlite.so, and `home.packages = [ cfg.package ]`
+          # links this package's lib/ into the home-manager profile — so
+          # shipping it here is what puts it on the search path.
+          #
+          # This was dropped from the package output before 2026-09-14 and
+          # the loss was silent: db_utils swallowed the load failure, so the
+          # only symptom was every write to a sync_* table dying inside a
+          # trigger with "no such function: crsql_internal_sync_bit". 151
+          # consecutive hourly `ingest git` runs failed that way over ten
+          # days. Don't remove this without also removing the sync_* shadow
+          # tables.
+          crsqlite = pkgs.stdenv.mkDerivation {
+            pname = "crsqlite";
+            version = "0.16.3";
+            src = pkgs.fetchzip {
+              url = "https://github.com/vlcn-io/cr-sqlite/releases/download/v0.16.3/crsqlite-linux-x86_64.zip";
+              hash = "sha256-F9uTWLanDAjL4btdEHtmNnc1SdHAzbAOYBTPCa4BqJI=";
+            };
+            # Prebuilt binary — patch interpreter/rpath for nix.
+            nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+            buildInputs = [ pkgs.stdenv.cc.cc.lib ];
+            installPhase = ''
+              mkdir -p $out/lib
+              cp crsqlite.so $out/lib/
+            '';
+          };
         in
         pkgs.stdenv.mkDerivation {
           pname = "templedb";
@@ -69,7 +98,10 @@
             fi
 
             SITE="$out/${python.sitePackages}"
-            mkdir -p "$SITE" "$out/bin"
+            mkdir -p "$SITE" "$out/bin" "$out/lib"
+
+            # cr-sqlite extension at the path _find_crsqlite() probes.
+            cp ${crsqlite}/lib/crsqlite.so "$out/lib/crsqlite.so"
 
             # Install all Python packages and modules from src/.
             cp -r src/. "$SITE/"
