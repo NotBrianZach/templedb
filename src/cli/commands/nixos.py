@@ -457,16 +457,34 @@ class NixOSCommand(Command):
             return 1
 
     def system_test(self, args) -> int:
-        """Test system configuration (nixos-rebuild test)"""
+        """Test system configuration.
+
+        Default: nixos-rebuild test (LIVE activation — restarts systemd units).
+        --eval-only: nix eval on toplevel drvPath (no build, no activation).
+        --build-only: nixos-rebuild build (all store paths built, no activation).
+        --dry-run: nixos-rebuild dry-activate (eval + show plan, no changes).
+        """
         try:
             from services.system_service import SystemService
             service = SystemService()
-            print(f"🧪 Testing system configuration: {args.slug}")
-            result = service.test_system(args.slug, dry_run=args.dry_run)
-            if result['success']:
-                print("\n✅ Test successful!")
+            eval_only = getattr(args, 'eval_only', False)
+            build_only = getattr(args, 'build_only', False)
+            if eval_only:
+                print(f"🔎 Evaluating {args.slug} (nix eval on drvPath — no build, no activation)")
+                result = service.eval_system(args.slug)
+            elif build_only:
+                print(f"🔨 Building {args.slug} (nixos-rebuild build — no activation)")
+                result = service.build_system(args.slug, dry_run=args.dry_run)
             else:
-                print(f"\n❌ Test failed (exit code {result['exit_code']})")
+                print(f"⚠️  Testing {args.slug} — this runs `nixos-rebuild test` which")
+                print(f"    ACTIVATES the new config on the LIVE system (systemd units")
+                print(f"    restart, config files rewrite). Not persistent across reboot.")
+                print(f"    Use --eval-only or --build-only for a truly non-mutating check.")
+                result = service.test_system(args.slug, dry_run=args.dry_run)
+            if result['success']:
+                print("\n✅ Success!")
+            else:
+                print(f"\n❌ Failed (exit code {result['exit_code']})")
             if result.get('stdout'):
                 print("\n📋 Output:")
                 print(result['stdout'])
@@ -2174,7 +2192,15 @@ def register(cli):
 
     def _args_system_test(p):
         p.add_argument('slug', help='Project slug')
-        p.add_argument('--dry-run', action='store_true')
+        p.add_argument('--dry-run', action='store_true',
+                       help='nixos-rebuild dry-activate: eval + show plan, no changes.')
+        p.add_argument('--eval-only', action='store_true',
+                       help='nix eval on toplevel drvPath — no build, no activation. '
+                            'Fastest failure detection for eval errors (missing options, '
+                            'renamed packages, insecure packages, type mismatches).')
+        p.add_argument('--build-only', action='store_true',
+                       help='nixos-rebuild build — build all store paths without activating. '
+                            'Slower than --eval-only but catches build failures too.')
 
     def _args_update_input(p):
         p.add_argument('slug', help='Project slug')

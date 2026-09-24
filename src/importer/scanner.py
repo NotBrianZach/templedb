@@ -14,6 +14,7 @@ from dataclasses import dataclass
 BINARY_ASSET_TYPES = {
     'image_svg', 'image_png', 'image_jpg', 'image_gif', 'image_webp', 'image_ico',
     'font', 'pdf', 'wasm', 'audio', 'video', 'archive', 'binary_asset',
+    'binary_encrypted',
 }
 
 # File type patterns (order matters - more specific patterns first)
@@ -28,6 +29,8 @@ FILE_TYPE_PATTERNS = [
     (r'\.(woff2?|ttf|otf|eot)$', 'font', None),
     (r'\.pdf$', 'pdf', None),
     (r'\.wasm$', 'wasm', None),
+    (r'\.gpg$', 'binary_encrypted', None),
+    (r'\.asc$', 'text_asc', None),
     (r'\.(mp3|wav|ogg|flac)$', 'audio', None),
     (r'\.(mp4|webm|mov|mkv)$', 'video', None),
     (r'\.(zip|tar|tar\.gz|tgz|tar\.bz2|7z)$', 'archive', None),
@@ -130,6 +133,11 @@ FILE_TYPE_PATTERNS = [
     (r'Gemfile\.lock$', 'gemfile_lock', None),
     (r'go\.mod$', 'go_mod', None),
     (r'go\.sum$', 'go_sum', None),
+    (r'flake\.lock$', 'nix_flake_lock', None),
+    (r'package-lock\.json$', 'npm_lock', None),
+    (r'pnpm-lock\.yaml$', 'pnpm_lock', None),
+    (r'yarn\.lock$', 'yarn_lock', None),
+    (r'\.lock$', 'lock_file', None),
     (r'composer\.json$', 'composer_json', None),
     (r'\.npmrc$', 'npm_rc', None),
     (r'\.yarnrc$', 'yarn_rc', None),

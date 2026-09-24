@@ -3,6 +3,7 @@
 Version control commands
 """
 import sys
+import os
 import hashlib
 import time
 import difflib
@@ -506,33 +507,15 @@ class VCSCommands(Command):
                 VALUES (?, ?, 0)
             """, (commit_id, branch['head_commit_id']), commit=False)
 
-        # Update branch head with a compare-and-swap keyed on the
-        # HEAD we read into `branch` above. Two concurrent `vcs commit`
-        # runs could otherwise both pass the create_commit step and
-        # the second's UPDATE silently overwrite the first's HEAD --
-        # the same TOCTOU class Phase C's publish_session_head CAS
-        # fixed. On rowcount=0 someone else advanced HEAD; abort with
-        # a clear error rather than clobbering it.
-        from db_utils import get_connection
-        _conn = get_connection()
-        _cur = _conn.execute(
-            "UPDATE vcs_branches SET head_commit_id = ? "
-            "WHERE id = ? AND head_commit_id IS ?",
-            (commit_id, branch['id'], branch.get('head_commit_id')),
-        )
-        if _cur.rowcount == 0:
-            from cli.json_output import emit_error
-            _shared = self.vcs_repo.query_one(
-                "SELECT head_commit_id FROM vcs_branches WHERE id = ?",
-                (branch['id'],),
-            )
-            return emit_error(
-                args, "HEAD_RACE",
-                f"Branch HEAD advanced concurrently "
-                f"(expected {branch.get('head_commit_id')}, "
-                f"now {_shared['head_commit_id'] if _shared else 'unknown'}). "
-                f"Refresh with `templedb vcs status <slug> --refresh` and retry.",
-            )
+        # Branch head is auto-advanced by the `update_branch_head_on_commit`
+        # trigger (see migrations/database_vcs_schema.sql) inside the same
+        # transaction as the vcs_commits INSERT above, so no manual
+        # UPDATE is required here. The previous app-level compare-and-swap
+        # was buggy: it always fired a false-positive HEAD_RACE error
+        # because the trigger had already set head_commit_id to the new
+        # commit id by the time the CAS's WHERE head_commit_id IS <old>
+        # ran. If cross-transaction race protection is needed, drop the
+        # trigger and do the UPDATE-with-CAS inside create_commit().
 
         # Create file states and update file_contents
         for file in staged:
@@ -556,7 +539,6 @@ class VCSCommands(Command):
                         "SELECT file_path FROM project_files WHERE id = ?",
                         (file['file_id'],))
                     if pf:
-                        import os
                         checkout = os.path.expanduser(
                             f"~/.config/templedb/checkouts/{project['slug']}")
                         fp = os.path.join(checkout, pf['file_path'])
@@ -872,15 +854,25 @@ class VCSCommands(Command):
         # --all shows everything regardless of session ownership.
         session_flag = getattr(args, 'session', False)
         all_flag = getattr(args, 'all_sessions', False)
-        if all_flag:
+        published_flag = getattr(args, 'published', False)
+        if published_flag:
+            visibility = 'published'
+            current_session_id = None
+        elif all_flag:
             visibility = 'all'
             current_session_id = None
         elif session_flag:
             visibility = 'session'
             current_session_id = self.service.get_current_session()['id']
         else:
-            visibility = 'published'
-            current_session_id = None
+            # Default: session view (published + your unpublished commits).
+            # `--published` reverts to the strict published-only filter.
+            visibility = 'session'
+            try:
+                current_session_id = self.service.get_current_session()['id']
+            except Exception:
+                current_session_id = None
+                visibility = 'published'
 
         commits = self.vcs_repo.get_commit_history(
             project['id'],
@@ -917,8 +909,8 @@ class VCSCommands(Command):
         ]
 
         view_label = {
-            'published': 'published view',
-            'session': 'session view (published + your unpublished commits)',
+            'published': 'published only',
+            'session': 'default view (published + your unpublished)',
             'all': 'all commits (no session filter)',
         }[visibility]
 
@@ -935,7 +927,7 @@ class VCSCommands(Command):
                 print("No commits found")
                 return
             for c in items:
-                marker = " (session)" if c['session_id'] is not None else ""
+                marker = " (unpublished)" if c['session_id'] is not None else ""
                 print(f"commit {c['hash']}{marker}")
                 print(f"Branch: {c['branch']}")
                 print(f"Author: {c['author']}")
@@ -2127,9 +2119,12 @@ def register(cli):
     log_parser.add_argument('-n', type=int, help='Number of commits to show')
     log_parser.add_argument('--branch', '-b', help='Filter by branch name')
     log_parser.add_argument('--session', action='store_true',
-                            help="Include the current session's unpublished commits "
-                                 "(default view hides them). Prefer `templedb publish` "
-                                 "to fast-forward them onto shared HEAD instead.")
+                            help="[deprecated no-op — this is now the default] "
+                                 "Include the current session's unpublished commits.")
+    log_parser.add_argument('--published', action='store_true',
+                            help="Show ONLY published commits (hide your unpublished "
+                                 "commits). Useful for seeing what mirrors have. "
+                                 "Overrides --session/--all-sessions.")
     log_parser.add_argument('--all-sessions', dest='all_sessions', action='store_true',
                             help="Show every commit regardless of session ownership "
                                  "(published + all sessions' unpublished commits).")

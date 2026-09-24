@@ -895,6 +895,58 @@ class SystemService:
 
         return count
 
+    def eval_system(self, project_slug: str) -> Dict[str, Any]:
+        """Evaluate system configuration -- nix eval on the toplevel drvPath.
+
+        Truly non-mutating: no store paths built, no downloads, no activation.
+        Fast (seconds to minutes). Catches evaluation errors: missing options,
+        renamed packages, insecure packages, module assertion failures.
+        """
+        self._render_templates(project_slug)
+        checkout_path = self.get_project_checkout_path(project_slug)
+        if not checkout_path:
+            raise SystemServiceError(
+                f"Could not find checkout for {project_slug}. "
+                f"Expected at ~/.config/templedb/checkouts/{project_slug}"
+            )
+        try:
+            hostname = subprocess.run(
+                ["hostname"], capture_output=True, text=True, check=True
+            ).stdout.strip()
+        except Exception:
+            hostname = os.uname().nodename
+        attr = f".#nixosConfigurations.{hostname}.config.system.build.toplevel.drvPath"
+        cmd = ["nix", "eval", "--raw", attr]
+        logger.info(f"Running: {' '.join(cmd)} (cwd={checkout_path})")
+        print(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, cwd=str(checkout_path), capture_output=True, text=True)
+        return {
+            "success": result.returncode == 0,
+            "exit_code": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+
+    def build_system(self, project_slug: str, dry_run: bool = False) -> Dict[str, Any]:
+        """Build system configuration -- nixos-rebuild build. No activation.
+
+        Builds all store paths (kernel, initrd, packages) but does NOT run
+        activate scripts, does NOT restart systemd units, does NOT change
+        the boot default.
+        """
+        self._render_templates(project_slug)
+        checkout_path = self.get_project_checkout_path(project_slug)
+        if not checkout_path:
+            raise SystemServiceError(
+                f"Could not find checkout for {project_slug}. "
+                f"Expected at ~/.config/templedb/checkouts/{project_slug}"
+            )
+        config_path = self.get_config_file_path(checkout_path)
+        if not config_path:
+            raise SystemServiceError(f"No flake.nix or configuration.nix in {checkout_path}")
+        flake_path = checkout_path if config_path.name == "flake.nix" else None
+        return self.run_nixos_rebuild("build", flake_path=flake_path, dry_run=dry_run)
+
     def test_system(self, project_slug: str, dry_run: bool = False) -> Dict[str, Any]:
         """Test system configuration without activating
 

@@ -212,6 +212,17 @@ class ClaudeCodeProvider(BaseProvider):
             # `templedb ai agent stop-stale` can filter this server out.
             child_env = dict(os.environ)
             child_env["TEMPLEDB_AGENT_SERVER_PID"] = str(os.getpid())
+            # Pin a stable VCS session for the whole agent turn so multi-step
+            # workflows (file set + vcs commit) don't fragment across the
+            # fresh-shell-per-bash-tool-call boundary. Using TEMPLEDB_SESSION
+            # (name-based, auto-creates) rather than TEMPLEDB_SESSION_ID
+            # avoids the "references no live session" error if the session
+            # gets ended between calls. Name is scoped by server PID so
+            # concurrent agent servers stay isolated.
+            child_env.setdefault(
+                "TEMPLEDB_SESSION",
+                f"claude-code-agent-{os.getpid()}",
+            )
             self._process = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
