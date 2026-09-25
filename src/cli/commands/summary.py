@@ -35,6 +35,12 @@ def _c(text, color):
 class SummaryCommand(Command):
     """Aggregate health view."""
 
+    # How recent an invariant result has to be before this pane will
+    # present it without a date. Matched to the hourly ingest cadence
+    # rather than the old flat 24h, which let a 15h-old issue count
+    # render exactly like a live one.
+    DOCTOR_FRESH_HOURS = 1
+
     def summary(self, args) -> int:
         from db_utils import query_all, query_one
         print()
@@ -86,6 +92,12 @@ class SummaryCommand(Command):
                       f"{a['ok_count']} ok, "
                       f"{a['err_count']} err")
 
+        # --- Systemd units ---
+        # Directly after ingestion because the adapters above are driven
+        # by systemd timers: "ingest is stale" and "its timer unit is
+        # failing" read in causal order.
+        self._print_systemd()
+
         # --- Doctor invariants ---
         print()
         print(_c("── Doctor invariants (latest results) ──", 'accent'))
@@ -101,17 +113,66 @@ class SummaryCommand(Command):
         if not checks:
             print(f"  {_c('(no doctor runs — try `templedb doctor entities`)', 'muted')}")
         else:
-            violated = sum(1 for c in checks if c['status'] != 'ok')
-            summary_color = 'green' if violated == 0 else 'red'
+            # A check that ERRORED is not a check that failed — it did
+            # not run at all, and its issue_count is meaningless. Counting
+            # and rendering the two the same way is how a check that had
+            # been dead for days kept displaying a stale "389 issue(s)"
+            # from its last successful run.
+            errored = [c for c in checks if c['status'] == 'error']
+            violated = [c for c in checks if c['status'] not in ('ok', 'error')]
+            summary_color = 'green' if not violated and not errored else 'red'
+            counts = f'{len(violated)} violated'
+            if errored:
+                counts += f', {len(errored)} could not run'
+            # Nothing schedules `doctor entities` — there are timers for
+            # ingest, reconcile and backup, but not this. So the pane
+            # shows whatever the last MANUAL run produced, and the
+            # header "(latest results)" reads as live when it is not.
+            # On 2026-09-25 it claimed 32 expired sessions against a
+            # true count of 1, from a run 15h earlier. Dating the pane
+            # as a whole is what makes the missing schedule visible.
+            # The OLDEST of the per-check latest results, not the
+            # newest: `--check X` persists only X, so a single check run
+            # a minute ago would otherwise let the header claim the
+            # whole pane is current. The pane is only as fresh as its
+            # stalest check.
+            oldest = min((c['ran_at'] for c in checks if c['ran_at']),
+                         default=None)
+            oldest_age, oldest_fresh = self._age_hint(
+                oldest, threshold_hours=self.DOCTOR_FRESH_HOURS)
+            stale_note = ''
+            if oldest_fresh != 'ok':
+                stale_note = _c(f"  — stalest {oldest_age}, "
+                                f"re-run `templedb doctor entities`",
+                                'yellow')
             print(f"  {_c(f'{len(checks)} invariants tracked; ', 'muted')}"
-                  f"{_c(f'{violated} currently violated', summary_color)}")
-            for c in checks[:3]:
-                marker = '✓' if c['status'] == 'ok' else '✗'
-                marker_col = 'green' if c['status'] == 'ok' else 'red'
-                summary = ('OK' if c['status'] == 'ok'
-                           else f"{c['issue_count']} issue(s)")
+                  f"{_c(counts, summary_color)}{stale_note}")
+
+            # Show problems first. The previous `checks[:3]` sliced the
+            # list by recency, so a violated check could be hidden behind
+            # three checks that merely ran later.
+            spotlight = (errored + violated)[:3] or checks[:3]
+            for c in spotlight:
+                if c['status'] == 'ok':
+                    marker, marker_col, detail = '✓', 'green', 'OK'
+                elif c['status'] == 'error':
+                    marker, marker_col = '!', 'yellow'
+                    detail = 'could not run (see `templedb doctor entities`)'
+                else:
+                    marker, marker_col = '✗', 'red'
+                    detail = f"{c['issue_count']} issue(s)"
+                # Per-check age too, not just the pane's: `doctor
+                # entities --check X` persists only X, so one fresh
+                # check can sit beside nineteen that are a day old.
+                # The old 24h threshold hid exactly that.
+                age_str, freshness = self._age_hint(
+                    c['ran_at'], threshold_hours=self.DOCTOR_FRESH_HOURS)
+                age = '' if freshness == 'ok' else f"  ({age_str})"
                 print(f"    {_c(marker, marker_col)} {c['check_name']:<45} "
-                      f"{summary}")
+                      f"{detail}{_c(age, 'muted')}")
+            if len(errored) + len(violated) > 3:
+                more = len(errored) + len(violated) - 3
+                print(f"    {_c(f'... and {more} more — `templedb doctor entities`', 'muted')}")
 
         # --- Reconcile per machine ---
         print()
@@ -262,6 +323,78 @@ class SummaryCommand(Command):
 
         print()
         return 0
+
+    def _print_systemd(self, max_rows=6):
+        """Failed and crash-looping units.
+
+        The only pane here that reads something outside the database.
+        Three units were failing on this machine when it was written and
+        no TempleDB surface mentioned any of them.
+        """
+        from services.systemd_health import collect
+
+        print()
+        print(_c("── Systemd units ──", 'accent'))
+        health = collect()
+
+        if not health.available:
+            scopes = ', '.join(health.unreachable) or 'none'
+            print(f"  {_c(f'(systemd unreachable: {scopes})', 'muted')}")
+            return
+
+        if health.unreachable:
+            # Say which scope went unread rather than implying the clean
+            # result covers everything.
+            scopes = ', '.join(health.unreachable)
+            print(f"  {_c(f'({scopes} scope unreachable — not checked)', 'yellow')}")
+
+        if health.healthy:
+            scanned = ', '.join(f"{n} {scope}"
+                                for scope, n in sorted(health.totals.items()))
+            print(f"  {_c('✓', 'green')} no failed or looping units "
+                  f"{_c(f'({scanned} scanned)', 'muted')}")
+            return
+
+        counts = []
+        if health.failed:
+            counts.append(f"{len(health.failed)} failed")
+        if health.looping:
+            counts.append(f"{len(health.looping)} restart-looping")
+        print(f"  {_c(', '.join(counts), 'red')}")
+
+        width = max(len(u.unit) for u in health.units[:max_rows])
+        for u in health.units[:max_rows]:
+            if u.state == 'failed':
+                marker, detail = '✗', f"failed ({u.result or 'unknown'})"
+                age = u.failed_for()
+                if age is not None:
+                    detail += f" {self._duration(age)}"
+            else:
+                # NRestarts, not a timestamp: every restart rewrites the
+                # unit's timestamps, so a loop running since May still
+                # reads as five seconds old.
+                marker = '↻'
+                detail = f"restart loop — {u.restarts:,} restarts"
+            # Pad before colouring: the ANSI codes are characters as far
+            # as f-string width is concerned, so padding the coloured
+            # string mis-aligns every column by the escape length.
+            scope = _c(f"{u.scope:<6}", 'muted')
+            print(f"    {_c(marker, 'red')} {u.unit:<{width}} "
+                  f"{scope} {detail}")
+
+        if len(health.units) > max_rows:
+            more = len(health.units) - max_rows
+            print(f"    {_c(f'... and {more} more — `systemctl --failed`', 'muted')}")
+        print(f"  {_c('detail: ' + health.units[0].status_cmd, 'muted')}")
+
+    @staticmethod
+    def _duration(seconds):
+        """Coarse human duration, e.g. 'for 3d'."""
+        if seconds < 3600:
+            return f"for {int(seconds // 60)}min"
+        if seconds < 86400:
+            return f"for {int(seconds // 3600)}h"
+        return f"for {int(seconds // 86400)}d"
 
     def _age_hint(self, ts, threshold_hours=1):
         """Return (age_string, freshness_class) where class is

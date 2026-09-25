@@ -18,10 +18,48 @@ import sys
 from pathlib import Path
 
 
+def _resolve_dev_checkout() -> Path:
+    """Locate the tree dev mode should run from.
+
+    Kept in sync with cli/__init__.py::_resolve_dev_checkout — duplicated
+    rather than imported because this file runs *before* the templedb
+    packages are on sys.path, which is the whole reason it exists.
+
+    The hardcoded checkouts/templedb/src is the read-only materialized
+    copy, not the edit workspace you actually edit, so dev mode used to
+    run different code than the one just changed.
+    """
+    override = os.environ.get("TEMPLEDB_DEV_SRC")
+    if override:
+        return Path(override)
+
+    default = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" / "src"
+    db_path = os.environ.get("TEMPLEDB_PATH") or str(
+        Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite")
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                """SELECT c.checkout_path FROM checkouts c
+                     JOIN projects p ON p.id = c.project_id
+                    WHERE p.slug = 'templedb' AND c.is_active = 1
+                    ORDER BY c.checkout_at DESC""").fetchall()
+        finally:
+            con.close()
+        for (path,) in rows:
+            candidate = Path(path) / "src"
+            if (candidate / "cli").is_dir():
+                return candidate
+    except Exception:
+        pass
+    return default
+
+
 def _apply_dev_mode() -> None:
     if not os.environ.get("TEMPLEDB_DEV_MODE"):
         return
-    checkout = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" / "src"
+    checkout = _resolve_dev_checkout()
     if checkout.exists() and (checkout / "cli").exists():
         checkout_str = str(checkout)
         if checkout_str not in sys.path:

@@ -687,6 +687,11 @@ class SystemService:
             str(checkout_path),
             str(config_path),
             1 if result['success'] else 0,  # Only mark active if successful
+            # Deliberately NOT falling back to result['generation'] here:
+            # that's the home-manager generation, a separate numbering from
+            # NixOS generations, and conflating them in a column named
+            # nixos_generation would make system-history lie. If home-switch
+            # rows need a queryable generation, they need their own column.
             result.get('nixos_generation'),
             command,
             result['exit_code'],
@@ -894,58 +899,6 @@ class SystemService:
                 logger.warning(f"Could not auto-commit generated files: {e}")
 
         return count
-
-    def eval_system(self, project_slug: str) -> Dict[str, Any]:
-        """Evaluate system configuration -- nix eval on the toplevel drvPath.
-
-        Truly non-mutating: no store paths built, no downloads, no activation.
-        Fast (seconds to minutes). Catches evaluation errors: missing options,
-        renamed packages, insecure packages, module assertion failures.
-        """
-        self._render_templates(project_slug)
-        checkout_path = self.get_project_checkout_path(project_slug)
-        if not checkout_path:
-            raise SystemServiceError(
-                f"Could not find checkout for {project_slug}. "
-                f"Expected at ~/.config/templedb/checkouts/{project_slug}"
-            )
-        try:
-            hostname = subprocess.run(
-                ["hostname"], capture_output=True, text=True, check=True
-            ).stdout.strip()
-        except Exception:
-            hostname = os.uname().nodename
-        attr = f".#nixosConfigurations.{hostname}.config.system.build.toplevel.drvPath"
-        cmd = ["nix", "eval", "--raw", attr]
-        logger.info(f"Running: {' '.join(cmd)} (cwd={checkout_path})")
-        print(f"Running: {' '.join(cmd)}")
-        result = subprocess.run(cmd, cwd=str(checkout_path), capture_output=True, text=True)
-        return {
-            "success": result.returncode == 0,
-            "exit_code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
-
-    def build_system(self, project_slug: str, dry_run: bool = False) -> Dict[str, Any]:
-        """Build system configuration -- nixos-rebuild build. No activation.
-
-        Builds all store paths (kernel, initrd, packages) but does NOT run
-        activate scripts, does NOT restart systemd units, does NOT change
-        the boot default.
-        """
-        self._render_templates(project_slug)
-        checkout_path = self.get_project_checkout_path(project_slug)
-        if not checkout_path:
-            raise SystemServiceError(
-                f"Could not find checkout for {project_slug}. "
-                f"Expected at ~/.config/templedb/checkouts/{project_slug}"
-            )
-        config_path = self.get_config_file_path(checkout_path)
-        if not config_path:
-            raise SystemServiceError(f"No flake.nix or configuration.nix in {checkout_path}")
-        flake_path = checkout_path if config_path.name == "flake.nix" else None
-        return self.run_nixos_rebuild("build", flake_path=flake_path, dry_run=dry_run)
 
     def test_system(self, project_slug: str, dry_run: bool = False) -> Dict[str, Any]:
         """Test system configuration without activating
@@ -1176,6 +1129,7 @@ class SystemService:
             Dict with success (bool), exit_code (int), stdout (str),
             stderr (str), generation (Optional[int]).
         """
+        before = self._hm_profile_state()
         try:
             flake_output = self.get_system_config('nixos.flake_output')
             if not flake_output:
@@ -1260,13 +1214,41 @@ class SystemService:
                         'generation': None,
                     }
 
-                generation = (
+                after = self._hm_profile_state()
+                generation = after['generation'] or (
                     self._extract_hm_generation(activate_result['stdout'])
                     or self._extract_hm_generation(activate_result['stderr'])
                 )
                 success = activate_result['exit_code'] == 0
-                if success:
-                    print(f"  ✅ home-manager activated (generation {generation})")
+
+                # Did anything actually change? Compare the resolved
+                # home-path store path, not the generation counter: the
+                # counter only falsifies (not advancing proves nothing
+                # changed), while a differing store path positively
+                # identifies a new closure.
+                #
+                # Reporting this matters because `home-rebuild` builds
+                # from the CHECKOUT, not the DB. A change committed to
+                # the DB but not yet published produces a completely
+                # successful-looking rebuild of the old config. That
+                # happened on 2026-09-24 and cost a debugging cycle: the
+                # run printed "✅ activated (generation 49)" while
+                # rebuilding the generation that was already live.
+                changed = (before.get('home_path') != after.get('home_path')
+                           or before.get('generation') != after.get('generation'))
+
+                if success and changed:
+                    if before.get('generation') != after.get('generation'):
+                        print(f"  ✅ home-manager activated "
+                              f"(generation {before.get('generation')} → {generation})")
+                    else:
+                        print(f"  ✅ home-manager activated (generation {generation}, "
+                              f"new closure)")
+                elif success:
+                    print(f"  ✅ home-manager activated — NO CHANGE "
+                          f"(generation {generation} rebuilt identically)")
+                    print(f"     If you expected a change, the checkout may be "
+                          f"stale: run `templedb publish run <slug>` first.")
                 else:
                     print(f"  ❌ home-manager activation failed")
 
@@ -1276,6 +1258,9 @@ class SystemService:
                     'stdout': build_result['stdout'] + '\n---activate---\n' + activate_result['stdout'],
                     'stderr': build_result['stderr'] + '\n---activate---\n' + activate_result['stderr'],
                     'generation': generation,
+                    'changed': changed,
+                    'home_path_before': before.get('home_path'),
+                    'home_path_after': after.get('home_path'),
                 }
             finally:
                 # Remove the per-invocation gcroot; the built path is either
@@ -1291,6 +1276,41 @@ class SystemService:
                 'generation': None,
             }
 
+
+    HM_PROFILE = "~/.local/state/nix/profiles/home-manager"
+
+    def _hm_profile_state(self) -> Dict[str, Any]:
+        """Read the live home-manager profile: (generation, store path).
+
+        Authoritative, unlike scraping the activation log. The activation
+        script only prints "Creating new profile generation N" when
+        something actually changed, so a no-op rebuild leaves the regex
+        with nothing to match and _extract_hm_generation() falls back to
+        reading the symlink — returning the OLD generation as if it were
+        the new one. Comparing this before/after is what distinguishes
+        "applied your change" from "rebuilt the identical closure".
+
+        Returns {'generation': int|None, 'home_path': str|None}.
+        """
+        import re
+        state: Dict[str, Any] = {'generation': None, 'home_path': None}
+        profile = os.path.expanduser(self.HM_PROFILE)
+        try:
+            target = os.readlink(profile)
+            m = re.search(r'home-manager-(\d+)-link', target)
+            if m:
+                state['generation'] = int(m.group(1))
+        except OSError:
+            return state
+        # The home-path symlink is the real discriminator: two generations
+        # can exist with identical contents, but a changed closure always
+        # means a different store path.
+        try:
+            state['home_path'] = os.path.realpath(
+                os.path.join(profile, "home-path"))
+        except OSError:
+            pass
+        return state
 
     def _extract_hm_generation(self, output: str) -> Optional[int]:
         """Extract home-manager generation number from output"""

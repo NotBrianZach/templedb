@@ -266,27 +266,65 @@ class CheckoutCommand:
 
             if not stale_checkouts:
                 print("   No stale checkouts found")
-                return 0
+            else:
+                print(f"   Found {len(stale_checkouts)} stale checkout(s):")
+                for co in stale_checkouts:
+                    print(f"      - {co['checkout_path']}")
 
-            print(f"   Found {len(stale_checkouts)} stale checkout(s):")
-            for co in stale_checkouts:
-                print(f"      - {co['checkout_path']}")
-
-            # Confirm deletion unless --force
-            if not (hasattr(args, 'force') and args.force):
-                response = input(f"\nRemove {len(stale_checkouts)} stale checkout(s)? (yes/no): ")
-                if response.lower() != 'yes':
-                    print("Cancelled")
+                if getattr(args, 'dry_run', False):
+                    print(f"\n   --dry-run: nothing removed.")
                     return 0
 
-            # Delete stale checkouts (CASCADE will remove snapshots)
-            removed = 0
-            for co in stale_checkouts:
-                self.checkout_repo.delete(co['id'])
-                removed += 1
-                logger.info(f"Removed: {co['checkout_path']}")
+                # Confirm deletion unless --force
+                if not (hasattr(args, 'force') and args.force):
+                    response = input(f"\nRemove {len(stale_checkouts)} stale checkout(s)? (yes/no): ")
+                    if response.lower() != 'yes':
+                        print("Cancelled")
+                        return 0
 
-            logger.info(f"Removed {removed} stale checkout(s)")
+                # Delete stale checkouts (CASCADE will remove snapshots)
+                removed = 0
+                for co in stale_checkouts:
+                    self.checkout_repo.delete(co['id'])
+                    removed += 1
+                    logger.info(f"Removed: {co['checkout_path']}")
+
+                logger.info(f"Removed {removed} stale checkout(s)")
+
+            # Orphan pruning runs even when no checkout was stale — the
+            # debris below outlives the rows that created it.
+
+            # Prune snapshots whose checkout is already gone. CASCADE
+            # only fires for rows deleted above; these are older debris
+            # from create_or_update's former INSERT OR REPLACE, which
+            # deleted and reinserted the row under a NEW id and left the
+            # snapshots pointing at an id that no longer exists. 700 such
+            # rows had accumulated by 2026-09-24. They are unreachable —
+            # every read path joins on checkout_id — so this is dead
+            # weight, not history.
+            from db_utils import query_one, execute as _execute
+            orphans = query_one(
+                """SELECT COUNT(*) AS n FROM checkout_snapshots s
+                    LEFT JOIN checkouts c ON c.id = s.checkout_id
+                    WHERE c.id IS NULL""")
+            n_orphans = (orphans or {}).get('n', 0)
+            if n_orphans:
+                # --dry-run must reach here too (orphans can exist with no
+                # stale checkout), so the guard belongs on the mutation,
+                # not on an early return further up. An earlier revision
+                # put it only in the stale-checkout branch and a --dry-run
+                # invocation deleted 700 rows.
+                if getattr(args, 'dry_run', False):
+                    print(f"   Would prune {n_orphans} orphaned snapshot row(s)")
+                    return 0
+                _execute(
+                    """DELETE FROM checkout_snapshots
+                        WHERE checkout_id NOT IN (SELECT id FROM checkouts)""")
+                print(f"   Pruned {n_orphans} orphaned snapshot row(s)")
+                logger.info(f"Pruned {n_orphans} orphaned checkout_snapshots")
+            elif getattr(args, 'dry_run', False):
+                print("   No orphaned snapshot rows")
+
             return 0
 
         except Exception as e:

@@ -23,8 +23,42 @@ def _get_db_path():
 DB_PATH = _get_db_path()
 DB_DIR = Path(DB_PATH).parent
 
-# Ensure database directory exists
-os.makedirs(DB_DIR, exist_ok=True)
+# Ensure database directory exists.
+#
+# Guarded on the directory already existing, because os.makedirs walks
+# UP: given a leaf it cannot stat, it recurses to the parent and tries
+# to create that instead. Inside a systemd sandbox that is fatal at
+# import time. woofs-sync.service runs with ProtectHome=true plus a
+# BindReadOnlyPaths remount of just the templedb directory, so the DB
+# and its directory are both present and readable while /home/zach is
+# not -- and this line died with
+#
+#   PermissionError: [Errno 13] Permission denied: '/home/zach'
+#
+# before argparse ever ran. The service reported "Failed to load
+# DATABASE_URL from TempleDB", which sent three people looking for a
+# missing secret that was there the whole time.
+#
+# Creation failure is tolerated rather than raised: a read-only or
+# sandboxed DB directory is a legitimate way to run, and a genuinely
+# unusable path still produces a precise error when the connection is
+# opened. Dying here only costs us `--help`.
+def _ensure_dir(path):
+    """mkdir -p that never raises at import time.
+
+    os.makedirs walks UP: given a leaf it cannot stat, it recurses to
+    the parent and tries to create that instead. Checking is_dir()
+    first means an existing-but-unstattable directory is left alone
+    rather than triggering that climb.
+    """
+    try:
+        if not Path(path).is_dir():
+            os.makedirs(path, exist_ok=True)
+    except OSError:
+        pass
+
+
+_ensure_dir(DB_DIR)
 
 # Directories
 NIX_ENV_DIR = DB_DIR / "nix-envs"
@@ -97,9 +131,10 @@ BLOB_CACHE_EVICTION_POLICY = os.environ.get(
     'lru'  # lru, lfu, fifo
 ).lower()
 
-# Ensure blob directories exist
-os.makedirs(BLOB_STORAGE_DIR, exist_ok=True)
-os.makedirs(BLOB_CACHE_DIR, exist_ok=True)
+# Ensure blob directories exist (same import-time guard as DB_DIR --
+# these sit under DB_DIR, so a sandbox that blocks one blocks all three)
+_ensure_dir(BLOB_STORAGE_DIR)
+_ensure_dir(BLOB_CACHE_DIR)
 
 # Logging Configuration
 LOG_LEVEL = os.environ.get('TEMPLEDB_LOG_LEVEL', 'INFO')

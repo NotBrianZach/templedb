@@ -52,8 +52,18 @@ class GraphCommands(Command):
         log_query("graph.search", args={"query": args.query})
         results = search_everywhere(args.query, limit=args.limit)
 
+        # This command matches names and metadata, never file contents.
+        # An empty result therefore means "no such path/project/commit
+        # message", NOT "this string appears nowhere" — point at the
+        # command that answers the question the user probably asked.
+        _CONTENT_HINT = (
+            "  (searched names, paths and commit messages — not file "
+            "contents)\n"
+            f"  For contents: templedb search content '{args.query}'")
+
         if not results:
             print(f"No results for '{args.query}'")
+            print(_CONTENT_HINT)
             return 0
 
         if args.json:
@@ -84,6 +94,8 @@ class GraphCommands(Command):
             if len(items) > 5:
                 print(f"    ... +{len(items) - 5} more")
             print()
+        print(_CONTENT_HINT)
+        print()
         return 0
 
     def who_uses(self, args) -> int:
@@ -404,14 +416,25 @@ def register(cli):
     subparsers = graph_parser.add_subparsers(dest='graph_subcommand', required=True)
 
     # graph search — query optional so we can show hint when omitted
-    s = subparsers.add_parser('search', help='Fuzzy search across everything')
+    # "across everything" was not true and cost real debugging time: this
+    # matches NAMES and metadata (project slugs, file paths, env vars,
+    # commit messages), never file contents. Searching for a symbol that
+    # lives in four files returned one commit message and no files, which
+    # reads as "this code does not exist".
+    s = subparsers.add_parser(
+        'search',
+        help='Fuzzy search names/paths/commits (NOT file contents — '
+             'use `templedb search content`)')
     s.add_argument('query', nargs='?', help='Search query (omit for a usage hint)')
     s.add_argument('--limit', type=int, default=50)
     s.add_argument('--json', action='store_true')
     cli.commands['graph.search'] = cmd.search
 
     # graph who-uses
-    w = subparsers.add_parser('who-uses', help='Find which projects use a secret/var/string')
+    w = subparsers.add_parser(
+        'who-uses',
+        help='Find which files contain a string (substring scan of file '
+             'contents; slower than `search content` but never stale)')
     w.add_argument('name', nargs='?',
                    help='Secret name, env var, or search string (omit for top candidates)')
     w.add_argument('--json', action='store_true')

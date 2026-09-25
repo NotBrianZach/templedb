@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session recap: silent-failure audit, DB-vs-workspace split, and 12 fixes</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14; --pos: #6ecf7a; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 860px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.82em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  .urgent { border-left-color: var(--warn); }
+  .quiet { color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1.1rem 0; font-size: 0.88em; }
+  th { text-align: left; color: #b0b0d0; font-size: 0.72rem;
+       text-transform: uppercase; letter-spacing: 0.08em;
+       border-bottom: 1px solid var(--border); padding: 0.45rem 0.6rem; }
+  td { padding: 0.45rem 0.6rem; border-bottom: 1px solid rgba(30,30,58,0.6);
+       vertical-align: top; }
+  td.ok { color: var(--pos); white-space: nowrap; }
+  td.bad { color: var(--accent); }
+  ul li { margin: 0.35rem 0; }
+  .hash { font-family: "JetBrains Mono", ui-monospace, monospace;
+          font-size: 0.85em; color: #e6c46b; }
+</style>
+</head>
+<body>
+
+<h1>Session recap: silent-failure audit, DB-vs-workspace split, and 12 fixes</h1>
+<p class="lede">
+Started as "how is TempleDB looking?" and turned into an audit of things
+failing silently. Found a 10-day entity-graph outage, a data-loss bug that
+ate this session's own report, a dead full-text index, a crash-looping MCP
+daemon, and 45 dead checkout rows. 28 commits across four projects. One
+problem is left deliberately unfixed and needs you to run one command after
+this session ends — see <em>Do this first</em>.
+</p>
+
+<div class="callout urgent">
+<p style="margin:0 0 0.5rem"><strong>Do this first — the WAL is 6.9 GB.</strong></p>
+<p style="margin:0">
+Every read against the live DB is currently ~100x slower than it should be
+(<code>templedb summary</code>: 2.1s on a copy, &gt;200s live). The WAL cannot
+drain while this session's <code>ai agent serve</code> / <code>ai mcp serve</code>
+processes hold read snapshots. Once the session exits, run:
+</p>
+<pre style="margin:0.7rem 0 0">python3 -c "import sqlite3; c=sqlite3.connect('$HOME/.local/share/templedb/templedb.sqlite'); \
+print(c.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone())"</pre>
+<p style="margin:0.5rem 0 0" class="quiet">
+Expect <code>(0, 0, 0)</code> and <code>-wal</code> dropping to near zero.
+Restarting the GUI does <em>not</em> help — that was tested and disproved.
+</p>
+</div>
+
+<h2>The through-line</h2>
+
+<p>
+Every major defect found today was the same shape: <strong>something failing
+on a loop, reporting success or nothing at all.</strong> Not one surfaced on
+its own.
+</p>
+
+<table>
+<tr><th>Failure</th><th>Duration unnoticed</th><th>What it looked like</th></tr>
+<tr><td>crsqlite missing → <code>ingest git</code></td><td>10 days, 151 runs</td><td>a red timestamp in <code>summary</code></td></tr>
+<tr><td><code>file set</code> + <code>vcs add</code> + commit</td><td>unknown</td><td><code>Files: 2</code>, exit 0, file deleted</td></tr>
+<tr><td>FTS content index</td><td>months</td><td>searches returning nothing</td></tr>
+<tr><td><code>templedb-mcp.service</code></td><td>months</td><td>nothing; 5s restart loop</td></tr>
+<tr><td><code>home-rebuild</code> on stale checkout</td><td>—</td><td>"✅ activated (generation 49)"</td></tr>
+<tr><td>103 checkout rows, 45 dead</td><td>—</td><td>nothing</td></tr>
+</table>
+
+<p>
+The second architectural theme: <strong>the database and the edit workspace
+are two sources of truth, and different commands trust different ones.</strong>
+<code>file set</code>, <code>reports reindex</code> and <code>file cat</code>
+speak to the DB; <code>vcs commit</code>, <code>vcs status --refresh</code> and
+<code>nixos home-rebuild</code> speak to the checkout. Four separate bugs today
+were instances of that split.
+</p>
+
+<h2>Fixed and verified</h2>
+
+<table>
+<tr><th>Commit</th><th>What</th></tr>
+<tr><td class="hash">12808668</td><td><strong>crsqlite shipped in the package again.</strong> <code>flake.nix</code>'s <code>mkPackage</code> stopped emitting <code>lib/crsqlite.so</code>; <code>_find_crsqlite()</code> probes <code>&lt;profile&gt;/lib/</code>, so the extension vanished from every profile. 151 hourly <code>ingest git</code> failures over 10 days. Published as <span class="hash">8255c1e</span>, repinned in system_config, home-manager generation 50. <code>ingest git</code> now works with no env var.</td></tr>
+<tr><td class="hash">0633046C</td><td><strong>file set data loss.</strong> Mirrored writes to the hardcoded <code>checkouts/&lt;slug&gt;</code> instead of the active checkout. In edit mode the refresh scans the <em>workspace</em>, finds no file, marks the row <code>state='deleted'</code>, and commit hard-deletes it. Reproduced, fixed, re-verified.</td></tr>
+<tr><td class="hash">59824A42</td><td><strong>home-rebuild no longer builds stale config.</strong> It called <code>materialize_from_db()</code>, which correctly <em>refuses</em> on divergence — then fell back to the stale checkout anyway. Also reports no-op rebuilds honestly now.</td></tr>
+<tr><td class="hash">2DA984A6</td><td><strong>New invariant <code>checkout_matches_db</code></strong> — catches the DB/workspace split before a commit destroys anything. Flags staged-but-missing (data loss) separately from content drift.</td></tr>
+<tr><td class="hash">7E11A950</td><td><strong>checkouts <code>is_active</code> rot.</strong> Never written false in the DB's history: 103 rows, 45 dead paths. Fixed at four sources — upsert instead of <code>INSERT OR REPLACE</code> (which orphaned 700 snapshots), derived liveness, reap-the-row-with-the-directory, and <code>admin checkout-gc</code>. Now 58 rows, 0 dead.</td></tr>
+<tr><td class="hash">552BC50D<br>D76512BA</td><td><strong>FTS content index repaired.</strong> Had UPDATE/DELETE triggers on a content-addressed table that is only ever <em>inserted</em> into — so no INSERT trigger meant it silently stopped growing. Migrations 110/111 move maintenance to <code>file_contents</code> and cover renames and soft-deletes. <code>apply_standard_pragmas</code>: 0 → 5 files.</td></tr>
+<tr><td class="hash">9ED0C8E7</td><td><strong>doctor + summary.</strong> <code>no_expired_active_sessions</code> selected a dropped column and had been dead for days while summary displayed its stale "389 issues". Errored checks now render as <code>!</code>, not as failures.</td></tr>
+<tr><td class="hash">8811C8CF</td><td><strong>Ingest watchdog.</strong> Files a broadcast handoff note at 3, 24 and 72 consecutive adapter failures.</td></tr>
+<tr><td class="hash">F85D1014</td><td><strong>Dev mode runs the tree you edit</strong>, not the read-only checkout.</td></tr>
+<tr><td class="hash">098FEB91</td><td><strong>11 client records restored</strong> to <code>woofs_projects/woofsDB/clientNotes.json</code> (1548 → 1559). They existed only in the checkout; a <code>publish run</code> would have destroyed them. Surfaced by the new invariant within an hour of it existing.</td></tr>
+<tr><td class="hash">20EBA7DB</td><td><strong>CLI path corrected in CLAUDE.md.</strong> <code>/home/zach/templeDB/templedb</code> does not exist; <code>templedb-mcp.service</code> took its <code>ExecStart</code> from that documented path and crash-looped with <code>203/EXEC</code>. Unit fixed too — now active, 0 restarts, serving 8421.</td></tr>
+<tr><td class="quiet">(direct)</td><td><strong>Migrator unblocked.</strong> Only two files were unrecorded (062, 071); both effects were already present, 062's index was not. Created it, backfilled both records. <code>admin db migrate</code> exits 0 and picks up new migrations again.</td></tr>
+</table>
+
+<h2>Open — ranked</h2>
+
+<h3>1. Drain the WAL <span class="quiet">(one command, after this session)</span></h3>
+<p>See the box at the top. Nothing else is blocked on it, but everything is slow until it's done.</p>
+
+<h3>2. Add systemd-unit health to <code>templedb summary</code></h3>
+<p>
+Three outages this session were units failing on a loop with nothing
+surfacing them. The ingest watchdog added today covers ingest adapters only.
+A "failed + crash-looping user units" section in <code>summary</code> would
+have caught the MCP daemon months ago, and would catch
+<code>woofs-sync.service</code> (still failing, below).
+</p>
+
+<h3>3. Reboot zMothership2 <span class="quiet">(carried from the prior session)</span></h3>
+<p>
+Running kernel <code>linux-6.1.176</code>; <code>6.1.188</code> is staged as
+boot default (gen 302). The Tailscale-flagged CVE is only fixed after reboot.
+Rollback: pick gen 301 in GRUB.
+</p>
+
+<h3>4. <code>woofs-sync.service</code> failing on startup</h3>
+<p>
+The wrapper falls back when <code>DATABASE_URL</code> isn't in templedb, then
+invokes the binary without <code>--db-url</code> or <code>--use-templedb</code>
+and errors. Pass <code>--use-templedb</code> in the fallback, or store the
+secret.
+</p>
+
+<h3>5. Smaller, known</h3>
+<ul>
+<li><code>commit_files</code> vs <code>vcs_file_states</code> — two tables for
+"files in a commit". <code>vcs commit</code> writes one, the git importer the
+other, so any query against either misses half the history. Not a regression;
+a schema decision to make.</li>
+<li>13 stale <code>deploy_stage_runs</code> stuck open since 2026-09-21.</li>
+<li>32 expired-but-active vcs sessions — <code>templedb vcs session gc</code>
+exists for this.</li>
+<li>HEAD-race CAS follow-up (see <code>src/cli/commands/vcs.py:510</code>).</li>
+</ul>
+
+<h2>Two futures: what the diff actually looks like</h2>
+
+<p>
+The root cause behind four of today's bugs is that the database and the
+workspace are both authoritative. There are two coherent endpoints. The
+point of writing them out is that <em>the half-state is worse than either</em>,
+and the schema makes the choice concrete rather than philosophical.
+</p>
+
+<ul>
+<li><strong>DB-authoritative</strong> → the workspace becomes a pure derived
+cache; commit is DB→disk, never disk→DB; the reconciliation-delete
+disappears entirely.</li>
+<li><strong>Disk-authoritative</strong> (the observer plan) → <code>file set</code>
+becomes a workspace write + ingest, and the DB stops being a write target.</li>
+</ul>
+
+<h3>A. DB-authoritative — schema</h3>
+
+<table>
+<tr><th>Table</th><th>Rows today</th><th>Fate</th></tr>
+<tr><td><code>vcs_working_state</code></td><td>1,932</td><td>Shrinks to a <em>selection set</em>. Drop <code>content_hash</code> (the hash of the file on disk) and the disk-derived <code>state</code>; staging becomes "which changed rows go in the next commit", computed from <code>file_contents</code> vs last commit.</td></tr>
+<tr><td><code>checkout_snapshots</code></td><td>29,149</td><td><strong>Deleted.</strong> It exists to detect disk drift. A derived cache has no drift — you re-materialize.</td></tr>
+<tr><td><code>checkouts</code></td><td>58</td><td>Becomes a disposable cache location; <code>is_active</code> finally means something.</td></tr>
+<tr><td><code>project_files</code>, <code>file_contents</code>, <code>content_blobs</code></td><td>2,267 / 1,952 / 11,865</td><td>Unchanged — already the master.</td></tr>
+<tr><td><code>vcs_commits</code>, <code>vcs_file_states</code></td><td>938 / 3,677</td><td>Unchanged — the DB stays the commit store.</td></tr>
+</table>
+
+<h3>A. DB-authoritative — CLI</h3>
+<ul>
+<li><code>vcs status --refresh</code> — flag deleted; there is nothing to refresh <em>from</em>.</li>
+<li><code>vcs add</code> — stops scanning disk entirely.</li>
+<li><code>templedb commit &lt;slug&gt; &lt;workspace&gt;</code> — <strong>deleted</strong>. It is the disk→DB path.</li>
+<li>Commit's reconciliation-delete — <strong>deleted</strong>. That is the line that ate this session's own report.</li>
+<li><code>templedb edit</code> — needs an explicit <code>--save</code>/import step.</li>
+</ul>
+<p class="quiet">
+Cost: you lose "edit in a workspace with vim and commit what's there". That
+is the workflow people actually like, and it becomes an explicit import.
+</p>
+
+<h3>B. Disk-authoritative (observer) — schema</h3>
+
+<table>
+<tr><th>Table</th><th>Rows today</th><th>Fate</th></tr>
+<tr><td><code>vcs_working_state</code></td><td>1,932</td><td><strong>Deleted.</strong> <code>git status</code> is the staging state.</td></tr>
+<tr><td><code>vcs_file_states</code></td><td>3,677</td><td><strong>Deleted.</strong> Duplicates git's tree.</td></tr>
+<tr><td><code>commit_files</code></td><td>1,500</td><td><strong>Survives and becomes canonical</strong> — it is already the git importer's projection. Resolves today's two-tables-for-one-concept problem by deletion rather than decision.</td></tr>
+<tr><td><code>vcs_commits</code></td><td>938</td><td>Becomes an ingested projection of <code>git log</code>, not a write target.</td></tr>
+<tr><td><code>file_contents</code>, <code>content_blobs</code></td><td>1,952 / 11,865</td><td>Demoted to a content cache for search and history.</td></tr>
+<tr><td><code>checkout_snapshots</code></td><td>29,149</td><td><strong>Deleted.</strong></td></tr>
+<tr><td><code>edit_intents</code></td><td>455</td><td><strong>Keeps its value</strong> — agent provenance that git cannot express.</td></tr>
+<tr><td class="quiet">new</td><td>—</td><td>Git linkage: blob/commit SHA columns on the projection tables, and a last-ingested-ref per project.</td></tr>
+</table>
+
+<h3>B. Disk-authoritative — CLI</h3>
+<p>
+This is the large deletion. <code>templedb vcs</code> has 15 subcommands;
+eleven of them become git:
+</p>
+<pre>add  reset  discard  commit  status  log  branch  switch  merge  diff  show   -> git
+session  edit  import-history  export                                        -> survive</pre>
+<p>
+Plus top-level <code>commit</code> and <code>push</code> fold into
+<code>publish</code>/git. What remains gets <em>better</em>, because it is the
+part git cannot do: <code>search</code>, <code>graph</code>, <code>entity</code>,
+<code>doctor</code>, <code>ingest</code>, <code>deploy</code>, <code>env</code>/
+<code>var</code>, <code>nixos</code>.
+</p>
+
+<div class="callout urgent">
+<p style="margin:0 0 0.6rem">
+<strong>A and B are divergent, not sequential.</strong> A deletes the
+disk→DB path; B deletes the DB→disk write path. They point opposite
+directions. Doing A does not defer the decision — <strong>it forecloses
+B</strong>, and reaching B afterwards means rebuilding what A removed.
+</p>
+<p style="margin:0">
+This matters because <code>vcs_working_state</code> already half-believes
+both models, which is roughly how the current state arrived: a sequence of
+individually-reasonable small diffs, none of which was the decision.
+</p>
+</div>
+
+<h3>Where the truth should live</h3>
+
+<p>
+The question hides two questions, and they have different answers. "Where
+does <em>file content</em> live" is not "where does <em>everything else</em>
+live", and TempleDB's value is overwhelmingly in the second while its pain
+is entirely in the first.
+</p>
+
+<p>
+<strong>File bytes belong in git.</strong> The database has no comparative
+advantage at storing them, and this session produced the receipts:
+</p>
+
+<ul>
+<li><code>content_blobs</code> holds <strong>11,866 blobs for 1,879 current
+files</strong> — a 6.3× history multiplier. That is a second object
+database sitting beside git's, with a worse implementation.</li>
+<li><strong>28 of 30 projects already carry a <code>repo_url</code>.</strong>
+Git is not a future migration; it is already underneath.</li>
+<li>Every defect found today was a problem git solved in 2005, re-solved
+badly: a commit reporting <code>Files: 2</code> while writing one,
+reconciliation hard-deleting rows, staging state derived from a disk scan
+that could be wrong, two parallel tables for "files in a commit".</li>
+<li>The one moment ACID-across-projects could have earned its keep — the
+flake pin touching <code>templedb</code> and <code>system_config</code>
+together — <strong>it did not fire</strong>. The real dependency was on a
+<em>published git rev</em>, not a transaction.</li>
+</ul>
+
+<p>
+<strong>Everything else belongs in the database</strong>, and that layer
+demonstrably works: the entity graph, invariants, <code>EditIntent</code>
+provenance, env/secrets, deploy state. It turned a ten-day outage into an
+eleven-second recovery. Git cannot express any of it.
+</p>
+
+<p>
+So the thesis does not need abandoning — it needs restating. <strong>A
+database-native development environment, not a database-native VCS.</strong>
+The valuable claim was never "we store your bytes better than git".
+</p>
+
+<p>
+<strong>Recommendation: B</strong>, with the scope named precisely — git owns
+file content and history; the DB owns everything derived and everything git
+cannot express. An earlier draft of this report recommended A on the grounds
+that it was the smaller diff and preserved the thesis. That reasoning was
+wrong twice over: it mistook a commitment for a stepping stone, and it
+defended a thesis that was never the valuable part.
+</p>
+
+<h3>No-regret work, correct under either answer</h3>
+
+<p>
+Do these regardless, and do them first — none of them prejudices the
+source-of-truth decision:
+</p>
+<ul>
+<li>The five seam invariants (§ Open, item 2).</li>
+<li>Deleting the four confirmed CLI aliases.</li>
+<li>Consolidating the health surfaces.</li>
+<li>Error translation at the CLI boundary.</li>
+<li>Turning today's six reproductions into integration tests.</li>
+</ul>
+
+<h3>What would change the recommendation</h3>
+<ul>
+<li>If the cr-sqlite CRDT work is meant to sync <em>file content</em> across
+machines rather than just the entity graph. The <code>sync_*</code> shadow
+tables are a real investment; if file bytes are supposed to ride them,
+DB-resident content is load-bearing and this needs re-arguing.</li>
+<li>If any of the 9 projects with no tracked files cannot have a git repo
+for a concrete reason.</li>
+<li>If cross-project atomic commits are load-bearing for a workflow not seen
+in this session. Only one candidate appeared, and it did not need them.</li>
+</ul>
+
+<h2>Shrinking the CLI: 43 → ~16</h2>
+
+<p>
+43 top-level commands today. The help text lied in at least two places this
+session, which is what a surface this wide produces. Three moves, in
+increasing order of disruption:
+</p>
+
+<p class="quiet"><strong>1. Delete the confirmed aliases (43 → 39).</strong>
+Their own help strings identify them:</p>
+<pre>new-machine   "(Deprecated) Use templedb bootstrap instead"
+build         "alias for deploy nix build"
+push          "alias for publish run --force"
+commit        "alias for project commit"</pre>
+
+<p class="quiet"><strong>2. Fold the five health surfaces into one (39 → 34).</strong>
+<code>doctor</code>, <code>reconcile</code>, <code>summary</code>,
+<code>hygiene</code>, <code>status</code>, <code>validate</code>,
+<code>source</code> all answer "is this healthy?" and none of them was the
+place anyone looked when things broke. One <code>templedb health</code> with
+subcommands, one exit code, one alert path.</p>
+
+<p class="quiet"><strong>3. Fold the graph-query surfaces (34 → ~30).</strong>
+<code>entity</code>, <code>tool</code>, <code>provenance</code>,
+<code>report</code> are all queries over the entity graph and belong under
+<code>graph</code>. <code>search</code> stays top-level — it is used
+constantly and by humans.</p>
+
+<p>
+That lands around 30 without touching semantics. Getting to ~16 requires the
+source-of-truth decision above: under B the entire <code>vcs</code> tree
+goes; under A it stays but <code>commit</code>, <code>push</code> and the
+workspace-diff path go. Either way the remaining nouns are roughly:
+</p>
+
+<pre>project  file  search  graph  health  env  secret  deploy
+publish  ingest  edit  gui  ai  nixos  admin  sync</pre>
+
+<p class="quiet">
+Worth doing in that order — steps 1 and 2 are pure wins available today and
+independent of the bigger decision.
+</p>
+
+<h2>Notes for whoever picks this up</h2>
+
+<ul>
+<li><strong>Write new files into the edit workspace, not via <code>file set</code>.</strong>
+<code>file set</code> on a <em>new</em> path still needs
+<code>vcs status --refresh</code> before <code>vcs add</code> will see it. This
+bit twice today, including for a migration file.</li>
+<li><strong>Always check the staged list before committing.</strong>
+<code>templedb vcs session show &lt;id&gt;</code>. Commit reported
+<code>Files: 2</code> while writing one.</li>
+<li><strong>Verify after committing, not just after writing.</strong>
+<code>templedb file cat &lt;slug&gt; &lt;path&gt; | sha256sum</code>. A write can
+verify clean and still be destroyed by the commit that follows.</li>
+<li><strong><code>publish run</code> before any nixos rebuild</strong>, and check
+the generation number actually advanced. Both the command output and
+<code>system_deployments</code> are identical between a real rebuild and a no-op.</li>
+<li><strong>Three search commands, three behaviours.</strong>
+<code>search content</code> (contents, FTS), <code>graph who-uses</code>
+(contents, substring), <code>graph search</code> (names/paths/commits only).
+CLAUDE.md now has the table.</li>
+<li><strong>Copy the DB with the backup API, not <code>cp</code>.</strong> A
+<code>shutil.copy2</code> of a WAL-mode DB gave a silently wrong snapshot today
+and nearly produced a false conclusion. Use
+<code>sqlite3.Connection.backup()</code>.</li>
+</ul>
+
+<p class="quiet" style="margin-top:2.5rem">
+<em>2026-09-25. 28 commits: templedb, system_config, woofs_projects, regr-test.
+Pre-migration backups at <code>/tmp/templedb-backup-pre110.sqlite</code> and
+<code>/tmp/templedb-backup-preA.sqlite</code> (741M each) — delete once you're
+satisfied. Full assessment of the tooling in
+<code>reports/2026-09-24-1442-templedb-assessment-*.html</code>.</em>
+</p>
+
+</body>
+</html>

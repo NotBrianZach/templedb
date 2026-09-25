@@ -36,11 +36,30 @@ class CheckoutRepository(BaseRepository):
         """
         logger.info(f"Creating/updating checkout for project {project_id} at {checkout_path}")
 
-        checkout_id = self.execute("""
-            INSERT OR REPLACE INTO checkouts
+        # Upsert in place. The previous INSERT OR REPLACE was destructive:
+        # REPLACE deletes the conflicting row and inserts a new one with a
+        # NEW rowid, which (a) silently reset last_sync_at to NULL because
+        # it isn't in the column list, and (b) orphaned every
+        # checkout_snapshots row pointing at the old checkout_id. As of
+        # 2026-09-24 that had left 41/103 checkouts with a NULL
+        # last_sync_at and 700 orphaned snapshot rows. DO UPDATE keeps the
+        # identity stable, so neither happens.
+        self.execute("""
+            INSERT INTO checkouts
             (project_id, checkout_path, branch_name, checkout_at, is_active)
             VALUES (?, ?, ?, datetime('now'), 1)
+            ON CONFLICT(project_id, checkout_path) DO UPDATE SET
+                branch_name = excluded.branch_name,
+                checkout_at = excluded.checkout_at,
+                is_active = 1
         """, (project_id, checkout_path, branch_name))
+
+        # lastrowid is unreliable for the DO UPDATE path, so read the id
+        # back rather than trusting the insert's return value.
+        row = self.query_one(
+            "SELECT id FROM checkouts WHERE project_id = ? AND checkout_path = ?",
+            (project_id, checkout_path))
+        checkout_id = row['id'] if row else None
 
         logger.debug(f"Checkout ID: {checkout_id}")
         return checkout_id
@@ -73,12 +92,31 @@ class CheckoutRepository(BaseRepository):
             Checkout dictionary or None
         """
         logger.debug(f"Getting active checkout for project {project_id}")
-        return self.query_one("""
+        # is_active alone cannot be trusted: nothing in the codebase has
+        # ever set it to 0, so every path a project was ever checked out
+        # to stays "active" forever (103 rows, 45 of them pointing at
+        # directories that no longer exist, as of 2026-09-24). Session
+        # reaping rmtree's the workspace without updating the row, so a
+        # dead path can easily be the most recent one — and returning it
+        # means callers build, commit, or materialize against nothing.
+        #
+        # Liveness is therefore derived: prefer the newest row whose
+        # directory actually exists. Falls back to the newest row overall
+        # so behaviour is unchanged for projects with no extant checkout
+        # (callers already handle a path that isn't there).
+        import os
+        rows = self.query_all("""
             SELECT id, project_id, checkout_path, branch_name, checkout_at, last_sync_at, is_active
             FROM checkouts
             WHERE project_id = ? AND is_active = 1
             ORDER BY checkout_at DESC
         """, (project_id,))
+        if not rows:
+            return None
+        for row in rows:
+            if os.path.isdir(row['checkout_path']):
+                return row
+        return rows[0]
 
     def get_all_for_project(self, project_id: int) -> List[Dict[str, Any]]:
         """

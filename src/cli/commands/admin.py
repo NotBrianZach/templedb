@@ -21,6 +21,28 @@ def register(cli):
     subparsers.add_parser('status', help='Show database and system status')
     cli.commands['admin.status'] = system_cmd.status
 
+    # --- admin checkout-gc ---
+    # CheckoutCommands.cleanup_checkouts() and
+    # CheckoutRepository.find_stale_checkouts() already existed but were
+    # unreachable: cli/commands/checkout.py defines no register(), only a
+    # standalone main(), so `templedb checkout` was never a command. The
+    # result was that nothing ever pruned the table — 103 rows, all
+    # is_active=1, 45 of them pointing at directories that no longer
+    # exist. Wired in here rather than as a new top-level noun because
+    # this is maintenance, and the CLI already carries 44 of those.
+    from cli.commands.checkout import CheckoutCommand
+    checkout_cmd = CheckoutCommand()
+    gc_p = subparsers.add_parser(
+        'checkout-gc',
+        help='Deactivate/remove checkout rows whose directory is gone')
+    gc_p.add_argument('project_slug', nargs='?',
+                      help='Limit to one project (default: all)')
+    gc_p.add_argument('--force', '-f', action='store_true',
+                      help='Skip the confirmation prompt')
+    gc_p.add_argument('--dry-run', action='store_true',
+                      help='List what would be removed and exit')
+    cli.commands['admin.checkout-gc'] = checkout_cmd.cleanup_checkouts
+
     # --- admin db ---
     db_cmd = DBCommands()
     db_parser = subparsers.add_parser('db', help='Database management (migrations, integrity)')

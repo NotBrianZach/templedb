@@ -125,6 +125,38 @@ class SearchCommands(Command):
         return 0
 
     @handle_errors("search files")
+    def reindex(self, args) -> int:
+        """Rebuild file_contents_fts from the current state of the DB.
+
+        Migration 110 installed triggers that keep the index current, so
+        this should rarely be needed. It exists because the index had
+        already drifted once, silently and badly: before 110 there was no
+        INSERT trigger at all on a content-addressed table whose rows are
+        only ever inserted, so the index stopped growing and
+        `search content "def"` matched 39 files across a 197k-line
+        corpus. If results ever look impossibly thin again, run this —
+        and treat it as evidence the triggers regressed.
+        """
+        from db_utils import execute, query_one
+        before = query_one("SELECT COUNT(*) AS n FROM file_contents_fts")['n']
+        execute("DELETE FROM file_contents_fts")
+        execute(
+            """INSERT INTO file_contents_fts (rowid, file_path, content_text)
+               SELECT pf.id, pf.file_path, cb.content_text
+                 FROM project_files pf
+                 JOIN file_contents fc
+                   ON fc.file_id = pf.id AND fc.is_current = 1
+                 JOIN content_blobs cb
+                   ON cb.hash_sha256 = fc.content_hash
+                WHERE pf.status = 'active'
+                  AND cb.content_text IS NOT NULL""")
+        after = query_one("SELECT COUNT(*) AS n FROM file_contents_fts")['n']
+        print(f"Reindexed file contents: {before} -> {after} rows")
+        if after < before:
+            print("  (fewer rows is normal — the old index retained "
+                  "historical revisions and deleted files)")
+        return 0
+
     def search_files(self, args) -> int:
         """Search file names"""
         pattern = args.pattern
@@ -176,6 +208,11 @@ def register(cli):
     content_parser.add_argument('-i', '--ignore-case', action='store_true', help='Case insensitive (only with --no-fts)')
     content_parser.add_argument('--no-fts', action='store_true', help='Use LIKE instead of FTS5 (slower)')
     cli.commands['search.content'] = cmd.search_content
+
+    # search reindex
+    reindex_parser = subparsers.add_parser(
+        'reindex', help='Rebuild the full-text content index from current files')
+    cli.commands['search.reindex'] = cmd.reindex
 
     # search files
     files_parser = subparsers.add_parser('files', help='Search file names')

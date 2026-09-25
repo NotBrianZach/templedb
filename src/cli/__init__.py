@@ -24,7 +24,54 @@ from pathlib import Path
 # obvious you asked for something the environment can't deliver.
 # Design in reports/2026-08-16-nix-profile-staleness-design.html
 # ────────────────────────────────────────────────────────────────────
-_DEV_CHECKOUT = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" / "src"
+def _resolve_dev_checkout():
+    """Locate the tree dev mode should run from.
+
+    The hardcoded ~/.config/templedb/checkouts/templedb/src is the
+    read-only materialized copy, NOT the tree you edit: when a project
+    is in edit mode the live working directory is
+    ~/.config/templedb/edit-workspaces/<slug>/<stamp>/. Pointing dev
+    mode at the former means `TEMPLEDB_DEV_MODE=1` runs different code
+    than the one you just changed — the same checkout-vs-workspace
+    confusion that produced several silent no-ops on 2026-09-24.
+
+    Resolved with stdlib sqlite3 only: this executes before the
+    templedb packages are importable, so it cannot use the repositories
+    layer. Mirrors CheckoutRepository.get_active_for_project by
+    preferring the newest checkout whose directory actually exists.
+    TEMPLEDB_DEV_SRC overrides entirely, for anyone who wants the old
+    behaviour or a scratch tree.
+    """
+    override = os.environ.get("TEMPLEDB_DEV_SRC")
+    if override:
+        return Path(override)
+
+    default = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" / "src"
+    db_path = os.environ.get("TEMPLEDB_PATH") or str(
+        Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite")
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                """SELECT c.checkout_path FROM checkouts c
+                     JOIN projects p ON p.id = c.project_id
+                    WHERE p.slug = 'templedb' AND c.is_active = 1
+                    ORDER BY c.checkout_at DESC""").fetchall()
+        finally:
+            con.close()
+        for (path,) in rows:
+            candidate = Path(path) / "src"
+            if (candidate / "cli").is_dir():
+                return candidate
+    except Exception:
+        # Never let dev-mode resolution break startup; the default below
+        # is what shipped before this function existed.
+        pass
+    return default
+
+
+_DEV_CHECKOUT = _resolve_dev_checkout()
 
 if os.environ.get("TEMPLEDB_DEV_MODE"):
     if _DEV_CHECKOUT.exists() and (_DEV_CHECKOUT / "cli").exists():

@@ -457,34 +457,16 @@ class NixOSCommand(Command):
             return 1
 
     def system_test(self, args) -> int:
-        """Test system configuration.
-
-        Default: nixos-rebuild test (LIVE activation — restarts systemd units).
-        --eval-only: nix eval on toplevel drvPath (no build, no activation).
-        --build-only: nixos-rebuild build (all store paths built, no activation).
-        --dry-run: nixos-rebuild dry-activate (eval + show plan, no changes).
-        """
+        """Test system configuration (nixos-rebuild test)"""
         try:
             from services.system_service import SystemService
             service = SystemService()
-            eval_only = getattr(args, 'eval_only', False)
-            build_only = getattr(args, 'build_only', False)
-            if eval_only:
-                print(f"🔎 Evaluating {args.slug} (nix eval on drvPath — no build, no activation)")
-                result = service.eval_system(args.slug)
-            elif build_only:
-                print(f"🔨 Building {args.slug} (nixos-rebuild build — no activation)")
-                result = service.build_system(args.slug, dry_run=args.dry_run)
-            else:
-                print(f"⚠️  Testing {args.slug} — this runs `nixos-rebuild test` which")
-                print(f"    ACTIVATES the new config on the LIVE system (systemd units")
-                print(f"    restart, config files rewrite). Not persistent across reboot.")
-                print(f"    Use --eval-only or --build-only for a truly non-mutating check.")
-                result = service.test_system(args.slug, dry_run=args.dry_run)
+            print(f"🧪 Testing system configuration: {args.slug}")
+            result = service.test_system(args.slug, dry_run=args.dry_run)
             if result['success']:
-                print("\n✅ Success!")
+                print("\n✅ Test successful!")
             else:
-                print(f"\n❌ Failed (exit code {result['exit_code']})")
+                print(f"\n❌ Test failed (exit code {result['exit_code']})")
             if result.get('stdout'):
                 print("\n📋 Output:")
                 print(result['stdout'])
@@ -530,13 +512,39 @@ class NixOSCommand(Command):
             # Materialize DB → checkout before building so that `file set`
             # edits that missed the checkout mirror don't silently rebuild
             # against stale files. Mirrors switch_system() (system_service.py).
-            checkout_path = service.materialize_from_db(slug)
-            if not checkout_path:
-                checkout_path = service.get_project_checkout_path(slug)
-            if not checkout_path:
+            #
+            # materialize_from_db() returns None for two very different
+            # reasons: the project has no checkout at all, or it REFUSED
+            # because the checkout diverges from the DB. Falling back to
+            # get_project_checkout_path() in the second case throws away
+            # the safety check and builds the stale tree anyway — which is
+            # exactly what happened on 2026-09-24: a committed flake.nix
+            # pin bump was skipped, home-manager rebuilt the generation
+            # that was already live, and the run reported success.
+            existing_checkout = service.get_project_checkout_path(slug)
+            if not existing_checkout:
                 print(
                     f"❌ No checkout for '{slug}'. Import files first: "
                     f"templedb project import /path/to/config",
+                    file=sys.stderr,
+                )
+                return 1
+
+            checkout_path = service.materialize_from_db(slug)
+            if not checkout_path:
+                # Checkout exists but materialize declined. Building now
+                # would use stale config and look successful.
+                print(
+                    f"\n❌ Refusing to rebuild '{slug}' from a checkout that "
+                    f"diverges from the database.\n"
+                    f"   Building now would silently use stale config and "
+                    f"still report success.\n\n"
+                    f"   Resolve with one of:\n"
+                    f"     templedb publish run {slug} -m \"...\"   "
+                    f"(DB is authoritative — overwrites the checkout)\n"
+                    f"     templedb vcs add -p {slug} <files> && "
+                    f"templedb vcs commit -p {slug} -m \"...\"   "
+                    f"(keep the checkout's version)",
                     file=sys.stderr,
                 )
                 return 1
@@ -2192,15 +2200,7 @@ def register(cli):
 
     def _args_system_test(p):
         p.add_argument('slug', help='Project slug')
-        p.add_argument('--dry-run', action='store_true',
-                       help='nixos-rebuild dry-activate: eval + show plan, no changes.')
-        p.add_argument('--eval-only', action='store_true',
-                       help='nix eval on toplevel drvPath — no build, no activation. '
-                            'Fastest failure detection for eval errors (missing options, '
-                            'renamed packages, insecure packages, type mismatches).')
-        p.add_argument('--build-only', action='store_true',
-                       help='nixos-rebuild build — build all store paths without activating. '
-                            'Slower than --eval-only but catches build failures too.')
+        p.add_argument('--dry-run', action='store_true')
 
     def _args_update_input(p):
         p.add_argument('slug', help='Project slug')

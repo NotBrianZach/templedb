@@ -7,6 +7,7 @@ database-native version control.
 """
 import os
 import socket
+import sqlite3
 import subprocess
 from typing import List, Dict, Any, Optional
 
@@ -263,6 +264,9 @@ class VCSService(BaseService):
     ) -> Dict[str, Any]:
         """Mark a session ended. Does not unstage the session's rows.
 
+        Also finalizes the session's in-flight deploy_stage_runs, which
+        nothing else ever closes -- see below.
+
         If the session has reap_policy='discard' AND a non-empty name,
         also removes any Phase-D per-session workspace directories
         (edit-workspaces/<slug>/<sanitized-name>/) belonging to it.
@@ -284,12 +288,64 @@ class VCSService(BaseService):
             """,
             (reason, session_id),
         )
+        # A session's in-flight stage runs die with it, and nothing else
+        # ever closes them. deploy_stage_runs rows are finalized by the
+        # stage context manager on exit, so a wrapper process that died
+        # mid-stage -- or a session reaped by `vcs session gc` -- leaves
+        # the row ended_at IS NULL forever, and
+        # deploy_stages_have_no_stale_runs counts it for the rest of
+        # time. 13 such rows had accumulated by 2026-09-25, every one of
+        # them belonging to a session that had already ended, the oldest
+        # stuck open since 09-21.
+        #
+        # Guarded on the table's existence rather than assumed: the
+        # canonical migrations/schema.sql is stale and does not define
+        # deploy_stage_runs at all, so any DB built from it -- every
+        # fixture in tests/vcs/ among them -- would otherwise take an
+        # OperationalError here on a perfectly ordinary session end.
+        # Only the missing-table case is tolerated; anything else is a
+        # real fault and propagates.
+        try:
+            # Counted with a SELECT rather than taken from execute()'s
+            # return: db_utils.execute returns cursor.lastrowid, which is
+            # meaningless for an UPDATE. (repositories/base.py documents
+            # it as "number of affected rows"; that docstring is wrong.)
+            counted = self.vcs_repo.query_one(
+                """
+                SELECT COUNT(*) AS n FROM deploy_stage_runs
+                WHERE session_id = ? AND ended_at IS NULL
+                """,
+                (session_id,),
+            )
+            orphaned_stages = int(counted['n']) if counted else 0
+            if orphaned_stages:
+                self.vcs_repo.execute(
+                    """
+                    UPDATE deploy_stage_runs
+                    SET ended_at = datetime('now'), outcome = 'orphaned'
+                    WHERE session_id = ? AND ended_at IS NULL
+                    """,
+                    (session_id,),
+                )
+        except sqlite3.OperationalError as exc:
+            if 'no such table' not in str(exc):
+                raise
+            self.logger.debug(
+                "deploy_stage_runs absent; skipping orphan close for "
+                "session %s", session_id)
+            orphaned_stages = 0
+        if orphaned_stages:
+            self.logger.info(
+                "session %s ended with %d in-flight stage run(s); "
+                "marked outcome='orphaned'", session_id, orphaned_stages)
         if before and before['name'] and before['reap_policy'] == 'discard':
             self._reap_session_workspaces(before['name'])
         row = self.vcs_repo.query_one(
             "SELECT * FROM vcs_sessions WHERE id = ?", (session_id,)
         )
-        return dict(row) if row else {}
+        result = dict(row) if row else {}
+        result['orphaned_stage_runs'] = orphaned_stages
+        return result
 
     @staticmethod
     def _reap_session_workspaces(session_name: str) -> None:
@@ -322,6 +378,22 @@ class VCSService(BaseService):
                     _log.info(f"Reaped session workspace: {candidate}")
                 except OSError as e:
                     _log.warning(f"Could not reap {candidate}: {e}")
+                    continue
+                # Deactivate the checkouts row alongside the directory.
+                # Deleting the tree without this left an is_active=1 row
+                # pointing at a path that no longer exists — the dominant
+                # source of the 45 dead "active" checkouts counted on
+                # 2026-09-24, and a way for get_active_for_project() to
+                # hand callers a directory that isn't there.
+                try:
+                    from db_utils import execute as _execute
+                    _execute(
+                        "UPDATE checkouts SET is_active = 0 WHERE checkout_path = ?",
+                        (str(candidate),))
+                except Exception as e:  # never block reaping on bookkeeping
+                    _log.warning(
+                        f"Reaped {candidate} but could not deactivate its "
+                        f"checkouts row: {e}")
 
     def list_sessions(self, active_only: bool = False) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM vcs_sessions"

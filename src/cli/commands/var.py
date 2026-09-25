@@ -70,13 +70,95 @@ def _should_mask(key_name: str, value: str) -> bool:
     return False
 
 
+_URL_SCHEME_RE = re.compile(
+    r'^([A-Za-z][A-Za-z0-9+.\-]*://)([^/?#]*)(.*)$', re.DOTALL)
+
+
+def _redact_url_password(value: str):
+    """Blank the password in scheme://user:password@host, or None.
+
+    A connection string defeats every check in _should_mask: the key is
+    called DATABASE_URL so no sensitive word appears in the name, and
+    the value carries ':', '@' and '%' so it fails the API-key charset
+    test. `var list` printed the staging Postgres password in the clear
+    while dutifully masking the JWTs right above it.
+
+    Only the password is replaced, not the whole value. The host, port
+    and database name are not secret and are the reason anyone runs
+    `var list` on a connection string in the first place -- blanket
+    masking it to 'post...gres' would protect the same secret while
+    destroying the output's usefulness.
+    """
+    match = _URL_SCHEME_RE.match(value or '')
+    if not match:
+        return None
+    scheme, authority, rest = match.groups()
+    if '@' not in authority:
+        return None
+    # rpartition: per RFC 3986 userinfo runs to the LAST '@' in the
+    # authority, so an unencoded '@' inside the password still splits
+    # correctly. (This one is encoded as %40, but not every one is.)
+    userinfo, _, host = authority.rpartition('@')
+    if ':' not in userinfo:
+        return None  # a bare username carries nothing worth hiding
+    user, _, password = userinfo.partition(':')
+    if not password:
+        return None
+    return f"{scheme}{user}:****@{host}{rest}"
+
+
+_ENV_NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+# systemd reads EnvironmentFile= as PID 1, before dropping privileges,
+# so the file itself can be 0600 root-owned and the service user never
+# needs to read it. That is the whole appeal over a wrapper script
+# calling `templedb var get`: the service needs no access to the
+# TempleDB database at all.
+def _systemd_env_line(key: str, value):
+    """Render one EnvironmentFile line. Returns (line, None) or (None, reason).
+
+    The escape set is deliberately narrow, and was settled by feeding
+    candidate files to real systemd rather than from the manual. Inside
+    a double-quoted value systemd unescapes \\\\ and \\" and nothing
+    else: \\t and \\n come back as a literal backslash followed by the
+    letter, so escaping a tab that way would hand the service two
+    characters where the database holds one. A raw tab, meanwhile,
+    survives quoting untouched, as does leading and trailing
+    whitespace.
+
+    So: escape backslash and double-quote, pass everything else
+    through, and refuse the one case that cannot be represented
+    faithfully -- a value containing a newline. Emitting it unquoted
+    would end the assignment early and let the remainder parse as
+    further KEY=VALUE lines; emitting it as \\n would silently give the
+    service a different string than the one stored. Neither is worth
+    doing quietly, and no value in this database contains one.
+
+    Keys are checked too: TempleDB permits dots (`git_server.url`),
+    systemd does not. Passing one through would have systemd log a
+    warning into the journal and skip the line -- exactly the kind of
+    failure nobody reads.
+    """
+    if not _ENV_NAME_RE.match(key or ''):
+        return None, 'not a valid environment variable name'
+    text = '' if value is None else str(value)
+    if '\n' in text or '\r' in text:
+        return None, ('value contains a newline, which a systemd '
+                      'EnvironmentFile cannot represent faithfully')
+    text = text.replace('\\', '\\\\').replace('"', '\\"')
+    return f'{key}="{text}"', None
+
+
 def _mask_value(key_name: str, value: str) -> str:
-    if not _should_mask(key_name, value):
-        return value or ''
     v = value or ''
-    if len(v) <= 8:
-        return '****'
-    return f"{v[:4]}...{v[-4:]}"
+    if _should_mask(key_name, v):
+        if len(v) <= 8:
+            return '****'
+        return f"{v[:4]}...{v[-4:]}"
+    # Strictly additive: anything _should_mask already caught is masked
+    # above, so this can only ever hide more, never less.
+    redacted = _redact_url_password(v)
+    return redacted if redacted is not None else v
 
 
 # ---------------------------------------------------------------------------
@@ -914,7 +996,25 @@ class VarCommands(Command):
                 print(f"export {key}='{escaped}'")
         elif fmt == 'dotenv':
             for key, value in sorted(merged.items()):
-                print(f"{key}={value}")
+                # `or ''` matches the shell branch: a NULL var_value
+                # used to render as the literal string "None", which
+                # every consumer then read as a four-character value.
+                print(f"{key}={value or ''}")
+        elif fmt == 'systemd':
+            skipped = []
+            for key, value in sorted(merged.items()):
+                line, reason = _systemd_env_line(key, value)
+                if line is None:
+                    skipped.append((key, reason))
+                    continue
+                print(line)
+            for key, reason in skipped:
+                # stderr, so redirecting stdout into the env file still
+                # surfaces this. Silently dropping it is how the
+                # woofs-sync wrapper's `2>/dev/null` hid a broken
+                # credential lookup for months.
+                print(f"warning: skipped {key!r} — {reason}",
+                      file=sys.stderr)
         elif fmt == 'json':
             print(json.dumps(merged, indent=2, sort_keys=True))
         else:
@@ -1170,7 +1270,7 @@ def register_subcommands(parent_subparsers, cli, prefix='env'):
     p = subparsers.add_parser('export', help='Export merged vars for a project (env + secrets)')
     p.add_argument('project', help='Project slug')
     p.add_argument('--target', '-t', default=None, help='Deployment target')
-    p.add_argument('--format', default='shell', choices=['shell', 'dotenv', 'json'])
+    p.add_argument('--format', default='shell', choices=['shell', 'dotenv', 'json', 'systemd'])
     p.add_argument('--secrets', action='store_true', help='Include encrypted secrets (requires age key)')
     p.add_argument('--profile', default='default', help='Secret profile')
     cli.commands[f'{prefix}.var.export'] = cmd.var_export
@@ -1262,7 +1362,7 @@ def register(cli):
     p = subparsers.add_parser('export', help='Export merged vars for a project (env + secrets)')
     p.add_argument('project', help='Project slug')
     p.add_argument('--target', '-t', default=None, help='Deployment target')
-    p.add_argument('--format', default='shell', choices=['shell', 'dotenv', 'json'])
+    p.add_argument('--format', default='shell', choices=['shell', 'dotenv', 'json', 'systemd'])
     p.add_argument('--secrets', action='store_true', help='Include encrypted secrets (requires age key)')
     p.add_argument('--profile', default='default', help='Secret profile')
     cli.commands['var.export'] = cmd.var_export

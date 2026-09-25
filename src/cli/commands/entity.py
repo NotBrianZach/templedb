@@ -156,6 +156,7 @@ class EntityCommands(Command):
                     WHERE id = ?""",
                 (str(e), run_id),
             )
+            self._alert_on_repeated_failure(adapter_name, str(e))
             raise
         # Success — record counts if adapter set them.
         counts = self._last_counts or {}
@@ -174,6 +175,69 @@ class EntityCommands(Command):
              run_id),
         )
         return rc
+
+    # Consecutive failures at which a handoff note is raised. Three
+    # catches a real outage within a few hours on the hourly timer
+    # without firing on a one-off lock contention; 24 and 72 are the
+    # daily/three-day reminders. Alerting on EVERY failure would have
+    # produced 151 identical notes in September and been ignored.
+    _FAILURE_ALERT_THRESHOLDS = (3, 24, 72)
+
+    def _alert_on_repeated_failure(self, adapter_name: str, error: str) -> None:
+        """Raise a handoff note when an adapter fails repeatedly.
+
+        The scheduled ingest previously failed silently: 151 consecutive
+        hourly `ingest git` runs errored between 2026-09-14 and 09-24
+        with 'no such function: crsql_internal_sync_bit', and the only
+        trace was a red timestamp in `templedb summary` that nobody had
+        reason to open. A broadcast handoff note surfaces in the summary
+        inbox and survives across sessions.
+
+        Deliberately best-effort: alerting must never mask the original
+        ingest failure, which the caller is about to re-raise.
+        """
+        try:
+            from db_utils import query_all, execute
+            recent = query_all(
+                """SELECT status FROM ingestion_runs
+                    WHERE adapter = ? AND finished_at IS NOT NULL
+                    ORDER BY id DESC LIMIT ?""",
+                (adapter_name, max(self._FAILURE_ALERT_THRESHOLDS)))
+            streak = 0
+            for row in recent:
+                if row['status'] != 'error':
+                    break
+                streak += 1
+            if streak not in self._FAILURE_ALERT_THRESHOLDS:
+                return
+
+            # from_session is NOT NULL; reuse handoff's own resolver so
+            # the note is attributable even from an unregistered shell
+            # (the systemd timer has no TEMPLEDB_SESSION_ID).
+            from cli.commands.handoff import _current_session_id
+            # to_session AND to_topic must both be NULL: that is the
+            # shape `templedb summary` counts as a broadcast. Filing it
+            # under a topic would have hidden the alert on the one
+            # dashboard it exists to reach.
+            execute(
+                """INSERT INTO handoff_notes
+                       (from_session, from_actor, to_session, to_topic,
+                        subject, body, tags)
+                     VALUES (?, ?, NULL, NULL, ?, ?, ?)""",
+                (_current_session_id(), 'ingest-watchdog',
+                 f"ingest {adapter_name}: {streak} consecutive failures",
+                 f"The '{adapter_name}' ingest adapter has failed {streak} "
+                 f"times in a row. The entity graph is drifting from its "
+                 f"sources and will keep drifting until this is fixed.\n\n"
+                 f"Latest error:\n  {error}\n\n"
+                 f"Inspect:  templedb ingest history --limit 20\n"
+                 f"Retry:    templedb ingest {adapter_name}",
+                 'ingest,failure,automated'))
+            logger.warning(
+                "ingest %s has failed %d consecutive times — raised a "
+                "handoff note", adapter_name, streak)
+        except Exception as e:
+            logger.debug(f"failure alerting skipped: {e}")
 
     def ingest_schedule(self, args) -> int:
         """Manage the systemd user timer for scheduled ingest.
@@ -3347,6 +3411,12 @@ WantedBy=timers.target
              self._check_no_stale_deploy_stage_runs),
             ('working_state_references_valid_files',
              self._check_working_state_files_exist),
+            ('checkout_matches_db',
+             self._check_checkout_matches_db),
+            ('exec_targets_are_executable',
+             self._check_exec_targets_are_executable),
+            ('wal_within_size_budget',
+             self._check_wal_within_size_budget),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -3617,8 +3687,12 @@ WantedBy=timers.target
         Read-only: this reports drift. A future reconcile handler will
         apply each session's declared reap_policy."""
         from db_utils import query_all
+        # `context` was dropped from vcs_sessions when TEMPLEDB_CONTEXT
+        # was retired (#904); selecting it made this check die with
+        # "no such column: context" on every run. It was never used in
+        # the output below, so the column is simply gone from the SELECT.
         rows = query_all(
-            """SELECT id, name, context, started_at,
+            """SELECT id, name, started_at,
                       COALESCE(expected_lifetime_seconds, 86400)
                         AS lifetime_s,
                       COALESCE(reap_policy, 'orphan_stages')
@@ -3698,6 +3772,241 @@ WantedBy=timers.target
             f"references missing project_files.id={r['file_id']}"
             for r in rows
         ]
+
+    # A WAL this large means checkpoints have been blocked. Steady
+    # state is bounded by wal_autocheckpoint (1000 pages ~= 4 MB at a
+    # 4096-byte page), so anything in the hundreds of MB is not normal
+    # growth -- it is a high-water mark from an event, and 25x the
+    # ceiling is comfortably clear of any honest burst.
+    WAL_BUDGET_BYTES = 100 * 1024 * 1024
+
+    def _check_wal_within_size_budget(self):
+        """Invariant: the -wal sidecar has not ballooned.
+
+        A PASSIVE checkpoint -- the automatic kind -- cannot advance
+        past the oldest open read snapshot, and never shrinks the file
+        regardless. So a long-lived reader holding a snapshot across a
+        large write burst lets the WAL grow without bound, and once
+        grown it stays grown: nothing in normal operation truncates it.
+
+        On 2026-09-25 it reached 9.1 GB and every read against the DB
+        was ~100x slower than it should have been (`templedb summary`
+        took over 200s against 2.4s on a drained copy). It had been
+        that way long enough for a session recap to be written about
+        it, because nothing anywhere reported the file size.
+
+        Pure read -- deliberately does NOT checkpoint. Running one here
+        would make the check self-defeating on the happy path and
+        hide the very condition it exists to report.
+        """
+        import os
+        from config import DB_PATH
+
+        wal = f"{DB_PATH}-wal"
+        try:
+            size = os.path.getsize(wal)
+        except OSError:
+            # No -wal at all is the healthiest possible answer: either
+            # the DB is not in WAL mode or it is fully checkpointed.
+            return []
+        if size <= self.WAL_BUDGET_BYTES:
+            return []
+        return [
+            f"{wal} is {size / 1e9:.2f} GB "
+            f"(budget {self.WAL_BUDGET_BYTES / 1e6:.0f} MB) — a reader is "
+            f"pinning checkpoints, or one did and the file never shrank. "
+            f"Probe with PRAGMA wal_checkpoint(PASSIVE): a low live-frame "
+            f"count means it is merely un-truncated, and "
+            f"PRAGMA wal_checkpoint(TRUNCATE) reclaims it"
+        ]
+
+    def _check_exec_targets_are_executable(self):
+        """Invariant: systemd ExecStart targets TempleDB writes can run.
+
+        TempleDB stores no POSIX mode anywhere — `project_files` has no
+        mode column and neither does `file_contents` — so every script
+        it materializes lands 0644 regardless of how it arrived. A unit
+        pointed at one dies with 203/EXEC at exec time, which reaches no
+        health surface at all: the unit never runs, so it logs nothing,
+        and `systemctl --failed` shows it only if Restart= is unset.
+
+        Two outages traced to exactly this: `templedb-mcp.service` (the
+        2026-09-24 recap blamed the documented path, which was also
+        wrong, but the file it eventually pointed at was 0644 too) and
+        `poincare-sync.service`, found on 2026-09-25 after 41 minutes of
+        203/EXEC.
+
+        Scoped to TempleDB-managed roots on purpose. Nix-store targets
+        get their mode from the build and are not ours to police.
+        """
+        import os
+        from pathlib import Path
+        from services.systemd_health import SCOPES, exec_targets
+
+        home = Path.home()
+        roots = [
+            home / '.local' / 'share' / 'templedb' / 'fhs-deployments',
+            home / '.config' / 'templedb' / 'checkouts',
+            home / '.config' / 'templedb' / 'edit-workspaces',
+        ]
+
+        issues = []
+        for scope in SCOPES:
+            targets = exec_targets(scope)
+            if targets is None:
+                continue
+            for unit, raw in targets:
+                path = Path(raw)
+                if not any(path.is_relative_to(root) for root in roots):
+                    continue
+                if not path.exists():
+                    issues.append(
+                        f"{unit} ({scope}): ExecStart target missing: {raw}")
+                elif not os.access(raw, os.X_OK):
+                    mode = oct(path.stat().st_mode & 0o777)
+                    issues.append(
+                        f"{unit} ({scope}): ExecStart target not executable "
+                        f"(mode {mode}) — will fail 203/EXEC: {raw}")
+        return issues
+
+    def _check_checkout_matches_db(self):
+        """Invariant: each project's active checkout agrees with the DB.
+
+        TempleDB has two representations of a project's files: rows in
+        the database, and a real directory on disk that nix and the
+        build tooling actually read. Different commands trust different
+        ones — `file set` / `reports reindex` write the DB, while
+        `vcs commit` and `nixos home-rebuild` read the checkout. Every
+        silent-data-loss bug found on 2026-09-24 was a disagreement
+        between the two:
+
+          - a `file set` on a new path mirrored to the wrong directory,
+            so `vcs commit` saw no file on disk and DELETED the row
+            (commit 7A3BF285 reported "Files: 2" and wrote one);
+          - `reports reindex` regenerated index.html in the DB and the
+            next commit reverted it from the workspace;
+          - `home-rebuild` built a stale checkout and reported success.
+
+        Each was diagnosed only after the damage. This check makes the
+        disagreement visible beforehand.
+
+        Two failure modes, reported separately because they differ in
+        severity:
+
+          MISSING — the DB has the file, the checkout does not. If the
+            file is also staged, the next `vcs commit` will hard-delete
+            it. That is the data-loss case.
+          DIFFERS — both sides have it with different content. Whoever
+            reads the checkout (nix, commit) silently uses the stale
+            version.
+
+        Resolves the checkout the same way the tools do
+        (CheckoutRepository.get_active_for_project), so it inspects the
+        directory that would actually be built from — not the hardcoded
+        ~/.config/templedb/checkouts/<slug>, which is frequently not the
+        live tree when a project is in edit mode.
+        """
+        from db_utils import query_all, query_one
+        from pathlib import Path
+
+        LIMIT = 50
+        issues = []
+        projects = query_all(
+            "SELECT id, slug FROM projects WHERE slug IS NOT NULL ORDER BY slug")
+
+        for proj in projects:
+            checkout = query_one(
+                """SELECT checkout_path FROM checkouts
+                    WHERE project_id = ? AND is_active = 1
+                    ORDER BY checkout_at DESC""", (proj['id'],))
+            if not checkout:
+                continue
+            root = Path(checkout['checkout_path'])
+            # Stale /tmp checkouts from old runs linger with is_active=1.
+            # A vanished directory isn't drift, it's an untidy table.
+            if not root.is_dir():
+                continue
+
+            rows = query_all(
+                """SELECT pf.file_path, pf.id AS file_id,
+                          cb.content_text, cb.content_blob,
+                          ws.state AS ws_state,
+                          ws.staged_by_session_id AS staged_by
+                     FROM project_files pf
+                     JOIN file_contents fc
+                       ON fc.file_id = pf.id AND fc.is_current = 1
+                     JOIN content_blobs cb
+                       ON cb.hash_sha256 = fc.content_hash
+                LEFT JOIN vcs_working_state ws
+                       ON ws.file_id = pf.id
+                    WHERE pf.project_id = ? AND pf.status = 'active'""",
+                (proj['id'],))
+
+            for r in rows:
+                if len(issues) >= LIMIT:
+                    return issues + [
+                        f"... output capped at {LIMIT}; run "
+                        f"`templedb doctor entities --check checkout_matches_db` "
+                        f"after resolving these"]
+                # An in-flight edit is tracked in vcs_working_state. That
+                # divergence is intentional and already visible in
+                # `vcs status`, so it is work-in-progress, not drift.
+                # Without this, every uncommitted edit in an edit
+                # workspace shows up as a violation and the check becomes
+                # noise nobody reads.
+                tracked = r['ws_state'] in ('added', 'modified')
+                fpath = root / r['file_path']
+
+                if not fpath.exists():
+                    # state='deleted' is the live signature of impending
+                    # data loss, not a user intent to delete: `vcs add`
+                    # and `vcs status --refresh` scan the checkout, find
+                    # no file, and mark the row deleted — after which
+                    # `vcs commit` hard-deletes project_files. A file
+                    # written to the DB but never mirrored to disk lands
+                    # in exactly this state. Distinguishing it from a
+                    # deliberate `file rm` is not possible here, so say
+                    # what will happen and let the reader judge.
+                    if r['staged_by'] is not None and r['ws_state'] == 'deleted':
+                        issues.append(
+                            f"{proj['slug']}: {r['file_path']} is STAGED "
+                            f"state='deleted' because it is missing from "
+                            f"{root} — the next `vcs commit` will DELETE it "
+                            f"from the DB. If that is not intended, write the "
+                            f"file into the checkout and re-run `vcs add`")
+                    elif r['staged_by'] is not None:
+                        issues.append(
+                            f"{proj['slug']}: {r['file_path']} is STAGED "
+                            f"(state={r['ws_state']}) but missing from the "
+                            f"checkout — `vcs commit` resolves staged paths "
+                            f"against {root} and will drop it")
+                    elif not tracked:
+                        issues.append(
+                            f"{proj['slug']}: {r['file_path']} in DB but not "
+                            f"in checkout — run `templedb publish run "
+                            f"{proj['slug']}`")
+                    continue
+
+                if tracked:
+                    continue  # known in-progress edit
+
+                try:
+                    if r['content_text'] is not None:
+                        differs = fpath.read_text(encoding='utf-8') != r['content_text']
+                    elif r['content_blob'] is not None:
+                        differs = fpath.read_bytes() != bytes(r['content_blob'])
+                    else:
+                        differs = False
+                except OSError:
+                    differs = True
+                if differs:
+                    issues.append(
+                        f"{proj['slug']}: {r['file_path']} DIFFERS between DB "
+                        f"and checkout with no working_state row — builds and "
+                        f"commits reading {root} will silently use the "
+                        f"checkout's version")
+
+        return issues
 
     def _check_entities_have_sync_scope(self):
         """Invariant: every entity has a non-NULL sync_scope. New
