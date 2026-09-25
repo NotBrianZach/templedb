@@ -112,6 +112,78 @@ class SystemService:
         except Exception:
             return False
 
+    @staticmethod
+    def _apply_git_file_modes(checkout_dir: Path, files) -> int:
+        """Set the executable bit from git's index. Returns files changed.
+
+        The decision recorded on 2026-09-25: git is the authority for
+        POSIX mode, not the database. TempleDB has no mode column in
+        `project_files` or `file_contents` and is not getting one --
+        that would commit to the DB-authoritative endpoint, while git
+        already stores the bit for free.
+
+        So materialize defers to `git ls-files -s`: 100755 means set the
+        bit, 100644 means clear it. A file git has never seen has no
+        recorded opinion, and falls back to the shebang -- otherwise a
+        newly added script would be born 0644 and have to be fixed by
+        hand before git could record anything better.
+
+        Best-effort: a checkout that is not a git repo yet (first
+        materialize into a fresh directory) just gets the shebang rule.
+        """
+        git_modes = {}
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "-s", "-z"],
+                cwd=str(checkout_dir), capture_output=True,
+                text=True, check=False,
+            )
+            if result.returncode == 0:
+                for entry in result.stdout.split('\0'):
+                    if not entry:
+                        continue
+                    meta, _, path = entry.partition('\t')
+                    parts = meta.split()
+                    if path and parts:
+                        git_modes[path] = parts[0]
+        except Exception as e:
+            logger.debug(f"Could not read git file modes: {e}")
+
+        changed = 0
+        for f in files:
+            rel = f["file_path"]
+            fpath = checkout_dir / rel
+            recorded = git_modes.get(rel)
+            if recorded is not None:
+                want_exec = recorded == '100755'
+            else:
+                # Unknown to git: infer from the shebang, the same signal
+                # a human would use before running `git add`.
+                want_exec = False
+                try:
+                    with open(fpath, 'rb') as fh:
+                        want_exec = fh.read(2) == b'#!'
+                except OSError:
+                    continue
+            try:
+                current = fpath.stat().st_mode
+                # Mirror the read bits: a file readable by group/other
+                # should be executable by them too, which is what
+                # `chmod +x` does and what git's 100755 means.
+                exec_bits = (current & 0o444) >> 2
+                desired = ((current | exec_bits) if want_exec
+                           else (current & ~0o111))
+                if desired != current:
+                    os.chmod(fpath, desired)
+                    changed += 1
+            except OSError as e:
+                logger.debug(f"Could not set mode on {rel}: {e}")
+
+        if changed:
+            logger.info(
+                f"Applied git's executable bit to {changed} file(s)")
+        return changed
+
     def materialize_from_db(self, project_slug: str, force: bool = False) -> Optional[Path]:
         """Write project files from DB to checkout dir for nix evaluation.
 
@@ -191,6 +263,13 @@ class SystemService:
                 else:
                     fpath.write_bytes(b"")
                 written += 1
+
+            # Git owns the executable bit. TempleDB stores no POSIX mode
+            # anywhere -- see the exec_targets_are_executable invariant --
+            # so without this every script it materializes is 0644, and
+            # the published mirror records 100644 for install.sh and all
+            # 771 tracked files. Two 203/EXEC outages came from that.
+            self._apply_git_file_modes(checkout_dir, files)
 
             # Delete files that exist on disk but are no longer in the DB
             # active set — closes the drift class where materialize copied
