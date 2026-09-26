@@ -23,6 +23,92 @@ logger = get_logger(__name__)
 _TRACKING_KEYS = ("nixos.last_generated_at", "nixos.last_generated_snapshot")
 
 
+# ── Which keys `nixos generate` can actually render ───────────────────────────
+#
+# `nixos generate` emits system_config-nixos.nix and
+# system_config-home.nix from the nixos.* namespace (plus the same keys
+# scoped under a host name). Everything else lives in system_config but
+# is consumed elsewhere -- publish reads mirror.*, and woofs.* is
+# mirrored into modules/woofs/config.nix BY HAND because that file's
+# template placeholders were destroyed by being substituted in place.
+#
+# Counting those unrenderable keys as "changed since last generate" told
+# the user a generate would apply them. It never did: verified
+# 2026-09-25 that changing woofs.data_owner altered only the generated
+# file's timestamp, and grep for "woofs" across both generated files
+# returns 0. The prompt was offering a fix that could not work, which is
+# worse than saying nothing.
+
+# A DENY-list, not an allow-list. Default is "renderable", which
+# preserves the previous behaviour for every key; only namespaces
+# confirmed unrenderable are excluded. An allow-list would need me to
+# know exactly what the generator emits for every prefix, and I do not
+# -- host-scoped keys are a mix (zMothership2.videoDriver looks
+# rendered, zMothership2.woofs.enable is not), so guessing there would
+# just swap one wrong report for another.
+#
+# woofs.* verified unrenderable 2026-09-25: grep across both generated
+# files returns 0, and regenerating after changing woofs.data_owner
+# altered only the output's timestamp. Extend this tuple as others are
+# actually confirmed, not assumed.
+_UNRENDERED_NAMESPACES = ("woofs.",)
+
+
+def _known_hosts(conn) -> frozenset:
+    """Host names, so `<host>.nixos.attr...` counts as renderable too."""
+    try:
+        rows = conn.execute(
+            "SELECT key FROM system_config WHERE key LIKE 'nixos.host.%'"
+        ).fetchall()
+        return frozenset(
+            r[0].split(".", 2)[2] for r in rows if r[0].count(".") >= 2)
+    except Exception:
+        return frozenset()
+
+
+def _is_generated_key(key: str, hosts: frozenset) -> bool:
+    """False only for namespaces confirmed not to be rendered.
+
+    Host-scoped keys are matched on the part after the host, so
+    `zMothership2.woofs.enable` is treated the same as `woofs.enable`.
+    """
+    head, _, rest = key.partition(".")
+    bare = rest if (rest and head in hosts) else key
+    return not bare.startswith(_UNRENDERED_NAMESPACES)
+
+
+def _split_dirty(conn, changed):
+    """Partition changed keys into (renderable, needs-hand-mirroring)."""
+    hosts = _known_hosts(conn)
+    generated, manual = [], []
+    for key in changed:
+        (generated if _is_generated_key(key, hosts) else manual).append(key)
+    return generated, manual
+
+
+def _changed_keys(conn):
+    """Keys modified since the last generate, excluding bookkeeping."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM system_config WHERE key = 'nixos.last_generated_at'"
+        ).fetchone()
+        placeholders = ",".join("?" * len(_TRACKING_KEYS))
+        if not row:
+            rows = conn.execute(
+                f"SELECT key FROM system_config WHERE key NOT IN ({placeholders})",
+                _TRACKING_KEYS,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT key FROM system_config "
+                f"WHERE key NOT IN ({placeholders}) AND updated_at > ?",
+                (*_TRACKING_KEYS, row[0]),
+            ).fetchall()
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+
+
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _get_conn():
@@ -31,23 +117,9 @@ def _get_conn():
 
 
 def _dirty_count(conn) -> int:
-    try:
-        row = conn.execute(
-            "SELECT value FROM system_config WHERE key = 'nixos.last_generated_at'"
-        ).fetchone()
-        placeholders = ",".join("?" * len(_TRACKING_KEYS))
-        if not row:
-            return conn.execute(
-                f"SELECT COUNT(*) FROM system_config WHERE key NOT IN ({placeholders})",
-                _TRACKING_KEYS,
-            ).fetchone()[0]
-        return conn.execute(
-            f"SELECT COUNT(*) FROM system_config "
-            f"WHERE key NOT IN ({placeholders}) AND updated_at > ?",
-            (*_TRACKING_KEYS, row[0]),
-        ).fetchone()[0]
-    except Exception:
-        return 0
+    """Number of changed keys a generate would actually render."""
+    generated, _manual = _split_dirty(conn, _changed_keys(conn))
+    return len(generated)
 
 
 def _mark_clean():
@@ -83,7 +155,22 @@ def _mark_clean():
 def _check_dirty_and_prompt() -> bool:
     """Return True if the caller should proceed, False if aborted."""
     conn = _get_conn()
-    count = _dirty_count(conn)
+    generated, manual = _split_dirty(conn, _changed_keys(conn))
+    count = len(generated)
+
+    if manual:
+        # Named separately and NOT offered to generate, because generate
+        # cannot touch them. Silence here is what let woofs.* look live.
+        noun = "key" if len(manual) == 1 else "keys"
+        print(f"note: {len(manual)} config {noun} changed that "
+              f"`nixos generate` does not render:", file=sys.stderr)
+        for key in sorted(manual)[:6]:
+            print(f"        {key}", file=sys.stderr)
+        if len(manual) > 6:
+            print(f"        ... and {len(manual) - 6} more", file=sys.stderr)
+        print("      These must be mirrored into their module by hand "
+              "(woofs.* -> modules/woofs/config.nix).", file=sys.stderr)
+
     if count == 0:
         return True
     try:
