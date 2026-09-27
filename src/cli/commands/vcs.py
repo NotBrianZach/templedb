@@ -1073,6 +1073,15 @@ class VCSCommands(Command):
         if hasattr(args, 'staged') and args.staged:
             return self._diff_staged(project, args)
 
+        # No file named: diff the whole working set, like `git diff`.
+        # `file` is nargs='?', so omitting it used to pass None straight
+        # into fuzzy_match_file and die with "'NoneType' object has no
+        # attribute 'lower'" — the bare `vcs diff <slug>` that everyone
+        # reaches for first, and the one shape with no workaround short
+        # of naming every changed path by hand.
+        if not getattr(args, 'file', None):
+            return self._diff_working(project, args)
+
         # Fuzzy match file
         file_record = fuzzy_match_file(project['id'], args.file, show_matched=True)
         if not file_record:
@@ -1221,9 +1230,18 @@ class VCSCommands(Command):
         old_label: str, new_label: str,
         unified: bool = True, color: bool = True
     ) -> None:
-        """Display diff with optional color"""
-        old_lines = old_content.splitlines(keepends=True)
-        new_lines = new_content.splitlines(keepends=True)
+        """Display diff with optional color.
+
+        Lines are split WITHOUT keepends. difflib is given lineterm='',
+        so it adds no newlines of its own and `print` supplies exactly
+        one per line. Keeping the ends meant every content line carried
+        its own '\\n' and then got another from print — every diff this
+        tool produced came out double-spaced, `vcs show` and
+        `vcs diff --staged` included. Header and hunk lines never had a
+        newline to keep, which is why they alone looked right.
+        """
+        old_lines = old_content.splitlines()
+        new_lines = new_content.splitlines()
 
         if unified:
             diff_lines = list(difflib.unified_diff(
@@ -1280,6 +1298,121 @@ class VCSCommands(Command):
         else:
             return line
 
+    def _get_last_committed_content(
+        self, file_id: int, branch_id: int
+    ) -> Optional[str]:
+        """Content of a file as of the most recent commit touching it.
+
+        Resolves through content_hash rather than reading
+        vcs_file_states.content_text directly. That column is NULL
+        whenever the content was stored as a blob — 1025 of 3755 rows in
+        this database — and a caller that trusts it gets "" for the old
+        side and renders the entire file as one giant addition. The hash
+        is always present, so go through content_blobs and keep
+        content_text only as the fallback.
+
+        Not scoped to the branch for the lookup itself: a file's history
+        legitimately spans branches, and scoping it hides the parent
+        revision after a switch. branch_id is accepted for callers that
+        already have it and to keep the signature stable if that changes.
+        """
+        row = self.vcs_repo.query_one("""
+            SELECT vfs.content_hash, vfs.content_text
+            FROM vcs_file_states vfs
+            JOIN vcs_commits vc ON vc.id = vfs.commit_id
+            WHERE vfs.file_id = ? AND vfs.change_type != 'deleted'
+            ORDER BY vc.commit_timestamp DESC
+            LIMIT 1
+        """, (file_id,))
+        if not row:
+            return None
+        if row['content_hash']:
+            content, _ = self._get_content_by_hash(row['content_hash'])
+            if content is not None:
+                return content
+        return row['content_text']
+
+    def _diff_working(self, project: dict, args) -> int:
+        """Show a diff of every changed file in the working set.
+
+        The unstaged counterpart to --staged, and what a bare
+        `vcs diff <slug>` means. Compares each non-unmodified
+        working_state row against the last committed content for that
+        path, which is the same comparison `vcs status` uses to decide
+        the state in the first place — so the two agree by construction
+        instead of by coincidence.
+        """
+        branch = self.vcs_repo.get_active_branch(project['id'])
+
+        if not branch:
+            logger.error("No active branch found")
+            return 1
+
+        changed = self.vcs_repo.query_all("""
+            SELECT
+                ws.file_id,
+                ws.state,
+                ws.content_hash,
+                pf.file_path
+            FROM vcs_working_state ws
+            JOIN project_files pf ON ws.file_id = pf.id
+            WHERE ws.project_id = ? AND ws.branch_id = ?
+              AND ws.state != 'unmodified'
+            ORDER BY pf.file_path
+        """, (project['id'], branch['id']))
+
+        if not changed:
+            print("No changes")
+            print(f"  (run `templedb vcs status {project['slug']} --refresh` "
+                  f"if you expected some — working state is only as current "
+                  f"as the last scan)")
+            return 0
+
+        unified = not getattr(args, 'side_by_side', False)
+        color = not getattr(args, 'no_color', False)
+
+        for f in changed:
+            print(f"{'='*70}")
+            print(f"File: {f['file_path']}")
+            print(f"State: {f['state']}")
+            print(f"{'='*70}\n")
+
+            if f['state'] == 'deleted':
+                # Show what would be lost, not just the fact of loss.
+                old = self._get_last_committed_content(
+                    f['file_id'], branch['id'])
+                if old:
+                    for line in old.splitlines():
+                        print(f"-{line}")
+                else:
+                    print("--- File deleted (no committed content to show)")
+                print()
+                continue
+
+            new_content, _ = self._get_content_by_hash(f['content_hash'])
+            if new_content is None:
+                print("(binary or unreadable content — no textual diff)\n")
+                continue
+
+            if f['state'] == 'added':
+                print("+++ New file")
+                for line in new_content.splitlines():
+                    print(f"+{line}")
+                print()
+                continue
+
+            old_content = self._get_last_committed_content(
+                f['file_id'], branch['id']) or ""
+            self._display_diff(
+                old_content, new_content,
+                f"{f['file_path']} (committed)",
+                f"{f['file_path']} (working)",
+                unified=unified, color=color,
+            )
+            print()
+
+        return 0
+
     def _diff_staged(self, project: dict, args) -> int:
         """Show diff of staged changes"""
         branch = self.vcs_repo.get_active_branch(project['id'])
@@ -1326,23 +1459,22 @@ class VCSCommands(Command):
                 print()
 
             elif file['state'] == 'deleted':
-                # Show deleted file (would need to get from last commit)
-                print("--- File deleted")
+                old_content = self._get_last_committed_content(
+                    file['file_id'], branch['id'])
+                if old_content:
+                    for line in old_content.splitlines():
+                        print(f"-{line}")
+                else:
+                    print("--- File deleted (no committed content to show)")
                 print()
 
             elif file['state'] == 'modified':
-                # Show diff between committed and staged version
-                # Get last committed version
-                last_commit = self.vcs_repo.query_one("""
-                    SELECT vfs.content_text
-                    FROM vcs_file_states vfs
-                    JOIN vcs_commits vc ON vfs.commit_id = vc.id
-                    WHERE vfs.file_id = ? AND vc.branch_id = ?
-                    ORDER BY vc.commit_timestamp DESC
-                    LIMIT 1
-                """, (file['file_id'], branch['id']))
-
-                old_content = last_commit['content_text'] if last_commit else ""
+                # Old side resolves through content_hash, not the
+                # content_text column — that column is NULL for
+                # blob-stored content and the whole file would otherwise
+                # render as an addition.
+                old_content = self._get_last_committed_content(
+                    file['file_id'], branch['id']) or ""
                 new_content, _ = self._get_content_by_hash(file['current_hash'])
 
                 if new_content:

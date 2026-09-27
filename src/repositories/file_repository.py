@@ -32,6 +32,17 @@ class FileRepository(BaseRepository):
 
         Returns:
             List of file dictionaries
+
+        `lines_of_code` prefers file_contents.line_count over
+        project_files.lines_of_code. The latter is written at import time
+        and never refreshed on a `file set` / commit, so it is both
+        incomplete and stale: of templedb's 774 active files 167 have it
+        NULL (which `file ls -l` rendered as "0 loc", indistinguishable
+        from a genuinely empty file), and the populated ones drift badly
+        — src/cli/commands/vcs.py read 1706 against an actual 2191 lines.
+        file_contents.line_count is written with every current-content
+        row, so it tracks reality. The old column stays as the fallback
+        rather than being dropped, since rows predating line_count exist.
         """
         logger.debug(f"Getting files for project {project_id} (include_content={include_content})")
 
@@ -41,7 +52,7 @@ class FileRepository(BaseRepository):
                     pf.id as file_id,
                     pf.file_path,
                     pf.file_name,
-                    pf.lines_of_code,
+                    COALESCE(fc.line_count, pf.lines_of_code) as lines_of_code,
                     pf.edit_mode,
                     fc.content_hash,
                     fc.version,
@@ -63,7 +74,7 @@ class FileRepository(BaseRepository):
                     pf.id as file_id,
                     pf.file_path,
                     pf.file_name,
-                    pf.lines_of_code,
+                    COALESCE(fc.line_count, pf.lines_of_code) as lines_of_code,
                     pf.edit_mode,
                     fc.content_hash,
                     fc.version

@@ -603,14 +603,29 @@ class WorkingStateDetector:
         scanner = FileScanner(self.project_root)
         current_files = scanner.scan_directory()
 
-        # Get all tracked files from database
+        # Get all tracked files from database.
+        #
+        # `status` comes along because deletion detection below must
+        # ignore rows that are ALREADY recorded as deleted. Without that,
+        # every past deletion is rediscovered on every scan: `vcs status
+        # --refresh` reported "Deleted: 28" for templedb and 268 for bza,
+        # counted in the header and — because the listing renders only
+        # the staged/modified sets — never shown, so there was nothing to
+        # act on and no way to make the number go down.
+        #
+        # The map itself stays complete, deleted rows included.
+        # project_files has UNIQUE(project_id, file_path), so a path
+        # whose row exists but is filtered out of the lookup would take
+        # the "new file" branch below and fail the INSERT on the
+        # constraint. Re-creating a deleted file has to find the old row.
         tracked_files = query_all("""
-            SELECT id, file_path FROM project_files
+            SELECT id, file_path, status FROM project_files
             WHERE project_id = ?
         """, (self.project_id,))
 
         # Create lookup maps
         tracked_by_path = {f['file_path']: f['id'] for f in tracked_files}
+        tracked_status = {f['file_path']: f['status'] for f in tracked_files}
         current_by_path = {f.relative_path: f for f in current_files}
 
         changes = {
@@ -717,6 +732,21 @@ class WorkingStateDetector:
                 # Check if modified
                 file_id = tracked_by_path[rel_path]
 
+                # The path is on disk but its row is marked deleted, so
+                # the file came back. Reactivate it: the deletion loop
+                # now skips non-active rows, so leaving the status alone
+                # would strand the file in a state where it exists, has
+                # detectable content, and is invisible to everything that
+                # filters on status='active' — `file ls`, checkout, and
+                # the checkout_matches_db invariant among them.
+                if tracked_status.get(rel_path) not in (None, 'active'):
+                    execute("""
+                        UPDATE project_files
+                           SET status = 'active', updated_at = datetime('now')
+                         WHERE id = ?
+                    """, (file_id,), commit=False)
+                    tracked_status[rel_path] = 'active'
+
                 # Get last *committed* content hash (not just stored/imported content)
                 # file_contents is updated by project sync, so comparing against it
                 # always shows "unmodified". We need the last VCS commit hash.
@@ -781,6 +811,11 @@ class WorkingStateDetector:
         # Check for deleted files
         for file_path, file_id in tracked_by_path.items():
             if file_path not in current_by_path:
+                # Already recorded as deleted — not news. Reporting it
+                # again every scan is what produced a deletion count that
+                # never dropped and listed nothing.
+                if tracked_status.get(file_path) != 'active':
+                    continue
                 state = 'deleted'
                 changes['deleted'] += 1
 

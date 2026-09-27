@@ -3930,8 +3930,10 @@ WantedBy=timers.target
             rows = query_all(
                 """SELECT pf.file_path, pf.id AS file_id,
                           cb.content_text, cb.content_blob,
+                          cb.created_at AS db_blob_created,
                           ws.state AS ws_state,
-                          ws.staged_by_session_id AS staged_by
+                          ws.staged_by_session_id AS staged_by,
+                          wcb.created_at AS ws_blob_created
                      FROM project_files pf
                      JOIN file_contents fc
                        ON fc.file_id = pf.id AND fc.is_current = 1
@@ -3939,6 +3941,8 @@ WantedBy=timers.target
                        ON cb.hash_sha256 = fc.content_hash
                 LEFT JOIN vcs_working_state ws
                        ON ws.file_id = pf.id
+                LEFT JOIN content_blobs wcb
+                       ON wcb.hash_sha256 = ws.content_hash
                     WHERE pf.project_id = ? AND pf.status = 'active'""",
                 (proj['id'],))
 
@@ -3987,9 +3991,6 @@ WantedBy=timers.target
                             f"{proj['slug']}`")
                     continue
 
-                if tracked:
-                    continue  # known in-progress edit
-
                 try:
                     if r['content_text'] is not None:
                         differs = fpath.read_text(encoding='utf-8') != r['content_text']
@@ -3999,6 +4000,50 @@ WantedBy=timers.target
                         differs = False
                 except OSError:
                     differs = True
+
+                if tracked:
+                    # A working_state row was taken as proof the
+                    # divergence was intentional, and `continue` ran
+                    # before the comparison below. That is what let a
+                    # STALE workspace hide: on 2026-09-26 this project's
+                    # edit workspace held revisions of claude_code.py and
+                    # scanner.py from 09-19 and 09-06 while the DB's
+                    # current content dated from 09-24, and committing
+                    # from it would have silently destroyed the newer
+                    # content — the agent idle-timeout watchdog and the
+                    # lock-file scanner patterns. The row said 'modified',
+                    # so the one check built for this class said nothing.
+                    #
+                    # An edit in progress and a workspace left behind look
+                    # identical in `state`. What separates them is WHEN
+                    # the checkout's content was first seen: real edits
+                    # produce content this database has never stored
+                    # before (no content_blobs row, or one created just
+                    # now by the scan that recorded the edit), whereas a
+                    # stale workspace holds a blob the DB recorded and
+                    # then moved past. So: only flag it when the
+                    # checkout's blob is strictly OLDER than the current
+                    # one.
+                    #
+                    # A deliberate revert to an older revision trips this
+                    # too, and cannot be told apart from staleness here.
+                    # Say what will be lost and let the reader judge —
+                    # the same choice the state='deleted' branch above
+                    # makes.
+                    if (differs and r['ws_blob_created'] and r['db_blob_created']
+                            and r['ws_blob_created'] < r['db_blob_created']):
+                        issues.append(
+                            f"{proj['slug']}: {r['file_path']} in the checkout "
+                            f"is OLDER than the DB's current content "
+                            f"({r['ws_blob_created']} vs "
+                            f"{r['db_blob_created']}) — the working_state row "
+                            f"says '{r['ws_state']}', but this looks like a "
+                            f"stale workspace, and committing {root} would "
+                            f"revert the newer content. Refresh with "
+                            f"`templedb edit {proj['slug']} --refresh --force` "
+                            f"unless you meant to revert it")
+                    continue
+
                 if differs:
                     issues.append(
                         f"{proj['slug']}: {r['file_path']} DIFFERS between DB "
