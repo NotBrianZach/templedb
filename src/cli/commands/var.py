@@ -12,6 +12,16 @@ Scope resolution order (most → least specific):
 Env vars are stored in the environment_variables table.
 Secrets are stored in secret_blobs + project_secret_blobs (per-variable age encryption).
 
+Those are two tables but one namespace as far as callers are concerned: `list`
+shows both, so `get` and `unset` look in both. `--secret` is required on `set`,
+where you are choosing to encrypt, but on `get` and `unset` it only disambiguates
+— omitting it still finds a secret. Both used to consult environment_variables
+alone, which made `get` report "not found" for keys `list` had just printed.
+
+Exit codes: `get` and `unset` return 1 when the key does not exist. `unset` used
+to print success and return 0 regardless of whether it deleted anything, so a
+script that relied on that (calling unset idempotently) needs `|| true`.
+
 Usage examples:
   templedb env var set woofs_projects SUPABASE_URL https://... --target staging
   templedb env var set woofs_projects SECRET_KEY abc123 --secret --keys templedb-primary
