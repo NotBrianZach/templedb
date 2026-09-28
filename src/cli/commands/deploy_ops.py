@@ -512,8 +512,12 @@ class DeployOpsMixin:
             # checkout, not the (possibly stale) legacy repo_url import
             # path. Same class of bug as the vcs-status scanner had.
             from sync.manager import SyncManager
+            from repositories.checkout_repository import CheckoutRepository
             try:
-                project_path = SyncManager(project_slug).get_checkout_path()
+                # BUILD: a deploy must build the published tree, not an
+                # in-progress edit workspace that happens to be newer.
+                project_path = SyncManager(project_slug).get_checkout_path(
+                    CheckoutRepository.PURPOSE_BUILD)
             except (ValueError, KeyError):
                 project_path = Path(project['repo_url'])
             flake_path = project_path / 'flake.nix'

@@ -302,6 +302,14 @@ CREATE TABLE IF NOT EXISTS checkouts (
     checkout_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_sync_at TEXT,
     is_active BOOLEAN DEFAULT 1,
+    -- kind/session_id from migration 113. They MUST be here as well as in
+    -- the migration: a fresh install applies schema.sql and then stamps
+    -- every numbered migration as applied WITHOUT running it, so a column
+    -- missing here is missing forever on new machines while 113 reads as
+    -- applied. That is exactly the drift migrate() warns about (075-082,
+    -- Aug 2026).
+    kind TEXT NOT NULL DEFAULT 'scratch',   -- canonical | edit | scratch
+    session_id INTEGER REFERENCES vcs_sessions(id),
     UNIQUE(project_id, checkout_path)
 );
 

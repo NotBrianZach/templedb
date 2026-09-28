@@ -400,8 +400,16 @@ class NixOSCommand(Command):
                     # Prefer operational checkout over legacy repo_url
                     # import path — same fix as vcs-status scanner.
                     from sync.manager import SyncManager
+                    from repositories.checkout_repository import CheckoutRepository
                     try:
-                        config_path = SyncManager(project_slug).get_checkout_path()
+                        # BUILD: generated modules must land in the
+                        # materialised tree that a rebuild actually reads,
+                        # never in whichever workspace happens to be
+                        # newest. Writing them into an agent's edit
+                        # workspace would produce a config that evaluates
+                        # here and does not exist at switch time.
+                        config_path = SyncManager(project_slug).get_checkout_path(
+                            CheckoutRepository.PURPOSE_BUILD)
                     except (ValueError, KeyError):
                         config_path = Path(project['repo_url'])
                     modules_dir = config_path / 'modules'

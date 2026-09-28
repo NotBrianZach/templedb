@@ -53,11 +53,38 @@ def _resolve_dev_checkout():
         import sqlite3
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
-            rows = con.execute(
-                """SELECT c.checkout_path FROM checkouts c
-                     JOIN projects p ON p.id = c.project_id
-                    WHERE p.slug = 'templedb' AND c.is_active = 1
-                    ORDER BY c.checkout_at DESC""").fetchall()
+            # Mirrors CheckoutRepository.resolve(PURPOSE_EDIT): prefer an
+            # edit tree, then anything else still active. Dev mode exists
+            # to run the code you are editing, so an edit workspace is the
+            # right answer and the canonical tree is the fallback.
+            #
+            # `kind` arrived in migration 113. This runs before templedb
+            # is importable and must not break on a database that predates
+            # it, so the ordering is expressed with a CASE that degrades
+            # to pure recency when the column is missing — hence the
+            # OperationalError retry below rather than a schema probe.
+            #
+            # This duplicates resolve() on purpose (no imports are
+            # available yet) and that duplication is a correctness
+            # coupling, not a style problem: if the two disagree,
+            # TEMPLEDB_DEV_MODE=1 runs different code than the tree you
+            # just edited. tests/unit/services/test_checkout_resolve.py
+            # asserts they agree.
+            ordered = """SELECT c.checkout_path FROM checkouts c
+                           JOIN projects p ON p.id = c.project_id
+                          WHERE p.slug = 'templedb' AND c.is_active = 1
+                          ORDER BY CASE c.kind WHEN 'edit' THEN 0
+                                               WHEN 'canonical' THEN 1
+                                               ELSE 2 END,
+                                   c.checkout_at DESC"""
+            legacy = """SELECT c.checkout_path FROM checkouts c
+                          JOIN projects p ON p.id = c.project_id
+                         WHERE p.slug = 'templedb' AND c.is_active = 1
+                         ORDER BY c.checkout_at DESC"""
+            try:
+                rows = con.execute(ordered).fetchall()
+            except sqlite3.OperationalError:
+                rows = con.execute(legacy).fetchall()
         finally:
             con.close()
         for (path,) in rows:

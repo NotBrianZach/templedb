@@ -81,9 +81,133 @@ class CheckoutRepository(BaseRepository):
             WHERE project_id = ? AND checkout_path = ?
         """, (project_id, checkout_path))
 
+    # Purposes for resolve(). Different consumers legitimately want
+    # different trees, which is why a single "active checkout" could never
+    # be right for both: a build must read the materialised tree that
+    # `publish` owns, while a commit must read the tree someone is
+    # actually editing. Conflating them is how a `project checkout`
+    # refreshing the canonical tree silently became the source for
+    # staging and cost system_config commit FA20845EE25BD208 its content.
+    PURPOSE_BUILD = 'build'   # build / materialize / publish -> canonical
+    PURPOSE_EDIT = 'edit'     # status / add / commit / diff  -> edit tree
+
+    def resolve(
+        self,
+        project_id: int,
+        purpose: str = PURPOSE_EDIT,
+        session_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve the checkout a caller should use, by what it is for.
+
+        See reports/2026-09-27-2103-checkout-role-and-session-scoped-
+        resolution-design.html. Migration 113 added `kind`, so rows are
+        now classified rather than guessed at:
+
+          canonical  publish-owned materialised tree
+          edit       a writable working tree
+          scratch    throwaway; NEVER resolved to, only usable when named
+                     explicitly (e.g. `templedb commit <slug> <dir>`)
+
+        PURPOSE_BUILD returns the canonical tree. PURPOSE_EDIT prefers
+        this session's own edit tree, then an unowned one.
+
+        Ambiguity is reported, not silently resolved — but it is not yet
+        fatal. session_id is NULL on every row migration 113 touched, so
+        until it is populated (phase 4) every edit tree looks unowned and
+        raising here would break the three projects that currently have
+        more than one. Warn and keep today's deterministic answer instead;
+        the warning is what makes the situation visible enough to fix.
+        """
+        import os
+        import sqlite3
+        try:
+            rows = self.query_all("""
+                SELECT id, project_id, checkout_path, branch_name, checkout_at,
+                       last_sync_at, is_active, kind, session_id
+                FROM checkouts
+                WHERE project_id = ? AND is_active = 1
+                ORDER BY checkout_at DESC
+            """, (project_id,))
+        except sqlite3.OperationalError:
+            # Database predates migration 113 (or is an ad-hoc test
+            # fixture). Fall back to the pre-roles behaviour rather than
+            # failing: resolution is on the path of nearly every command,
+            # so an un-migrated DB must degrade, not break. Callers get
+            # exactly what they got before roles existed.
+            logger.debug(
+                "checkouts.kind missing; using pre-113 resolution for "
+                "project %s", project_id)
+            return self._legacy_get_active_for_project(project_id)
+        if not rows:
+            return None
+
+        def extant(rs):
+            return [r for r in rs if os.path.isdir(r['checkout_path'])]
+
+        if purpose == self.PURPOSE_BUILD:
+            canonical = extant([r for r in rows if r['kind'] == 'canonical'])
+            if canonical:
+                return canonical[0]
+            # No canonical tree yet (a project that has only ever been
+            # edited). Fall through rather than fail: publishing is how a
+            # canonical tree comes into existence in the first place.
+            logger.debug(
+                "No canonical checkout for project %s; falling back",
+                project_id)
+            return (extant(rows) or rows)[0]
+
+        # PURPOSE_EDIT
+        edits = extant([r for r in rows if r['kind'] == 'edit'])
+
+        if session_id is not None:
+            mine = [r for r in edits if r['session_id'] == session_id]
+            if mine:
+                return mine[0]
+
+        adoptable = [r for r in edits
+                     if r['session_id'] is None
+                     or not self._session_is_live(r['session_id'])]
+        if len(adoptable) == 1:
+            return adoptable[0]
+        if len(adoptable) > 1:
+            logger.warning(
+                "Project %s has %d candidate edit checkouts and no session "
+                "owns one; using the most recent (%s). The others are %s. "
+                "Whichever is newest wins, so a materialise elsewhere can "
+                "change this answer — name the tree explicitly for anything "
+                "that matters.",
+                project_id, len(adoptable), adoptable[0]['checkout_path'],
+                ", ".join(r['checkout_path'] for r in adoptable[1:]),
+            )
+            return adoptable[0]
+
+        # Every edit tree belongs to some other live session. Using one
+        # would stage another agent's in-progress work, so prefer the
+        # canonical tree; callers that need to write will fail on its
+        # read-only mode, which is the correct outcome.
+        canonical = extant([r for r in rows if r['kind'] == 'canonical'])
+        if canonical:
+            logger.warning(
+                "Project %s: every edit checkout belongs to another live "
+                "session; falling back to the canonical tree at %s. Run "
+                "`templedb edit <slug>` for your own workspace.",
+                project_id, canonical[0]['checkout_path'])
+            return canonical[0]
+        return (extant(rows) or rows)[0]
+
+    def _session_is_live(self, session_id: int) -> bool:
+        """True if the session exists and has not ended."""
+        row = self.query_one(
+            "SELECT ended_at FROM vcs_sessions WHERE id = ?", (session_id,))
+        return bool(row) and row['ended_at'] is None
+
     def get_active_for_project(self, project_id: int) -> Optional[Dict[str, Any]]:
         """
         Get the active checkout for a project.
+
+        DEPRECATED: use resolve(project_id, purpose). Kept so the call
+        sites can migrate one at a time; defaults to PURPOSE_EDIT, which
+        is what every caller of this name historically meant.
 
         Args:
             project_id: Project ID
@@ -91,6 +215,11 @@ class CheckoutRepository(BaseRepository):
         Returns:
             Checkout dictionary or None
         """
+        return self.resolve(project_id, self.PURPOSE_EDIT)
+
+    def _legacy_get_active_for_project(self, project_id: int) -> Optional[Dict[str, Any]]:
+        """Pre-migration-113 resolution, retained for reference and for
+        the test that asserts resolve() is a superset of it."""
         logger.debug(f"Getting active checkout for project {project_id}")
         # is_active alone cannot be trusted: nothing in the codebase has
         # ever set it to 0, so every path a project was ever checked out

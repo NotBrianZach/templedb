@@ -56,19 +56,35 @@ class SyncManager:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def get_checkout_path(self) -> Path:
+    def get_checkout_path(self, purpose: Optional[str] = None) -> Path:
         """Get checkout path for this project.
 
         Prefers an explicit checkout record; falls back to repo_url for projects
         whose working directory IS the repo (no separate checkout needed).
+
+        `purpose` selects WHICH tree (see CheckoutRepository.resolve):
+        PURPOSE_BUILD for anything that builds or generates from the
+        project — those must read the materialised tree `publish` owns,
+        not whatever workspace someone happens to be editing — and
+        PURPOSE_EDIT for status/add/commit/diff. Defaults to EDIT, which
+        is what every caller of this method meant before roles existed.
         """
         from repositories.checkout_repository import CheckoutRepository
         checkout_repo = CheckoutRepository()
-        checkout = checkout_repo.get_active_for_project(self.project_id)
+        checkout = checkout_repo.resolve(
+            self.project_id,
+            purpose or CheckoutRepository.PURPOSE_EDIT,
+        )
         if checkout:
             return Path(checkout['checkout_path'])
         if self.repo_url:
-            return Path(self.repo_url)
+            # repo_url is not always a filesystem path — neko-lan-host
+            # carries 'templedb://neko-lan-host'. Returning that as a Path
+            # produces a directory that cannot exist, so let it fall
+            # through to the explicit error instead of a confusing ENOENT
+            # somewhere downstream.
+            if '://' not in str(self.repo_url):
+                return Path(self.repo_url)
         raise ValueError(f"No active checkout found for project {self.project_slug}")
 
     def save_sync_cache(self, file_hashes: Dict[str, str]) -> None:
