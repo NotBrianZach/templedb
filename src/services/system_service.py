@@ -21,6 +21,30 @@ from db_utils import query_one, query_all, execute, get_connection
 logger = logging.getLogger(__name__)
 
 
+def _ensure_writable(path: Path) -> None:
+    """Add the owner-write bit to an existing file, best effort.
+
+    lock_checkout() chmods checkout files to 0444 so people edit through
+    `templedb edit` rather than the generated tree. That lock is aimed at
+    humans and must not block TempleDB rewriting its own output —
+    materialize owns the checkout.
+
+    Deliberately narrow: it adds u+w to a file that is already there and
+    does nothing else. It does not unlock the tree wholesale, because a
+    crash mid-materialize would then leave every file writable and
+    silently retire the guard. It also swallows failures — a file we
+    cannot chmod will fail at the write with a clearer error than
+    anything raised from here.
+    """
+    try:
+        if path.exists():
+            mode = path.stat().st_mode & 0o777
+            if not mode & 0o200:
+                path.chmod(mode | 0o200)
+    except OSError:
+        pass
+
+
 class SystemServiceError(Exception):
     """Raised when system operations fail"""
     pass
@@ -256,6 +280,18 @@ class SystemService:
                 fpath = checkout_dir / f["file_path"]
                 fpath.parent.mkdir(parents=True, exist_ok=True)
 
+                # lock_checkout() chmods every file to 0444 so that humans
+                # edit through `templedb edit`, not the checkout. That lock
+                # is aimed at people; it must not stop TempleDB rewriting
+                # its own output. Without this, materialize dies with
+                # EACCES on the first locked file — and because the caller
+                # reads a failed materialize as "the checkout diverges from
+                # the DB", `nixos home-rebuild` then refused to build and
+                # advised `publish run`, which would have pushed a project
+                # to its git mirror to fix a file mode. Observed on
+                # system_config 2026-09-28 with 56 locked files.
+                _ensure_writable(fpath)
+
                 if f["content_text"] is not None:
                     fpath.write_text(f["content_text"], encoding="utf-8")
                 elif f["content_blob"] is not None:
@@ -361,6 +397,7 @@ class SystemService:
                     preserved_ignored += 1
                     continue
                 try:
+                    _ensure_writable(path)
                     path.unlink()
                     deleted += 1
                 except OSError as e:
@@ -419,6 +456,21 @@ class SystemService:
             logger.info(f"Materialized {written} files to {checkout_dir}{suffix}")
             return checkout_dir
 
+        except PermissionError as e:
+            # Distinct from the generic failure below on purpose. The
+            # caller turns a failed materialize into "the checkout
+            # diverges from the database" and suggests `publish run` or
+            # `vcs commit` — neither of which fixes a file mode, and the
+            # first pushes to a git mirror. Say what actually happened.
+            logger.error(
+                f"Materialize failed: cannot write to the {project_slug} "
+                f"checkout ({e}). This is a permission problem, NOT a "
+                f"content difference — the checkout is chmod'd read-only "
+                f"and something outside materialize locked it. Nothing was "
+                f"published or committed. Fix with "
+                f"`chmod -R u+w {checkout_dir}` and re-run."
+            )
+            return None
         except Exception as e:
             logger.error(f"Materialize failed: {e}")
             return None
