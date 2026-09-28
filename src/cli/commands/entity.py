@@ -4233,11 +4233,101 @@ WantedBy=timers.target
             ent_n = ent_row['n'] if ent_row else 0
             delta = abs(ent_n - src_n)
             if delta > 5:
-                issues.append(
-                    f"{kind}: {ent_n} entities vs {src_n} source rows "
-                    f"(delta {delta}) — run `templedb ingest all`"
-                )
+                # The two directions have different causes and different
+                # remedies, and saying `ingest all` for both was wrong
+                # half the time. Ingest only adds and refreshes — it has
+                # no delete pass — so when entities EXCEED source rows it
+                # cannot help, and the advice sent people round a loop
+                # that left the number unchanged. Verified 2026-09-27:
+                # `ingest all` run twice against a File delta of 13, no
+                # movement either time.
+                if ent_n > src_n:
+                    issues.append(
+                        f"{kind}: {ent_n} entities vs {src_n} source rows "
+                        f"(delta {delta}) — {delta} entit(ies) outlived "
+                        f"their source row. `ingest all` will NOT fix this; "
+                        f"it never deletes. Run "
+                        f"`templedb entity prune-orphans --kind {kind} --dry-run`"
+                    )
+                else:
+                    issues.append(
+                        f"{kind}: {ent_n} entities vs {src_n} source rows "
+                        f"(delta {delta}) — source rows not yet projected; "
+                        f"run `templedb ingest all`"
+                    )
         return issues
+
+    # Which source row each entity kind is a projection of, and how to
+    # tell that the row is gone. Only kinds whose external_ref can be
+    # mapped back to a source row unambiguously are listed — a kind
+    # absent here is simply not prunable, which is the safe default.
+    _ORPHAN_SOURCES = {
+        # File external_ref is '<project-slug>/<file_path>'.
+        'File': """
+            SELECT e.id, e.external_ref, e.label
+              FROM entities e
+             WHERE e.kind = 'File'
+               AND NOT EXISTS (
+                   SELECT 1 FROM project_files pf
+                     JOIN projects p ON p.id = pf.project_id
+                    WHERE pf.status = 'active'
+                      AND e.external_ref = p.slug || '/' || pf.file_path)
+        """,
+    }
+
+    def graph_prune_orphans(self, args) -> int:
+        """Delete entities whose source row no longer exists.
+
+        Ingest is add-and-refresh only: deleting a file removes its
+        project_files row but leaves the File entity behind forever. On
+        2026-09-28 that was 24 stale File entities against 1919 live
+        rows, and entity_counts_match_source_tables had been reporting it
+        with advice (`ingest all`) that could not work.
+
+        Dry-run by default. Deleting graph rows is not something to do on
+        a typo, and the whole point of the check is that nobody had
+        looked at these — so the first run should show, not act.
+        """
+        from db_utils import query_all, execute
+
+        kinds = ([args.kind] if getattr(args, 'kind', None)
+                 else sorted(self._ORPHAN_SOURCES))
+        unknown = [k for k in kinds if k not in self._ORPHAN_SOURCES]
+        if unknown:
+            logger.error(
+                f"No orphan rule for kind(s): {', '.join(unknown)}. "
+                f"Prunable kinds: {', '.join(sorted(self._ORPHAN_SOURCES))}. "
+                f"A kind without a rule cannot be checked safely, so it is "
+                f"left alone rather than guessed at."
+            )
+            return 1
+
+        total = 0
+        for kind in kinds:
+            rows = query_all(self._ORPHAN_SOURCES[kind])
+            if not rows:
+                print(f"{kind}: no orphans")
+                continue
+            total += len(rows)
+            verb = "Would delete" if args.dry_run else "Deleting"
+            print(f"{kind}: {verb} {len(rows)} orphaned entit(ies)")
+            for r in rows[:20]:
+                print(f"    {r['external_ref']}")
+            if len(rows) > 20:
+                print(f"    ... and {len(rows) - 20} more")
+            if not args.dry_run:
+                for r in rows:
+                    # Same order as graph_forget: archive rows have no FK
+                    # so they must go by hand; relations CASCADE.
+                    execute("DELETE FROM observations_archive WHERE entity_id=?",
+                            (r['id'],))
+                    execute("DELETE FROM entities WHERE id=?", (r['id'],))
+
+        if total and args.dry_run:
+            print(f"\n{total} orphan(s). Re-run with --apply to delete.")
+        elif total:
+            print(f"\n✓ Pruned {total} orphaned entit(ies)")
+        return 0
 
     def _check_reconcile_freshness(self):
         """Invariant: every fleet_machine should have been reconciled
@@ -4553,6 +4643,23 @@ def register(cli):
     forget.add_argument('--dry-run', action='store_true',
                         help='Preview what would go without acting')
     cli.commands['entity.forget'] = cmd.graph_forget
+
+    prune = esub.add_parser(
+        'prune-orphans',
+        help='Delete entities whose source row is gone (ingest never '
+             'deletes, so these accumulate). Dry-run by default.',
+    )
+    prune.add_argument('--kind',
+                       help='Restrict to one kind (default: every kind '
+                            'with an orphan rule)')
+    # Dry-run is the default and --apply is the opt-in, rather than the
+    # usual --dry-run opt-out. These rows accumulate precisely because
+    # nobody looks at them, so the first run of an unfamiliar command
+    # should show its work instead of deleting graph rows.
+    prune.add_argument('--apply', dest='dry_run', action='store_false',
+                       default=True,
+                       help='Actually delete (default is dry-run)')
+    cli.commands['entity.prune-orphans'] = cmd.graph_prune_orphans
 
     obs = esub.add_parser(
         'observations',

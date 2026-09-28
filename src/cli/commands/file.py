@@ -176,11 +176,28 @@ class FileCommands(Command):
                 logger.error(f"Project '{args.project}' not found")
                 return 1
 
-            # Get content from --content flag or stdin
+            # Get content from --content flag or stdin.
+            #
+            # stdin is read as BYTES and decoded only if it is valid
+            # UTF-8. Reading it as text made `file set` fail outright on
+            # any binary file — "'utf-8' codec can't decode byte 0x84 in
+            # position 0" — with nothing written. That is why
+            # system_config's .authinfo.gpg could not be put into the DB
+            # at all, which in turn let materialize delete it from the
+            # checkout as an untracked stray and broke a nix build.
+            #
+            # Text keeps its exact previous path: the same str, the same
+            # hash, stored in content_text. Only genuinely undecodable
+            # input takes the blob branch, so nothing that worked before
+            # changes shape.
             if hasattr(args, 'content') and args.content:
                 content = args.content
             else:
-                content = sys.stdin.read()
+                raw = sys.stdin.buffer.read()
+                try:
+                    content = raw.decode('utf-8')
+                except UnicodeDecodeError:
+                    content = raw
 
             if not content:
                 logger.error("No content provided (use --content or pipe to stdin)")
@@ -264,7 +281,12 @@ class FileCommands(Command):
             # Guards against the write-broken bug where later refresh/commit can revert.
             if hasattr(args, 'verify') and args.verify:
                 from db_utils import query_one
-                expected_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
+                # content is bytes for binary input; encoding it again
+                # would raise and take --verify down with it, which is
+                # the one flag callers use to prove a write landed.
+                expected_hash = hashlib.sha256(
+                    content.encode('utf-8') if isinstance(content, str) else content
+                ).hexdigest()
                 row = query_one(
                     """SELECT fc.content_hash, fc.line_count
                          FROM file_contents fc
@@ -721,22 +743,40 @@ class FileCommands(Command):
             return None
 
     def _write_content_to_db(self, project_id: int, project_slug: str,
-                             file_path: str, content: str):
-        """Write file content directly to the TempleDB database."""
+                             file_path: str, content):
+        """Write file content directly to the TempleDB database.
+
+        `content` is a str for text or bytes for binary. Binary is stored
+        in content_blob with content_type 'binary_asset' and a NULL
+        encoding, matching what the scanner produces for the same file —
+        so a blob written here and one written by an import are
+        indistinguishable downstream.
+        """
         from repositories.base import BaseRepository
         base = BaseRepository()
 
-        content_bytes = content.encode('utf-8')
+        is_binary = isinstance(content, (bytes, bytearray))
+        content_bytes = bytes(content) if is_binary else content.encode('utf-8')
         content_hash = hashlib.sha256(content_bytes).hexdigest()
-        line_count = content.count('\n') + 1 if content else 0
+        # Line count is meaningless for binary and 0 is the honest answer;
+        # counting 0x0a bytes would invent a statistic about a blob.
+        line_count = 0 if is_binary else (content.count('\n') + 1 if content else 0)
 
         # Upsert content blob
-        base.execute("""
-            INSERT OR IGNORE INTO content_blobs
-            (hash_sha256, content_text, content_blob, content_type, encoding,
-             file_size_bytes, reference_count)
-            VALUES (?, ?, NULL, 'text', 'utf-8', ?, 1)
-        """, (content_hash, content, len(content_bytes)))
+        if is_binary:
+            base.execute("""
+                INSERT OR IGNORE INTO content_blobs
+                (hash_sha256, content_text, content_blob, content_type, encoding,
+                 file_size_bytes, reference_count)
+                VALUES (?, NULL, ?, 'binary_asset', NULL, ?, 1)
+            """, (content_hash, content_bytes, len(content_bytes)))
+        else:
+            base.execute("""
+                INSERT OR IGNORE INTO content_blobs
+                (hash_sha256, content_text, content_blob, content_type, encoding,
+                 file_size_bytes, reference_count)
+                VALUES (?, ?, NULL, 'text', 'utf-8', ?, 1)
+            """, (content_hash, content, len(content_bytes)))
 
         # Check if file exists
         file_record = self.file_repo.get_file_by_path(project_id, file_path)
@@ -875,9 +915,18 @@ class FileCommands(Command):
                 target = os.path.join(checkout, file_path)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 # Atomic write via tmp + rename to avoid partial reads.
+                # Binary content mirrors as bytes; opening "w" for it
+                # raises "write() argument must be str, not bytes", which
+                # the handler below turns into a warning — leaving the DB
+                # written and the checkout NOT, exactly the split this
+                # mirror exists to prevent.
                 tmp = f"{target}.tmp.{os.getpid()}"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    f.write(content)
+                if isinstance(content, (bytes, bytearray)):
+                    with open(tmp, "wb") as f:
+                        f.write(content)
+                else:
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        f.write(content)
                 os.replace(tmp, target)
             else:
                 logger.warning(
