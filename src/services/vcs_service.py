@@ -715,9 +715,17 @@ class VCSService(BaseService):
         editor write, before any refresh). Result: commits that match
         their commit *message* but not their intended *diff*.
 
+        Reads disk, but REFUSES to overwrite the row with content the
+        database recorded earlier than what the row already holds — see
+        the guard below. Without that, this function is also the way a
+        verified write gets destroyed, which is what happened to
+        system_config commit FA20845EE25BD208.
+
         Returns the current content_hash (or None if the file was
         deleted on disk / could not be read / is over the blob size
-        threshold with no fallback path).
+        threshold with no fallback path). When the guard declines, the
+        row is left alone and its existing hash is returned — the value
+        callers should stage.
         """
         from pathlib import Path
         from importer.content import ContentStore
@@ -760,14 +768,66 @@ class VCSService(BaseService):
             """, (fc.hash_sha256, fc.content_text, fc.content_type,
                   fc.encoding, fc.file_size))
 
+        prev = self.vcs_repo.query_one(
+            "SELECT state, content_hash FROM vcs_working_state WHERE id = ?",
+            (ws_row_id,),
+        )
+
+        # Refuse to go backwards.
+        #
+        # This function reads whatever directory resolves as the project's
+        # "active checkout", and that resolution is recency-based: nothing
+        # ever clears checkouts.is_active (61 rows set, 0 cleared as of
+        # 2026-09-27), so the newest extant directory wins. Any command
+        # that materialises a tree elsewhere — `project checkout`,
+        # `publish`, `edit` — can therefore make a DIFFERENT tree
+        # authoritative as a side effect, and the next `vcs add` will
+        # re-hash from it. On 2026-09-26 that overwrote a
+        # `file set --verify`-confirmed write with a copy from before the
+        # correction, and system_config commit FA20845EE25BD208 recorded
+        # the old bytes.
+        #
+        # The discriminator is blob AGE, not file mtime. content_blobs is
+        # content-addressed and append-only, so the created_at of the row
+        # matching the disk bytes is when this database FIRST saw that
+        # content. Genuinely new work is either absent from content_blobs
+        # or was inserted moments ago by the INSERT OR IGNORE above, so it
+        # is newer and passes. A stale tree holds content the DB recorded
+        # and has since moved past, so it is older and is declined.
+        #
+        # mtime would not work and is the obvious wrong answer: a
+        # materialise writes stale CONTENT with a fresh mtime, so the
+        # stale copy looks newer than the write it is about to destroy.
+        # This is the same test used by the checkout_matches_db invariant,
+        # so the check and the report agree by construction.
+        if (prev and prev['content_hash']
+                and prev['content_hash'] != new_hash):
+            ages = self.vcs_repo.query_one("""
+                SELECT (SELECT created_at FROM content_blobs
+                         WHERE hash_sha256 = ?) AS disk_at,
+                       (SELECT created_at FROM content_blobs
+                         WHERE hash_sha256 = ?) AS row_at
+            """, (new_hash, prev['content_hash']))
+            disk_at = ages['disk_at'] if ages else None
+            row_at = ages['row_at'] if ages else None
+            # Unknown on either side means no evidence of staleness, and
+            # a tie is not evidence either. Both proceed, preserving the
+            # editor-write behaviour this function exists for.
+            if disk_at and row_at and disk_at < row_at:
+                self.logger.warning(
+                    "Refusing to stage %s from %s: that copy's content was "
+                    "recorded %s, older than the %s already in working state. "
+                    "Treating the checkout as stale and keeping the newer "
+                    "content. If the revert is intended, write it into the "
+                    "checkout and re-run `vcs status --refresh`.",
+                    file_path, checkout, disk_at, row_at,
+                )
+                return prev['content_hash']
+
         # Determine new state. If the row was 'added' (never committed)
         # keep 'added'; otherwise call it 'modified'. Full added/
         # modified detection against vcs_file_states is the scanner's
         # job — we just make sure the hash reflects reality.
-        prev = self.vcs_repo.query_one(
-            "SELECT state FROM vcs_working_state WHERE id = ?",
-            (ws_row_id,),
-        )
         new_state = 'added' if (prev and prev['state'] == 'added') else 'modified'
 
         self.vcs_repo.execute("""
