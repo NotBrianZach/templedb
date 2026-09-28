@@ -627,6 +627,12 @@ class VarCommands(Command):
             if row:
                 print(row['var_value'])
                 return 0
+            # Same reasoning as the project path below: a global secret is still a
+            # variable the caller asked for by name.
+            val = self._global_secret_get(profile, key)
+            if val is not None:
+                print(val)
+                return 0
             print(f"error: {key} not found in global scope", file=sys.stderr)
             return 1
 
@@ -645,6 +651,12 @@ class VarCommands(Command):
             return 0
 
         value = self._resolve(project['id'], key, target)
+        if value is None:
+            # Fall through to the secret store. `var list` prints plain vars and
+            # secrets in one view and tells the reader to "templedb env var get
+            # bza KEY to reveal" a masked value — so `get` has to look in both
+            # places, or it reports "not found" for a key the tool just listed.
+            value = self._secret_get(project['id'], profile, key)
         if value is None:
             print(f"error: {key} not found (project={args.project}, target={target})", file=sys.stderr)
             return 1
@@ -1119,7 +1131,19 @@ class VarCommands(Command):
         stored_name = _var_key(target, key)
         profile = getattr(args, 'profile', 'default') or 'default'
 
+        # Every branch below checks the row exists before deleting it. `execute()`
+        # returns lastrowid, which says nothing about how many rows a DELETE
+        # removed, so an unconditional "unset X" printed success for keys that were
+        # never there — including every secret, which lives in a different table.
         if getattr(args, 'global_scope', False):
+            if self._ev_lookup('global', None, stored_name) is None:
+                val = self._global_secret_get(profile, key)
+                if val is not None:
+                    print("error: that is a global secret; unset it with --secret",
+                          file=sys.stderr)
+                    return 1
+                print(f"error: {key} not found [global]", file=sys.stderr)
+                return 1
             self.execute("""
                 DELETE FROM environment_variables
                 WHERE scope_type = 'global' AND scope_id IS NULL AND var_name = ?
@@ -1129,6 +1153,9 @@ class VarCommands(Command):
 
         if getattr(args, 'tag', None):
             tag = self._get_tag(args.tag)
+            if self._ev_lookup('tag', tag['id'], stored_name) is None:
+                print(f"error: {key} not found [tag:{args.tag}]", file=sys.stderr)
+                return 1
             self.execute("""
                 DELETE FROM environment_variables
                 WHERE scope_type = 'tag' AND scope_id = ? AND var_name = ?
@@ -1143,19 +1170,29 @@ class VarCommands(Command):
         project = self._get_project(args.project)
 
         if getattr(args, 'secret', False):
-            found = self._secret_unset(project['id'], profile, key)
-            if found:
+            if self._secret_unset(project['id'], profile, key):
                 print(f"unset secret {key} [{args.project}/{profile}]")
-            else:
-                print(f"warning: secret {key} not found [{args.project}/{profile}]", file=sys.stderr)
+                return 0
+            print(f"error: secret {key} not found [{args.project}/{profile}]", file=sys.stderr)
+            return 1
+
+        if self._ev_lookup('project', project['id'], stored_name) is not None:
+            self.execute("""
+                DELETE FROM environment_variables
+                WHERE scope_type = 'project' AND scope_id = ? AND var_name = ?
+            """, (project['id'], stored_name))
+            print(f"unset {key} [{args.project}]")
             return 0
 
-        self.execute("""
-            DELETE FROM environment_variables
-            WHERE scope_type = 'project' AND scope_id = ? AND var_name = ?
-        """, (project['id'], stored_name))
-        print(f"unset {key} [{args.project}]")
-        return 0
+        # Not a plain var, so try the secret store rather than claiming success.
+        # `unset` means "remove this variable"; making the caller already know which
+        # of the two tables it lives in is what produced the false success.
+        if self._secret_unset(project['id'], profile, key):
+            print(f"unset secret {key} [{args.project}/{profile}]")
+            return 0
+
+        print(f"error: {key} not found [{args.project}]", file=sys.stderr)
+        return 1
 
     # ------------------------------------------------------------------
     # var tag
