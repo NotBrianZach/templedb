@@ -22,7 +22,63 @@ class CheckoutRepository(BaseRepository):
     - Cleaning up stale checkouts
     """
 
-    def create_or_update(self, project_id: int, checkout_path: str, branch_name: str = 'main') -> int:
+    @staticmethod
+    def classify_path(checkout_path: str) -> str:
+        """Which role a path implies: canonical | edit | scratch.
+
+        The single definition of the rule migration 113 applied in SQL.
+        Both must agree — a path classified one way at backfill and the
+        other at creation would make a tree appear or vanish from
+        resolution depending on which wrote the row last.
+
+        Deliberately conservative: anything not recognisably under
+        checkouts/ or edit-workspaces/ is scratch, because scratch is the
+        role that can never win resolution. Guessing 'edit' for an
+        unfamiliar path would hand it authority over commits.
+        """
+        p = str(checkout_path)
+        if '/.config/templedb/edit-workspaces/' in p:
+            return 'edit'
+        if '/.config/templedb/checkouts/' in p:
+            return 'canonical'
+        return 'scratch'
+
+    def current_session_id(self) -> Optional[int]:
+        """The session this process belongs to, or None. Never creates one.
+
+        Deliberately NOT VCSService.get_current_session, which creates a
+        session when none exists. Resolving a path must not have the side
+        effect of opening a session — `vcs status` would start one just by
+        asking where the tree is.
+
+        Reads the same env vars that pin an agent's identity across the
+        fresh-shell-per-tool-call boundary, and only accepts a session
+        that is still live.
+        """
+        import os
+        sid = os.environ.get('TEMPLEDB_SESSION_ID')
+        if sid:
+            try:
+                row = self.query_one(
+                    "SELECT id FROM vcs_sessions WHERE id = ? AND ended_at IS NULL",
+                    (int(sid),))
+                if row:
+                    return row['id']
+            except (ValueError, TypeError):
+                pass
+        name = os.environ.get('TEMPLEDB_SESSION')
+        if name:
+            row = self.query_one(
+                """SELECT id FROM vcs_sessions
+                    WHERE name = ? AND ended_at IS NULL
+                    ORDER BY started_at DESC LIMIT 1""", (name,))
+            if row:
+                return row['id']
+        return None
+
+    def create_or_update(self, project_id: int, checkout_path: str,
+                         branch_name: str = 'main',
+                         kind: Optional[str] = None) -> int:
         """
         Create or update a checkout record.
 
@@ -30,11 +86,27 @@ class CheckoutRepository(BaseRepository):
             project_id: Project ID
             checkout_path: Filesystem path where project was checked out
             branch_name: Branch name (default: 'main')
+            kind: canonical | edit | scratch. Inferred from the path when
+                not given.
 
         Returns:
             Checkout ID
         """
         logger.info(f"Creating/updating checkout for project {project_id} at {checkout_path}")
+
+        # `kind` must be written here, not left to the column default.
+        # The default is 'scratch' (fail-safe for rows nothing classified),
+        # and resolve() ignores scratch entirely — so a new checkout that
+        # did not set it would be invisible to every command that looks
+        # for a tree. `templedb edit <slug>` would hand back a workspace
+        # that staging then refused to read.
+        kind = kind or self.classify_path(checkout_path)
+
+        # An edit workspace belongs to whoever made it, so concurrent
+        # agents stop competing for one answer. Only edit trees get an
+        # owner: a canonical tree is shared by definition, and a scratch
+        # tree is never resolved to.
+        session_id = self.current_session_id() if kind == 'edit' else None
 
         # Upsert in place. The previous INSERT OR REPLACE was destructive:
         # REPLACE deletes the conflicting row and inserts a new one with a
@@ -46,13 +118,20 @@ class CheckoutRepository(BaseRepository):
         # identity stable, so neither happens.
         self.execute("""
             INSERT INTO checkouts
-            (project_id, checkout_path, branch_name, checkout_at, is_active)
-            VALUES (?, ?, ?, datetime('now'), 1)
+            (project_id, checkout_path, branch_name, checkout_at, is_active,
+             kind, session_id)
+            VALUES (?, ?, ?, datetime('now'), 1, ?, ?)
             ON CONFLICT(project_id, checkout_path) DO UPDATE SET
                 branch_name = excluded.branch_name,
                 checkout_at = excluded.checkout_at,
-                is_active = 1
-        """, (project_id, checkout_path, branch_name))
+                is_active = 1,
+                kind = excluded.kind,
+                -- Re-checking out an edit workspace transfers ownership to
+                -- the session doing it; a NULL (no session) must not erase
+                -- an existing owner, or an incidental materialise would
+                -- orphan another agent's tree.
+                session_id = COALESCE(excluded.session_id, checkouts.session_id)
+        """, (project_id, checkout_path, branch_name, kind, session_id))
 
         # lastrowid is unreliable for the DO UPDATE path, so read the id
         # back rather than trusting the insert's return value.
@@ -158,6 +237,13 @@ class CheckoutRepository(BaseRepository):
 
         # PURPOSE_EDIT
         edits = extant([r for r in rows if r['kind'] == 'edit'])
+
+        # Default to this process's session. Without this the session_id
+        # parameter was dead weight — nothing on the 13 call sites behind
+        # SyncManager.get_checkout_path passes one, so step 1 could never
+        # fire and concurrent agents kept sharing an answer.
+        if session_id is None:
+            session_id = self.current_session_id()
 
         if session_id is not None:
             mine = [r for r in edits if r['session_id'] == session_id]

@@ -3413,6 +3413,8 @@ WantedBy=timers.target
              self._check_working_state_files_exist),
             ('checkout_matches_db',
              self._check_checkout_matches_db),
+            ('checkout_roles_are_unambiguous',
+             self._check_checkout_roles_unambiguous),
             ('exec_targets_are_executable',
              self._check_exec_targets_are_executable),
             ('wal_within_size_budget',
@@ -4050,6 +4052,88 @@ WantedBy=timers.target
                         f"and checkout with no working_state row — builds and "
                         f"commits reading {root} will silently use the "
                         f"checkout's version")
+
+        return issues
+
+    def _check_checkout_roles_unambiguous(self):
+        """Invariant: a project's checkout roles answer one question each.
+
+        Migrations 113/114 gave checkouts a `kind` and an owning session
+        so that `resolve()` could stop meaning "whichever directory was
+        written to most recently". That rule is what let a
+        `project checkout` make the canonical tree authoritative for
+        staging and cost system_config commit FA20845EE25BD208 its
+        content. Classification alone does not keep the answer unique,
+        though, so this reports the three ways it can go ambiguous again:
+
+          MULTIPLE CANONICAL — two published trees for one project. There
+            is no rule to choose between them and a build would pick by
+            recency, which is the original bug wearing a new column.
+
+          MULTIPLE ADOPTABLE EDIT — more than one edit workspace that no
+            live session owns. resolve() warns and takes the newest, so
+            the answer is stable but arbitrary; a materialise elsewhere
+            can still move it.
+
+          ORPHANED EDIT — an edit workspace whose session has ended.
+            Harmless on its own, and deliberately NOT auto-retired: all
+            four that existed on 2026-09-27 had content differing from
+            the DB, so deleting them would have discarded work nobody had
+            looked at. Reported so the choice is made deliberately.
+
+        Scratch rows are ignored entirely — being un-authoritative is
+        what scratch means, so any number of them is fine.
+        """
+        from db_utils import query_all
+        from pathlib import Path
+
+        issues = []
+        rows = query_all("""
+            SELECT p.slug, c.checkout_path, c.kind, c.session_id,
+                   s.ended_at, s.name AS session_name
+              FROM checkouts c
+              JOIN projects p ON p.id = c.project_id
+         LEFT JOIN vcs_sessions s ON s.id = c.session_id
+             WHERE c.is_active = 1 AND c.kind IN ('canonical', 'edit')
+             ORDER BY p.slug, c.checkout_at DESC
+        """)
+
+        by_project = {}
+        for r in rows:
+            by_project.setdefault(r['slug'], []).append(r)
+
+        for slug, rs in sorted(by_project.items()):
+            # Only trees that exist can be resolved to; a vanished one is
+            # already handled by admin checkout-gc.
+            live = [r for r in rs if Path(r['checkout_path']).is_dir()]
+
+            canonical = [r for r in live if r['kind'] == 'canonical']
+            if len(canonical) > 1:
+                issues.append(
+                    f"{slug}: {len(canonical)} canonical checkouts — a build "
+                    f"would pick by recency. Keep one and deactivate the "
+                    f"rest: " + ", ".join(r['checkout_path'] for r in canonical))
+
+            edits = [r for r in live if r['kind'] == 'edit']
+            adoptable = [r for r in edits
+                         if r['session_id'] is None or r['ended_at'] is not None]
+            if len(adoptable) > 1:
+                issues.append(
+                    f"{slug}: {len(adoptable)} edit checkouts that no live "
+                    f"session owns — `vcs add` takes the newest "
+                    f"({adoptable[0]['checkout_path']}), but that is recency "
+                    f"again and a materialise elsewhere can move it. Retire "
+                    f"the ones you are done with: "
+                    + ", ".join(r['checkout_path'] for r in adoptable[1:]))
+
+            for r in edits:
+                if r['session_id'] is not None and r['ended_at'] is not None:
+                    issues.append(
+                        f"{slug}: edit checkout {r['checkout_path']} belongs "
+                        f"to session '{r['session_name']}', which ended "
+                        f"{r['ended_at']}. Commit or discard it — it is not "
+                        f"auto-removed because its contents may differ from "
+                        f"the DB")
 
         return issues
 

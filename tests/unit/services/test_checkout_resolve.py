@@ -25,9 +25,17 @@ from db_utils import execute, query_one
 
 
 @pytest.fixture
-def repo(tmp_path):
+def repo(tmp_path, monkeypatch):
     """Build a project's checkout rows and return (resolver, mkdir helper)."""
     _schema()
+
+    # resolve() now defaults session_id to this process's session, read
+    # from the environment. Left alone, these tests would inherit whatever
+    # TEMPLEDB_SESSION the developer (or agent) happens to have exported
+    # and give different answers on different machines. Cleared by default;
+    # tests that care set it explicitly.
+    monkeypatch.delenv('TEMPLEDB_SESSION', raising=False)
+    monkeypatch.delenv('TEMPLEDB_SESSION_ID', raising=False)
 
     def _make(rows, session_id=None):
         """rows: list of (kind, leaf, is_active, session_id, exists)."""
@@ -63,9 +71,12 @@ def _schema():
                kind TEXT NOT NULL DEFAULT 'scratch',
                session_id INTEGER,
                UNIQUE(project_id, checkout_path))""",
+        # started_at matters: current_session_id() orders by it to pick
+        # the most recent session when a name has been reused.
         """CREATE TABLE IF NOT EXISTS vcs_sessions (
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT,
-               author TEXT, ended_at TEXT)""",
+               author TEXT, ended_at TEXT,
+               started_at TEXT NOT NULL DEFAULT (datetime('now')))""",
     ):
         execute(stmt)
 
@@ -252,3 +263,98 @@ def test_dev_mode_sql_orders_edit_before_canonical(repo):
     assert rows[2][0].endswith('tmp'), "scratch last"
     # And the repository agrees on the top pick.
     assert r.resolve(pid, EDIT)['checkout_path'] == rows[0][0]
+
+
+# --- creation must classify, or the row is invisible -------------------
+
+def test_create_or_update_classifies_by_path(repo, tmp_path, monkeypatch):
+    """`kind` must be written at creation, not left to the column default.
+
+    The default is 'scratch' and resolve() ignores scratch, so a checkout
+    created without a kind would be invisible to every command that looks
+    for a tree — `templedb edit <slug>` would hand back a workspace that
+    staging then refused to read. This shipped briefly in phase 2.
+    """
+    r, pid = repo([])
+    monkeypatch.delenv('TEMPLEDB_SESSION', raising=False)
+    monkeypatch.delenv('TEMPLEDB_SESSION_ID', raising=False)
+    cases = [
+        ('/home/u/.config/templedb/checkouts/proj', 'canonical'),
+        ('/home/u/.config/templedb/edit-workspaces/proj/sess', 'edit'),
+        ('/tmp/whatever', 'scratch'),
+        ('/some/unfamiliar/place', 'scratch'),
+    ]
+    for path, expected in cases:
+        assert r.classify_path(path) == expected, path
+        r.create_or_update(pid, path)
+        row = r.get_by_path(pid, path)
+        got = query_one("SELECT kind FROM checkouts WHERE id = ?", (row['id'],))
+        assert got['kind'] == expected, f"{path} -> {got['kind']}"
+
+
+def test_unfamiliar_paths_default_to_scratch(repo):
+    """Conservative on purpose: guessing 'edit' for an unrecognised path
+    would hand it authority over commits."""
+    r, _ = repo([])
+    assert r.classify_path('/opt/somewhere/else') == 'scratch'
+
+
+def test_created_edit_workspace_is_owned_by_this_session(repo, tmp_path, monkeypatch):
+    """Ownership is what lets concurrent agents stop competing."""
+    r, pid = repo([])
+    execute("INSERT INTO vcs_sessions (name, author, ended_at) VALUES ('mine','a',NULL)")
+    sid = query_one("SELECT id FROM vcs_sessions WHERE name='mine'")['id']
+    monkeypatch.setenv('TEMPLEDB_SESSION', 'mine')
+    monkeypatch.delenv('TEMPLEDB_SESSION_ID', raising=False)
+    p = '/home/u/.config/templedb/edit-workspaces/proj/mine'
+    r.create_or_update(pid, p)
+    row = query_one("SELECT kind, session_id FROM checkouts WHERE checkout_path=?", (p,))
+    assert row['kind'] == 'edit'
+    assert row['session_id'] == sid
+
+
+def test_canonical_never_acquires_an_owner(repo, monkeypatch):
+    """A published tree is shared by definition. If it gained a session,
+    resolve() would start treating it as someone's private workspace."""
+    r, pid = repo([])
+    execute("INSERT INTO vcs_sessions (name, author, ended_at) VALUES ('mine','a',NULL)")
+    monkeypatch.setenv('TEMPLEDB_SESSION', 'mine')
+    p = '/home/u/.config/templedb/checkouts/proj'
+    r.create_or_update(pid, p)
+    row = query_one("SELECT kind, session_id FROM checkouts WHERE checkout_path=?", (p,))
+    assert row['kind'] == 'canonical'
+    assert row['session_id'] is None
+
+
+def test_rematerialising_does_not_orphan_another_sessions_workspace(repo, monkeypatch):
+    """COALESCE on the upsert: a session-less materialise must not erase
+    an existing owner, or an incidental `project checkout` would strand
+    another agent's tree."""
+    r, pid = repo([])
+    execute("INSERT INTO vcs_sessions (name, author, ended_at) VALUES ('owner','a',NULL)")
+    sid = query_one("SELECT id FROM vcs_sessions WHERE name='owner'")['id']
+    p = '/home/u/.config/templedb/edit-workspaces/proj/owner'
+    monkeypatch.setenv('TEMPLEDB_SESSION', 'owner')
+    r.create_or_update(pid, p)
+    monkeypatch.delenv('TEMPLEDB_SESSION', raising=False)
+    r.create_or_update(pid, p)          # e.g. a plain `project checkout`
+    row = query_one("SELECT session_id FROM checkouts WHERE checkout_path=?", (p,))
+    assert row['session_id'] == sid, "owner must survive a session-less re-checkout"
+
+
+def test_current_session_id_never_creates_a_session(repo, monkeypatch):
+    """Resolving a path must not have the side effect of opening a
+    session — `vcs status` would start one just by asking where the tree
+    is. This is why it is not VCSService.get_current_session."""
+    r, _ = repo([])
+    monkeypatch.setenv('TEMPLEDB_SESSION', 'does-not-exist')
+    before = query_one("SELECT COUNT(*) c FROM vcs_sessions")['c']
+    assert r.current_session_id() is None
+    assert query_one("SELECT COUNT(*) c FROM vcs_sessions")['c'] == before
+
+
+def test_ended_session_is_not_current(repo, monkeypatch):
+    r, _ = repo([])
+    execute("INSERT INTO vcs_sessions (name, author, ended_at) VALUES ('old','a','2026-09-01')")
+    monkeypatch.setenv('TEMPLEDB_SESSION', 'old')
+    assert r.current_session_id() is None
