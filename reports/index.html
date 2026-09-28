@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-09-27-2103-checkout-role-and-session-scoped-resolution-design.html">
+  <div class="row">
+    <span class="date">2026-09-27 21:03</span>
+    <span class="title">Checkout role and session-scoped resolution design</span>
+  </div>
+  <div class="summary">
+    templedb vcs commit silently reverted a file set write that --verify had just confirmed. The cause is not a race or a typo: checkouts.is_active is 1 on all 61 rows and 0 on none, so "the active checkout" actually resolves to whichever directory was written to most recently. Four of seven projects have more than one candidate; templedb has 43. This is the design for replacing that rule with an explicit role plus session ownership, and the measurement showing why the role column alone is not enough.
+  </div>
+</a>
+
 <a class="report" href="2026-09-25-0912-session-recap-silent-failure-audit-db-vs-workspace-split-and.html">
   <div class="row">
     <span class="date">2026-09-25 09:12</span>

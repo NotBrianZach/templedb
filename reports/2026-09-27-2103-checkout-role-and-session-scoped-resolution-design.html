@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Checkout role and session-scoped resolution design</title>
+<style>
+  :root {
+    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a;
+    --text: #d0d0e8; --muted: #8080a0; --accent: #e94560;
+    --link: #7ec7ff; --code-bg: #0a0a14; --pos: #6ecf7a; --warn: #e0c060;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 860px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.55rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.82em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  .urgent { border-left-color: var(--warn); }
+  .quiet { color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1.1rem 0; font-size: 0.88em; }
+  th { text-align: left; color: #b0b0d0; font-size: 0.72rem;
+       text-transform: uppercase; letter-spacing: 0.08em;
+       border-bottom: 1px solid var(--border); padding: 0.45rem 0.6rem; }
+  td { padding: 0.45rem 0.6rem; border-bottom: 1px solid rgba(30,30,58,0.6);
+       vertical-align: top; }
+  td.ok { color: var(--pos); white-space: nowrap; }
+  td.bad { color: var(--accent); }
+  ul li { margin: 0.35rem 0; }
+  ol li { margin: 0.35rem 0; }
+  .hash { font-family: "JetBrains Mono", ui-monospace, monospace;
+          font-size: 0.85em; color: #e6c46b; }
+</style>
+</head>
+<body>
+
+<h1>Checkout role and session-scoped resolution design</h1>
+<p class="lede">
+<code>templedb vcs commit</code> silently reverted a <code>file set</code> write
+that <code>--verify</code> had just confirmed. The cause is not a race or a
+typo: <code>checkouts.is_active</code> is <strong>1 on all 61 rows and 0 on
+none</strong>, so "the active checkout" actually resolves to <em>whichever
+directory was written to most recently</em>. Four of seven projects have more
+than one candidate; templedb has 43. This is the design for replacing that rule
+with an explicit role plus session ownership, and the measurement showing why
+the role column alone is not enough.
+</p>
+
+<h2>The incident</h2>
+
+<p>
+Commit <span class="hash">FA20845EE25BD208</span> to <code>system_config</code>
+was supposed to record two files. It recorded the corrected
+<code>flake.nix</code> (<span class="hash">b3d734a99778</span>) and the
+<strong>stale</strong> <code>hosts/zachgigamothers.nix</code>
+(<span class="hash">3dee653f6abd</span>) — discarding DB content that
+<code>file set --verify</code> had confirmed as
+<span class="hash">fd190b8c2437</span> moments earlier. The tree then claimed
+<code>hostName = "zachgigamothers"</code> while the file that had been verified
+against the running machine said <code>"nixos"</code>.
+</p>
+
+<p>The chain, all in one direction:</p>
+
+<pre>vcs add &lt;file&gt;
+  → VCSService.stage_files
+  → _refresh_ws_row_from_disk          # re-hash the file from disk
+  → SyncManager.get_checkout_path()
+  → CheckoutRepository.get_active_for_project()
+  → "newest is_active=1 row whose directory still exists"</pre>
+
+<p>
+Staging deliberately re-reads from disk. That exists for a good reason —
+without it, <code>vcs add</code> stages whatever hash the last scanner pass
+recorded, so an editor write that postdates the scan gets committed with a
+message describing a different diff. The bug is not that it reads disk. The bug
+is <em>which</em> disk it reads.
+</p>
+
+<div class="callout">
+<strong>What made it fire:</strong> earlier in the same session I had run
+<code>project checkout system_config …/checkouts/system_config</code> to
+refresh the canonical tree. That made the canonical row the newest, so it won
+"active" away from the edit workspace where the real work was. Staging then read
+pre-correction bytes from it, over a verified DB write.
+</div>
+
+<h2>is_active is not broken, it is empty</h2>
+
+<p>
+The column holds no information. Measured on the live database:
+</p>
+
+<pre>checkouts total = 61      is_active=1: 61      is_active=0: 0</pre>
+
+<p>
+Nothing has ever set it to 0. The single <code>UPDATE</code> that touches it
+(<code>vcs_service.py:391</code>) fires only when session reaping
+<code>rmtree</code>s a workspace. So <code>WHERE is_active = 1</code> is a
+no-op filter and the effective rule is recency.
+</p>
+
+<p>
+<code>get_active_for_project</code> already carries a comment about this and a
+mitigation — it prefers the newest row whose directory <em>exists</em>, because
+45 rows once pointed at deleted directories. That part works and is not the
+problem here. The canonical checkout existed. It won legitimately, by a rule
+that is simply wrong for the question being asked.
+</p>
+
+<p>Two independent defects in that rule:</p>
+
+<ul>
+<li><strong>Recency-based.</strong> Any tool that materialises to a different
+path becomes the staging authority as a side effect. 40 of templedb's 43
+candidates are <code>/tmp/tdb-*</code> scratch trees that still exist; each is
+one <code>project checkout</code> away from owning the next commit.</li>
+<li><strong>Project-scoped, not session-scoped.</strong> Concurrent agents on
+one project share a single answer. <code>bza</code> currently has two agent
+workspaces; today's rule hands both agents whichever is newer.</li>
+</ul>
+
+<h2>Measured starting state</h2>
+
+<table>
+<tr><th>kind (by path shape)</th><th>count</th><th>notes</th></tr>
+<tr><td><code>scratch</code> (<code>/tmp/*</code>)</td><td>47</td>
+    <td>all still exist</td></tr>
+<tr><td><code>canonical</code> (<code>checkouts/&lt;slug&gt;</code>)</td><td>5</td>
+    <td class="ok">1 per project, 0 violations</td></tr>
+<tr><td><code>edit</code> (session-stamped)</td><td>6</td>
+    <td>leaf name <em>is</em> the session name for <code>claude-code-agent-*</code></td></tr>
+<tr><td><code>edit</code> (bare legacy)</td><td>3</td>
+    <td class="bad">parent directory of the session-stamped ones</td></tr>
+</table>
+
+<p>
+The surface to change is small, which is the one piece of good news: there is
+<strong>one</strong> insert point (<code>CheckoutRepository.create_or_update</code>)
+with <strong>one</strong> caller (<code>checkout.py:134</code>), and
+<strong>five</strong> readers of the resolution.
+</p>
+
+<h2>Schema</h2>
+
+<pre>ALTER TABLE checkouts ADD COLUMN kind TEXT NOT NULL DEFAULT 'scratch';
+ALTER TABLE checkouts ADD COLUMN session_id INTEGER REFERENCES vcs_sessions(id);</pre>
+
+<p>
+<code>DEFAULT 'scratch'</code> is fail-safe on purpose: an unclassified row must
+never win authority. Defaulting to <code>'edit'</code> would make every future
+unlabelled row a candidate, which is the current bug with extra steps.
+</p>
+
+<p>Backfill is pure path shape. No inference:</p>
+
+<pre>UPDATE checkouts SET kind='canonical'
+ WHERE checkout_path LIKE '%/.config/templedb/checkouts/%';
+UPDATE checkouts SET kind='edit'
+ WHERE checkout_path LIKE '%/.config/templedb/edit-workspaces/%';
+UPDATE checkouts SET is_active=0 WHERE kind='scratch';   -- retires 47 rows</pre>
+
+<p>
+<code>session_id</code> is left <strong>NULL</strong> by the backfill. The leaf
+names could be matched against <code>vcs_sessions.name</code>, but historical
+attribution has no consumer and a wrong guess is worse than an honest NULL.
+Only new checkouts get an owner.
+</p>
+
+<h2>Resolution</h2>
+
+<p>
+<code>get_active_for_project(project_id)</code> becomes
+<code>resolve(project_id, purpose)</code>, with the old name kept as a
+deprecated shim mapping to <code>purpose=EDIT</code> so the five readers can be
+migrated one at a time.
+</p>
+
+<pre>BUILD | MATERIALIZE | PUBLISH  →  the canonical row. Full stop.
+
+EDIT | STAGE | COMMIT | STATUS →
+  1. this session's edit workspace (kind=edit, session_id=me, dir exists)
+  2. adoptable edit workspaces (session_id IS NULL, or session.ended_at set):
+       exactly one   → use it
+       more than one → raise AmbiguousCheckout(candidates)
+  3. none → refuse, naming `templedb edit &lt;slug&gt;`
+
+scratch is never returned. A scratch tree is used only when named
+explicitly, e.g. `templedb commit &lt;slug&gt; &lt;dir&gt;`.</pre>
+
+<p>
+The load-bearing property is in step 1: <strong>another live session's
+workspace is never silently used.</strong> Different purposes also stop
+fighting over one answer — a build genuinely wants the canonical tree while a
+commit genuinely wants the edit tree, and no single "active" flag can express
+both.
+</p>
+
+<h2>Session-scoping compatibility</h2>
+
+<p>This is where the sharp edges are, and one of them invalidates the simple version of the plan.</p>
+
+<h3>1. Reaping must not orphan a tree</h3>
+<p>
+On session end, set <code>session_id = NULL</code> — making the row
+<em>adoptable</em> via step 2 — rather than deleting it. Set
+<code>is_active = 0</code> only if the directory was actually removed. That
+keeps the existing <code>vcs_service.py:391</code> behaviour coherent instead
+of competing with it.
+</p>
+
+<h3>2. No session behaves exactly as today</h3>
+<p>
+With <code>TEMPLEDB_SESSION</code> unset, step 1 cannot match and step 2
+applies. A project with one workspace resolves as it does now. That is the
+backward-compatibility guarantee, and it is why step 2 cannot be dropped in
+favour of pure session ownership.
+</p>
+
+<h3>3. The raw-sqlite duplicate becomes a correctness coupling</h3>
+<p>
+<code>src/cli/__init__.py</code> resolves the dev-mode source tree
+<em>before</em> the templedb packages are importable, so it reimplements the
+rule in stdlib <code>sqlite3</code>. It has to learn the same rule. Until it
+does, <code>TEMPLEDB_DEV_MODE=1</code> can run different code than the tree you
+just edited — which its own comment says already happened once. Mitigation: port
+the rule and add a test asserting both implementations agree against the live
+database.
+</p>
+
+<h3>4. Ended-session ambiguity is real, and the role column does not fix it</h3>
+
+<div class="callout urgent">
+<strong>The measurement that changes the plan.</strong> After classifying by
+path shape and deactivating all 47 scratch rows, <strong>3 of 4 projects are
+still ambiguous</strong>, because each has several live <em>edit</em>
+workspaces: <code>bza</code> 4, <code>templedb</code> 3,
+<code>system_config</code> 2. Step 2 would raise for three projects on day one.
+Session scoping is therefore required, not complementary.
+</div>
+
+<p>
+The bare legacy rows have to be retired in the same migration. That also fixes
+something worse than ambiguity: <code>edit-workspaces/&lt;slug&gt;</code> is the
+<strong>parent</strong> of the session-stamped workspaces, so that tree
+physically contains nested copies of the project. If a bare row ever won
+resolution, a scan would walk into the session subdirectories and see every file
+twice.
+</p>
+
+<pre>UPDATE checkouts SET is_active=0
+ WHERE kind='edit'
+   AND checkout_path IN ('…/edit-workspaces/bza',
+                         '…/edit-workspaces/templedb',
+                         '…/edit-workspaces/system_config');</pre>
+
+<p>
+That leaves <code>bza</code> 3, <code>templedb</code> 2,
+<code>system_config</code> 1. The remaining two are resolved by step 1 once
+sessions own their workspaces, and by pruning workspaces whose session has ended
+and whose tree has no uncommitted changes.
+</p>
+
+<h2>Indexes</h2>
+
+<pre>CREATE UNIQUE INDEX checkouts_one_canonical ON checkouts(project_id)
+  WHERE kind='canonical' AND is_active=1;
+CREATE UNIQUE INDEX checkouts_one_edit_per_session ON checkouts(project_id, session_id)
+  WHERE kind='edit' AND is_active=1;</pre>
+
+<p>
+The canonical index is satisfiable today — verified, 5 rows across 5 projects,
+zero violations. The per-session index is <strong>not enforceable yet</strong>:
+SQLite treats NULLs as distinct in a unique index, so every
+<code>session_id IS NULL</code> edit row slips through, and that is precisely
+the set which is still ambiguous. It only becomes meaningful once sessions
+populate the column, which is why it lands last rather than first.
+</p>
+
+<h2>Rollout</h2>
+
+<table>
+<tr><th>phase</th><th>change</th><th>verifiable by</th></tr>
+<tr><td>0</td><td>blob-age guard in <code>_refresh_ws_row_from_disk</code></td>
+    <td>reproduces this incident; independent of everything below</td></tr>
+<tr><td>1</td><td>migration: columns, path-shape backfill, retire scratch + bare legacy</td>
+    <td>50 rows deactivated; resolution unchanged</td></tr>
+<tr><td>2</td><td><code>resolve(purpose)</code> + 5 readers; old name as shim</td>
+    <td>staging picks the session tree, build picks canonical</td></tr>
+<tr><td>3</td><td>canonical unique index + doctor invariant for &gt;1 adoptable edit tree</td>
+    <td>index applies cleanly</td></tr>
+<tr><td>4</td><td><code>session_id</code> populated on create; <code>AmbiguousCheckout</code> becomes fatal</td>
+    <td>per-session index applies</td></tr>
+</table>
+
+<p>
+Phases 0 and 1 are independently useful and carry no behavioural risk — phase 1
+is pure bookkeeping, and phase 0 is the part that actually stops data loss.
+</p>
+
+<h3>Phase 0 in more detail, since it ships first</h3>
+<p>
+Refuse the disk overwrite when the disk content resolves to a
+<code>content_blobs</code> row <em>older</em> than the one the working-state row
+already holds. This is the same discriminator already shipped for the
+<code>checkout_matches_db</code> invariant in
+<span class="hash">5584E0DF1B9559E3</span>, so the two agree by construction
+rather than by coincidence.
+</p>
+<p>
+<strong>Do not use mtime for this.</strong> It is the obvious choice and it
+would not have caught this incident: <code>project checkout</code> writes stale
+content with a <em>fresh</em> mtime, so the stale copy looks newer than the
+verified write. Blob age is the signal that holds.
+</p>
+
+<h2>One open question</h2>
+
+<p>
+Step 3 above refuses when no edit tree exists. The alternative is to return the
+canonical tree flagged read-only, which is friendlier — but it means
+<code>vcs status</code> on such a project reports against the materialised copy,
+and DB-versus-checkout confusion is the root of this entire class of bug. The
+design as written refuses and names <code>templedb edit &lt;slug&gt;</code>. That
+is a judgement call, not a derivation, and it is the one decision here worth
+disagreeing with.
+</p>
+
+<h2>Wider point</h2>
+
+<p>
+<code>is_active</code> was a boolean that no code ever cleared, so it decayed
+into a constant while still <em>looking</em> like state. Every reader then
+layered a heuristic on top of it — newest-first here, directory-exists there —
+and the heuristics diverged. The same shape has now appeared three times in this
+codebase: <code>project_files.lines_of_code</code> written at import and never
+refreshed, <code>project_files.status</code> read by some queries and ignored by
+others, and this. A column that nothing maintains is worse than a missing
+column, because a missing column cannot be trusted by mistake.
+</p>
+
+<p class="quiet" style="margin-top:2.5rem">
+<em>2026-09-27. Incident: <span class="hash">FA20845EE25BD208</span> lost the
+write, <span class="hash">F5B49D3026DD5DAB</span> landed it. Measurements taken
+against the live database at 61 checkout rows. Nothing in this design is
+implemented yet — phase 0 is the intended starting point.</em>
+</p>
+
+</body>
+</html>
