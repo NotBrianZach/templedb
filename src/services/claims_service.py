@@ -130,12 +130,20 @@ def assert_claim(project_id: int,
 
 # ── Entity-graph mirroring ───────────────────────────────────────────
 # Claims become kind='Claim' entities so the existing /entities browser
-# and `templedb entity` CLI render them with no new display code. Only
-# Claim entities are created here — edges to Commit/Report/AstBuild are
-# added when those entities already exist, because their ingest paths
-# own them and inventing rows would corrupt the counts hygiene checks.
+# and `templedb entity` CLI render them with no new display code.
+#
+# Claim and Commit entities are created here; Report and AstBuild edges
+# are only linked when those entities already exist, since their ingest
+# paths own them. Commit is the exception on purpose: a claim is asserted
+# the moment its evidence appears, which is almost always BEFORE entity
+# ingest has seen the commit, so waiting for ingest meant the scoped-to
+# spine edge was silently never written. The row created here is the same
+# faithful projection of vcs_commits that the ingest builds — identical
+# ref, label and 'git' authority — so the two upserts converge instead of
+# duplicating.
 
-def _upsert_entity(kind: str, external_ref: str, label: Optional[str]) -> Optional[int]:
+def _upsert_entity(kind: str, external_ref: str, label: Optional[str],
+                   authority: str = CLAIM_AUTHORITY) -> Optional[int]:
     """Local mirror of EntityCommands._upsert_entity (src/cli/commands/entity.py)
     — a service importing a CLI class would be the wrong direction."""
     from db_utils import execute, query_one
@@ -150,7 +158,7 @@ def _upsert_entity(kind: str, external_ref: str, label: Optional[str]) -> Option
     execute("""INSERT INTO entities
                    (kind, external_ref, source_authority, label, sync_scope)
                  VALUES (?, ?, ?, ?, 'fleet')""",
-            (kind, external_ref, CLAIM_AUTHORITY, label))
+            (kind, external_ref, authority, label))
     row = query_one("SELECT id FROM entities WHERE kind=? AND external_ref=?",
                     (kind, external_ref))
     return row["id"] if row else None
@@ -185,15 +193,24 @@ def _mirror_to_graph(claim_id: int, project_id: int, commit_id: int,
         if not cid:
             return
 
-        # Claim --scoped-to--> Commit. This edge, not the report edge,
-        # is the spine: every claim has a revision, few have a report.
+        # Claim --scoped-to--> Commit. This edge, not the report edge, is
+        # the spine: every claim has a revision, few have a report. The
+        # slug comes via vcs_branches, matching how the entity ingest
+        # derives the ref — joining projects directly would build a
+        # different ref on any project where the two disagree, and
+        # silently duplicate the entity.
         commit = query_one(
-            """SELECT p.slug, c.commit_hash FROM vcs_commits c
-                 JOIN projects p ON p.id = c.project_id
+            """SELECT p.slug, c.commit_hash, c.commit_message
+                 FROM vcs_commits c
+                 JOIN vcs_branches b ON b.id = c.branch_id
+                 JOIN projects p     ON p.id = b.project_id
                 WHERE c.id = ?""", (commit_id,))
         if commit:
+            summary = (commit["commit_message"] or "").split("\n", 1)[0][:80]
             _link(cid, "scoped-to",
-                  _entity_id("Commit", f"{commit['slug']}/{commit['commit_hash']}"))
+                  _upsert_entity("Commit",
+                                 f"{commit['slug']}/{commit['commit_hash']}",
+                                 summary, authority="git"))
 
         # Report --asserts--> Claim, when a report happens to cite it.
         if report_ref:
