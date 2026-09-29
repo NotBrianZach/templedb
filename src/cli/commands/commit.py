@@ -528,12 +528,31 @@ class CommitCommand:
         # (e.g. unknown extension not in FILE_TYPE_PATTERNS), and treating that
         # as a deletion would clobber the DB entry.
         for path, file_info in db_by_path.items():
-            if (workspace_dir / path).exists():
-                logger.warning(
-                    "Skipping phantom delete for %s: file exists on disk but "
-                    "scanner did not track it (likely unknown file type in "
-                    "FILE_TYPE_PATTERNS)", path
-                )
+            disk_path = workspace_dir / path
+            if disk_path.exists():
+                # The scanner skipped a file the DB already tracks. Usually
+                # because it is gitignored: the scanner takes its candidate
+                # set from `git ls-files --exclude-standard`, so e.g.
+                # system_config's flake.lock (.gitignore:120) is invisible
+                # to it even though templedb tracks the file.
+                #
+                # git itself applies .gitignore only to UNTRACKED files — a
+                # tracked file's edits always show. Mirror that here: once
+                # templedb tracks a path, compare it on content rather than
+                # re-filtering it. Previously this branch only warned, so an
+                # edit to such a file was silently dropped and the commit
+                # reported "No changes"; treating it as a deletion instead
+                # would clobber the DB entry, which is why the warning was
+                # there in the first place.
+                content = ContentStore.read_file_content(disk_path)
+                if content and content.hash_sha256 != file_info['content_hash']:
+                    changes['modified'].append(FileChange(
+                        change_type='modified',
+                        file_path=path,
+                        file_id=file_info['id'],
+                        old_hash=file_info['content_hash'],
+                        content=content
+                    ))
                 continue
             changes['deleted'].append(FileChange(
                 change_type='deleted',
