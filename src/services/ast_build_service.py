@@ -156,7 +156,61 @@ class AstBuildService(BaseService):
                 "SELECT * FROM ast_builds WHERE output_hash = ? AND host_name = ?",
                 (output_hash, host_name),
             )
-        return self._row_to_dict(row)
+        built = self._row_to_dict(row)
+        self._assert_build_claim(built, buildable)
+        return built
+
+    # Config source lives in the system_config project, so a build claim
+    # is scoped to that project's revision — not to the build directory,
+    # which is content-addressed and has no history of its own.
+    _CLAIM_PROJECT = "system_config"
+
+    def _assert_build_claim(self, built: Optional[dict], buildable) -> None:
+        """Assert `build-exit-zero` for a verified build.
+
+        Only when buildable == 1. An unverified build (None, nix check
+        not run) or a failed one (0) is evidence, not a claim.
+
+        The warrant recorded here is not yet checkable:
+        ast_builds.ast_snapshot_hash is still NULL ("reserved; phase 1",
+        migration 079), so a phase-2 checker cannot confirm the build
+        came from the AST at this revision — which is precisely the
+        stale-generated-file defeater. The claim is recorded now so the
+        history exists by the time that column is populated.
+        """
+        if buildable != 1 or not built:
+            return
+        try:
+            from services.claims_service import assert_claim
+            project = query_one("SELECT id FROM projects WHERE slug = ?",
+                                (self._CLAIM_PROJECT,))
+            if not project:
+                return
+            head = query_one(
+                "SELECT id FROM vcs_commits WHERE project_id = ? "
+                "ORDER BY commit_timestamp DESC, id DESC LIMIT 1",
+                (project["id"],))
+            if not head:
+                return
+            host = built["host_name"]
+            assert_claim(
+                project_id=project["id"],
+                commit_id=head["id"],
+                statement=(f"Generated Nix config for {host} builds "
+                           f"(output {built['output_hash'][:12]})."),
+                warrant_kind="build-exit-zero",
+                warrant_gloss=("nix build of this output_hash exited 0 on this "
+                               "host; says nothing about runtime behaviour"),
+                asserted_by="ast_build_service",
+                host_name=host,
+                inputs={"scopes": built.get("scopes"),
+                        "output_hash": built["output_hash"]},
+                evidence=[{"kind": "AstBuild",
+                           "ref": f"{host}/{built['output_hash']}",
+                           "hash": built["output_hash"]}],
+            )
+        except Exception as e:
+            logger.debug(f"build claim not recorded: {e}")
 
     def diff(self, ref_a: str, ref_b: str = "live", host_name: Optional[str] = None) -> str:
         """Unified diff between two builds, or between a build and the live checkout.

@@ -680,15 +680,64 @@ def load_structure_tests_from_db(project_slug: str):
         return None
 
 
+def resolve_head_commit_id(project_id: int):
+    """Best-effort HEAD for a project, used to pin a test run to a revision.
+
+    Deliberately not `vcs_branches.head_commit_id`: migration 107 notes
+    that column is only sporadically advanced (the workspace-commit path
+    never touches it), so derive the tip the way most readers do. A
+    session's private commits sort newest, so an in-session run pins to
+    the session tip rather than the shared HEAD, which is the revision
+    the tests actually saw. Returns None for a project with no commits —
+    the run is still recorded, just unpinned.
+    """
+    from db_utils import query_one
+    row = query_one("""
+        SELECT id FROM vcs_commits
+         WHERE project_id = ?
+         ORDER BY commit_timestamp DESC, id DESC
+         LIMIT 1
+    """, (project_id,))
+    return row["id"] if row else None
+
+
 def save_test_run(project_slug: str, result: 'TestResult', duration_ms: int, output: str):
-    """Save test run results to DB."""
+    """Save test run results to DB, pinned to the revision under test.
+
+    A clean run also asserts a `tests-all-passed` claim. Only a clean
+    one: a failing run stays in test_runs as evidence, but a claim is a
+    proposition the system stands behind, so there is no "the suite
+    fails" claim to make. Recording the claim is best-effort and never
+    affects whether the run itself was saved.
+    """
     try:
         from db_utils import execute, query_one
         project = query_one("SELECT id FROM projects WHERE slug = ?", (project_slug,))
-        if project:
-            execute(
-                "INSERT INTO test_runs (project_id, total_tests, passed, failed, duration_ms, output) VALUES (?,?,?,?,?,?)",
-                (project["id"], result.passed + result.failed, result.passed, result.failed, duration_ms, output))
+        if not project:
+            return
+        commit_id = resolve_head_commit_id(project["id"])
+        total = result.passed + result.failed
+        run_id = execute(
+            "INSERT INTO test_runs (project_id, commit_id, total_tests, passed, failed, duration_ms, output) VALUES (?,?,?,?,?,?,?)",
+            (project["id"], commit_id, total, result.passed, result.failed,
+             duration_ms, output))
+    except Exception:
+        return
+
+    if result.failed or not total or not commit_id:
+        return
+    try:
+        from services.claims_service import assert_claim
+        assert_claim(
+            project_id=project["id"],
+            commit_id=commit_id,
+            statement=f"{project_slug}: all {total} tests pass.",
+            warrant_kind="tests-all-passed",
+            warrant_gloss=(f"a test_runs row at this revision recorded {total} "
+                           "tests with 0 failures; says nothing about coverage"),
+            asserted_by="test_runner",
+            evidence=[{"kind": "TestRun", "ref": str(run_id)}],
+        )
     except Exception:
         pass
 
