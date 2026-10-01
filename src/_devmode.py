@@ -23,6 +23,14 @@ from typing import List, Optional
 
 __all__ = ["resolve_dev_checkout", "DEFAULT_CHECKOUT"]
 
+# Resolution is cached for the life of the process. _launcher.py resolves
+# first to set up sys.path, then cli/__init__.py asks again for the same
+# answer; without this they would each open the DB, stat a few hundred
+# paths, and print the same skip warnings twice. A sentinel rather than
+# None because None is a meaningful result ("no usable tree").
+_UNRESOLVED = object()
+_cached = _UNRESOLVED
+
 DEFAULT_CHECKOUT = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" / "src"
 
 
@@ -57,10 +65,20 @@ def resolve_dev_checkout(warn=True) -> Optional[Path]:
     TEMPLEDB_DEV_SRC overrides everything, unchecked — if you point it
     somewhere deliberately, that is the answer.
     """
+    global _cached
+    if _cached is not _UNRESOLVED:
+        return _cached
+
     override = os.environ.get("TEMPLEDB_DEV_SRC")
     if override:
-        return Path(override)
+        _cached = Path(override)
+        return _cached
 
+    _cached = _resolve_uncached(warn)
+    return _cached
+
+
+def _resolve_uncached(warn: bool) -> Optional[Path]:
     try:
         import sqlite3
         con = sqlite3.connect(f"file:{_db_path()}?mode=ro", uri=True)
