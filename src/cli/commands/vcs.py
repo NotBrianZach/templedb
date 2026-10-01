@@ -1215,7 +1215,7 @@ class VCSCommands(Command):
 
         # Get file state at that commit
         file_state = self.vcs_repo.query_one("""
-            SELECT content_text, change_type FROM vcs_file_states
+            SELECT content_hash, change_type FROM vcs_file_states
             WHERE commit_id = ? AND file_id = ?
         """, (commit['id'], file_id))
 
@@ -1225,7 +1225,11 @@ class VCSCommands(Command):
         if file_state['change_type'] == 'deleted':
             return "", f"deleted in {commit['commit_hash'][:8]}"
 
-        return file_state['content_text'], commit['commit_hash'][:8]
+        if not file_state['content_hash']:
+            return None, f"content unavailable at {commit['commit_hash'][:8]}"
+
+        content, _ = self._get_content_by_hash(file_state['content_hash'])
+        return content, commit['commit_hash'][:8]
 
     def _display_diff(
         self, old_content: str, new_content: str,
@@ -1305,13 +1309,11 @@ class VCSCommands(Command):
     ) -> Optional[str]:
         """Content of a file as of the most recent commit touching it.
 
-        Resolves through content_hash rather than reading
-        vcs_file_states.content_text directly. That column is NULL
-        whenever the content was stored as a blob — 1025 of 3755 rows in
-        this database — and a caller that trusts it gets "" for the old
-        side and renders the entire file as one giant addition. The hash
-        is always present, so go through content_blobs and keep
-        content_text only as the fallback.
+        Resolves through content_hash and content_blobs. Since migration
+        118 that is the only path — vcs_file_states no longer carries an
+        inline copy of the bytes. A row whose content_hash is NULL is a
+        tombstone from before content_blobs existed, not a corruption,
+        and has no content to return.
 
         Not scoped to the branch for the lookup itself: a file's history
         legitimately spans branches, and scoping it hides the parent
@@ -1319,20 +1321,17 @@ class VCSCommands(Command):
         already have it and to keep the signature stable if that changes.
         """
         row = self.vcs_repo.query_one("""
-            SELECT vfs.content_hash, vfs.content_text
+            SELECT vfs.content_hash
             FROM vcs_file_states vfs
             JOIN vcs_commits vc ON vc.id = vfs.commit_id
             WHERE vfs.file_id = ? AND vfs.change_type != 'deleted'
             ORDER BY vc.commit_timestamp DESC
             LIMIT 1
         """, (file_id,))
-        if not row:
+        if not row or not row['content_hash']:
             return None
-        if row['content_hash']:
-            content, _ = self._get_content_by_hash(row['content_hash'])
-            if content is not None:
-                return content
-        return row['content_text']
+        content, _ = self._get_content_by_hash(row['content_hash'])
+        return content
 
     def _diff_working(self, project: dict, args) -> int:
         """Show a diff of every changed file in the working set.
@@ -1471,10 +1470,9 @@ class VCSCommands(Command):
                 print()
 
             elif file['state'] == 'modified':
-                # Old side resolves through content_hash, not the
-                # content_text column — that column is NULL for
-                # blob-stored content and the whole file would otherwise
-                # render as an addition.
+                # Old side resolves through content_hash and
+                # content_blobs; since migration 118 that is the only
+                # place a committed file's bytes live.
                 old_content = self._get_last_committed_content(
                     file['file_id'], branch['id']) or ""
                 new_content, _ = self._get_content_by_hash(file['current_hash'])
@@ -1702,11 +1700,12 @@ class VCSCommands(Command):
                     SELECT c.id, c.parent_commit_id
                     FROM vcs_commits c JOIN commit_chain cc ON c.id = cc.parent_commit_id
                 )
-                SELECT fs.file_id, fs.content_hash, fs.content_text, fs.change_type,
+                SELECT fs.file_id, fs.content_hash, cb.content_text, fs.change_type,
                        pf.file_path, fs.commit_id
                 FROM vcs_file_states fs
                 JOIN commit_chain cc ON fs.commit_id = cc.id
                 JOIN project_files pf ON fs.file_id = pf.id
+                LEFT JOIN content_blobs cb ON cb.hash_sha256 = fs.content_hash
                 ORDER BY fs.commit_id DESC
             """, (commit_id,))
             tree = {}

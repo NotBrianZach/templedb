@@ -124,27 +124,26 @@ def export_to_git(
     total_files = 0
 
     for commit in commits:
-        # Get file states for this commit
-        # Try vcs_file_states first, fall back to commit_files
+        # Get file states for this commit. Since migration 118 this is
+        # the single source — commit_files is a view over the same table,
+        # so the old fallback query could only ever return the same rows
+        # (and never did: it named cf.content_hash, a column commit_files
+        # has never had).
+        #
+        # project_files is LEFT joined because it is hard-deleted on
+        # commit while the file state deliberately outlives it; the row's
+        # own denormalized file_path is what survives for those.
         file_states_all = conn.execute("""
-            SELECT fs.file_id, pf.file_path, fs.content_text, fs.content_blob,
+            SELECT fs.file_id,
+                   COALESCE(fs.file_path, pf.file_path) AS file_path,
+                   cb.content_text, cb.content_blob,
                    fs.content_hash, fs.file_size, fs.change_type
             FROM vcs_file_states fs
-            JOIN project_files pf ON fs.file_id = pf.id
+            LEFT JOIN project_files pf ON pf.id = fs.file_id
+            LEFT JOIN content_blobs cb ON cb.hash_sha256 = fs.content_hash
             WHERE fs.commit_id = ?
-            ORDER BY pf.file_path
+            ORDER BY file_path
         """, (commit["id"],)).fetchall()
-
-        if not file_states_all:
-            file_states_all = conn.execute("""
-                SELECT cf.file_id, pf.file_path, cb.content_text, cb.content_blob,
-                       cf.content_hash, cb.file_size_bytes as file_size, cf.change_type
-                FROM commit_files cf
-                JOIN project_files pf ON cf.file_id = pf.id
-                LEFT JOIN content_blobs cb ON cf.content_hash = cb.hash_sha256
-                WHERE cf.commit_id = ?
-                ORDER BY pf.file_path
-            """, (commit["id"],)).fetchall()
 
         if not file_states_all:
             # Commit with no file changes recorded — skip
@@ -153,6 +152,10 @@ def export_to_git(
         # Write files to working tree
         files_in_commit = 0
         for fs in file_states_all:
+            if not fs["file_path"]:
+                # Neither the state row nor project_files knows the path;
+                # nothing to write it to.
+                continue
             fp = output / fs["file_path"]
             change = fs["change_type"] or "modified"
 

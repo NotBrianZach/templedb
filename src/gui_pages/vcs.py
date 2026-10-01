@@ -136,8 +136,10 @@ def vcs_commit_detail(slug: str, commit_hash: str):
             fp = f["file_path"]
             # Get this commit's content
             fs = query_one(
-                """SELECT content_text FROM vcs_file_states
-                   WHERE commit_id = ? AND file_id = (
+                """SELECT cb.content_text AS content_text
+                   FROM vcs_file_states vfs
+                   LEFT JOIN content_blobs cb ON cb.hash_sha256 = vfs.content_hash
+                   WHERE vfs.commit_id = ? AND vfs.file_id = (
                      SELECT id FROM project_files WHERE project_id = (
                        SELECT id FROM projects WHERE slug = ?
                      ) AND file_path = ? LIMIT 1
@@ -154,8 +156,10 @@ def vcs_commit_detail(slug: str, commit_hash: str):
             old_text = ""
             if parent:
                 pfs = query_one(
-                    """SELECT content_text FROM vcs_file_states
-                       WHERE commit_id = ? AND file_id = (
+                    """SELECT cb.content_text AS content_text
+                       FROM vcs_file_states vfs
+                       LEFT JOIN content_blobs cb ON cb.hash_sha256 = vfs.content_hash
+                       WHERE vfs.commit_id = ? AND vfs.file_id = (
                          SELECT id FROM project_files WHERE project_id = (
                            SELECT id FROM projects WHERE slug = ?
                          ) AND file_path = ? LIMIT 1
@@ -497,8 +501,10 @@ def vcs_commit_detail(slug: str, commit_hash: str):
             fp = f["file_path"]
             # Get this commit's content
             fs = query_one(
-                """SELECT content_text FROM vcs_file_states
-                   WHERE commit_id = ? AND file_id = (
+                """SELECT cb.content_text AS content_text
+                   FROM vcs_file_states vfs
+                   LEFT JOIN content_blobs cb ON cb.hash_sha256 = vfs.content_hash
+                   WHERE vfs.commit_id = ? AND vfs.file_id = (
                      SELECT id FROM project_files WHERE project_id = (
                        SELECT id FROM projects WHERE slug = ?
                      ) AND file_path = ? LIMIT 1
@@ -515,8 +521,10 @@ def vcs_commit_detail(slug: str, commit_hash: str):
             old_text = ""
             if parent:
                 pfs = query_one(
-                    """SELECT content_text FROM vcs_file_states
-                       WHERE commit_id = ? AND file_id = (
+                    """SELECT cb.content_text AS content_text
+                       FROM vcs_file_states vfs
+                       LEFT JOIN content_blobs cb ON cb.hash_sha256 = vfs.content_hash
+                       WHERE vfs.commit_id = ? AND vfs.file_id = (
                          SELECT id FROM project_files WHERE project_id = (
                            SELECT id FROM projects WHERE slug = ?
                          ) AND file_path = ? LIMIT 1

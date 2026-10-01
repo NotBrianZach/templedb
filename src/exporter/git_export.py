@@ -222,8 +222,11 @@ class GitExporter:
                 cf.change_type,
                 cf.new_content_hash,
                 cf.old_content_hash,
-                cf.new_path,
-                cf.old_path,
+                -- commit_files has never had new_path/old_path; the
+                -- columns are *_file_path. Naming them unqualified made
+                -- every export of a commit raise "no such column".
+                cf.new_file_path AS new_path,
+                cf.old_file_path AS old_path,
                 pf.file_path
             FROM commit_files cf
             JOIN project_files pf ON cf.file_id = pf.id
