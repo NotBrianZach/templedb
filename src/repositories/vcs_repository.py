@@ -123,11 +123,59 @@ class VCSRepository(BaseRepository):
             new_path: New file path (for added/renamed)
         """
         logger.debug(f"Recording {change_type} change for file {file_id} in commit {commit_id}")
+
+        if self._file_changes_normalized():
+            # Post-118: one table. The row for this (commit, file) has
+            # usually already been inserted by the caller's own
+            # vcs_file_states write, so this call's job is to annotate it
+            # with the delta fields that only it knows — the previous
+            # content hash, and the path.
+            #
+            # file_path is stored denormalized because project_files rows
+            # are hard-deleted on commit (see cli/commands/file.py), and
+            # before 118 the path of a deleted file survived *only* in
+            # commit_files.old_file_path. 140 rows depended on that.
+            self.execute("""
+                INSERT INTO vcs_file_states
+                    (commit_id, file_id, file_path, change_type,
+                     content_hash, old_content_hash, file_size)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(commit_id, file_id) DO UPDATE SET
+                    old_content_hash = COALESCE(excluded.old_content_hash,
+                                                vcs_file_states.old_content_hash),
+                    file_path        = COALESCE(vcs_file_states.file_path,
+                                                excluded.file_path)
+            """, (commit_id, file_id, new_path or old_path, change_type,
+                  new_hash or 'DELETED', old_hash), commit=False)
+            return
+
+        # Pre-118 fallback. Kept so this code works both before and after
+        # the migration lands: the migration applies instantly via
+        # `admin db migrate --from-db` while this module only updates on a
+        # nix rebuild, so the two cannot be made simultaneous. Delete this
+        # branch once 118 is applied everywhere.
         self.execute("""
             INSERT INTO commit_files
             (commit_id, file_id, change_type, old_content_hash, new_content_hash, old_file_path, new_file_path)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (commit_id, file_id, change_type, old_hash, new_hash, old_path, new_path), commit=False)
+
+    _normalized_cache = None
+
+    def _file_changes_normalized(self) -> bool:
+        """True once migration 118 has folded commit_files into vcs_file_states.
+
+        Detected by probing for the column 118 adds rather than reading
+        schema_version, so it stays correct on a DB migrated by any route.
+        """
+        if VCSRepository._normalized_cache is None:
+            try:
+                cols = {r['name'] for r in self.query_all(
+                    "SELECT name FROM pragma_table_info('vcs_file_states')")}
+                VCSRepository._normalized_cache = 'old_content_hash' in cols
+            except Exception:
+                VCSRepository._normalized_cache = False
+        return VCSRepository._normalized_cache
 
     def get_commit_history(self, project_id: int, branch_name: Optional[str] = None,
                           limit: int = 50, visibility: str = 'published',

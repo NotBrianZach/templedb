@@ -579,13 +579,15 @@ class VCSCommands(Command):
                     file_size = len((content_text or '').encode('utf-8')) if content_text else len(ws_blob.get('content_blob') or b'')
                     line_count = content_text.count('\n') + 1 if content_text else None
 
+            # content_text omitted on purpose — content_blobs already holds
+            # the bytes for ws_hash. See migration 118.
             self.vcs_repo.execute("""
                 INSERT INTO vcs_file_states (
-                    commit_id, file_id, content_text,
+                    commit_id, file_id,
                     content_hash, file_size, line_count, change_type
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (commit_id, file['file_id'], content_text,
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (commit_id, file['file_id'],
                   ws_hash, file_size, line_count, file['state']), commit=False)
 
             # Update file_contents so materialization sees the committed content

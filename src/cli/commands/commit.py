@@ -650,11 +650,15 @@ class CommitCommand:
         )
 
         # Record content snapshot in vcs_file_states (canonical)
+        # content_text is deliberately NOT written here: the bytes already
+        # live in content_blobs keyed by this hash, and storing a second
+        # copy inline made vcs_file_states a parallel content store (79 MB
+        # of duplication as of 2026-10-01). Migration 118 drops the column.
         self.vcs_repo.execute("""
-            INSERT INTO vcs_file_states (commit_id, file_id, content_text, content_hash,
+            INSERT INTO vcs_file_states (commit_id, file_id, content_hash,
                                          file_size, line_count, change_type)
-            VALUES (?, ?, ?, ?, ?, ?, 'added')
-        """, (commit_id, file_id, change.content.content_text,
+            VALUES (?, ?, ?, ?, ?, 'added')
+        """, (commit_id, file_id,
               change.content.hash_sha256, change.content.file_size,
               change.content.line_count), commit=False)
 
@@ -716,11 +720,12 @@ class CommitCommand:
         )
 
         # Record content snapshot in vcs_file_states (canonical)
+        # See _commit_added_file: content lives in content_blobs, not here.
         self.vcs_repo.execute("""
-            INSERT INTO vcs_file_states (commit_id, file_id, content_text, content_hash,
+            INSERT INTO vcs_file_states (commit_id, file_id, content_hash,
                                          file_size, line_count, change_type)
-            VALUES (?, ?, ?, ?, ?, ?, 'modified')
-        """, (commit_id, change.file_id, change.content.content_text,
+            VALUES (?, ?, ?, ?, ?, 'modified')
+        """, (commit_id, change.file_id,
               change.content.hash_sha256, change.content.file_size,
               change.content.line_count), commit=False)
 

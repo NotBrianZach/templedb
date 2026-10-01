@@ -314,29 +314,56 @@ class CathedralImporter:
                 new_file_id = file_id_map.get(old_file_id)
 
                 if new_commit_id and new_file_id:
-                    # Check if already exists
-                    existing = cursor.execute("""
-                        SELECT id FROM commit_files
-                        WHERE commit_id = ? AND file_id = ?
-                    """, (new_commit_id, new_file_id)).fetchone()
+                    # Target table depends on whether migration 118 has
+                    # folded commit_files into vcs_file_states; after it,
+                    # commit_files is a read-only compatibility view.
+                    cols = {r[1] for r in cursor.execute(
+                        "PRAGMA table_info(vcs_file_states)").fetchall()}
+                    normalized = 'old_content_hash' in cols
 
-                    if not existing:
+                    # This INSERT previously named columns `old_path` and
+                    # `new_path`, which commit_files does not have (they are
+                    # `old_file_path`/`new_file_path`) — so importing a
+                    # bundle with commit_files raised "no such column".
+                    # Fixed in passing.
+                    if normalized:
                         cursor.execute("""
-                            INSERT INTO commit_files (
-                                commit_id, file_id, change_type,
-                                old_content_hash, new_content_hash,
-                                old_path, new_path
+                            INSERT INTO vcs_file_states (
+                                commit_id, file_id, file_path, change_type,
+                                content_hash, old_content_hash, file_size
                             )
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, 0)
+                            ON CONFLICT(commit_id, file_id) DO NOTHING
                         """, (
                             new_commit_id,
                             new_file_id,
+                            cf.get('new_path') or cf.get('old_path'),
                             cf['change_type'],
+                            cf.get('new_content_hash') or 'DELETED',
                             cf.get('old_content_hash'),
-                            cf.get('new_content_hash'),
-                            cf.get('old_path'),
-                            cf.get('new_path')
                         ))
+                    else:
+                        existing = cursor.execute("""
+                            SELECT id FROM commit_files
+                            WHERE commit_id = ? AND file_id = ?
+                        """, (new_commit_id, new_file_id)).fetchone()
+                        if not existing:
+                            cursor.execute("""
+                                INSERT INTO commit_files (
+                                    commit_id, file_id, change_type,
+                                    old_content_hash, new_content_hash,
+                                    old_file_path, new_file_path
+                                )
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                new_commit_id,
+                                new_file_id,
+                                cf['change_type'],
+                                cf.get('old_content_hash'),
+                                cf.get('new_content_hash'),
+                                cf.get('old_path'),
+                                cf.get('new_path')
+                            ))
 
         # Import tags (new git integration data)
         if tags:
