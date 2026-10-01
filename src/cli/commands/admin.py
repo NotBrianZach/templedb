@@ -51,6 +51,11 @@ def register(cli):
     migrate_p = db_sub.add_parser('migrate', help='Apply pending migrations')
     migrate_p.add_argument('--db-path', help='Database path (default: auto)')
     migrate_p.add_argument('--dry-run', action='store_true', help='Show what would be applied')
+    migrate_p.add_argument(
+        '--from-db', action='store_true',
+        help='Read migration SQL from the templedb project in the database '
+             'instead of the installed package (applies a new migration '
+             'without waiting on a nix rebuild)')
     cli.commands['admin.db.migrate'] = db_cmd.migrate
 
     status_p = db_sub.add_parser('status', help='Show migration status')

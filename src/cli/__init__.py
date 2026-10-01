@@ -85,12 +85,49 @@ def _resolve_dev_checkout():
                 rows = con.execute(ordered).fetchall()
             except sqlite3.OperationalError:
                 rows = con.execute(legacy).fetchall()
+            # Files the DB says should exist under src/. Used below to
+            # reject a tree that is behind: an edit workspace abandoned by
+            # another session keeps its `checkouts` row and still looks
+            # plausible (it has src/cli/), but is missing whatever modules
+            # landed after it was last materialized. Picking it then fails
+            # at import — observed 2026-09-29, when the newest edit
+            # workspace belonged to a different session and had no
+            # cli/commands/claims.py, so TEMPLEDB_DEV_MODE=1 died with
+            # ImportError instead of falling back.
+            src_files = [r[0] for r in con.execute(
+                """SELECT pf.file_path FROM project_files pf
+                     JOIN projects p ON p.id = pf.project_id
+                    WHERE p.slug = 'templedb' AND pf.status = 'active'
+                      AND pf.file_path LIKE 'src/%'""").fetchall()]
         finally:
             con.close()
+
+        def _missing(root: Path):
+            """Paths the DB has that this tree doesn't. Existence only —
+            a content comparison would mean hashing a few hundred files on
+            every startup. This catches the failure that actually bites (a
+            new module absent entirely); a tree holding stale *contents* of
+            every file still passes, and that degrades to running slightly
+            old code rather than crashing."""
+            base = root.parent  # root is <tree>/src; paths are 'src/...'
+            return [f for f in src_files if not (base / f).exists()]
+
         for (path,) in rows:
             candidate = Path(path) / "src"
-            if (candidate / "cli").is_dir():
-                return candidate
+            if not (candidate / "cli").is_dir():
+                continue
+            gaps = _missing(candidate)
+            if gaps:
+                print(
+                    f"⚠  skipping dev tree {candidate.parent} — behind DB by "
+                    f"{len(gaps)} file(s) (e.g. {gaps[0]})",
+                    file=sys.stderr,
+                )
+                continue
+            return candidate
+        # Every candidate was stale. Returning None disables dev mode
+        # rather than silently running whichever old tree sorted first.
+        return None
     except Exception:
         # Never let dev-mode resolution break startup; the default below
         # is what shipped before this function existed.
@@ -98,10 +135,13 @@ def _resolve_dev_checkout():
     return default
 
 
-_DEV_CHECKOUT = _resolve_dev_checkout()
+# Only resolved when actually asked for: this opens the DB and stats a
+# few hundred paths, which every non-dev invocation would otherwise pay
+# for at startup to answer a question it never asks.
+_DEV_CHECKOUT = _resolve_dev_checkout() if os.environ.get("TEMPLEDB_DEV_MODE") else None
 
 if os.environ.get("TEMPLEDB_DEV_MODE"):
-    if _DEV_CHECKOUT.exists() and (_DEV_CHECKOUT / "cli").exists():
+    if _DEV_CHECKOUT and _DEV_CHECKOUT.exists() and (_DEV_CHECKOUT / "cli").exists():
         _dev_src = str(_DEV_CHECKOUT)
         if _dev_src not in sys.path:
             sys.path.insert(0, _dev_src)
@@ -109,8 +149,10 @@ if os.environ.get("TEMPLEDB_DEV_MODE"):
         __path__ = [str(_DEV_CHECKOUT / "cli")]
     else:
         print(
-            f"⚠  TEMPLEDB_DEV_MODE=1 but no checkout at {_DEV_CHECKOUT} — "
-            "run `templedb publish run templedb` to materialize",
+            "⚠  TEMPLEDB_DEV_MODE=1 but no usable dev tree "
+            f"({_DEV_CHECKOUT or 'every candidate was behind the DB'}) — "
+            "running the installed package instead. "
+            "`templedb publish run templedb` refreshes the canonical tree.",
             file=sys.stderr,
         )
 
@@ -123,7 +165,7 @@ from cli.commands import (
     domain, nixos, config_compiler, ast,
     file, tutorial, dev, deploy_history,
     reports, edit, source, intent, entity, handoff, tool, provenance,
-    reconcile, summary, hygiene, sync, claims,
+    reconcile, summary, hygiene, sync, claims, reload,
 )
 from cli.core import cli
 
@@ -344,6 +386,7 @@ def main():
     hygiene.register(cli)
     sync.register(cli)
     claims.register(cli)
+    reload.register(cli)
 
     # Lazy imports for optional modules
     try:

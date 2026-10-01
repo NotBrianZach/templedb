@@ -73,8 +73,50 @@ BASE_FILES = [
 _NUMBERED_MIGRATION_RE = re.compile(r'^(\d+)_.+\.sql$')
 
 
-def _discover_migrations(applied_filenames: Optional[set] = None) -> List[Tuple[int, str]]:
-    """Scan MIGRATIONS_DIR for numbered migration files.
+def extract_migrations_from_db(db_path: str, dest: Path) -> Path:
+    """Write the templedb project's `migrations/*.sql` from the DB into dest.
+
+    Migrations are tracked files in the templedb project, so the DB holds
+    them the moment `templedb file set` lands — whereas the nix-installed
+    copy under site-packages only updates on a package rebuild. Sourcing
+    from here decouples a schema change from a rebuild cycle.
+
+    Only files directly under `migrations/` are extracted: `_discover_migrations`
+    globs non-recursively, so pulling `migrations/archived/*.sql` in flat
+    would resurrect retired migrations under colliding version numbers.
+
+    Uses stdlib sqlite3 rather than db_utils so this stays usable from a
+    bootstrap context where the service layer may not be importable.
+    """
+    import sqlite3
+    dest.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute("""
+            SELECT pf.file_path, cb.content_text
+              FROM project_files pf
+              JOIN projects p       ON p.id = pf.project_id
+              JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
+              JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+             WHERE p.slug = 'templedb'
+               AND pf.status = 'active'
+               AND pf.file_path LIKE 'migrations/%.sql'
+               AND pf.file_path NOT LIKE 'migrations/%/%'
+        """).fetchall()
+    finally:
+        con.close()
+
+    for r in rows:
+        if r["content_text"] is None:
+            continue
+        (dest / Path(r["file_path"]).name).write_text(r["content_text"])
+    return dest
+
+
+def _discover_migrations(applied_filenames: Optional[set] = None,
+                         migrations_dir: Optional[Path] = None) -> List[Tuple[int, str]]:
+    """Scan a migrations directory (MIGRATIONS_DIR by default) for numbered files.
 
     Returns [(version, filename)] sorted by (version, filename). Filenames
     must match ``<int>_<slug>.sql``; anything else is ignored (base
@@ -92,7 +134,7 @@ def _discover_migrations(applied_filenames: Optional[set] = None) -> List[Tuple[
         across installs.
     """
     groups: Dict[int, List[str]] = {}
-    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+    for path in sorted((migrations_dir or MIGRATIONS_DIR).glob("*.sql")):
         m = _NUMBERED_MIGRATION_RE.match(path.name)
         if not m:
             continue
@@ -143,9 +185,12 @@ class Migrator:
     );
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, migrations_dir: Optional[Path] = None):
         self.db_path = db_path
-        self.migrations_dir = MIGRATIONS_DIR
+        # Caller may override the source (e.g. `admin db migrate --from-db`
+        # extracts the project's migrations/ from the DB into a temp dir,
+        # so a schema change does not have to wait on a nix rebuild).
+        self.migrations_dir = Path(migrations_dir) if migrations_dir else MIGRATIONS_DIR
 
     def _connect(self) -> sqlite3.Connection:
         from db_utils import apply_standard_pragmas
@@ -258,7 +303,8 @@ class Migrator:
         # unapplied duplicate version prefixes so we fail loud instead
         # of picking an ambiguous winner (already-applied duplicates
         # are tolerated with a warning -- see _discover_migrations).
-        numbered = _discover_migrations(applied_filenames=set(applied.keys()))
+        numbered = _discover_migrations(applied_filenames=set(applied.keys()),
+                                        migrations_dir=self.migrations_dir)
 
         if fresh:
             # Fresh install: schema.sql is the canonical superset. Mark
@@ -342,7 +388,8 @@ class Migrator:
         # Numbered migrations (discovered from filesystem). Pass applied
         # set so historical same-version drift shows as a warning
         # rather than raising.
-        for _version, filename in _discover_migrations(applied_filenames=set(applied.keys())):
+        for _version, filename in _discover_migrations(applied_filenames=set(applied.keys()),
+                                        migrations_dir=self.migrations_dir):
             info = applied.get(filename)
             result.append({
                 "filename": filename,
@@ -385,7 +432,8 @@ class Migrator:
 
         # Stamp all numbered migrations. Pass applied set so historical
         # same-version drift is tolerated (all-applied → warning).
-        for version, filename in _discover_migrations(applied_filenames=set(applied.keys())):
+        for version, filename in _discover_migrations(applied_filenames=set(applied.keys()),
+                                        migrations_dir=self.migrations_dir):
             if filename not in applied:
                 conn.execute(
                     "INSERT OR IGNORE INTO schema_version (version, filename, file_hash, applied_at) "

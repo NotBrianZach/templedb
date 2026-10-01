@@ -17,6 +17,8 @@ class DBCommands(Command):
 
     def migrate(self, args) -> int:
         """Apply pending migrations."""
+        import shutil
+        import tempfile
         from db_utils import DB_PATH
         from migrator import Migrator
 
@@ -25,10 +27,29 @@ class DBCommands(Command):
         # Ensure parent dir exists
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        m = Migrator(db_path)
-        print(f"Database: {db_path}")
+        # --from-db sources migration SQL from the templedb project in the
+        # database instead of the nix-installed copy under site-packages.
+        # The DB has a migration the moment `file set` lands it; the store
+        # copy only updates on a package rebuild, which is why a schema
+        # change otherwise has to wait on a full publish/rebuild cycle.
+        migrations_dir = None
+        tmpdir = None
+        if getattr(args, 'from_db', False):
+            from migrator import extract_migrations_from_db
+            tmpdir = tempfile.mkdtemp(prefix='templedb-migrations-')
+            migrations_dir = extract_migrations_from_db(db_path, Path(tmpdir))
+            n = len(list(Path(migrations_dir).glob('*.sql')))
+            print(f"Sourcing migrations from DB ({n} file(s)) rather than "
+                  f"the installed package")
 
-        applied, skipped = m.migrate(dry_run=args.dry_run)
+        try:
+            m = Migrator(db_path, migrations_dir=migrations_dir)
+            print(f"Database: {db_path}")
+
+            applied, skipped = m.migrate(dry_run=args.dry_run)
+        finally:
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
 
         if applied == 0 and skipped > 0:
             print(f"Database is up to date ({skipped} migrations already applied)")
