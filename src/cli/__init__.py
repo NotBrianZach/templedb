@@ -25,114 +25,13 @@ from pathlib import Path
 # Design in reports/2026-08-16-nix-profile-staleness-design.html
 # ────────────────────────────────────────────────────────────────────
 def _resolve_dev_checkout():
-    """Locate the tree dev mode should run from.
+    """Delegate to _devmode, the single implementation.
 
-    The hardcoded ~/.config/templedb/checkouts/templedb/src is the
-    read-only materialized copy, NOT the tree you edit: when a project
-    is in edit mode the live working directory is
-    ~/.config/templedb/edit-workspaces/<slug>/<stamp>/. Pointing dev
-    mode at the former means `TEMPLEDB_DEV_MODE=1` runs different code
-    than the one you just changed — the same checkout-vs-workspace
-    confusion that produced several silent no-ops on 2026-09-24.
-
-    Resolved with stdlib sqlite3 only: this executes before the
-    templedb packages are importable, so it cannot use the repositories
-    layer. Mirrors CheckoutRepository.get_active_for_project by
-    preferring the newest checkout whose directory actually exists.
-    TEMPLEDB_DEV_SRC overrides entirely, for anyone who wants the old
-    behaviour or a scratch tree.
+    Importable from both layouts: the nix install flattens src/ into
+    site-packages, and a dev tree has <tree>/src on sys.path.
     """
-    override = os.environ.get("TEMPLEDB_DEV_SRC")
-    if override:
-        return Path(override)
-
-    default = Path.home() / ".config" / "templedb" / "checkouts" / "templedb" / "src"
-    db_path = os.environ.get("TEMPLEDB_PATH") or str(
-        Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite")
-    try:
-        import sqlite3
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            # Mirrors CheckoutRepository.resolve(PURPOSE_EDIT): prefer an
-            # edit tree, then anything else still active. Dev mode exists
-            # to run the code you are editing, so an edit workspace is the
-            # right answer and the canonical tree is the fallback.
-            #
-            # `kind` arrived in migration 113. This runs before templedb
-            # is importable and must not break on a database that predates
-            # it, so the ordering is expressed with a CASE that degrades
-            # to pure recency when the column is missing — hence the
-            # OperationalError retry below rather than a schema probe.
-            #
-            # This duplicates resolve() on purpose (no imports are
-            # available yet) and that duplication is a correctness
-            # coupling, not a style problem: if the two disagree,
-            # TEMPLEDB_DEV_MODE=1 runs different code than the tree you
-            # just edited. tests/unit/services/test_checkout_resolve.py
-            # asserts they agree.
-            ordered = """SELECT c.checkout_path FROM checkouts c
-                           JOIN projects p ON p.id = c.project_id
-                          WHERE p.slug = 'templedb' AND c.is_active = 1
-                          ORDER BY CASE c.kind WHEN 'edit' THEN 0
-                                               WHEN 'canonical' THEN 1
-                                               ELSE 2 END,
-                                   c.checkout_at DESC"""
-            legacy = """SELECT c.checkout_path FROM checkouts c
-                          JOIN projects p ON p.id = c.project_id
-                         WHERE p.slug = 'templedb' AND c.is_active = 1
-                         ORDER BY c.checkout_at DESC"""
-            try:
-                rows = con.execute(ordered).fetchall()
-            except sqlite3.OperationalError:
-                rows = con.execute(legacy).fetchall()
-            # Files the DB says should exist under src/. Used below to
-            # reject a tree that is behind: an edit workspace abandoned by
-            # another session keeps its `checkouts` row and still looks
-            # plausible (it has src/cli/), but is missing whatever modules
-            # landed after it was last materialized. Picking it then fails
-            # at import — observed 2026-09-29, when the newest edit
-            # workspace belonged to a different session and had no
-            # cli/commands/claims.py, so TEMPLEDB_DEV_MODE=1 died with
-            # ImportError instead of falling back.
-            src_files = [r[0] for r in con.execute(
-                """SELECT pf.file_path FROM project_files pf
-                     JOIN projects p ON p.id = pf.project_id
-                    WHERE p.slug = 'templedb' AND pf.status = 'active'
-                      AND pf.file_path LIKE 'src/%'""").fetchall()]
-        finally:
-            con.close()
-
-        def _missing(root: Path):
-            """Paths the DB has that this tree doesn't. Existence only —
-            a content comparison would mean hashing a few hundred files on
-            every startup. This catches the failure that actually bites (a
-            new module absent entirely); a tree holding stale *contents* of
-            every file still passes, and that degrades to running slightly
-            old code rather than crashing."""
-            base = root.parent  # root is <tree>/src; paths are 'src/...'
-            return [f for f in src_files if not (base / f).exists()]
-
-        for (path,) in rows:
-            candidate = Path(path) / "src"
-            if not (candidate / "cli").is_dir():
-                continue
-            gaps = _missing(candidate)
-            if gaps:
-                print(
-                    f"⚠  skipping dev tree {candidate.parent} — behind DB by "
-                    f"{len(gaps)} file(s) (e.g. {gaps[0]})",
-                    file=sys.stderr,
-                )
-                continue
-            return candidate
-        # Every candidate was stale. Returning None disables dev mode
-        # rather than silently running whichever old tree sorted first.
-        return None
-    except Exception:
-        # Never let dev-mode resolution break startup; the default below
-        # is what shipped before this function existed.
-        pass
-    return default
+    from _devmode import resolve_dev_checkout
+    return resolve_dev_checkout()
 
 
 # Only resolved when actually asked for: this opens the DB and stats a
@@ -315,7 +214,7 @@ def _dev_mode_staleness_banner():
     """
     if not os.environ.get("TEMPLEDB_DEV_MODE"):
         return
-    if not _DEV_CHECKOUT.exists():
+    if not _DEV_CHECKOUT or not _DEV_CHECKOUT.exists():
         return  # Already warned at module load
     try:
         import hashlib
