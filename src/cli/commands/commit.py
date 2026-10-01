@@ -654,11 +654,26 @@ class CommitCommand:
         # live in content_blobs keyed by this hash, and storing a second
         # copy inline made vcs_file_states a parallel content store (79 MB
         # of duplication as of 2026-10-01). Migration 118 drops the column.
+        #
+        # Upsert, not a plain INSERT: post-118 record_file_change above
+        # writes to this same table, so the row already exists and a plain
+        # INSERT raised "UNIQUE constraint failed" on every added file.
+        # record_file_change only knows the delta fields (path, old hash)
+        # and leaves file_size 0 / line_count NULL, so this call owns the
+        # snapshot fields and fills them in.
         self.vcs_repo.execute("""
-            INSERT INTO vcs_file_states (commit_id, file_id, content_hash,
-                                         file_size, line_count, change_type)
-            VALUES (?, ?, ?, ?, ?, 'added')
-        """, (commit_id, file_id,
+            INSERT INTO vcs_file_states (commit_id, file_id, file_path,
+                                         content_hash, file_size, line_count,
+                                         change_type)
+            VALUES (?, ?, ?, ?, ?, ?, 'added')
+            ON CONFLICT(commit_id, file_id) DO UPDATE SET
+                file_path    = COALESCE(excluded.file_path,
+                                        vcs_file_states.file_path),
+                content_hash = excluded.content_hash,
+                file_size    = excluded.file_size,
+                line_count   = excluded.line_count,
+                change_type  = excluded.change_type
+        """, (commit_id, file_id, change.file_path,
               change.content.hash_sha256, change.content.file_size,
               change.content.line_count), commit=False)
 
@@ -720,12 +735,21 @@ class CommitCommand:
         )
 
         # Record content snapshot in vcs_file_states (canonical)
-        # See _commit_added_file: content lives in content_blobs, not here.
+        # See _commit_added_file for why this is an upsert and why content
+        # lives in content_blobs rather than here.
         self.vcs_repo.execute("""
-            INSERT INTO vcs_file_states (commit_id, file_id, content_hash,
-                                         file_size, line_count, change_type)
-            VALUES (?, ?, ?, ?, ?, 'modified')
-        """, (commit_id, change.file_id,
+            INSERT INTO vcs_file_states (commit_id, file_id, file_path,
+                                         content_hash, file_size, line_count,
+                                         change_type)
+            VALUES (?, ?, ?, ?, ?, ?, 'modified')
+            ON CONFLICT(commit_id, file_id) DO UPDATE SET
+                file_path    = COALESCE(excluded.file_path,
+                                        vcs_file_states.file_path),
+                content_hash = excluded.content_hash,
+                file_size    = excluded.file_size,
+                line_count   = excluded.line_count,
+                change_type  = excluded.change_type
+        """, (commit_id, change.file_id, change.file_path,
               change.content.hash_sha256, change.content.file_size,
               change.content.line_count), commit=False)
 
@@ -762,12 +786,21 @@ class CommitCommand:
             old_path=change.file_path
         )
 
-        # Record deletion in vcs_file_states (canonical)
+        # Record deletion in vcs_file_states (canonical). file_path matters
+        # most here: project_files was just hard-deleted above, so this row
+        # is the only surviving record of what the path was.
         self.vcs_repo.execute("""
-            INSERT INTO vcs_file_states (commit_id, file_id, content_hash,
-                                         file_size, line_count, change_type)
-            VALUES (?, ?, ?, 0, 0, 'deleted')
-        """, (commit_id, change.file_id, change.old_hash or 'DELETED'), commit=False)
+            INSERT INTO vcs_file_states (commit_id, file_id, file_path,
+                                         content_hash, file_size, line_count,
+                                         change_type)
+            VALUES (?, ?, ?, ?, 0, 0, 'deleted')
+            ON CONFLICT(commit_id, file_id) DO UPDATE SET
+                file_path    = COALESCE(excluded.file_path,
+                                        vcs_file_states.file_path),
+                content_hash = excluded.content_hash,
+                change_type  = excluded.change_type
+        """, (commit_id, change.file_id, change.file_path,
+              change.old_hash or 'DELETED'), commit=False)
 
     def _get_file_type_id(self, file_path: str) -> Optional[int]:
         """Get file type ID for a file path"""

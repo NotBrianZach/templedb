@@ -434,11 +434,19 @@ class VCSCommands(Command):
 
         # Get staged files for THIS session only. content_text lives in
         # content_blobs (CAS), not file_contents.
+        #
+        # project_files is joined for file_path only, which the commit
+        # below denormalizes into vcs_file_states. Without it every row
+        # this path wrote had file_path NULL, defeating the column
+        # migration 118 added to let file history outlive the hard-delete
+        # of project_files.
         staged = self.vcs_repo.query_all("""
-            SELECT ws.*, cb.content_text, fc.file_size_bytes, fc.line_count
+            SELECT ws.*, cb.content_text, fc.file_size_bytes, fc.line_count,
+                   pf.file_path
             FROM vcs_working_state ws
             LEFT JOIN file_contents fc ON ws.file_id = fc.file_id AND fc.is_current = 1
             LEFT JOIN content_blobs cb ON fc.content_hash = cb.hash_sha256
+            LEFT JOIN project_files pf ON pf.id = ws.file_id
             WHERE ws.project_id = ? AND ws.branch_id = ?
               AND ws.staged_by_session_id = ?
         """, (project['id'], branch['id'], sid))
@@ -583,11 +591,18 @@ class VCSCommands(Command):
             # the bytes for ws_hash. See migration 118.
             self.vcs_repo.execute("""
                 INSERT INTO vcs_file_states (
-                    commit_id, file_id,
+                    commit_id, file_id, file_path,
                     content_hash, file_size, line_count, change_type
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (commit_id, file['file_id'],
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(commit_id, file_id) DO UPDATE SET
+                    file_path    = COALESCE(excluded.file_path,
+                                            vcs_file_states.file_path),
+                    content_hash = excluded.content_hash,
+                    file_size    = excluded.file_size,
+                    line_count   = excluded.line_count,
+                    change_type  = excluded.change_type
+            """, (commit_id, file['file_id'], file.get('file_path'),
                   ws_hash, file_size, line_count, file['state']), commit=False)
 
             # Update file_contents so materialization sees the committed content
@@ -1867,15 +1882,30 @@ class VCSCommands(Command):
                 VALUES (?, ?, 1)
             """, (commit_id, source['head_commit_id']), commit=False)
 
-        # Create file states for merged files
+        # Create file states for merged files. The path comes from the
+        # trees already built above rather than a fresh project_files
+        # lookup, so a file deleted on one side still records the path it
+        # had at the revision being merged.
         for fid, content in merged_contents.items():
             if content is None:
                 continue
+            row = ours_tree.get(fid) or theirs_tree.get(fid) or base_tree.get(fid)
             content_hash = _hashlib.sha256(content.encode()).hexdigest()
             self.vcs_repo.execute("""
-                INSERT INTO vcs_file_states (commit_id, file_id, content_hash, file_size, line_count, change_type)
-                VALUES (?, ?, ?, ?, ?, 'modified')
-            """, (commit_id, fid, content_hash, len(content.encode()), content.count('\n') + 1), commit=False)
+                INSERT INTO vcs_file_states (commit_id, file_id, file_path,
+                                             content_hash, file_size, line_count,
+                                             change_type)
+                VALUES (?, ?, ?, ?, ?, ?, 'modified')
+                ON CONFLICT(commit_id, file_id) DO UPDATE SET
+                    file_path    = COALESCE(excluded.file_path,
+                                            vcs_file_states.file_path),
+                    content_hash = excluded.content_hash,
+                    file_size    = excluded.file_size,
+                    line_count   = excluded.line_count,
+                    change_type  = excluded.change_type
+            """, (commit_id, fid, row['file_path'] if row else None,
+                  content_hash, len(content.encode()),
+                  content.count('\n') + 1), commit=False)
 
         # Update branch head
         self.vcs_repo.execute(
