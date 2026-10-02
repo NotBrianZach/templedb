@@ -68,130 +68,6 @@ def secret_detail(slug: str, profile: str):
 
 
 @router.get("/vars", response_class=HTMLResponse)
-def vars_list(project: str = Query(""), env: str = Query(""), host: str = Query("")):
-    rows = query_all("""
-        SELECT ev.id, ev.scope_type, ev.scope_id,
-               p.slug,
-               ev.var_name, ev.var_value, ev.value_type, ev.template,
-               ev.is_secret, ev.description, ev.updated_at,
-               ev.hostname
-        FROM environment_variables ev
-        LEFT JOIN projects p ON p.id = ev.scope_id AND ev.scope_type = 'project'
-        ORDER BY ev.hostname, p.slug NULLS LAST, ev.var_name
-    """)
-
-    def parse_name(var_name):
-        name = var_name or ""
-        if ":" in name:
-            idx = name.rfind(":")
-            return name[:idx], name[idx + 1:]
-        return "", name
-
-    parsed = [{**dict(r), **dict(zip(("env_prefix", "key"), parse_name(r["var_name"])))} for r in rows]
-
-    # Collect unique values for dropdowns before filtering
-    all_slugs = sorted({r["slug"] for r in parsed if r["slug"]})
-    all_env_prefixes = sorted({r["env_prefix"] for r in parsed if r["env_prefix"]})
-    all_hosts = sorted({r["hostname"] or "(untagged)" for r in parsed})
-
-    if host:
-        filter_host = None if host == "(untagged)" else host
-        parsed = [r for r in parsed if (r["hostname"] or "(untagged)") == (host or "(untagged)")]
-    if project:
-        parsed = [r for r in parsed if (r["slug"] or "") == project]
-    if env:
-        parsed = [r for r in parsed if r["env_prefix"] == env]
-
-    # Filter dropdowns
-    def _select(name, options, current, placeholder):
-        opts = f'<option value="">{placeholder}</option>'
-        for val in options:
-            sel = ' selected' if val == current else ''
-            opts += f'<option value="{html.escape(val)}"{sel}>{html.escape(val)}</option>'
-        style = 'style="background:#13131f;border:1px solid #2a2a4a;color:#d0d0e8;padding:0.3rem 0.5rem;border-radius:4px;font-family:monospace;font-size:0.85rem"'
-        return f'<select name="{name}" onchange="this.form.submit()" {style}>{opts}</select>'
-
-    filter_bar = f"""
-<form method="get" action="/vars" class="row" style="margin-bottom:1rem">
-  {_select("host", all_hosts, host, "All hosts")}
-  {_select("project", all_slugs, project, "All projects")}
-  {_select("env", all_env_prefixes, env, "All envs")}
-  <span class="muted">{len(parsed)} var{"s" if len(parsed) != 1 else ""}</span>
-</form>
-{_search_bar("vars-content", "Fuzzy filter by key or value…", "340px")}
-"""
-
-    def _render_value(r):
-        if r["is_secret"]:
-            return '<span class="muted">••••••</span> <span class="badge">secret</span>'
-        if r["value_type"] == "compound" and r["template"]:
-            return f'<span style="font-size:0.78rem;word-break:break-all">{_highlight_template(r["template"])}</span>'
-        val = r["var_value"] or ""
-        if len(val) > 72:
-            return f'<span title="{html.escape(val)}" style="word-break:break-all">{html.escape(val[:72])}<span class="muted">…</span></span>'
-        return f'<span style="word-break:break-all">{html.escape(val)}</span>'
-
-    def _type_badge(vtype):
-        cls = " blue" if vtype != "static" else ""
-        return f'<span class="badge{cls}">{html.escape(vtype)}</span>'
-
-    def _host_badge(hostname):
-        import socket
-        h = hostname or "(untagged)"
-        is_local = h == socket.gethostname()
-        color = "#4a9a6a" if is_local else "#7a7a9a"
-        return f'<span style="font-size:0.72rem;color:{color}">{html.escape(h)}</span>'
-
-    def _make_table(var_rows):
-        trs = [
-            [f'<code>{html.escape(r["key"])}</code>', _render_value(r), _type_badge(r["value_type"]),
-             _host_badge(r.get("hostname")), html.escape((r["updated_at"] or "")[:10])]
-            for r in var_rows
-        ]
-        return _table(["Key", "Value", "Type", "Host", "Updated"], trs)
-
-    by_project = defaultdict(list)
-    for r in parsed:
-        by_project[r["slug"] or "__global__"].append(r)
-
-    sections_html = ""
-
-    if "__global__" in by_project:
-        global_rows = by_project["__global__"]
-        trs = []
-        for r in global_rows:
-            key_cell = f'<code>{html.escape(r["key"])}</code>'
-            if r["env_prefix"]:
-                key_cell += f' <span class="muted" style="font-size:0.75rem">[{html.escape(r["env_prefix"])}]</span>'
-            trs.append([key_cell, _render_value(r), _type_badge(r["value_type"]),
-                        _host_badge(r.get("hostname")), html.escape((r["updated_at"] or "")[:10])])
-        sections_html += f'<div class="fsec"><h3>Global</h3>{_table(["Key", "Value", "Type", "Host", "Updated"], trs)}</div>'
-
-    for slug in sorted(k for k in by_project if k != "__global__"):
-        proj_rows = by_project[slug]
-        by_env = defaultdict(list)
-        for r in proj_rows:
-            by_env[r["env_prefix"]].append(r)
-
-        proj_html = ""
-        for ep in sorted(by_env.keys()):
-            label = ep if ep else "(no env)"
-            badge = (
-                f'<span class="badge blue">{html.escape(label)}</span>'
-                if ep else
-                f'<span class="muted" style="font-size:0.8rem">{html.escape(label)}</span>'
-            )
-            proj_html += f'<div class="fsec" style="margin:0.75rem 0 0.4rem">{badge}{_make_table(by_env[ep])}</div>'
-
-        link = f'<a href="/projects/{html.escape(slug)}">{html.escape(slug)}</a>'
-        sections_html += f'<div class="fsec"><h3 style="margin-top:1.75rem">{link}</h3>{proj_html}</div>'
-
-    body = f'<h2>Vars</h2>{filter_bar}<div id="vars-content">{sections_html}</div>'
-    return _base("Vars", body, "vars")
-
-
-
-@router.get("/vars", response_class=HTMLResponse)
 def vars_redirect():
     from fastapi.responses import RedirectResponse
     return RedirectResponse("/env")
@@ -201,12 +77,18 @@ def vars_redirect():
 
 
 @router.get("/env", response_class=HTMLResponse)
-def env_list(project: str = Query(""), env: str = Query(""), kind: str = Query("")):
-    # ── Gather environment_variables ──────────────────────────────────────────
+def env_list(project: str = Query(""), env: str = Query(""), kind: str = Query(""),
+             host: str = Query("")):
+    # hostname is carried here because /vars now redirects to this page.
+    # /vars was the only view that showed which variables are host-scoped,
+    # and that is not a rounding error: 31 of the 60 rows in
+    # environment_variables are pinned to a host. Redirecting without this
+    # column would have silently merged host-scoped and global variables
+    # into one undifferentiated list on a six-host fleet.
     ev_rows = query_all("""
         SELECT ev.id, ev.scope_type, ev.scope_id, p.slug,
                ev.var_name, ev.var_value, ev.value_type, ev.template,
-               ev.is_secret, ev.description, ev.updated_at
+               ev.is_secret, ev.description, ev.updated_at, ev.hostname
         FROM environment_variables ev
         LEFT JOIN projects p ON p.id = ev.scope_id AND ev.scope_type = 'project'
     """)
@@ -228,6 +110,7 @@ def env_list(project: str = Query(""), env: str = Query(""), kind: str = Query("
             "template": r["template"], "is_secret": bool(r["is_secret"]),
             "profile": None, "updated_at": r["updated_at"],
             "scope_type": r["scope_type"], "scope_id": r["scope_id"],
+            "hostname": r["hostname"],
         })
 
     # ── Gather secret_blobs (encrypted — key name only) ───────────────────────
@@ -250,6 +133,8 @@ def env_list(project: str = Query(""), env: str = Query(""), kind: str = Query("
             "template": None, "is_secret": True,
             "profile": r["profile"], "updated_at": r["updated_at"],
             "scope_type": "project", "scope_id": None,
+            # Encrypted blobs are not host-scoped; the column does not apply.
+            "hostname": None,
         })
 
     unified.sort(key=lambda r: (r["slug"] or "", r["env_prefix"], r["key"]))
@@ -257,6 +142,7 @@ def env_list(project: str = Query(""), env: str = Query(""), kind: str = Query("
     # ── Collect dropdown options BEFORE filtering ─────────────────────────────
     all_slugs = sorted({r["slug"] for r in unified if r["slug"]})
     all_envs = sorted({r["env_prefix"] for r in unified if r["env_prefix"]})
+    all_hosts = sorted({r["hostname"] or "(untagged)" for r in unified})
 
     # ── Apply filters ─────────────────────────────────────────────────────────
     if project:
@@ -265,6 +151,8 @@ def env_list(project: str = Query(""), env: str = Query(""), kind: str = Query("
         unified = [r for r in unified if r["env_prefix"] == env]
     if kind:
         unified = [r for r in unified if r["value_type"] == kind]
+    if host:
+        unified = [r for r in unified if (r["hostname"] or "(untagged)") == host]
 
     # ── Filter dropdowns ──────────────────────────────────────────────────────
     def _sel(name, options, cur, placeholder):
@@ -288,6 +176,7 @@ def env_list(project: str = Query(""), env: str = Query(""), kind: str = Query("
 <form method="get" action="/env" class="row" style="margin-bottom:1rem">
   {_sel("project", all_slugs, project, "All projects")}
   {_sel("env", all_envs, env, "All envs")}
+  {_sel("host", all_hosts, host, "All hosts")}
   {kind_sel_html}
   <span class="muted">{n} entr{"ies" if n != 1 else "y"}</span>
 </form>
@@ -349,6 +238,13 @@ def env_list(project: str = Query(""), env: str = Query(""), kind: str = Query("
 
     sections_html = ""
 
+    def _host_badge(hostname):
+        """Green when the variable is pinned to the machine you are on."""
+        import socket
+        h = hostname or "(untagged)"
+        color = "#4a9a6a" if h == socket.gethostname() else "#7a7a9a"
+        return f'<span style="font-size:0.72rem;color:{color}">{html.escape(h)}</span>'
+
     def _render_section(rows, group_key):
         trs = []
         for r in rows:
@@ -358,9 +254,10 @@ def env_list(project: str = Query(""), env: str = Query(""), kind: str = Query("
                 f'<code>{html.escape(r["key"])}</code>{src_badge}',
                 _val_cell(r),
                 TYPE_BADGE.get(r["value_type"], f'<span class="badge">{html.escape(r["value_type"])}</span>'),
+                _host_badge(r.get("hostname")),
                 html.escape((r["updated_at"] or "")[:10]),
             ])
-        return _table(["Key", "Value", "Type", "Updated"], trs)
+        return _table(["Key", "Value", "Type", "Host", "Updated"], trs)
 
     def _dotenv_block(rows, group_key):
         lines = []
