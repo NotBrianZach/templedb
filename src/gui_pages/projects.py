@@ -3,12 +3,15 @@ import html
 import json
 import os
 import subprocess
+from collections import defaultdict
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Query
 from fastapi.responses import HTMLResponse
 
 from db_utils import execute, query_all, query_one
+from gui_helpers import _parse_markdown
 from gui_helpers import _base, _table, _search_bar, _file_link, _msg, _run, _status_badge, CSS
 
 router = APIRouter()
@@ -125,15 +128,6 @@ def projects_list():
 {import_form}
 """
     return _base("Projects", body, "projects")
-
-
-def _backup_history_exists() -> bool:
-    try:
-        query_one("SELECT 1 FROM backup_history LIMIT 1")
-        return True
-    except Exception:
-        return False
-
 
 
 def _backup_history_exists() -> bool:
@@ -377,282 +371,98 @@ def _project_vars_tab(slug: str) -> str:
 
 
 def _project_docs_tab(slug: str) -> str:
+    """List a project's markdown, parsed from the committed files.
+
+    This used to read readme_files / readme_sections / readme_topics and
+    fall back to project_files only when the project had no rows. Since
+    the index's sole writer was a one-off script that last ran
+    2026-04-05, the "preferred" branch served four-month-old metadata for
+    the projects it covered and the fallback -- which had no titles,
+    sections or word counts -- served everything else. Parsing the real
+    bytes removes both the staleness and the two-tier behaviour.
+
+    Shares _parse_markdown with gui_pages/docs.py so the project tab and
+    the global /docs page cannot disagree about what a doc contains.
+    """
     proj = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
     if not proj:
         return '<p class="muted">Project not found.</p>'
-    project_id = proj["id"]
 
-    # Prefer readme_files (rich metadata) if available
-    readme_docs = query_all("""
-        SELECT rf.id, rf.title, rf.file_path, rf.category, rf.word_count,
-               rf.section_count, rf.has_toc, rf.description, rf.last_scanned_at
-        FROM readme_files rf
-        WHERE rf.project_id = ?
-        ORDER BY rf.category NULLS LAST, rf.title
-    """, (project_id,))
-
-    if readme_docs:
-        # Fetch sections and topics
-        doc_ids = [r["id"] for r in readme_docs]
-        placeholders = ",".join("?" * len(doc_ids))
-        sections_rows = query_all(
-            f"SELECT readme_id, heading, level, anchor, line_number FROM readme_sections "
-            f"WHERE readme_id IN ({placeholders}) ORDER BY readme_id, line_number",
-            doc_ids,
-        )
-        topics_rows = query_all(
-            f"SELECT readme_id, topic, relevance FROM readme_topics "
-            f"WHERE readme_id IN ({placeholders}) ORDER BY readme_id, relevance DESC",
-            doc_ids,
-        )
-        sections_by_doc: dict = defaultdict(list)
-        for s in sections_rows:
-            sections_by_doc[s["readme_id"]].append(s)
-        topics_by_doc: dict = defaultdict(list)
-        for t in topics_rows:
-            topics_by_doc[t["readme_id"]].append(t)
-
-        by_cat: dict = defaultdict(list)
-        for r in readme_docs:
-            by_cat[r["category"] or "uncategorized"].append(r)
-
-        html_out = ""
-        for cat in sorted(by_cat.keys()):
-            docs = by_cat[cat]
-            cat_label = cat.replace("-", " ").title()
-            rows = []
-            for r in docs:
-                doc_secs = sections_by_doc.get(r["id"], [])
-                doc_topics = topics_by_doc.get(r["id"], [])
-                topic_badges = " ".join(
-                    f'<span class="badge blue" style="font-size:0.68rem">{html.escape(t["topic"])}</span>'
-                    for t in doc_topics[:4]
-                )
-                toc = '<span class="badge green" style="font-size:0.68rem">TOC</span>' if r["has_toc"] else ""
-                title = r["title"] or r["file_path"] or ""
-                title_cell = (
-                    _file_link(slug, r["file_path"], title)
-                    if r["file_path"] else html.escape(title)
-                )
-                desc = r["description"] or ""
-                if desc:
-                    title_cell += f'<br><span class="muted" style="font-size:0.75rem">{html.escape(desc[:100])}</span>'
-
-                sec_detail = ""
-                if doc_secs:
-                    sec_trs = []
-                    for sec in doc_secs:
-                        indent = "&nbsp;" * (sec["level"] - 1) * 3
-                        sec_trs.append([
-                            f'<span class="muted" style="font-size:0.72rem">H{sec["level"]}</span>',
-                            f'{indent}{html.escape(sec["heading"])}',
-                            f'<span class="muted">{sec["line_number"]}</span>',
-                        ])
-                    sec_detail = (
-                        f'<details><summary style="cursor:pointer;color:#606080;font-size:0.75rem">'
-                        f'{len(doc_secs)} section{"s" if len(doc_secs) != 1 else ""}'
-                        f'</summary><div style="margin-top:0.25rem">{_table(["Lvl","Heading","Line"], sec_trs)}</div></details>'
-                    )
-
-                rows.append([
-                    title_cell,
-                    f'{r["word_count"] or 0:,}',
-                    sec_detail or f'<span class="muted">{r["section_count"] or 0}</span>',
-                    f'{toc} {topic_badges}'.strip(),
-                    html.escape((r["last_scanned_at"] or "")[:10]),
-                ])
-            html_out += (
-                f'<div class="fsec" style="margin-top:1.25rem">'
-                f'<h4 style="margin:0 0 0.4rem;color:#888">{html.escape(cat_label)}'
-                f' <span style="font-weight:normal;font-size:0.8rem">({len(docs)})</span></h4>'
-                f'{_table(["Title","Words","Sections","Topics","Scanned"], rows)}'
-                f'</div>'
-            )
-        bar = _search_bar("proj-docs-wrap", "Filter docs…")
-        return f'{bar}<div id="proj-docs-wrap">{html_out}</div>'
-
-    # Fallback: project_files filtered to markdown
-    md_files = query_all("""
-        SELECT pf.file_path, pf.file_name, pf.description, pf.lines_of_code, pf.last_modified
+    rows = query_all("""
+        SELECT p.slug, pf.file_path, cb.content_text, fc.updated_at
         FROM project_files pf
+        JOIN projects p       ON p.id = pf.project_id
+        JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
+        JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
         WHERE pf.project_id = ?
-          AND (pf.file_path LIKE '%.md' OR pf.file_path LIKE '%.markdown'
-               OR pf.file_path LIKE '%.rst' OR pf.file_path LIKE '%.txt')
+          AND pf.status = 'active'
+          AND lower(pf.file_path) LIKE '%.md'
+          AND pf.file_path NOT LIKE '.%'
+          AND pf.file_path NOT LIKE '%/.%'
         ORDER BY pf.file_path
-    """, (project_id,))
+    """, (proj["id"],))
 
-    if not md_files:
+    if not rows:
         return '<p class="muted">No markdown docs found for this project.</p>'
 
-    rows = []
-    for f in md_files:
-        name_cell = _file_link(slug, f["file_path"])
-        desc = html.escape(f["description"] or "")
-        if desc:
-            name_cell += f'<br><span class="muted" style="font-size:0.75rem">{desc[:100]}</span>'
-        rows.append([
-            name_cell,
-            f'<span class="muted">{f["lines_of_code"] or "—"}</span>',
-            html.escape((f["last_modified"] or "")[:10]),
-        ])
+    docs = [_parse_markdown(r) for r in rows]
 
-    bar = _search_bar("proj-docs-tbl", "Filter docs…")
-    return f'{bar}{_table(["File", "Lines", "Modified"], rows, table_id="proj-docs-tbl")}'
+    by_cat: dict = defaultdict(list)
+    for d in docs:
+        by_cat[d["category"]].append(d)
 
-
-def _file_rows(slug: str, q: str) -> str:
-    if q:
-        data = query_all("""
-            SELECT file_path, type_name, lines_of_code
-            FROM files_with_types_view
-            WHERE project_slug = ? AND file_path LIKE ?
-            ORDER BY file_path LIMIT 500
-        """, (slug, f"%{q}%"))
-    else:
-        data = query_all("""
-            SELECT file_path, type_name, lines_of_code
-            FROM files_with_types_view
-            WHERE project_slug = ?
-            ORDER BY file_path LIMIT 500
-        """, (slug,))
-
-    rows = [
-        [
-            f'<a href="/projects/{html.escape(slug)}/file?path={html.escape(r["file_path"])}">{html.escape(r["file_path"])}</a>',
-            html.escape(r["type_name"] or ""),
-            f'{r["lines_of_code"] or 0:,}',
-        ]
-        for r in data
-    ]
-    count = f'<p class="muted" style="margin-bottom:0.5rem">{len(data)} file{"s" if len(data) != 1 else ""}</p>'
-    return count + _table(["Path", "Type", "LOC"], rows, "No files found.")
-
-
-
-def _project_docs_tab(slug: str) -> str:
-    proj = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
-    if not proj:
-        return '<p class="muted">Project not found.</p>'
-    project_id = proj["id"]
-
-    # Prefer readme_files (rich metadata) if available
-    readme_docs = query_all("""
-        SELECT rf.id, rf.title, rf.file_path, rf.category, rf.word_count,
-               rf.section_count, rf.has_toc, rf.description, rf.last_scanned_at
-        FROM readme_files rf
-        WHERE rf.project_id = ?
-        ORDER BY rf.category NULLS LAST, rf.title
-    """, (project_id,))
-
-    if readme_docs:
-        # Fetch sections and topics
-        doc_ids = [r["id"] for r in readme_docs]
-        placeholders = ",".join("?" * len(doc_ids))
-        sections_rows = query_all(
-            f"SELECT readme_id, heading, level, anchor, line_number FROM readme_sections "
-            f"WHERE readme_id IN ({placeholders}) ORDER BY readme_id, line_number",
-            doc_ids,
-        )
-        topics_rows = query_all(
-            f"SELECT readme_id, topic, relevance FROM readme_topics "
-            f"WHERE readme_id IN ({placeholders}) ORDER BY readme_id, relevance DESC",
-            doc_ids,
-        )
-        sections_by_doc: dict = defaultdict(list)
-        for s in sections_rows:
-            sections_by_doc[s["readme_id"]].append(s)
-        topics_by_doc: dict = defaultdict(list)
-        for t in topics_rows:
-            topics_by_doc[t["readme_id"]].append(t)
-
-        by_cat: dict = defaultdict(list)
-        for r in readme_docs:
-            by_cat[r["category"] or "uncategorized"].append(r)
-
-        html_out = ""
-        for cat in sorted(by_cat.keys()):
-            docs = by_cat[cat]
-            cat_label = cat.replace("-", " ").title()
-            rows = []
-            for r in docs:
-                doc_secs = sections_by_doc.get(r["id"], [])
-                doc_topics = topics_by_doc.get(r["id"], [])
-                topic_badges = " ".join(
-                    f'<span class="badge blue" style="font-size:0.68rem">{html.escape(t["topic"])}</span>'
-                    for t in doc_topics[:4]
+    html_out = ""
+    for cat in sorted(by_cat.keys()):
+        cat_docs = by_cat[cat]
+        trs = []
+        for d in cat_docs:
+            toc = ('<span class="badge green" style="font-size:0.68rem">TOC</span>'
+                   if d["has_toc"] else "")
+            title_cell = _file_link(slug, d["file_path"], d["title"])
+            if d["description"]:
+                title_cell += (
+                    f'<br><span class="muted" style="font-size:0.75rem">'
+                    f'{html.escape(d["description"][:100])}</span>'
                 )
-                toc = '<span class="badge green" style="font-size:0.68rem">TOC</span>' if r["has_toc"] else ""
-                title = r["title"] or r["file_path"] or ""
-                title_cell = (
-                    _file_link(slug, r["file_path"], title)
-                    if r["file_path"] else html.escape(title)
+
+            sec_detail = ""
+            if d["sections"]:
+                sec_trs = []
+                for sec in d["sections"]:
+                    indent = "&nbsp;" * (sec["level"] - 1) * 3
+                    sec_trs.append([
+                        f'<span class="muted" style="font-size:0.72rem">H{sec["level"]}</span>',
+                        f'<a href="/projects/{html.escape(slug)}/file'
+                        f'?path={quote(d["file_path"], safe="")}#{html.escape(sec["anchor"])}" '
+                        f'style="font-size:0.78rem">{indent}{html.escape(sec["heading"])}</a>',
+                        f'<span class="muted">{sec["line_number"]}</span>',
+                    ])
+                n = len(d["sections"])
+                sec_detail = (
+                    f'<details><summary style="cursor:pointer;color:#606080;font-size:0.75rem">'
+                    f'{n} section{"s" if n != 1 else ""}'
+                    f'</summary><div style="margin-top:0.25rem">'
+                    f'{_table(["Lvl", "Heading", "Line"], sec_trs)}</div></details>'
                 )
-                desc = r["description"] or ""
-                if desc:
-                    title_cell += f'<br><span class="muted" style="font-size:0.75rem">{html.escape(desc[:100])}</span>'
 
-                sec_detail = ""
-                if doc_secs:
-                    sec_trs = []
-                    for sec in doc_secs:
-                        indent = "&nbsp;" * (sec["level"] - 1) * 3
-                        sec_trs.append([
-                            f'<span class="muted" style="font-size:0.72rem">H{sec["level"]}</span>',
-                            f'{indent}{html.escape(sec["heading"])}',
-                            f'<span class="muted">{sec["line_number"]}</span>',
-                        ])
-                    sec_detail = (
-                        f'<details><summary style="cursor:pointer;color:#606080;font-size:0.75rem">'
-                        f'{len(doc_secs)} section{"s" if len(doc_secs) != 1 else ""}'
-                        f'</summary><div style="margin-top:0.25rem">{_table(["Lvl","Heading","Line"], sec_trs)}</div></details>'
-                    )
+            trs.append([
+                title_cell,
+                f'{d["word_count"]:,}',
+                sec_detail or '<span class="muted">0</span>',
+                toc,
+                html.escape((d["updated_at"] or "")[:10]),
+            ])
 
-                rows.append([
-                    title_cell,
-                    f'{r["word_count"] or 0:,}',
-                    sec_detail or f'<span class="muted">{r["section_count"] or 0}</span>',
-                    f'{toc} {topic_badges}'.strip(),
-                    html.escape((r["last_scanned_at"] or "")[:10]),
-                ])
-            html_out += (
-                f'<div class="fsec" style="margin-top:1.25rem">'
-                f'<h4 style="margin:0 0 0.4rem;color:#888">{html.escape(cat_label)}'
-                f' <span style="font-weight:normal;font-size:0.8rem">({len(docs)})</span></h4>'
-                f'{_table(["Title","Words","Sections","Topics","Scanned"], rows)}'
-                f'</div>'
-            )
-        bar = _search_bar("proj-docs-wrap", "Filter docs…")
-        return f'{bar}<div id="proj-docs-wrap">{html_out}</div>'
+        html_out += (
+            f'<div class="fsec" style="margin-top:1.25rem">'
+            f'<h4 style="margin:0 0 0.4rem;color:#888">{html.escape(cat)}'
+            f' <span style="font-weight:normal;font-size:0.8rem">({len(cat_docs)})</span></h4>'
+            f'{_table(["Title", "Words", "Sections", "Flags", "Updated"], trs)}'
+            f'</div>'
+        )
 
-    # Fallback: project_files filtered to markdown
-    md_files = query_all("""
-        SELECT pf.file_path, pf.file_name, pf.description, pf.lines_of_code, pf.last_modified
-        FROM project_files pf
-        WHERE pf.project_id = ?
-          AND (pf.file_path LIKE '%.md' OR pf.file_path LIKE '%.markdown'
-               OR pf.file_path LIKE '%.rst' OR pf.file_path LIKE '%.txt')
-        ORDER BY pf.file_path
-    """, (project_id,))
-
-    if not md_files:
-        return '<p class="muted">No markdown docs found for this project.</p>'
-
-    rows = []
-    for f in md_files:
-        name_cell = _file_link(slug, f["file_path"])
-        desc = html.escape(f["description"] or "")
-        if desc:
-            name_cell += f'<br><span class="muted" style="font-size:0.75rem">{desc[:100]}</span>'
-        rows.append([
-            name_cell,
-            f'<span class="muted">{f["lines_of_code"] or "—"}</span>',
-            html.escape((f["last_modified"] or "")[:10]),
-        ])
-
-    bar = _search_bar("proj-docs-tbl", "Filter docs…")
-    return f'{bar}{_table(["File", "Lines", "Modified"], rows, table_id="proj-docs-tbl")}'
-
-
+    bar = _search_bar("proj-docs-wrap", "Filter docs…")
+    return f'{bar}<div id="proj-docs-wrap">{html_out}</div>'
 def _file_rows(slug: str, q: str) -> str:
     if q:
         data = query_all("""

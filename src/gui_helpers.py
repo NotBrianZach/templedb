@@ -515,3 +515,90 @@ templedb sync network sync-all             # sync all peers</pre>
 </div>
 </details>
 """
+
+
+# ── Markdown parsing (shared by gui_pages/docs.py and projects.py) ──────────
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*$")
+_TOC_RE = re.compile(r"^(table of contents|contents|toc)$", re.IGNORECASE)
+
+
+def _anchor(heading: str) -> str:
+    """GitHub-style anchor slug for a heading."""
+    s = heading.strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s)
+    return re.sub(r"[-\s]+", "-", s).strip("-")
+
+
+def _doc_category(file_path: str) -> str:
+    """Group docs by where they actually live.
+
+    The old readme_files.category was inferred by regex over the content
+    ('setup', 'api', 'deployment', ...), which meant two docs in the same
+    directory could land in different buckets for no visible reason. The
+    directory is both cheaper and something you can act on.
+    """
+    parts = file_path.split("/")
+    if len(parts) == 1:
+        return "root"
+    if parts[0] == "docs":
+        return parts[1] if len(parts) > 2 else "docs"
+    return parts[0]
+
+
+def _parse_markdown(row) -> dict:
+    """Extract title, description, headings and counts from markdown.
+
+    Fenced code blocks are skipped: a shell block full of `# comment` lines
+    would otherwise register as a pile of H1 headings.
+    """
+    text = row["content_text"] or ""
+    lines = text.splitlines()
+
+    title = None
+    description = None
+    sections = []
+    has_toc = False
+    in_fence = False
+
+    for i, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+
+        m = _HEADING_RE.match(line)
+        if m:
+            level = len(m.group(1))
+            heading = m.group(2).strip()
+            if _TOC_RE.match(heading):
+                has_toc = True
+            if level == 1 and title is None:
+                title = heading
+                continue
+            sections.append({
+                "level": level,
+                "heading": heading,
+                "anchor": _anchor(heading),
+                "line_number": i,
+            })
+            continue
+
+        # First real prose line after the title becomes the description.
+        if description is None and title is not None and stripped \
+                and not stripped.startswith(("|", ">", "-", "*", "<!--", "[")):
+            description = stripped[:200]
+
+    return {
+        "slug": row["slug"],
+        "file_path": row["file_path"],
+        "title": title or row["file_path"].rsplit("/", 1)[-1],
+        "description": description or "",
+        "category": _doc_category(row["file_path"]),
+        "sections": sections,
+        "has_toc": has_toc,
+        "word_count": len(text.split()),
+        "updated_at": row["updated_at"],
+    }
