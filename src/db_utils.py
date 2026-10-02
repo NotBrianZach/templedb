@@ -184,6 +184,37 @@ def close_connection():
 
 
 @contextmanager
+def _pooled_cursor(conn: sqlite3.Connection):
+    """Yield a cursor on the pooled connection and always finalize it.
+
+    Cursors on the long-lived thread-local connection have to be closed
+    deterministically rather than left to refcounting. A cursor whose
+    statement is still un-finalized holds a read transaction open, and in
+    WAL mode that pins the checkpoint: wal_checkpoint(TRUNCATE) returns
+    busy and the -wal file grows without bound for the life of the
+    process. `query_one` is the usual source — it fetches one row of a
+    result that often has more, so the statement never runs to
+    completion.
+
+    CPython's refcounting normally frees the local cursor at function
+    exit and finalizes the statement, which is why this is invisible in
+    short-lived CLI runs. Anything that retains the frame makes the leak
+    permanent, and the `except` clauses below do exactly that: they log
+    and re-raise, so a caller holding the exception also holds its
+    traceback, the frame, and the cursor.
+
+    Observed 2026-10-02 on this database: a 2.1 GB -wal pinned at frame
+    445 by `ai agent serve`, un-truncatable for the life of the session.
+    Reproduced and fixed by closing the cursor in a finally.
+    """
+    cursor = conn.cursor()
+    try:
+        yield cursor
+    finally:
+        cursor.close()
+
+
+@contextmanager
 def transaction():
     """Context manager for database transactions"""
     conn = get_connection()
@@ -199,10 +230,10 @@ def query_one(sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
     """Execute query and return single row as dict"""
     try:
         conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(sql, params)
-        row = cursor.fetchone()
-        return dict(row) if row else None
+        with _pooled_cursor(conn) as cursor:
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
+            return dict(row) if row else None
     except sqlite3.ProgrammingError as e:
         logger.error(f"SQL syntax error: {e}")
         logger.debug(f"Query: {sql[:500]}")
@@ -222,9 +253,9 @@ def query_all(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
     """Execute query and return all rows as list of dicts"""
     try:
         conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(sql, params)
-        return [dict(row) for row in cursor.fetchall()]
+        with _pooled_cursor(conn) as cursor:
+            cursor.execute(sql, params)
+            return [dict(row) for row in cursor.fetchall()]
     except sqlite3.ProgrammingError as e:
         logger.error(f"SQL syntax error: {e}")
         logger.debug(f"Query: {sql[:500]}")
@@ -254,11 +285,11 @@ def execute(sql: str, params: tuple = (), commit: bool = True) -> int:
     """
     try:
         conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(sql, params)
-        if commit:
-            conn.commit()
-        return cursor.lastrowid
+        with _pooled_cursor(conn) as cursor:
+            cursor.execute(sql, params)
+            if commit:
+                conn.commit()
+            return cursor.lastrowid
     except sqlite3.IntegrityError as e:
         logger.error(f"Database constraint violation: {e}")
         logger.debug(f"SQL: {sql[:500]}")
@@ -290,10 +321,10 @@ def executemany(sql: str, params_list: List[tuple], commit: bool = True) -> None
     """
     try:
         conn = get_connection()
-        cursor = conn.cursor()
-        cursor.executemany(sql, params_list)
-        if commit:
-            conn.commit()
+        with _pooled_cursor(conn) as cursor:
+            cursor.executemany(sql, params_list)
+            if commit:
+                conn.commit()
     except sqlite3.IntegrityError as e:
         logger.error(f"Database constraint violation in batch operation: {e}")
         logger.debug(f"SQL: {sql[:500]}")
@@ -425,7 +456,6 @@ def batch_insert_files(files: List[Dict[str, Any]]):
         return
 
     conn = get_connection()
-    cursor = conn.cursor()
 
     # Prepare data
     values = [
@@ -441,11 +471,12 @@ def batch_insert_files(files: List[Dict[str, Any]]):
         for f in files
     ]
 
-    cursor.executemany("""
-        INSERT INTO project_files
-        (project_id, file_path, component_name, file_type_id, description, lines_of_code, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, values)
+    with _pooled_cursor(conn) as cursor:
+        cursor.executemany("""
+            INSERT INTO project_files
+            (project_id, file_path, component_name, file_type_id, description, lines_of_code, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, values)
 
     conn.commit()
 
