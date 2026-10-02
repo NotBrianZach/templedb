@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 def temp_db():
     """Create a temp DB from schema.sql for testing."""
     tmp = tempfile.mktemp(suffix='.sqlite')
+    prev_path = os.environ.get('TEMPLEDB_PATH')
     os.environ['TEMPLEDB_PATH'] = tmp
 
     from migrator import Migrator
@@ -27,7 +28,12 @@ def temp_db():
 
     yield tmp
 
-    del os.environ['TEMPLEDB_PATH']
+    # Restore, never delete: an absent TEMPLEDB_PATH resolves to the
+    # production database for every test that runs after this one.
+    if prev_path is None:
+        os.environ.pop('TEMPLEDB_PATH', None)
+    else:
+        os.environ['TEMPLEDB_PATH'] = prev_path
     try:
         os.unlink(tmp)
     except Exception:

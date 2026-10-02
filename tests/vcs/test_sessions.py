@@ -23,6 +23,7 @@ class _VCSFixture(unittest.TestCase):
     def setUpClass(cls):
         fd, cls.db_path = tempfile.mkstemp(suffix='.sqlite', prefix='vcs-test-')
         os.close(fd)
+        cls._prev_templedb_path = os.environ.get('TEMPLEDB_PATH')
         os.environ['TEMPLEDB_PATH'] = cls.db_path
 
         # Wipe any cached modules that captured the previous path
@@ -78,7 +79,12 @@ class _VCSFixture(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        os.environ.pop('TEMPLEDB_PATH', None)
+        # Restore rather than pop: with TEMPLEDB_PATH absent, _get_db_path()
+        # resolves to the user's real database.
+        if getattr(cls, '_prev_templedb_path', None) is None:
+            os.environ.pop('TEMPLEDB_PATH', None)
+        else:
+            os.environ['TEMPLEDB_PATH'] = cls._prev_templedb_path
         os.environ.pop('TEMPLEDB_SESSION_ID', None)
         os.environ.pop('TEMPLEDB_AUTHOR', None)
         if os.path.exists(cls.db_path):

@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 def temp_env(tmp_path):
     """Create a fully isolated TempleDB environment with fresh DB."""
     db_path = str(tmp_path / "templedb.sqlite")
+    prev_path = os.environ.get("TEMPLEDB_PATH")
     os.environ["TEMPLEDB_PATH"] = db_path
 
     # Force db_utils to pick up the new path
@@ -38,8 +39,14 @@ def temp_env(tmp_path):
 
     yield {"db_path": db_path, "tmp_path": tmp_path}
 
-    # Restore
-    del os.environ["TEMPLEDB_PATH"]
+    # Restore the previous path rather than deleting the variable. Deleting
+    # it made _get_db_path() fall through to the production database, and
+    # the line below then wrote that resolution straight into db_utils --
+    # re-pointing every later test in the session at the real DB.
+    if prev_path is None:
+        os.environ.pop("TEMPLEDB_PATH", None)
+    else:
+        os.environ["TEMPLEDB_PATH"] = prev_path
     db_utils.DB_PATH = db_utils._get_db_path()
     db_utils.close_connection()
 

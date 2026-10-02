@@ -48,6 +48,7 @@ class _StageRunFixture(unittest.TestCase):
         fd, self.db_path = tempfile.mkstemp(suffix='.sqlite',
                                             prefix='stage-orphan-')
         os.close(fd)
+        self._prev_templedb_path = os.environ.get('TEMPLEDB_PATH')
         os.environ['TEMPLEDB_PATH'] = self.db_path
         for mod in list(sys.modules):
             if (mod.startswith('db_utils') or mod.startswith('repositories')
@@ -61,7 +62,12 @@ class _StageRunFixture(unittest.TestCase):
         conn.close()
 
     def tearDown(self):
-        os.environ.pop('TEMPLEDB_PATH', None)
+        # Restore rather than pop: with TEMPLEDB_PATH absent, _get_db_path()
+        # resolves to the user's real database.
+        if getattr(self, '_prev_templedb_path', None) is None:
+            os.environ.pop('TEMPLEDB_PATH', None)
+        else:
+            os.environ['TEMPLEDB_PATH'] = self._prev_templedb_path
         if os.path.exists(self.db_path):
             os.unlink(self.db_path)
 

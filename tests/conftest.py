@@ -44,6 +44,76 @@ if not os.environ.get("TEMPLEDB_PATH"):
             pass
     atexit.register(_cleanup_test_db_bootstrap)
 
+# The database this session is allowed to touch, and the one it is not.
+#
+# TEST_DB is whatever TEMPLEDB_PATH held once the block above finished —
+# either the bootstrap temp DB, or a path the caller exported deliberately.
+TEST_DB = os.environ["TEMPLEDB_PATH"]
+PRODUCTION_DB = str(Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite")
+
+
+def restore_test_db_path():
+    """Re-point TEMPLEDB_PATH and db_utils back at this session's test DB.
+
+    Call this from any fixture teardown that temporarily redirected
+    TEMPLEDB_PATH. Do NOT `del os.environ["TEMPLEDB_PATH"]` instead:
+    `config._get_db_path()` falls through to
+    ~/.local/share/templedb/templedb.sqlite when the variable is absent,
+    so deleting it silently re-points the whole suite at the user's real
+    database for every test that follows.
+    """
+    os.environ["TEMPLEDB_PATH"] = TEST_DB
+    try:
+        import db_utils
+    except ImportError:
+        return
+    db_utils.DB_PATH = TEST_DB
+    db_utils.close_connection()
+
+
+def _paths_in_play():
+    """Every DB path something could currently resolve a connection through."""
+    paths = [os.environ.get("TEMPLEDB_PATH")]
+    try:
+        import db_utils
+        paths.append(getattr(db_utils, "DB_PATH", None))
+    except ImportError:
+        pass
+    return [p for p in paths if p]
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Refuse to run a test while anything points at the real database.
+
+    Checked before every test rather than once at startup, because the
+    failure this guards against is introduced *mid-session*: a fixture
+    teardown unsets TEMPLEDB_PATH, and tests that run later — including
+    several `_reset()` helpers that loop unqualified `DELETE FROM` over
+    project_files, file_contents and content_blobs — resolve straight to
+    production. A collection-time check cannot see that.
+
+    The missing-variable case is repaired rather than fatal: it is
+    recoverable and the restore is unambiguous. Actively pointing at
+    production is fatal.
+    """
+    if not os.environ.get("TEMPLEDB_PATH"):
+        restore_test_db_path()
+
+    real = os.path.realpath(PRODUCTION_DB)
+    for path in _paths_in_play():
+        if os.path.realpath(path) == real:
+            pytest.exit(
+                "ABORTED: the test suite resolved to the production database\n"
+                f"  {PRODUCTION_DB}\n"
+                f"before {item.nodeid}.\n"
+                "Refusing to run — this suite deletes rows unconditionally.\n"
+                "A fixture teardown most likely unset TEMPLEDB_PATH instead "
+                "of calling conftest.restore_test_db_path().",
+                returncode=3,
+            )
+
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
@@ -55,9 +125,24 @@ from db_utils import query_one, query_all, execute, get_connection, close_connec
 # ============================================================================
 
 @pytest.fixture(scope="session")
-def db_path() -> str:
-    """Get database path"""
-    return str(Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite")
+def db_path(tmp_path_factory) -> str:
+    """A migrated throwaway database for schema and constraint tests.
+
+    This used to return ~/.local/share/templedb/templedb.sqlite, so every
+    test taking it — and every test taking `db_connection`, which is built
+    on it — opened the user's real database. The constraint tests only
+    appeared to pass because production happens to have the schema they
+    assert on.
+
+    It gets its own file rather than the shared bootstrap DB: the bootstrap
+    is deliberately schema-less and individual test groups build just the
+    tables they need into it, so migrating it here would change the state
+    those groups start from.
+    """
+    path = str(tmp_path_factory.mktemp("schema") / "templedb.sqlite")
+    from migrator import Migrator
+    Migrator(path).migrate()
+    return path
 
 
 @pytest.fixture(scope="session")

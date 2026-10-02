@@ -16,13 +16,57 @@ from conftest import db_connection, db_path, query_one, query_all
 # Constraint Violation Tests
 # ============================================================================
 
+@pytest.fixture
+def seeded(db_connection: sqlite3.Connection) -> sqlite3.Connection:
+    """One baseline row in each table the duplicate-rejection tests target.
+
+    Every one of those tests forces a collision with
+    `INSERT INTO t SELECT ... FROM t LIMIT 1` — copying a row that already
+    exists. With an empty table the SELECT matches nothing, the INSERT is a
+    no-op and no IntegrityError is raised, so the test passes only where the
+    table is already populated.
+
+    They used to run against the user's production database, which supplied
+    that data by accident. Seeding here makes them self-contained: without
+    this fixture all eight assert nothing at all.
+    """
+    c = db_connection
+    c.execute("PRAGMA foreign_keys=ON")
+    c.execute("INSERT INTO projects (slug, name) VALUES ('seed-proj', 'Seed')")
+    pid = c.execute("SELECT id FROM projects WHERE slug='seed-proj'").fetchone()[0]
+
+    c.execute("INSERT INTO file_types (type_name, category) VALUES ('python', 'source')")
+    ftid = c.execute("SELECT id FROM file_types WHERE type_name='python'").fetchone()[0]
+
+    c.execute("INSERT INTO project_files (project_id, file_type_id, file_path, file_name)"
+              " VALUES (?, ?, 'src/seed.py', 'seed.py')", (pid, ftid))
+    fid = c.execute("SELECT id FROM project_files WHERE project_id=?", (pid,)).fetchone()[0]
+
+    c.execute("INSERT INTO vcs_branches (project_id, branch_name) VALUES (?, 'main')", (pid,))
+    c.execute("INSERT INTO nix_environments (project_id, env_name) VALUES (?, 'default')", (pid,))
+    c.execute("INSERT INTO deployment_targets (project_id, target_name, target_type)"
+              " VALUES (?, 'prod', 'nixos')", (pid,))
+
+    seed_hash = "0" * 64
+    c.execute("INSERT INTO content_blobs (hash_sha256, content_type, file_size_bytes)"
+              " VALUES (?, 'text', 7)", (seed_hash,))
+    c.execute("INSERT INTO file_contents (file_id, content_hash, file_size_bytes, is_current)"
+              " VALUES (?, ?, 7, 1)", (fid, seed_hash))
+
+    # A second file so the self-dependency test has a valid row to copy from
+    # without the seed itself depending on a self-reference.
+    c.execute("INSERT INTO project_files (project_id, file_type_id, file_path, file_name)"
+              " VALUES (?, ?, 'src/other.py', 'other.py')", (pid, ftid))
+    return c
+
+
 @pytest.mark.constraints
 @pytest.mark.unit
-def test_duplicate_project_slugs_rejected(db_connection: sqlite3.Connection):
+def test_duplicate_project_slugs_rejected(seeded: sqlite3.Connection):
     """Test that duplicate project slugs are rejected"""
 
     with pytest.raises(sqlite3.IntegrityError):
-        db_connection.execute("""
+        seeded.execute("""
             INSERT INTO projects (slug, name)
             SELECT slug, 'Duplicate ' || name
             FROM projects
@@ -32,11 +76,11 @@ def test_duplicate_project_slugs_rejected(db_connection: sqlite3.Connection):
 
 @pytest.mark.constraints
 @pytest.mark.unit
-def test_duplicate_file_paths_within_project_rejected(db_connection: sqlite3.Connection):
+def test_duplicate_file_paths_within_project_rejected(seeded: sqlite3.Connection):
     """Test that duplicate file paths within a project are rejected"""
 
     with pytest.raises(sqlite3.IntegrityError):
-        db_connection.execute("""
+        seeded.execute("""
             INSERT INTO project_files (project_id, file_path, file_type_id)
             SELECT project_id, file_path, file_type_id
             FROM project_files
@@ -46,11 +90,11 @@ def test_duplicate_file_paths_within_project_rejected(db_connection: sqlite3.Con
 
 @pytest.mark.constraints
 @pytest.mark.unit
-def test_duplicate_branch_names_rejected(db_connection: sqlite3.Connection):
+def test_duplicate_branch_names_rejected(seeded: sqlite3.Connection):
     """Test that duplicate branch names within a project are rejected"""
 
     with pytest.raises(sqlite3.IntegrityError):
-        db_connection.execute("""
+        seeded.execute("""
             INSERT INTO vcs_branches (project_id, branch_name)
             SELECT project_id, branch_name
             FROM vcs_branches
@@ -61,11 +105,11 @@ def test_duplicate_branch_names_rejected(db_connection: sqlite3.Connection):
 
 @pytest.mark.constraints
 @pytest.mark.unit
-def test_duplicate_environment_names_rejected(db_connection: sqlite3.Connection):
+def test_duplicate_environment_names_rejected(seeded: sqlite3.Connection):
     """Test that duplicate environment names within a project are rejected"""
 
     with pytest.raises(sqlite3.IntegrityError):
-        db_connection.execute("""
+        seeded.execute("""
             INSERT INTO nix_environments (project_id, env_name)
             SELECT project_id, env_name
             FROM nix_environments
@@ -75,11 +119,11 @@ def test_duplicate_environment_names_rejected(db_connection: sqlite3.Connection)
 
 @pytest.mark.constraints
 @pytest.mark.unit
-def test_multiple_current_versions_rejected(db_connection: sqlite3.Connection):
+def test_multiple_current_versions_rejected(seeded: sqlite3.Connection):
     """Test that multiple current versions per file are rejected"""
 
     with pytest.raises(sqlite3.IntegrityError):
-        db_connection.execute("""
+        seeded.execute("""
             INSERT INTO file_contents (file_id, content_hash, file_size_bytes, is_current)
             SELECT file_id, content_hash, file_size_bytes, 1
             FROM file_contents
@@ -90,11 +134,11 @@ def test_multiple_current_versions_rejected(db_connection: sqlite3.Connection):
 
 @pytest.mark.constraints
 @pytest.mark.unit
-def test_file_self_dependency_rejected(db_connection: sqlite3.Connection):
+def test_file_self_dependency_rejected(seeded: sqlite3.Connection):
     """Test that file self-dependencies are rejected"""
 
     with pytest.raises(sqlite3.IntegrityError):
-        db_connection.execute("""
+        seeded.execute("""
             INSERT INTO file_dependencies (parent_file_id, dependency_file_id, dependency_type)
             SELECT id, id, 'import'
             FROM project_files
@@ -104,11 +148,11 @@ def test_file_self_dependency_rejected(db_connection: sqlite3.Connection):
 
 @pytest.mark.constraints
 @pytest.mark.unit
-def test_duplicate_deployment_targets_rejected(db_connection: sqlite3.Connection):
+def test_duplicate_deployment_targets_rejected(seeded: sqlite3.Connection):
     """Test that duplicate deployment targets are rejected"""
 
     with pytest.raises(sqlite3.IntegrityError):
-        db_connection.execute("""
+        seeded.execute("""
             INSERT INTO deployment_targets (project_id, target_name, target_type)
             SELECT project_id, target_name, target_type
             FROM deployment_targets
@@ -118,11 +162,11 @@ def test_duplicate_deployment_targets_rejected(db_connection: sqlite3.Connection
 
 @pytest.mark.constraints
 @pytest.mark.unit
-def test_duplicate_content_hashes_rejected(db_connection: sqlite3.Connection):
+def test_duplicate_content_hashes_rejected(seeded: sqlite3.Connection):
     """Test that duplicate content blobs (by hash) are rejected"""
 
     with pytest.raises(sqlite3.IntegrityError):
-        db_connection.execute("""
+        seeded.execute("""
             INSERT INTO content_blobs (hash_sha256, content_type, file_size_bytes)
             SELECT hash_sha256, content_type, file_size_bytes
             FROM content_blobs
