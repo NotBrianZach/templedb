@@ -28,58 +28,139 @@ _status_badge = _status_badge
 _run = _run
 TEMPLEDB = TEMPLEDB
 
+from urllib.parse import quote
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*$")
+_TOC_RE = re.compile(r"^(table of contents|contents|toc)$", re.IGNORECASE)
+
+
+def _anchor(heading: str) -> str:
+    """GitHub-style anchor slug for a heading."""
+    s = heading.strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s)
+    return re.sub(r"[-\s]+", "-", s).strip("-")
+
+
+def _doc_category(file_path: str) -> str:
+    """Group docs by where they actually live.
+
+    The old readme_files.category was inferred by regex over the content
+    ('setup', 'api', 'deployment', ...), which meant two docs in the same
+    directory could land in different buckets for no visible reason. The
+    directory is both cheaper and something you can act on.
+    """
+    parts = file_path.split("/")
+    if len(parts) == 1:
+        return "root"
+    if parts[0] == "docs":
+        return parts[1] if len(parts) > 2 else "docs"
+    return parts[0]
+
+
+def _parse_markdown(row) -> dict:
+    """Extract title, description, headings and counts from markdown.
+
+    Fenced code blocks are skipped: a shell block full of `# comment` lines
+    would otherwise register as a pile of H1 headings.
+    """
+    text = row["content_text"] or ""
+    lines = text.splitlines()
+
+    title = None
+    description = None
+    sections = []
+    has_toc = False
+    in_fence = False
+
+    for i, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+
+        m = _HEADING_RE.match(line)
+        if m:
+            level = len(m.group(1))
+            heading = m.group(2).strip()
+            if _TOC_RE.match(heading):
+                has_toc = True
+            if level == 1 and title is None:
+                title = heading
+                continue
+            sections.append({
+                "level": level,
+                "heading": heading,
+                "anchor": _anchor(heading),
+                "line_number": i,
+            })
+            continue
+
+        # First real prose line after the title becomes the description.
+        if description is None and title is not None and stripped \
+                and not stripped.startswith(("|", ">", "-", "*", "<!--", "[")):
+            description = stripped[:200]
+
+    return {
+        "slug": row["slug"],
+        "file_path": row["file_path"],
+        "title": title or row["file_path"].rsplit("/", 1)[-1],
+        "description": description or "",
+        "category": _doc_category(row["file_path"]),
+        "sections": sections,
+        "has_toc": has_toc,
+        "word_count": len(text.split()),
+        "updated_at": row["updated_at"],
+    }
+
 
 @router.get("/docs", response_class=HTMLResponse)
 def docs_list(project: str = Query(""), category: str = Query("")):
-    readme_files = query_all("""
-        SELECT rf.id, p.slug, rf.title, rf.file_path, rf.category, rf.scope,
-               rf.word_count, rf.section_count, rf.has_toc, rf.last_scanned_at,
-               rf.description
-        FROM readme_files rf JOIN projects p ON rf.project_id = p.id
-        ORDER BY p.slug, rf.category NULLS LAST, rf.title
+    # Markdown is read straight from the committed files. This page used to
+    # render the readme_files / readme_topics / readme_sections tables, but
+    # that index had no refresh path: its only writer was
+    # scripts/dogfood_readme_system.py, a one-off script with no CLI command
+    # wired to it. It ran once and stopped, so every row still read
+    # last_scanned_at = 2026-04-05 and 15 of templedb's 132 docs were simply
+    # invisible here -- including the docs describing the system you were
+    # looking at.
+    #
+    # Parsing on request costs ~315 files / 3.3 MB across 15 projects, which
+    # is cheap next to an index that silently lies. Nothing to go stale, and
+    # nothing to re-run after a commit.
+    rows = query_all("""
+        SELECT p.slug, pf.file_path, cb.content_text, fc.updated_at
+        FROM project_files pf
+        JOIN projects p       ON p.id = pf.project_id
+        JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
+        JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+        WHERE pf.status = 'active'
+          AND lower(pf.file_path) LIKE '%.md'
+          -- Skip dotted directories: 21 of the 315 markdown files live in
+          -- .claude/ or a .release-backup-<date>/ snapshot, and listing a
+          -- backup copy beside the real doc is worse than not listing it.
+          AND pf.file_path NOT LIKE '.%'
+          AND pf.file_path NOT LIKE '%/.%'
+        ORDER BY p.slug, pf.file_path
     """)
+    all_docs = [_parse_markdown(r) for r in rows]
 
-    topics_rows = query_all("""
-        SELECT rt.readme_id, rt.topic, rt.relevance
-        FROM readme_topics rt
-        ORDER BY rt.readme_id, rt.relevance DESC
-    """)
-    topics_by_doc: dict = defaultdict(list)
-    for t in topics_rows:
-        topics_by_doc[t["readme_id"]].append(t)  # t["relevance"] is the score
-
-    sections_rows = query_all("""
-        SELECT rs.readme_id, rs.heading, rs.level, rs.anchor, rs.line_number
-        FROM readme_sections rs ORDER BY rs.readme_id, rs.line_number
-    """)
-    sections_by_doc: dict = defaultdict(list)
-    for s in sections_rows:
-        sections_by_doc[s["readme_id"]].append(s)
-
-    # Collect filter options — include ALL projects, not just those with READMEs
-    readme_projects = sorted({r["slug"] for r in readme_files})
     all_projects_rows = query_all("SELECT slug FROM projects ORDER BY slug")
     all_projects = sorted({r["slug"] for r in all_projects_rows})
-    all_categories = sorted({r["category"] or "uncategorized" for r in readme_files})
+    all_categories = sorted({d["category"] for d in all_docs})
 
     # Filter
-    filtered = readme_files
+    filtered = all_docs
     if project:
-        filtered = [r for r in filtered if r["slug"] == project]
+        filtered = [d for d in filtered if d["slug"] == project]
     if category:
-        cat_match = None if category == "uncategorized" else category
-        filtered = [r for r in filtered if (r["category"] or None) == cat_match]
+        filtered = [d for d in filtered if d["category"] == category]
 
-    # Group by category
     by_category: dict = defaultdict(list)
-    for r in filtered:
-        by_category[r["category"] or "uncategorized"].append(r)
+    for d in filtered:
+        by_category[d["category"]].append(d)
 
-    # Filter dropdowns
-    proj_opts = '<option value="">All projects</option>' + "".join(
-        f'<option value="{html.escape(p)}" {"selected" if p == project else ""}>{html.escape(p)}</option>'
-        for p in all_projects
-    )
     cat_opts = '<option value="">All categories</option>' + "".join(
         f'<option value="{html.escape(c)}" {"selected" if c == category else ""}>{html.escape(c)}</option>'
         for c in all_categories
@@ -88,71 +169,62 @@ def docs_list(project: str = Query(""), category: str = Query("")):
     sections_html = ""
     for cat in sorted(by_category.keys()):
         docs = by_category[cat]
-        cat_label = cat.title() if cat != "uncategorized" else "Uncategorized"
-        rows = []
-        for r in docs:
-            doc_topics = topics_by_doc.get(r["id"], [])
-            doc_sections = sections_by_doc.get(r["id"], [])
-            topic_badges = " ".join(
-                f'<span class="badge blue" style="font-size:0.68rem">{html.escape(t["topic"])}</span>'
-                for t in doc_topics[:5]
-            )
-            toc_badge = '<span class="badge green" style="font-size:0.68rem">TOC</span>' if r["has_toc"] else ""
-            scope_badge = (
-                f'<span class="badge" style="font-size:0.68rem">{html.escape(r["scope"])}</span>'
-                if r["scope"] else ""
+        rows_html = []
+        for d in docs:
+            toc_badge = (
+                '<span class="badge green" style="font-size:0.68rem">TOC</span>'
+                if d["has_toc"] else ""
             )
             title_cell = (
-                f'<strong>{_file_link(r["slug"], r["file_path"], r["title"] or r["file_path"])}</strong>'
-                if r["file_path"] else f'<strong>{html.escape(r["title"] or "")}</strong>'
+                f'<strong>{_file_link(d["slug"], d["file_path"], d["title"])}</strong>'
             )
-            desc = html.escape(r["description"] or "")
-            desc_cell = f'<span class="muted" style="font-size:0.8rem">{desc}</span>' if desc else ""
+            desc_cell = (
+                f'<span class="muted" style="font-size:0.8rem">{html.escape(d["description"])}</span>'
+                if d["description"] else ""
+            )
 
-            # Sections expander
             sec_detail = ""
-            if doc_sections:
+            if d["sections"]:
                 sec_trs = []
-                for s in doc_sections:
+                for s in d["sections"]:
                     indent = "&nbsp;" * (s["level"] - 1) * 3
-                    anchor_link = (
-                        f'<a href="/projects/{html.escape(r["slug"])}/file?path={html.escape(r["file_path"] or "")}#{html.escape(s["anchor"] or "")}" '
-                        f'style="font-size:0.78rem">{indent}{html.escape(s["heading"])}</a>'
-                        if r["file_path"] else f'{indent}{html.escape(s["heading"])}'
-                    )
                     sec_trs.append([
                         f'<span class="muted" style="font-size:0.75rem">H{s["level"]}</span>',
-                        anchor_link,
+                        f'<a href="/projects/{html.escape(d["slug"])}/file'
+                        f'?path={quote(d["file_path"], safe="")}#{html.escape(s["anchor"])}" '
+                        f'style="font-size:0.78rem">{indent}{html.escape(s["heading"])}</a>',
                         f'<span class="muted">{s["line_number"]}</span>',
                     ])
                 sec_inner = _table(["Lvl", "Heading", "Line"], sec_trs)
+                n = len(d["sections"])
                 sec_detail = (
                     f'<details style="margin-top:0.15rem">'
                     f'<summary style="cursor:pointer;color:#606080;font-size:0.75rem">'
-                    f'{len(doc_sections)} section{"s" if len(doc_sections) != 1 else ""}</summary>'
+                    f'{n} section{"s" if n != 1 else ""}</summary>'
                     f'<div style="margin-top:0.3rem">{sec_inner}</div></details>'
                 )
 
-            rows.append([
+            rows_html.append([
                 title_cell + (f'<br>{desc_cell}' if desc_cell else ""),
-                f'{r["slug"]}',
-                f'{r["word_count"] or 0:,}',
-                sec_detail or f'<span class="muted">{r["section_count"] or 0}</span>',
-                f'{toc_badge} {scope_badge}'.strip(),
-                topic_badges,
-                html.escape((r["last_scanned_at"] or "")[:10]),
+                html.escape(d["slug"]),
+                f'{d["word_count"]:,}',
+                sec_detail or '<span class="muted">0</span>',
+                toc_badge,
+                html.escape((d["updated_at"] or "")[:10]),
             ])
 
         section_table = _table(
-            ["Title", "Project", "Words", "Sections", "Flags", "Topics", "Scanned"],
-            rows,
+            ["Title", "Project", "Words", "Sections", "Flags", "Updated"],
+            rows_html,
         )
         sections_html += (
             f'<div class="fsec" style="margin-top:1.5rem">'
-            f'<h3>{html.escape(cat_label)} <span class="muted" style="font-weight:normal;font-size:0.85rem">({len(docs)})</span></h3>'
+            f'<h3>{html.escape(cat)} '
+            f'<span class="muted" style="font-weight:normal;font-size:0.85rem">({len(docs)})</span></h3>'
             f'{section_table}</div>'
         )
 
+    total = len(filtered)
     total = len(filtered)
 
     # ── File Tree Browser ─────────────────────────────────────────────────
