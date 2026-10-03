@@ -585,6 +585,12 @@ def register(cli):
     checkout_diff_parser.add_argument('project_slug', help='Project slug')
     checkout_diff_parser.add_argument('checkout_path', help='Checkout directory path')
     checkout_diff_parser.add_argument('file', nargs='?', help='File pattern to diff (optional)')
+    checkout_diff_parser.add_argument(
+        '--since-checkout', action='store_true',
+        help='Compare against what was materialized into this tree, not the '
+             'current database — i.e. what was edited here. Use this before '
+             'deleting a workspace; the default answers the different '
+             'question of what committing this tree would change.')
     cli.commands['project.checkout-diff'] = checkout_cmd.diff
 
     # project commit

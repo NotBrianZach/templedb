@@ -604,6 +604,7 @@ class CheckoutCommand:
         project_slug = args.project_slug
         checkout_path = Path(args.checkout_path).resolve()
         file_pattern = getattr(args, 'file', None)
+        since_checkout = getattr(args, 'since_checkout', False)
 
         try:
             # Get project
@@ -622,32 +623,54 @@ class CheckoutCommand:
                 logger.info(f"  Run: templedb project checkout {project_slug} {checkout_path}")
                 return 1
 
-            # Get database files
-            db_files = self.file_repo.get_files_for_project(project['id'], include_content=True)
-            db_by_path = {f['file_path']: f for f in db_files}
-
-            # Get checkout snapshots
-            snapshots = {}
-            snapshot_rows = self.checkout_repo.query_all("""
-                SELECT
-                    cs.file_id,
-                    cs.content_hash,
-                    pf.file_path
-                FROM checkout_snapshots cs
-                JOIN project_files pf ON cs.file_id = pf.id
-                WHERE cs.checkout_id = ?
-            """, (checkout['id'],))
-
-            for row in snapshot_rows:
-                snapshots[row['file_path']] = row
-
-            # Find modified files
             from importer.content import ContentStore
             import difflib
 
-            for file_path_str, snapshot in snapshots.items():
+            # Two different questions, and mixing them was the bug. Default
+            # ("what would change if I committed this tree") compares disk to
+            # the DATABASE. --since-checkout ("what did I edit here")
+            # compares disk to checkout_snapshots, the hash recorded when
+            # each file was materialised into this tree.
+            #
+            # The old code gated on the snapshot but printed a DB diff, so the
+            # two disagreed whenever the DB moved on: a file edited here and
+            # then committed was reported changed and then showed zero hunks,
+            # because snapshot held the pre-edit hash while DB and disk had
+            # already converged. Measured 2026-10-03 on a 789-file checkout:
+            # 24 files had snapshot != db_current, nearly all untouched here.
+            # Whichever baseline is chosen, the gate and the printed diff must
+            # come from the same one.
+            if since_checkout:
+                baseline_label = 'at checkout'
+                rows = self.checkout_repo.query_all("""
+                    SELECT
+                        pf.file_path,
+                        cs.content_hash,
+                        cb.content_text,
+                        cb.content_blob,
+                        cb.content_type
+                    FROM checkout_snapshots cs
+                    JOIN project_files pf ON cs.file_id = pf.id
+                    LEFT JOIN content_blobs cb ON cb.hash_sha256 = cs.content_hash
+                    WHERE cs.checkout_id = ?
+                """, (checkout['id'],))
+                baseline_by_path = {r['file_path']: r for r in rows}
+            else:
+                baseline_label = 'database'
+                db_files = self.file_repo.get_files_for_project(project['id'], include_content=True)
+                baseline_by_path = {f['file_path']: f for f in db_files}
+
+            changed = 0
+
+            for file_path_str, baseline in sorted(baseline_by_path.items()):
                 # Filter by pattern if provided
                 if file_pattern and file_pattern not in file_path_str:
+                    continue
+
+                # A baseline with no content to compare against: a DB row for
+                # a file with no current content (e.g. a deleted migration),
+                # or a snapshot whose blob has since been pruned.
+                if not baseline.get('content_hash'):
                     continue
 
                 file_path = checkout_path / file_path_str
@@ -661,42 +684,49 @@ class CheckoutCommand:
                     continue
 
                 # Check if modified
-                if local_content.hash_sha256 != snapshot['content_hash']:
-                    # Get database version
-                    db_file = db_by_path.get(file_path_str)
-                    if not db_file:
-                        continue
+                if local_content.hash_sha256 == baseline['content_hash']:
+                    continue
 
-                    print(f"\n{'='*60}")
-                    print(f"File: {file_path_str}")
-                    print(f"{'='*60}")
+                changed += 1
+                print(f"\n{'='*60}")
+                print(f"File: {file_path_str}")
+                print(f"{'='*60}")
 
-                    # Show diff
-                    if db_file['content_type'] == 'text' and local_content.content_type == 'text':
-                        db_lines = db_file['content_text'].splitlines(keepends=True)
-                        local_lines = local_content.content_text.splitlines(keepends=True)
+                # Show diff
+                if (baseline['content_type'] == 'text'
+                        and local_content.content_type == 'text'
+                        and baseline.get('content_text') is not None):
+                    db_lines = baseline['content_text'].splitlines(keepends=True)
+                    local_lines = local_content.content_text.splitlines(keepends=True)
 
-                        diff = difflib.unified_diff(
-                            db_lines,
-                            local_lines,
-                            fromfile=f"{file_path_str} (database)",
-                            tofile=f"{file_path_str} (checkout)",
-                            lineterm=''
-                        )
+                    diff = difflib.unified_diff(
+                        db_lines,
+                        local_lines,
+                        fromfile=f"{file_path_str} ({baseline_label})",
+                        tofile=f"{file_path_str} (checkout)",
+                        lineterm=''
+                    )
 
-                        for line in diff:
-                            if line.startswith('+'):
-                                print(f"\033[32m{line}\033[0m")  # Green
-                            elif line.startswith('-'):
-                                print(f"\033[31m{line}\033[0m")  # Red
-                            elif line.startswith('@'):
-                                print(f"\033[36m{line}\033[0m")  # Cyan
-                            else:
-                                print(line)
-                    else:
-                        print(f"   Binary file changed")
-                        print(f"   Database: {len(db_file.get('content_blob', b''))} bytes")
-                        print(f"   Checkout: {local_content.file_size} bytes")
+                    for line in diff:
+                        if line.startswith('+'):
+                            print(f"\033[32m{line}\033[0m")  # Green
+                        elif line.startswith('-'):
+                            print(f"\033[31m{line}\033[0m")  # Red
+                        elif line.startswith('@'):
+                            print(f"\033[36m{line}\033[0m")  # Cyan
+                        else:
+                            print(line)
+                else:
+                    print(f"   Binary file changed")
+                    print(f"   {baseline_label.capitalize()}: "
+                          f"{len(baseline.get('content_blob') or b'')} bytes")
+                    print(f"   Checkout: {local_content.file_size} bytes")
+
+            if changed == 0:
+                print(f"No differences between checkout and {baseline_label}.")
+            else:
+                noun = "file" if changed == 1 else "files"
+                print(f"\n{changed} {noun} differ from the {baseline_label}.")
 
             return 0
 
