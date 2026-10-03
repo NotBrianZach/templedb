@@ -3855,7 +3855,7 @@ WantedBy=timers.target
         Reports REGRESSIONS, not the backlog. The 47 known cases are
         seeded into unmaintained_columns_baseline by migration 123 and
         stay quiet; only a column absent from that table fires. Without
-        the baseline this check would be 47 issues red on day one, which
+        the baseline this invariant would be 47 issues red on day one, which
         trains people to skip the whole surface -- the same way
         checkout_matches_db's false /tmp/tdb-land entry did.
 
@@ -3877,7 +3877,7 @@ WantedBy=timers.target
         edit_intents.cancelled_at (1 of 780 set) and vcs_sessions.host
         (952 of 953) are indistinguishable from constants by that measure,
         and both are correct. Counting non-nulls separately is what keeps
-        them out, and is why this check can be precise enough to act on.
+        them out, and is why this invariant can be precise enough to act on.
 
         Shape is compared too, not just the name: a baselined all_null
         column that someone starts writing a single constant value into
@@ -3895,16 +3895,16 @@ WantedBy=timers.target
 
         # Degrade rather than fail on a DB predating migration 123 -- the
         # same contract resolve() keeps for pre-113 databases, since a
-        # health check that errors is worse than one that abstains.
+        # an invariant that errors is worse than one that abstains.
         # Ask sqlite_master rather than catching the failure: db_utils logs
         # at ERROR before re-raising, so letting it throw would print
         # "no such table" on a healthy pre-123 database and report OK in
-        # the same breath -- a check whose own output contradicts itself.
+        # the same breath -- an invariant whose own output contradicts itself.
         if not query_one(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name = 'unmaintained_columns_baseline'"):
             logger.debug(
-                "unmaintained_columns_baseline missing; skipping check "
+                "unmaintained_columns_baseline missing; skipping invariant "
                 "(apply migration 123)")
             return []
         baseline_rows = query_all(
@@ -3942,7 +3942,7 @@ WantedBy=timers.target
             if not names:
                 continue
 
-            # One scan per table rather than one per column: this check
+            # One scan per table rather than one per column: this invariant
             # walks every table in the DB, and per-column scans turned a
             # 0.9s pass into minutes on the larger ones.
             # Explicit aliases rather than relying on the generated names

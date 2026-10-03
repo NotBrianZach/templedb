@@ -33,11 +33,11 @@
 -- vcs_sessions.host (952 of 953) look identical to a constant under
 -- COUNT(DISTINCT), which ignores NULLs, but both are correct: an
 -- optional timestamp and a near-single-machine fleet. Treating them as
--- violations is how this check would have become noise.
+-- violations is how this invariant would have become noise.
 --
 -- Being in this table is NOT approval. Most rows carry 'not triaged' and
 -- mean only "true on 2026-10-02". The point is that the SET is frozen:
--- a new unmaintained column is a regression the check reports, while
+-- a new unmaintained column is a regression the invariant reports, while
 -- these stay quiet until someone populates or drops them.
 
 CREATE TABLE IF NOT EXISTS unmaintained_columns_baseline (
