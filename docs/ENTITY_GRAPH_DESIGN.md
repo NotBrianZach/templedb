@@ -180,14 +180,18 @@ Phase 3 does NOT:
 - Refactor existing typed tables to disappear behind `entities`. They
   remain fast-path storage. The entities/relations tables are a
   parallel index.
-- Add SCIP ingestion. That's Phase 4.
-- Add SSH-probe reconcile. That's Phase 3.5 or 4.
+- Add SCIP ingestion. That was Phase 4.
+- Add SSH-probe reconcile. That was Phase 3.5 or 4.
 - Turn `deployment_snapshots` into a proper span. That's a follow-up
   once the span pattern has proven out.
 
-Phase 4 adds SCIP as an additional local chart. Phase 5 retires the
-authority-over-source vocabulary that the observer plan is walking
-away from.
+Phase 4 would have added SCIP as an additional local chart; that tranche
+is **deferred** — the adapter exists but has not run since 2026-09-05.
+SSH-probe reconcile shipped instead, as `templedb reconcile`. Phase 5
+retires the authority-over-source vocabulary that the observer plan is
+walking away from. Current tranche status lives in
+[`CLAUDE.md`](../CLAUDE.md) → "Where the plan landed"; this document
+describes the design as of Phase 3 and is not updated per tranche.
 
 ## References
 

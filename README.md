@@ -388,7 +388,7 @@ templedb hygiene dead-imports bza                 # imports with no references
 templedb entity paths --kind Symbol --limit 20    # entity refs by external_ref shape
 ```
 
-Language ingest is currently Python via tree-sitter; SCIP adapters for TypeScript/Rust/Nix are the Phase 4 story (see [proposed schema map](reports/2026-09-03-0843-proposed-schema-after-observer-integrator-plan.html)).
+Language ingest is currently Python via tree-sitter; SCIP adapters for TypeScript/Rust/Nix are a deferred tranche, not in flight (see [proposed schema map](reports/2026-09-03-0843-proposed-schema-after-observer-integrator-plan.html)).
 
 The graph is bug-productive here: doctor invariants have already caught resolver bugs by asserting things that are *structurally impossible* (e.g., "no `calls` relation has stdlib at `from` and user-CLI at `to`"). See [today's session recap](reports/2026-09-04-1410-session-recap-2-applying-parallel-session-answers.html) for a real bug caught this way.
 
@@ -483,14 +483,23 @@ Recent design-thread highlights:
 
 ## Roadmap / upcoming
 
-The observer/integrator plan is largely landed. What's next, in rough order:
+The observer/integrator plan is largely landed. See
+[`CLAUDE.md` → "Where the plan landed"](CLAUDE.md) for the tranche-level
+view; this list is the ordering. What's next, in rough order:
 
 1. **Log-based projection for the entity graph** ([migration plan](reports/2026-09-04-1019-migration-plan-dual-write-to-log-based-projection.html), ~3 weeks). Retire dual-write. Single-writer typed tables + async projection into entities/relations. Kills the drift class entirely — writes flow into the graph through one path, projection materializes the derived view.
-2. **CRSql sync for `entities`/`relations`** with per-kind `sync_scope`. Fleet-wide graph convergence.
-3. **SCIP adapters** (TypeScript, Rust, Nix) — external code-facts ingestion. Language coverage grows with the SCIP ecosystem rather than our parser budget.
-4. **Observations archive + current-only semantics** — retention policy so the graph doesn't grow unbounded when SCIP dumps millions of symbol facts.
-5. **Sidecar-column migration** (expand/contract) — move `vcs_commit_metadata`, `vcs_file_change_metadata`, etc. onto `entities.attributes_json`.
-6. **Cross-session handoff** via `templedb handoff {send,list,pop,ack}` — carry unfinished threads across sessions and agents without losing state (design in [cross-session handoff semantics](reports/2026-09-03-0826-cross-session-handoff-semantics.html)).
+2. **Observations archive + current-only semantics** — retention policy so the graph doesn't grow unbounded when a bulk symbol adapter dumps millions of facts.
+3. **Sidecar-column migration** (expand/contract) — move `vcs_commit_metadata`, `vcs_file_change_metadata`, etc. onto `entities.attributes_json`. Migration 123 laid the baseline and `doctor`'s `no_new_unmaintained_columns` invariant guards the direction.
+
+Shipped since this list was written:
+
+- **CRSql sync for `entities`/`relations`** with per-kind `sync_scope` — `templedb sync {init,status,serve,pull,push,peers,network}`, with the `every_entity_has_sync_scope` and `machine_local_kinds_never_fleet_scope` invariants holding it honest.
+- **Cross-session handoff** — `templedb handoff {send,list,pop,ack}` (design in [cross-session handoff semantics](reports/2026-09-03-0826-cross-session-handoff-semantics.html)).
+- **Checkout roles and session-scoped resolution** — phases 0–4 of [the design](reports/2026-09-27-2103-checkout-role-and-session-scoped-resolution-design.html), which is what made multi-workspace writes deterministic.
+
+Deferred:
+
+- **SCIP adapters** (TypeScript, Rust, Nix) — external code-facts ingestion, so language coverage grows with the SCIP ecosystem rather than our parser budget. The adapter exists but has not run since 2026-09-05; Python via tree-sitter covers TempleDB itself, so this has not been the binding constraint.
 
 ---
 

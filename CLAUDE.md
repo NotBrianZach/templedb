@@ -8,23 +8,73 @@ completed Phases 0–3 during 2026-09-01 through 2026-09-03. Session recap
 at [`reports/2026-09-03-1530-session-recap-*.html`](reports/).
 
 **Current stance**: TempleDB observes source (git is authoritative), owns
-intents + relationships + the cross-authority knowledge graph. Six
-ingest adapters keep the graph in sync (hourly systemd timer). Ten
-doctor invariants + one active-probe reconcile (daily systemd timer)
-detect drift. See [`docs/ENTITY_GRAPH_DESIGN.md`](docs/ENTITY_GRAPH_DESIGN.md)
+intents + relationships + the cross-authority knowledge graph. Nine
+ingest adapters keep the graph in sync (hourly systemd timer). 23 doctor
+invariants + one active-probe reconcile (daily systemd timer) detect
+drift. See [`docs/ENTITY_GRAPH_DESIGN.md`](docs/ENTITY_GRAPH_DESIGN.md)
 for the categorical framing.
 
-Fastest orientation:
+Fastest orientation (the counts above drift — `templedb summary` is
+authoritative):
 ```bash
 templedb summary                      # health at a glance
-templedb entity search <keyword>      # search the 12k-entity graph
+templedb entity search <keyword>      # search the 31k-entity graph
 templedb provenance machine <host>    # what motivated the code running there
 templedb gui                          # /entities and /summary in the browser
 ```
 
-Phase 4 (SCIP for cross-language code facts) and Phase 5 (retire
-authority-over-source vocabulary — this section IS Phase 5) are the
-remaining tranches. Everything else is polish.
+### Tranches
+
+Design work for a tranche goes in a dated `reports/` doc that carries
+its own phase numbering and rollout table; those are the real plan
+documents. [`ROADMAP.md`](ROADMAP.md) is a stub pointing back here.
+
+**Landed — checkout roles and session-scoped resolution.** Phases 0–4 of
+[`reports/2026-09-27-2103-checkout-role-and-session-scoped-resolution-design.html`](reports/),
+shipped 2026-09-27 through 2026-10-03: which tree is authoritative when
+the canonical checkout, several edit workspaces, and the DB disagree.
+Blob-age guard so a stale disk cannot overwrite a newer blob,
+`resolve(purpose)` so a writer never reconciles against the published
+copy, migration 122's partial unique indexes, `session_id` populated on
+create, and `admin checkout-gc` to retire ended-session trees. This was
+the bulk of recent commit volume and it is the abstraction every write
+path depends on — it was never polish, and listing it here is how it
+stops being invisible. Phases 0–3 are unconditional; phase 4's
+guarantee holds only for callers that pin a session, which is the gap
+below.
+
+**Open gap in that tranche.** `session_id` on an edit tree is populated
+from `TEMPLEDB_SESSION_ID` or `TEMPLEDB_SESSION` and nothing else —
+`CheckoutRepository.current_session_id()` has no PID fallback and
+deliberately never creates a session, so resolving a path cannot have
+the side effect of opening one. An agent that exports neither var
+therefore creates edit trees with `session_id IS NULL`, and SQLite
+treats NULLs as distinct in a unique index, so migration 122's
+per-session index does not constrain precisely the rows that are still
+ambiguous. The design report predicted this: the NULL set "only becomes
+meaningful once sessions populate the column."
+
+Those projects fall back to "newest active edit tree wins", which a
+materialise elsewhere can change mid-session — the `vcs status` warning
+names the losers when it happens. So `checkout_matches_db` and
+`checkout_roles_are_unambiguous` going red is usually an unpinned agent
+rather than dead data, and `admin checkout-gc` will not clear it: those
+trees are live, not stale. Pin the session before `templedb edit`, and
+name the tree explicitly for anything that matters.
+
+**Remaining — Phase 5**: retire the authority-over-source vocabulary.
+This section is Phase 5; there is nothing else to track for it.
+
+**Deferred — SCIP for cross-language code facts**, which held the Phase 4
+slot. The `scip` ingest adapter exists and last ran 2026-09-05; nothing
+has driven it since and no phase doc was ever written. Python via
+tree-sitter already covers the language TempleDB itself is written in,
+so what SCIP buys is coverage for the TS/JS and Nix projects — real, but
+not the binding constraint. Either pick it up or retire the adapter;
+what it should not do is keep reading as in-flight.
+```bash
+templedb ingest scip --project <slug>
+```
 
 ## Dogfooding: Use TempleDB For Everything
 
