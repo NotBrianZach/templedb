@@ -11,6 +11,21 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
+class NoEditCheckout(RuntimeError):
+    """Raised by resolve(PURPOSE_WRITE) when only a published tree exists.
+
+    Deliberately not a return value. Every previous attempt to express
+    "there is no safe tree" as a value — None, or the canonical row with
+    a flag — was dropped by at least one of the call sites, which is how
+    a commit came to reconcile against the materialised tree in the
+    first place.
+
+    Plain RuntimeError rather than error_handler.TempleDBError so the
+    repository layer keeps no dependency on the CLI's error module;
+    callers that want the CLI's formatting catch it and re-raise.
+    """
+
+
 class CheckoutRepository(BaseRepository):
     """
     Repository for checkout-related database operations.
@@ -193,13 +208,29 @@ class CheckoutRepository(BaseRepository):
     # refreshing the canonical tree silently became the source for
     # staging and cost system_config commit FA20845EE25BD208 its content.
     PURPOSE_BUILD = 'build'   # build / materialize / publish -> canonical
-    PURPOSE_EDIT = 'edit'     # status / add / commit / diff  -> edit tree
+    PURPOSE_EDIT = 'edit'     # status / diff / read-only     -> edit tree
+    # Writers. Same resolution as EDIT, but refuses rather than falling
+    # back to the canonical tree, because that fallback is a data-loss
+    # path for anything that WRITES: `vcs commit` reconciles staged
+    # paths against the resolved tree, so resolving to the published
+    # tree is how `reports reindex` + commit reverted index.html, and
+    # how a `file set` to a new path got dropped (commit 7A3BF285
+    # reported "Files: 2" and wrote one).
+    #
+    # This is the design's step 3 — "none -> refuse, naming `templedb
+    # edit <slug>`" — kept off PURPOSE_EDIT on purpose. The design
+    # flagged this as the one call worth disagreeing with, and the
+    # disagreement resolves by splitting it: a reader genuinely can use
+    # the canonical tree (`vcs status` on an unedited project reports
+    # against published content, which is true), while a writer cannot.
+    PURPOSE_WRITE = 'write'
 
     def resolve(
         self,
         project_id: int,
         purpose: str = PURPOSE_EDIT,
         session_id: Optional[int] = None,
+        quiet: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Resolve the checkout a caller should use, by what it is for.
 
@@ -243,6 +274,16 @@ class CheckoutRepository(BaseRepository):
                 "project %s", project_id)
             return self._legacy_get_active_for_project(project_id)
         if not rows:
+            # No checkout rows at all. A reader gets None and the caller
+            # falls back (get_checkout_path tries repo_url); a writer
+            # must not, or the refusal has a hole exactly where the
+            # project is least set up. Measured before this line existed:
+            # 10 of 24 projects have no rows, and every one of them
+            # passed the write check and then failed deeper down with
+            # "No active checkout found" — or took the repo_url fallback
+            # and wrote to an imported source directory.
+            if purpose == self.PURPOSE_WRITE:
+                self._refuse_write(project_id)
             return None
 
         def extant(rs):
@@ -279,31 +320,42 @@ class CheckoutRepository(BaseRepository):
                      if r['session_id'] is None
                      or not self._session_is_live(r['session_id'])]
         if len(adoptable) == 1:
-            self._warn_if_behind(project_id, adoptable[0])
+            if not quiet:
+                self._warn_if_behind(project_id, adoptable[0])
             return adoptable[0]
         if len(adoptable) > 1:
-            logger.warning(
-                "Project %s has %d candidate edit checkouts and no session "
-                "owns one; using the most recent (%s). The others are %s. "
-                "Whichever is newest wins, so a materialise elsewhere can "
-                "change this answer — name the tree explicitly for anything "
-                "that matters.",
-                project_id, len(adoptable), adoptable[0]['checkout_path'],
-                ", ".join(r['checkout_path'] for r in adoptable[1:]),
-            )
-            self._warn_if_behind(project_id, adoptable[0])
+            if not quiet:
+                logger.warning(
+                    "Project %s has %d candidate edit checkouts and no "
+                    "session owns one; using the most recent (%s). The "
+                    "others are %s. Whichever is newest wins, so a "
+                    "materialise elsewhere can change this answer — name "
+                    "the tree explicitly for anything that matters.",
+                    project_id, len(adoptable), adoptable[0]['checkout_path'],
+                    ", ".join(r['checkout_path'] for r in adoptable[1:]),
+                )
+                self._warn_if_behind(project_id, adoptable[0])
             return adoptable[0]
 
-        # No tree this caller may use. Two quite different situations
-        # reach here and the fallback is the same, so the message must
-        # not be: before phase 4 both said "every edit checkout belongs
-        # to another live session", which is simply false for a project
-        # that has no edit tree at all — and that is now the normal
-        # state after the prune retires the ones nobody is using.
-        # Diagnosing from a false message costs more than no message.
+        # No edit tree. A writer stops here: everything below hands back
+        # the canonical tree, and a commit reconciled against the
+        # published tree is the data-loss path PURPOSE_WRITE exists to
+        # close. Raised rather than returned so no caller can forget to
+        # check — and the message has to carry the fix, since the state
+        # is now ordinary rather than exceptional.
+        if purpose == self.PURPOSE_WRITE:
+            self._refuse_write(project_id)
+
+        # Two quite different situations reach here and the fallback is
+        # the same, so the message must not be: before phase 4 both said
+        # "every edit checkout belongs to another live session", which is
+        # simply false for a project that has no edit tree at all — and
+        # that is now the normal state after the prune retires the ones
+        # nobody is using. Diagnosing from a false message costs more
+        # than no message.
         canonical = extant([r for r in rows if r['kind'] == 'canonical'])
         if canonical:
-            if edits:
+            if edits and not quiet:
                 logger.warning(
                     "Project %s: every edit checkout belongs to another live "
                     "session; falling back to the canonical tree at %s. Run "
@@ -323,6 +375,22 @@ class CheckoutRepository(BaseRepository):
                     "one.", project_id, canonical[0]['checkout_path'])
             return canonical[0]
         return (extant(rows) or rows)[0]
+
+    def _refuse_write(self, project_id: int) -> None:
+        """Raise NoEditCheckout, naming the project and the way out."""
+        slug = (self.query_one(
+            "SELECT slug FROM projects WHERE id = ?", (project_id,))
+            or {}).get('slug') or str(project_id)
+        raise NoEditCheckout(
+            f"{slug} has no edit workspace this caller may write to, so "
+            f"there is no safe target: the trees that remain are the one "
+            f"`publish` materialises and any belonging to a live session. "
+            f"Committing against the published tree reverts whatever the "
+            f"DB holds that the tree does not; writing into another "
+            f"session's tree stages someone else's work.\n"
+            f"  Make your own:   templedb edit {slug}\n"
+            f"  Or name a tree:  templedb commit {slug} <dir>"
+        )
 
     def _session_is_live(self, session_id: int) -> bool:
         """True if the session exists and has not ended."""

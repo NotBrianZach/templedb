@@ -4524,11 +4524,32 @@ WantedBy=timers.target
         return 0
 
     def _check_reconcile_freshness(self):
-        """Invariant: every fleet_machine should have been reconciled
-        within the last 7 days. Otherwise drift is undetectable —
-        we can't know if the machine has diverged from the DB.
+        """Invariant: every DEPLOYED fleet_machine has been reconciled
+        within the last 7 days. Otherwise drift is undetectable — we
+        cannot know whether the machine has diverged from the DB.
 
-        Warns for machines never probed too."""
+        Scoped to deployed machines, matching `reconcile machine all`,
+        which skips never-deployed ones because — in its own words —
+        there is no baseline to diff against and the probe would just
+        fail with 'no DB record for this machine'. Unscoped, this
+        invariant demanded a weekly SSH probe of every row ever added to
+        the table and named a remedy whose default behaviour declines to
+        do it: on 2026-10-03 all 5 issues it reported were machines with
+        deployment_status='new' and last_deployed_at IS NULL, two of
+        them localhost placeholders and one a LAN address created
+        2026-03-19 with an empty machine_config. Following the advice
+        would have meant SSHing five hosts to re-measure nothing.
+
+        That is the failure mode migration 122 names about
+        checkout_matches_db's false /tmp/tdb-land entry: a health check
+        that cries wolf about things nothing acts on is how the real
+        entries in it get skimmed past. A never-deployed machine is a
+        plan, not drift.
+
+        Never-probed-but-deployed still fires, which is the case that
+        matters — something was pushed to a host and nothing has checked
+        it since.
+        """
         from db_utils import query_all
         rows = query_all(
             """SELECT fm.machine_name,
@@ -4536,12 +4557,13 @@ WantedBy=timers.target
                  FROM fleet_machines fm
                  LEFT JOIN reconcile_runs rr
                    ON rr.machine_name = fm.machine_name
+                WHERE fm.last_deployed_at IS NOT NULL
                 GROUP BY fm.machine_name
                 HAVING last_run IS NULL
                     OR datetime(last_run) < datetime('now', '-7 days')"""
         )
-        return [f"Machine {r['machine_name']} last reconciled at "
-                f"{r['last_run'] or '(never)'} — "
+        return [f"Machine {r['machine_name']} was deployed but last "
+                f"reconciled at {r['last_run'] or '(never)'} — "
                 f"run `templedb reconcile machine {r['machine_name']}`"
                 for r in rows]
 

@@ -58,17 +58,48 @@ def _sanitize_session_component(name: str) -> str:
 def _resolve_workspace_session_name() -> str:
     """Pick the session component for the workspace path.
 
-    Priority:
-      1. TEMPLEDB_SESSION env var — the declared name (agents).
-      2. Current session's `name` field via VCSService — auto-derived
+    Priority, deliberately the same order CheckoutRepository.
+    current_session_id() uses:
+      1. TEMPLEDB_SESSION_ID — the pinned session, by id.
+      2. TEMPLEDB_SESSION env var — the declared name (agents).
+      3. Current session's `name` field via VCSService — auto-derived
          SID-based name for humans, one per terminal.
-      3. Fallback 'default' — used only if session resolution fails
+      4. Fallback 'default' — used only if session resolution fails
          (fresh install without vcs_sessions rows, corner cases).
+
+    Matching that order is the point. These two functions answer
+    "which session is this?" for two different things — this one names
+    the DIRECTORY, current_session_id() stamps the checkouts ROW — and
+    they disagreed whenever only TEMPLEDB_SESSION_ID was set, because
+    this one did not read it and fell through to the ambient session
+    instead. On 2026-10-03, `TEMPLEDB_SESSION_ID=1000 templedb edit
+    templedb` built a workspace named after session #999 and recorded
+    #1000 as its owner. Resolution still worked — ownership is what
+    resolve() reads — but every message naming the directory named the
+    wrong session, which is a slow way to lose an afternoon.
 
     This is called every time a workspace path is derived, so it must
     not raise; on any error, fall back to 'default' so the workspace
     is still usable.
     """
+    pinned = os.environ.get("TEMPLEDB_SESSION_ID", "").strip()
+    if pinned:
+        try:
+            from db_utils import query_one
+            # Only a live session, matching current_session_id(): an id
+            # pointing at an ended session does not own anything, so
+            # naming the directory after it would restate the bug in
+            # the other direction.
+            row = query_one(
+                "SELECT name FROM vcs_sessions "
+                " WHERE id = ? AND ended_at IS NULL", (int(pinned),))
+            if row and row['name']:
+                return _sanitize_session_component(row['name'])
+        except Exception:
+            # Includes a non-integer TEMPLEDB_SESSION_ID. Falls through
+            # to the name-based rules rather than raising, per this
+            # function's contract.
+            pass
     explicit = os.environ.get("TEMPLEDB_SESSION", "").strip()
     if explicit:
         return _sanitize_session_component(explicit)

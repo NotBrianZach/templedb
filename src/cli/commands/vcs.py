@@ -19,6 +19,32 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
+def _has_write_tree(project: dict) -> bool:
+    """False (having explained why) when the only tree is published.
+
+    The design's step 3, applied where it belongs. `resolve` returns the
+    canonical tree when no edit workspace exists, which is right for a
+    reader and wrong for a writer: `vcs commit` reconciles staged paths
+    against the resolved tree, so committing against the materialised
+    copy reverts whatever the DB holds that the copy does not.
+
+    Checked once, here, rather than threading PURPOSE_WRITE through the
+    13 call sites behind SyncManager.get_checkout_path — the resolution
+    those sites do is unchanged, and this refuses before any of them
+    runs. quiet=True because they resolve again a moment later and the
+    adopted-a-stale-tree warning should appear once, not twice.
+    """
+    from repositories.checkout_repository import (
+        CheckoutRepository, NoEditCheckout)
+    try:
+        CheckoutRepository().resolve(
+            project['id'], CheckoutRepository.PURPOSE_WRITE, quiet=True)
+        return True
+    except NoEditCheckout as e:
+        logger.error(str(e))
+        return False
+
+
 def _project_not_found(name: str):
     """Standard error + guidance when a project slug doesn't resolve.
 
@@ -97,6 +123,9 @@ class VCSCommands(Command):
             project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
                 _project_not_found(args.project)
+                return 1
+
+            if not _has_write_tree(project):
                 return 1
 
             # Determine what to stage
@@ -376,6 +405,9 @@ class VCSCommands(Command):
         project = fuzzy_match_project(args.project, show_matched=False)
         if not project:
             _project_not_found(args.project)
+            return 1
+
+        if not _has_write_tree(project):
             return 1
 
         # Get branch

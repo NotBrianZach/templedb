@@ -630,3 +630,97 @@ def test_a_current_lone_tree_is_adopted_without_complaint(
     with caplog.at_level(logging.WARNING):
         assert r.resolve(pid, EDIT)['checkout_path'].endswith('ws')
     assert caplog.messages == []
+
+
+# --- PURPOSE_WRITE refuses rather than handing back the published tree -
+
+WRITE = 'write'
+
+
+def test_write_refuses_when_only_a_canonical_tree_exists(repo):
+    """The design's step 3. A reader may use the canonical tree, a
+    writer may not: `vcs commit` reconciles staged paths against the
+    resolved tree, so committing against the materialised copy reverts
+    whatever the DB has that the copy does not."""
+    from repositories.checkout_repository import NoEditCheckout
+    r, pid = repo([('canonical', 'canon', 1, None, True)])
+    assert r.resolve(pid, EDIT)['checkout_path'].endswith('canon'), \
+        "readers are unaffected"
+    with pytest.raises(NoEditCheckout) as got:
+        r.resolve(pid, WRITE)
+    # The message has to carry the fix — no-edit-tree is now the
+    # ordinary state for a project nobody is working on.
+    assert 'templedb edit' in str(got.value)
+
+
+def test_write_is_satisfied_by_this_sessions_workspace(repo):
+    r, pid = repo([
+        ('canonical', 'canon', 1, None, True),
+        ('edit', 'mine', 1, None, True),
+    ])
+    mine = _session()
+    execute("UPDATE checkouts SET session_id=? WHERE checkout_path LIKE '%mine'",
+            (mine,))
+    assert r.resolve(pid, WRITE, session_id=mine)['checkout_path'].endswith('mine')
+
+
+def test_write_accepts_an_adoptable_workspace(repo):
+    """Adoption stays allowed for writes. Refusing it would make every
+    unpinned commit fail, which is a different bug — the point is only
+    that a PUBLISHED tree is never a write target."""
+    r, pid = repo([('edit', 'orphan', 1, None, True)])
+    dead = _session(ended=True)
+    execute("UPDATE checkouts SET session_id=? WHERE checkout_path LIKE '%orphan'",
+            (dead,))
+    assert r.resolve(pid, WRITE)['checkout_path'].endswith('orphan')
+
+
+def test_write_refuses_when_every_tree_belongs_to_a_live_session(repo):
+    """Falling back to canonical here was already a warning for readers;
+    for a writer it is the same data-loss path."""
+    from repositories.checkout_repository import NoEditCheckout
+    r, pid = repo([
+        ('canonical', 'canon', 1, None, True),
+        ('edit', 'theirs', 1, None, True),
+    ])
+    theirs = _session()
+    execute("UPDATE checkouts SET session_id=? WHERE checkout_path LIKE '%theirs'",
+            (theirs,))
+    with pytest.raises(NoEditCheckout):
+        r.resolve(pid, WRITE)
+
+
+def test_write_ignores_a_scratch_tree(repo):
+    """A /tmp tree is reachable only when named, so it must not satisfy
+    the write check either."""
+    from repositories.checkout_repository import NoEditCheckout
+    r, pid = repo([('scratch', 'tmp', 1, None, True)])
+    with pytest.raises(NoEditCheckout):
+        r.resolve(pid, WRITE)
+
+
+def test_quiet_suppresses_the_warnings_but_not_the_answer(repo, caplog):
+    """The write check resolves once to decide, and the command resolves
+    again to do the work. Without quiet the warnings printed twice."""
+    import logging
+    r, pid = repo([
+        ('edit', 'a', 1, None, True),
+        ('edit', 'b', 1, None, True),
+    ])
+    with caplog.at_level(logging.WARNING):
+        got = r.resolve(pid, EDIT, quiet=True)
+    assert got['checkout_path'].endswith('b')
+    assert caplog.messages == []
+
+
+def test_write_refuses_when_there_are_no_checkout_rows_at_all(repo):
+    """The hole the first version of PURPOSE_WRITE had. `if not rows:
+    return None` ran before the purpose was consulted, so the 10 of 24
+    projects with no rows passed the write check and failed deeper down
+    — or took get_checkout_path's repo_url fallback and wrote into an
+    imported source directory."""
+    from repositories.checkout_repository import NoEditCheckout
+    r, pid = repo([])
+    assert r.resolve(pid, EDIT) is None, "readers still get None"
+    with pytest.raises(NoEditCheckout):
+        r.resolve(pid, WRITE)
