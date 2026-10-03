@@ -353,9 +353,9 @@ class BootstrapCommand(Command):
             if claude_settings.exists():
                 _ok("Claude Code settings already configured")
             else:
-                templedb_path = Path(__file__).parent.parent.parent.parent / "templedb"
+                from cli.core import templedb_command
                 result = subprocess.run(
-                    [str(templedb_path), "claude", "setup", "--force"],
+                    templedb_command("claude", "setup", "--force"),
                     capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
                     _ok("Claude Code hooks installed (git commands → templedb)")

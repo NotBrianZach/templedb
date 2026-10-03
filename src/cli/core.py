@@ -376,5 +376,22 @@ class Command:
         return project
 
 
+def templedb_command(*args: str) -> list:
+    """Build an argv list that re-invokes the templedb CLI as a subprocess.
+
+    Do not derive this from `__file__` — in the nix-installed package the
+    modules live under lib/pythonX.Y/site-packages/ with no launcher beside
+    them, and the source tree at /home/zach/templeDB has no launcher either.
+    The installed wrapper on PATH is the only reliable entry point.
+    """
+    import shutil
+
+    on_path = shutil.which("templedb")
+    if on_path:
+        return [on_path, *args]
+    # Fallback: run the package through the current interpreter.
+    return [sys.executable, "-m", "cli", *args]
+
+
 # Global CLI instance
 cli = TempleDBCLI()

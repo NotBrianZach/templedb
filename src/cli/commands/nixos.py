@@ -191,8 +191,8 @@ def _check_dirty_and_prompt() -> bool:
 
     if answer in ("", "y", "yes"):
         import subprocess
-        launcher = Path(__file__).parent.parent.parent.parent / "templedb"
-        result = subprocess.run([str(launcher), "nixos", "generate", slug])
+        from cli.core import templedb_command
+        result = subprocess.run(templedb_command("nixos", "generate", slug))
         if result.returncode != 0:
             print("⚠ Generate failed — continuing with rebuild anyway.", file=sys.stderr)
         else:
