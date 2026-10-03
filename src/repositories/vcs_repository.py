@@ -73,9 +73,26 @@ class VCSRepository(BaseRepository):
 
     def create_commit(self, project_id: int, branch_id: int, commit_hash: str,
                      author: str, message: str,
-                     parent_hash: Optional[str] = None) -> int:
+                     parent_hash: Optional[str] = None,
+                     parent_commit_id: Optional[int] = None) -> int:
         """
-        Create a new commit record.
+        Create a new commit record and link it to its first parent.
+
+        Pass the parent as `parent_commit_id` when you already have the id
+        (normally the branch's current head); `parent_hash` is the older
+        spelling and is resolved to an id. Supplying neither means a root
+        commit — correct only for a project's or branch's first commit.
+
+        Parent linkage is written here, to both vcs_commits.parent_commit_id
+        and the vcs_commit_parents order-0 row, because keeping them in sync
+        was left to callers and they drifted: `vcs merge` wrote the join-table
+        rows and never set parent_commit_id, so merge commits read as roots to
+        anything walking the column. Callers with a second parent (a true
+        merge) still add order-1 themselves.
+
+        Read the branch head BEFORE calling this: the
+        update_branch_head_on_commit trigger advances it on INSERT, so a head
+        read afterwards is the new commit itself.
 
         Args:
             project_id: Project ID
@@ -83,15 +100,16 @@ class VCSRepository(BaseRepository):
             commit_hash: Commit hash (SHA-256)
             author: Commit author
             message: Commit message
-            parent_hash: Optional hash of the parent commit
+            parent_hash: Optional hash of the first parent
+            parent_commit_id: Optional id of the first parent; wins over
+                parent_hash when both are given
 
         Returns:
             Commit ID
         """
         logger.info(f"Creating commit for project {project_id} on branch {branch_id}")
 
-        parent_commit_id = None
-        if parent_hash:
+        if parent_commit_id is None and parent_hash:
             parent = self.get_commit_by_hash(project_id, parent_hash)
             if parent:
                 parent_commit_id = parent['id']
@@ -103,6 +121,13 @@ class VCSRepository(BaseRepository):
             (project_id, branch_id, commit_hash, author, commit_message, commit_timestamp, parent_commit_id)
             VALUES (?, ?, ?, ?, ?, datetime('now'), ?)
         """, (project_id, branch_id, commit_hash, author, message, parent_commit_id), commit=False)
+
+        if parent_commit_id is not None:
+            self.execute("""
+                INSERT INTO vcs_commit_parents (commit_id, parent_commit_id, parent_order)
+                VALUES (?, ?, 0)
+                ON CONFLICT(commit_id, parent_commit_id) DO NOTHING
+            """, (commit_id, parent_commit_id), commit=False)
 
         logger.info(f"Created commit {commit_id} with hash {commit_hash[:8]}")
         return commit_id

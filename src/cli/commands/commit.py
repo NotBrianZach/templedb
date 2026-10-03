@@ -347,6 +347,22 @@ class CommitCommand:
                 import time
                 commit_hash = hashlib.sha256(f"{project['id']}-{message}-{time.time()}".encode()).hexdigest()[:40]
 
+                # Link to the branch's current head. Read it before
+                # create_commit, which fires update_branch_head_on_commit and
+                # moves it to the new commit.
+                #
+                # This used to be omitted entirely, so every commit made
+                # through this path was a root: parent_commit_id NULL with no
+                # vcs_commit_parents row. Because CLAUDE.md recommends this
+                # command over `vcs commit`, it is how most history was
+                # written — 541 of templedb's 554 commits were unreachable
+                # from any branch head as of 2026-10-03.
+                head = self.vcs_repo.query_one(
+                    "SELECT head_commit_id FROM vcs_branches WHERE id = ?",
+                    (branch_id,),
+                )
+                parent_commit_id = head['head_commit_id'] if head else None
+
                 # Create commit record
                 author = os.getenv('USER', 'unknown')
                 commit_id = self.vcs_repo.create_commit(
@@ -354,7 +370,8 @@ class CommitCommand:
                     branch_id=branch_id,
                     commit_hash=commit_hash,
                     author=author,
-                    message=message
+                    message=message,
+                    parent_commit_id=parent_commit_id,
                 )
 
                 # Phase B: tag the commit with its owning session and

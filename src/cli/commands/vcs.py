@@ -1862,20 +1862,18 @@ class VCSCommands(Command):
         hash_input = f"{project['slug']}:{current['branch_name']}:merge:{args.source}:{time.time()}"
         commit_hash = _hashlib.sha256(hash_input.encode()).hexdigest()[:16].upper()
 
+        # First parent is the branch being merged into. Passing it here sets
+        # vcs_commits.parent_commit_id as well as the order-0 join row; this
+        # call previously wrote only the join row, leaving merge commits
+        # looking like roots to anything reading the column.
         commit_id = self.vcs_repo.create_commit(
             project_id=project['id'],
             branch_id=current['id'],
             commit_hash=commit_hash,
             author=author,
-            message=merge_msg
+            message=merge_msg,
+            parent_commit_id=current['head_commit_id'] or None,
         )
-
-        # Record parents (squash only records first parent — linear history)
-        if current['head_commit_id']:
-            self.vcs_repo.execute("""
-                INSERT OR IGNORE INTO vcs_commit_parents (commit_id, parent_commit_id, parent_order)
-                VALUES (?, ?, 0)
-            """, (commit_id, current['head_commit_id']), commit=False)
         if not squash:
             self.vcs_repo.execute("""
                 INSERT OR IGNORE INTO vcs_commit_parents (commit_id, parent_commit_id, parent_order)
