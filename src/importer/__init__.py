@@ -583,6 +583,54 @@ class WorkingStateDetector:
                 file_content.file_size,
             ), commit=False)
 
+    def _stale_disk_content(self, file_id: int, disk_hash: str):
+        """The DB's current content for this file when it is strictly
+        NEWER than what the checkout holds; otherwise None.
+
+        The guard VCSService._refresh_ws_row_from_disk has, applied to
+        the path that actually runs first. That one protects `vcs add`,
+        but `vcs status --refresh` reaches working state through this
+        rescan instead, with no age test at all — so merely asking for
+        status against a left-behind tree wrote its older content into
+        every row. Measured 2026-10-03 on templedb: one `--refresh`
+        produced 21 'modified' rows and all 21 content hashes were blobs
+        the DB had recorded and moved past, the oldest from 09-21. A
+        commit from that state would have reverted every one of them.
+
+        Blob age, not mtime, for the reason the other guard gives:
+        content_blobs is content-addressed and append-only, so a row's
+        created_at is when this database FIRST saw those bytes. New work
+        is absent from the table (or inserted moments ago by
+        _ensure_content_blob) and reads as newer; a stale tree holds
+        content the DB stored and superseded, and reads as older. A
+        materialise writes stale content with a fresh mtime, so mtime
+        would miss exactly this case.
+
+        Compares against file_contents.is_current — the DB's content now
+        — rather than the last commit. The hazard is losing the newest
+        content, and a `file set` that has not been committed yet is
+        precisely the content most worth not losing.
+        """
+        row = query_one("""
+            SELECT fc.content_hash AS db_hash,
+                   cb.created_at    AS db_at,
+                   (SELECT created_at FROM content_blobs
+                     WHERE hash_sha256 = ?) AS disk_at
+              FROM file_contents fc
+              JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+             WHERE fc.file_id = ? AND fc.is_current = 1
+        """, (disk_hash, file_id))
+        if not row or row['db_hash'] == disk_hash:
+            return None
+        # Unknown on either side is no evidence of staleness, and a tie
+        # is not evidence either. Both proceed, so an ordinary editor
+        # write is still picked up — the behaviour this scan exists for.
+        if not row['disk_at'] or not row['db_at']:
+            return None
+        if row['disk_at'] >= row['db_at']:
+            return None
+        return row
+
     def detect_changes(self) -> Dict[str, int]:
         """Detect file changes and update vcs_working_state table"""
         print(f"\n🔍 Detecting changes in {self.project_slug}...")
@@ -632,8 +680,13 @@ class WorkingStateDetector:
             'added': 0,
             'modified': 0,
             'deleted': 0,
-            'unmodified': 0
+            'unmodified': 0,
+            # Files whose checkout copy lost to the DB's newer content.
+            # Reported separately because it is not a change the user
+            # made — it is a measurement of the tree they are scanning.
+            'stale': 0,
         }
+        stale_paths = []
 
         # Snapshot currently-staged rows before the disk re-scan clobbers them.
         # A staged row represents user intent to commit that exact content_hash
@@ -794,6 +847,38 @@ class WorkingStateDetector:
                     changes['modified'] += 1
                     self._ensure_content_blob(file_content)
 
+                # Refuse to go backwards. The blob must be in
+                # content_blobs before asking its age, which
+                # _ensure_content_blob above guarantees: genuinely new
+                # content lands with created_at = now and passes.
+                record_hash = file_content.hash_sha256
+                if state == 'modified':
+                    stale = self._stale_disk_content(file_id, record_hash)
+                    if stale:
+                        # Keep the DB's newer content, exactly as the
+                        # `vcs add` guard does. Recording the disk hash
+                        # here is what arms the revert, and this scan is
+                        # reached by a read-only-looking command, so the
+                        # damage is done before anyone decides anything.
+                        record_hash = stale['db_hash']
+                        changes['stale'] += 1
+                        stale_paths.append(
+                            (rel_path, stale['disk_at'], stale['db_at']))
+                        # The state has to follow the hash the row now
+                        # holds, or it says 'modified' about content
+                        # equal to HEAD and `vcs status` lists a file
+                        # with an empty diff — the shape A9FF49B7 fixed
+                        # in checkout-diff. Still 'modified' when the DB
+                        # has uncommitted newer content, which is the
+                        # `file set` case and genuinely is a change.
+                        changes['modified'] -= 1
+                        if (last_committed and last_committed['content_hash']
+                                == record_hash):
+                            state = 'unmodified'
+                            changes['unmodified'] += 1
+                        else:
+                            changes['modified'] += 1
+
                 # If the user already staged this file with a specific
                 # content_hash (typically via `templedb file set`), keep
                 # that hash and the session attribution. Otherwise emit
@@ -804,7 +889,7 @@ class WorkingStateDetector:
                     branch_id,
                     file_id,
                     preserved['state'] if preserved else state,
-                    preserved['content_hash'] if preserved else file_content.hash_sha256,
+                    preserved['content_hash'] if preserved else record_hash,
                     preserved['staged_by_session_id'] if preserved else None,
                 ))
 
@@ -855,6 +940,21 @@ class WorkingStateDetector:
         print(f"   Modified: {changes['modified']}")
         print(f"   Deleted: {changes['deleted']}")
         print(f"   Unmodified: {changes['unmodified']}")
+        if changes['stale']:
+            # Loud, and above the per-file list, because the number is
+            # about the tree rather than about the user's work: a scan
+            # that silently normalised these would hide the fact that
+            # the whole workspace is behind.
+            print(f"   Stale in checkout: {changes['stale']} "
+                  f"(kept the DB's newer content)")
+            for rel_path, disk_at, db_at in stale_paths[:5]:
+                print(f"      {rel_path}: checkout copy from {disk_at}, "
+                      f"DB has {db_at}")
+            if len(stale_paths) > 5:
+                print(f"      ... and {len(stale_paths) - 5} more")
+            print(f"   This checkout is behind the DB. `templedb edit "
+                  f"{self.project_slug}` makes a current workspace; to "
+                  f"revert deliberately, commit from the named tree.")
 
         return changes
 

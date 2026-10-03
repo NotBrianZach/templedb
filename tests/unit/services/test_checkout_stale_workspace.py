@@ -282,3 +282,85 @@ def test_newer_disk_blob_is_not_stale(case):
     issues = case(db_content="older\n", disk_content="newer\n",
                   disk_blob_at='2026-09-30 00:00:00', db_blob_at=NEW)
     assert issues == []
+
+
+# --- the same discriminator, on the path that runs FIRST ---------------
+#
+# The invariant above reports staleness after the fact.
+# WorkingStateDetector._stale_disk_content stops it being recorded in the
+# first place, because `vcs status --refresh` reaches vcs_working_state
+# through a full rescan that had no age test at all — so asking a
+# read-only-looking question wrote the stale tree's older content into
+# every row, and a later commit would have replayed it as a revert.
+#
+# Measured 2026-10-03 on templedb: one --refresh against a workspace cut
+# 10-01 produced 21 'modified' rows, and all 21 hashes were blobs the DB
+# had recorded and moved past, the oldest from 09-21.
+
+
+def _detector():
+    """The method touches no instance state, so skip __init__ (which
+    requires a real project row and a resolvable project_root)."""
+    from importer import WorkingStateDetector
+    return WorkingStateDetector.__new__(WorkingStateDetector)
+
+
+@pytest.fixture
+def stale_check(tmp_path):
+    """Returns _stale_disk_content's verdict for one file.
+
+    db_content is what the DB currently holds; disk_content is what the
+    checkout holds. The two *_blob_at values are when this database
+    first saw each.
+    """
+    def _run(db_content, disk_content,
+             db_blob_at=NEW, disk_blob_at=OLD, register_disk_blob=True):
+        import hashlib
+        _schema()
+        _reset()
+        pid = _project('g')
+        db_hash = hashlib.sha256(db_content.encode()).hexdigest()
+        _blob(db_hash, db_content, db_blob_at)
+        file_id = _file(pid, 'src/thing.py', db_hash)
+        disk_hash = hashlib.sha256(disk_content.encode()).hexdigest()
+        if register_disk_blob and disk_hash != db_hash:
+            _blob(disk_hash, disk_content, disk_blob_at)
+        return _detector()._stale_disk_content(file_id, disk_hash)
+    return _run
+
+
+def test_rescan_declines_content_the_db_has_moved_past(stale_check):
+    """This session's incident, in one assertion."""
+    import hashlib
+    verdict = stale_check(db_content="published\n", disk_content="stale\n",
+                          db_blob_at=NEW, disk_blob_at=OLD)
+    assert verdict is not None
+    assert verdict['db_hash'] == hashlib.sha256(b'published\n').hexdigest()
+    assert verdict['disk_at'] == OLD and verdict['db_at'] == NEW
+
+
+def test_rescan_keeps_an_ordinary_editor_write(stale_check):
+    """The behaviour the rescan exists for. Content the DB has never
+    stored has no blob row, so there is no evidence of staleness and it
+    must pass — otherwise every uncommitted edit would be reverted by
+    the guard meant to protect it."""
+    assert stale_check(db_content="committed\n", disk_content="my edit\n",
+                       register_disk_blob=False) is None
+
+
+def test_rescan_is_silent_when_the_tree_agrees(stale_check):
+    assert stale_check(db_content="same\n", disk_content="same\n") is None
+
+
+def test_rescan_allows_content_newer_than_the_db(stale_check):
+    """A blob recorded after the DB's current one is an edit ahead of the
+    DB, not a stale tree."""
+    assert stale_check(db_content="older\n", disk_content="newer\n",
+                       db_blob_at=OLD, disk_blob_at=NEW) is None
+
+
+def test_rescan_treats_a_tie_as_no_evidence(stale_check):
+    """Equal timestamps are not evidence of staleness, and the guard
+    only ever acts on evidence — same rule as the `vcs add` guard."""
+    assert stale_check(db_content="a\n", disk_content="b\n",
+                       db_blob_at=NEW, disk_blob_at=NEW) is None
