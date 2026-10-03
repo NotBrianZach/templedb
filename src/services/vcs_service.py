@@ -340,12 +340,77 @@ class VCSService(BaseService):
                 "marked outcome='orphaned'", session_id, orphaned_stages)
         if before and before['name'] and before['reap_policy'] == 'discard':
             self._reap_session_workspaces(before['name'])
+        self._retire_empty_edit_checkouts(session_id)
         row = self.vcs_repo.query_one(
             "SELECT * FROM vcs_sessions WHERE id = ?", (session_id,)
         )
         result = dict(row) if row else {}
         result['orphaned_stage_runs'] = orphaned_stages
         return result
+
+    def _retire_empty_edit_checkouts(self, session_id: int) -> None:
+        """Deactivate this session's edit rows if their trees hold no work.
+
+        The leak phase 4 exists to close. _reap_session_workspaces only
+        fires for reap_policy == 'discard', and that column is NULL on
+        all 953 session rows, so in practice ending a session left its
+        edit row is_active = 1 with a dead owner — which resolve() counts
+        as adoptable. Every reap therefore added an ambiguous candidate:
+        the eight sessions reaped on 2026-10-02 took templedb from 1 to 3
+        and bza from 1 to 3, and `vcs status` has warned on every
+        invocation since.
+
+        Scoped to the ending session's own rows, so this costs one tree
+        hashed per session end rather than a sweep of every project. The
+        same classification backs `admin checkout-gc`, which is where a
+        whole-table pass belongs.
+
+        Never raises. A session must end even if the bookkeeping cannot
+        — the same contract _reap_session_workspaces keeps, and for the
+        same reason: a half-ended session is worse than an untidy table.
+        """
+        try:
+            from repositories.checkout_repository import CheckoutRepository
+            repo = CheckoutRepository()
+            rows = [r for r in repo.find_retired_edit_checkouts()
+                    if r['session_id'] == session_id]
+            for row in rows:
+                verdict = repo.classify_edit_tree(
+                    row['project_id'], row['checkout_path'])
+                if verdict.get('error'):
+                    # The directory is already gone, so there is no
+                    # content to judge and no tree to protect. Left to
+                    # `admin checkout-gc`, which deletes rows pointing
+                    # at nothing rather than deactivating them — saying
+                    # "keeping, it holds work" about a vanished tree
+                    # would be the kind of false message that costs an
+                    # afternoon.
+                    self.logger.debug(
+                        "session %s ended; edit checkout %s has no "
+                        "directory, leaving it to admin checkout-gc",
+                        session_id, row['checkout_path'])
+                    continue
+                if verdict['verdict'] == repo.TREE_HAS_WORK:
+                    # Left for a human, and the
+                    # checkout_roles_are_unambiguous invariant keeps
+                    # naming it. Deleting work nobody has looked at is
+                    # the one outcome worse than an ambiguous resolve().
+                    self.logger.info(
+                        "session %s ended; keeping edit checkout %s — it "
+                        "holds %d file(s) with content the DB has never "
+                        "stored and %d untracked file(s)",
+                        session_id, row['checkout_path'],
+                        len(verdict['has_work']), len(verdict['untracked']))
+                    continue
+                repo.deactivate(row['id'])
+                self.logger.info(
+                    "session %s ended; retired edit checkout row for %s "
+                    "(%s). The directory is untouched.",
+                    session_id, row['checkout_path'], verdict['verdict'])
+        except Exception as e:
+            self.logger.warning(
+                "Could not retire edit checkouts for session %s: %s",
+                session_id, e)
 
     @staticmethod
     def _reap_session_workspaces(session_name: str) -> None:

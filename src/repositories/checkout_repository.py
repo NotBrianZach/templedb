@@ -279,6 +279,7 @@ class CheckoutRepository(BaseRepository):
                      if r['session_id'] is None
                      or not self._session_is_live(r['session_id'])]
         if len(adoptable) == 1:
+            self._warn_if_behind(project_id, adoptable[0])
             return adoptable[0]
         if len(adoptable) > 1:
             logger.warning(
@@ -290,19 +291,36 @@ class CheckoutRepository(BaseRepository):
                 project_id, len(adoptable), adoptable[0]['checkout_path'],
                 ", ".join(r['checkout_path'] for r in adoptable[1:]),
             )
+            self._warn_if_behind(project_id, adoptable[0])
             return adoptable[0]
 
-        # Every edit tree belongs to some other live session. Using one
-        # would stage another agent's in-progress work, so prefer the
-        # canonical tree; callers that need to write will fail on its
-        # read-only mode, which is the correct outcome.
+        # No tree this caller may use. Two quite different situations
+        # reach here and the fallback is the same, so the message must
+        # not be: before phase 4 both said "every edit checkout belongs
+        # to another live session", which is simply false for a project
+        # that has no edit tree at all — and that is now the normal
+        # state after the prune retires the ones nobody is using.
+        # Diagnosing from a false message costs more than no message.
         canonical = extant([r for r in rows if r['kind'] == 'canonical'])
         if canonical:
-            logger.warning(
-                "Project %s: every edit checkout belongs to another live "
-                "session; falling back to the canonical tree at %s. Run "
-                "`templedb edit <slug>` for your own workspace.",
-                project_id, canonical[0]['checkout_path'])
+            if edits:
+                logger.warning(
+                    "Project %s: every edit checkout belongs to another live "
+                    "session; falling back to the canonical tree at %s. Run "
+                    "`templedb edit <slug>` for your own workspace.",
+                    project_id, canonical[0]['checkout_path'])
+            else:
+                # Not a warning. Reading the canonical tree is the right
+                # answer for a project nobody is editing — `vcs status`
+                # on it reports against published content and comes back
+                # clean, which is true. The design's alternative was to
+                # refuse and name `templedb edit <slug>`; that is still
+                # the better answer for writers, but it belongs at the
+                # write path, not here, where it would break `status`.
+                logger.debug(
+                    "Project %s has no edit checkout; using the canonical "
+                    "tree at %s. `templedb edit <slug>` makes a writable "
+                    "one.", project_id, canonical[0]['checkout_path'])
             return canonical[0]
         return (extant(rows) or rows)[0]
 
@@ -311,6 +329,284 @@ class CheckoutRepository(BaseRepository):
         row = self.query_one(
             "SELECT ended_at FROM vcs_sessions WHERE id = ?", (session_id,))
         return bool(row) and row['ended_at'] is None
+
+    def _warn_if_behind(self, project_id: int, row: Dict[str, Any]) -> None:
+        """Say so when an adopted tree predates content now in the DB.
+
+        The hole the prune does not close, and the reason "retire the
+        stale trees" is not on its own an answer. Step 2 returns a lone
+        adoptable tree silently — one candidate is not ambiguous, so
+        there was nothing to warn about — and nothing on that path ever
+        asked whether the tree was current. Retiring templedb's
+        claude-code-agent-6352 on 2026-10-03 therefore left the next
+        unpinned `vcs status` reading claude-code-agent-fixups, cut
+        2026-09-26, with no warning at all: strictly less noise and no
+        more truth.
+
+        Counts blobs, not files on disk: this runs on the resolution path
+        of nearly every command, and classify_edit_tree hashes the whole
+        tree. One indexed comparison against checkout_at answers "has the
+        DB moved since this tree was cut" well enough for a warning, and
+        a warning is all this should be — the tree may still be the right
+        one to commit from, and only the reader knows.
+        """
+        when = row.get('checkout_at')
+        if not when:
+            return
+        try:
+            newer = self.query_one("""
+                SELECT COUNT(*) AS n
+                  FROM project_files pf
+                  JOIN file_contents fc
+                    ON fc.file_id = pf.id AND fc.is_current = 1
+                  JOIN content_blobs cb
+                    ON cb.hash_sha256 = fc.content_hash
+                 WHERE pf.project_id = ? AND pf.status = 'active'
+                   AND cb.created_at > ?
+            """, (project_id, when))
+        except Exception as e:
+            logger.debug("Could not check whether %s is behind: %s",
+                         row['checkout_path'], e)
+            return
+        n = (newer or {}).get('n', 0)
+        if not n:
+            return
+        logger.warning(
+            "Project %s: adopting edit checkout %s, which was materialised "
+            "%s — the DB has newer content for %d file(s) since then. "
+            "Committing from it may revert them. `templedb edit <slug>` "
+            "makes a current workspace; `admin checkout-gc` says whether "
+            "this one holds work.",
+            project_id, row['checkout_path'], when, n)
+
+    # --- phase 4: retiring edit trees nobody is using -------------------
+    #
+    # Verdicts from classify_edit_tree. The distinction that matters is
+    # not "does this tree differ from the DB" — a stale tree and an
+    # edited tree both differ, which is why `state` could never separate
+    # them and why the checkout_matches_db invariant needed blob age to
+    # tell a left-behind workspace from work in progress.
+    TREE_CLEAN = 'clean'        # agrees with the DB file for file
+    TREE_STALE = 'stale'        # differs only by content the DB moved past
+    TREE_HAS_WORK = 'has_work'  # holds content this database has never stored
+
+    def find_retired_edit_checkouts(
+        self, project_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Active edit rows whose owning session has ended.
+
+        The candidate set for the prune migration 122 deferred. Ending a
+        session does not deactivate its edit row and never did, so each
+        reap turns another workspace into an adoptable one: the eight
+        sessions reaped on 2026-10-02 took templedb from 1 adoptable tree
+        to 3 and bza to 3, which is `resolve()` choosing by recency again
+        with a column in front of it.
+
+        Requires an owner. A session_id IS NULL row is NOT a candidate,
+        even though resolve() treats it as equally adoptable: migration
+        113's backfill left the column NULL rather than matching leaf
+        names against vcs_sessions, so "no owner" means "nobody recorded
+        one", not "the owner finished". Retiring those on content alone
+        would be inferring the thing the backfill deliberately refused to
+        guess. They stay for a human, and the
+        checkout_roles_are_unambiguous invariant keeps naming them.
+        """
+        sql = """
+            SELECT c.id, c.project_id, c.checkout_path, c.kind,
+                   c.session_id, c.checkout_at,
+                   p.slug AS project_slug,
+                   s.name AS session_name, s.ended_at
+              FROM checkouts c
+              JOIN projects p ON p.id = c.project_id
+         LEFT JOIN vcs_sessions s ON s.id = c.session_id
+             WHERE c.is_active = 1
+               AND c.kind = 'edit'
+               AND c.session_id IS NOT NULL
+               -- A session_id pointing at no row cannot be live either,
+               -- and resolve() already treats that tree as adoptable, so
+               -- leaving it out would make the prune blind to exactly
+               -- the rows the invariant complains about.
+               AND (s.id IS NULL OR s.ended_at IS NOT NULL)
+        """
+        params: tuple = ()
+        if project_id is not None:
+            sql += " AND c.project_id = ?"
+            params = (project_id,)
+        sql += " ORDER BY p.slug, c.checkout_at DESC"
+        return self.query_all(sql, params)
+
+    def classify_edit_tree(self, project_id: int, root) -> Dict[str, Any]:
+        """Does this tree hold anything the database has never seen?
+
+        The question the prune turns on, and it is deliberately NOT "does
+        the tree have uncommitted changes" — which is how migration 122
+        phrased it, and which would spare the exact trees causing the
+        problem. Measured on templedb's claude-code-agent-6352 on
+        2026-10-03: 21 files differed from the DB and all 21 held a blob
+        the DB had recorded and moved past, the oldest from 09-21. A
+        has-changes rule reads that as 21 reasons to keep a tree whose
+        every byte is older than what is published.
+
+        So the discriminator is blob age, the same one
+        _check_checkout_matches_db uses, for the same reason: real work
+        produces content this database has never stored, while a stale
+        workspace holds content it stored and then superseded.
+
+          clean     every tracked file matches the DB
+          stale     differences exist, every one is an older blob
+          has_work  some file's content has no content_blobs row, or has
+                    one at least as new as the DB's current blob
+
+        Three things cannot indicate work and are counted, not judged:
+
+          absent    the DB has the file, the tree does not. A file that
+                    is not there holds nothing; this is the ordinary
+                    shape of a tree cut before a commit added files.
+          deleted-on-purpose is indistinguishable from absent here, and
+                    is the one case this gets wrong. It costs nothing
+                    recoverable: the prune deactivates a row, it does
+                    not remove a directory, and `templedb commit <slug>
+                    <dir>` still reaches a named tree through get_by_path
+                    — which does not filter on is_active, exactly as
+                    migration 122 relied on for scratch rows.
+          untracked a file in the tree with no project_files row. These
+                    DO count as work: a new file written into a workspace
+                    and not yet committed is this codebase's most
+                    expensive recurring loss (commit 7A3BF285 reported
+                    "Files: 2" and wrote one), so a tree holding any is
+                    never pruned automatically.
+        """
+        import hashlib
+        import os
+        from pathlib import Path
+
+        root = Path(root).resolve()
+        result = {
+            'checkout_path': str(root),
+            'stale': [], 'has_work': [], 'absent': [], 'untracked': [],
+            'verdict': self.TREE_CLEAN,
+        }
+        if not root.is_dir():
+            # Caller's problem (admin checkout-gc deletes these rows);
+            # say nothing rather than claim a verdict about no tree.
+            result['verdict'] = self.TREE_HAS_WORK
+            result['error'] = 'directory does not exist'
+            return result
+
+        rows = self.query_all("""
+            SELECT pf.file_path,
+                   fc.content_hash AS db_hash,
+                   cb.created_at AS db_blob_created
+              FROM project_files pf
+              JOIN file_contents fc
+                ON fc.file_id = pf.id AND fc.is_current = 1
+              JOIN content_blobs cb
+                ON cb.hash_sha256 = fc.content_hash
+             WHERE pf.project_id = ? AND pf.status = 'active'
+        """, (project_id,))
+
+        tracked = set()
+        for r in rows:
+            tracked.add(r['file_path'])
+            f = root / r['file_path']
+            try:
+                disk_hash = hashlib.sha256(f.read_bytes()).hexdigest()
+            except OSError:
+                result['absent'].append(r['file_path'])
+                continue
+            if disk_hash == r['db_hash']:
+                continue
+            # sha256 of the raw bytes, matching ContentStore.calculate_hash
+            # — the hash the DB stores. Comparing anything else here would
+            # make every file look changed.
+            seen = self.query_one(
+                "SELECT created_at FROM content_blobs WHERE hash_sha256 = ?",
+                (disk_hash,))
+            if (seen and r['db_blob_created']
+                    and seen['created_at'] < r['db_blob_created']):
+                result['stale'].append({
+                    'file_path': r['file_path'],
+                    'tree_blob_created': seen['created_at'],
+                    'db_blob_created': r['db_blob_created'],
+                })
+            else:
+                # No blob row at all is unreviewed work. A blob at least
+                # as new as the DB's current one is something stranger —
+                # content stored but not current, i.e. a revert or a
+                # write that lost a race — and guessing is not this
+                # function's job, so it counts as work and a human looks.
+                result['has_work'].append({
+                    'file_path': r['file_path'],
+                    'tree_blob_created': seen['created_at'] if seen else None,
+                    'db_blob_created': r['db_blob_created'],
+                })
+
+        result['untracked'] = self._untracked_in_tree(root, tracked)
+
+        if result['has_work'] or result['untracked']:
+            result['verdict'] = self.TREE_HAS_WORK
+        elif result['stale']:
+            result['verdict'] = self.TREE_STALE
+        return result
+
+    @staticmethod
+    def _untracked_in_tree(root, tracked: set) -> List[str]:
+        """Files in the tree the importer would track but the DB has no
+        row for.
+
+        Uses the scanner's own SKIP_DIRS and file-type gate rather than a
+        second definition of "a file this project cares about": a tree
+        full of __pycache__ and .direnv debris must not read as work, or
+        nothing is ever prunable. Equally, a file the scanner would not
+        pick up cannot be lost by retiring the row, because no commit
+        from that tree would have included it either.
+
+        Deliberately does not consult .gitignore. Materialised workspaces
+        have no .git, so the scanner's git filter is inert for them
+        anyway; where one does exist this over-reports, which fails
+        toward keeping a tree rather than retiring it.
+        """
+        import os
+        from pathlib import Path
+        try:
+            from importer.scanner import FileScanner, SKIP_DIRS
+        except ImportError:
+            # Without the scanner there is no trustworthy definition of
+            # "trackable", so claim everything is work and let the prune
+            # keep the tree. Fail-safe, not fail-quiet: the caller's
+            # report will show an unexplained has_work verdict.
+            logger.warning(
+                "importer.scanner unavailable; treating %s as unprunable",
+                root)
+            return ['<scanner unavailable>']
+
+        scanner = FileScanner(str(root))
+        untracked = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            for name in filenames:
+                p = Path(dirpath) / name
+                if not p.exists():          # broken symlink
+                    continue
+                rel = str(p.relative_to(root))
+                if rel in tracked:
+                    continue
+                if scanner.get_file_type(p):
+                    untracked.append(rel)
+        return sorted(untracked)
+
+    def deactivate(self, checkout_id: int) -> None:
+        """Retire a checkout row without touching its directory.
+
+        Deactivating rather than deleting, for the reason migration 122
+        gives for scratch rows: get_by_path does not filter on is_active,
+        so a named tree keeps working for `templedb commit <slug> <dir>`,
+        and the row stays the only record that the tree was ever checked
+        out.
+        """
+        logger.info(f"Deactivating checkout {checkout_id}")
+        self.execute(
+            "UPDATE checkouts SET is_active = 0 WHERE id = ?", (checkout_id,))
 
     def get_active_for_project(self, project_id: int) -> Optional[Dict[str, Any]]:
         """

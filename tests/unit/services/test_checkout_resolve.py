@@ -358,3 +358,275 @@ def test_ended_session_is_not_current(repo, monkeypatch):
     execute("INSERT INTO vcs_sessions (name, author, ended_at) VALUES ('old','a','2026-09-01')")
     monkeypatch.setenv('TEMPLEDB_SESSION', 'old')
     assert r.current_session_id() is None
+
+
+def test_no_edit_tree_does_not_claim_one_belongs_to_a_live_session(repo, caplog):
+    """The fallback message has to match the situation.
+
+    Both "all edit trees are owned by live sessions" and "there are no
+    edit trees" land on the canonical tree, and before phase 4 both said
+    the first. After the prune, no-edit-trees is the normal state for a
+    project nobody is working on, so that message would be wrong most of
+    the time it appeared.
+    """
+    import logging
+    r, pid = repo([('canonical', 'canon', 1, None, True)])
+    with caplog.at_level(logging.WARNING):
+        got = r.resolve(pid, EDIT)
+    assert got['checkout_path'].endswith('canon')
+    assert not any('another live session' in m for m in caplog.messages)
+
+
+# --- phase 4: the prune ------------------------------------------------
+#
+# Migration 122 named the rule as "session ended AND no uncommitted
+# changes". The second half is wrong as stated and these tests pin the
+# corrected version: a stale tree has changes by any diff you care to
+# run, and sparing it is how templedb kept two adoptable trees whose
+# content was older than what was published.
+
+
+def _blob(hash_, created_at):
+    execute("INSERT OR REPLACE INTO content_blobs (hash_sha256, created_at) "
+            "VALUES (?, ?)", (hash_, created_at))
+
+
+def _tracked_file(pid, rel, content, blob_created):
+    """Give the project a file whose current content is `content`."""
+    import hashlib
+    h = hashlib.sha256(content.encode()).hexdigest()
+    _blob(h, blob_created)
+    execute("INSERT INTO project_files (project_id, file_path, status) "
+            "VALUES (?, ?, 'active')", (pid, rel))
+    fid = query_one("SELECT id FROM project_files WHERE project_id=? AND "
+                    "file_path=?", (pid, rel))['id']
+    execute("INSERT INTO file_contents (file_id, content_hash, is_current) "
+            "VALUES (?, ?, 1)", (fid, h))
+    return h
+
+
+_CONTENT_TABLES = ('file_contents', 'content_blobs', 'project_files')
+
+
+@pytest.fixture
+def content_tables():
+    """The three tables classify_edit_tree reads, and nothing else.
+
+    Dropped on the way in AND on the way out, which is not fussiness:
+    conftest gives the whole run one test DB, and six other modules here
+    build these same tables with `CREATE TABLE IF NOT EXISTS` and their
+    own fuller column sets. A minimal `project_files` left behind by this
+    module made IF NOT EXISTS a no-op for them and 32 tests in four files
+    failed with "no column named file_type_id" — passing in isolation and
+    failing in the suite, which is the worst way for a fixture to be
+    wrong. Leaving no schema behind is this module's half of that
+    contract.
+    """
+    def _drop():
+        for t in _CONTENT_TABLES:
+            execute(f"DROP TABLE IF EXISTS {t}")
+    _drop()
+    for stmt in (
+        """CREATE TABLE project_files (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               project_id INTEGER NOT NULL, file_path TEXT NOT NULL,
+               status TEXT DEFAULT 'active')""",
+        """CREATE TABLE file_contents (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               file_id INTEGER NOT NULL, content_hash TEXT NOT NULL,
+               is_current INTEGER DEFAULT 1)""",
+        """CREATE TABLE content_blobs (
+               hash_sha256 TEXT PRIMARY KEY, created_at TEXT NOT NULL)""",
+    ):
+        execute(stmt)
+    yield
+    _drop()
+
+
+def test_stale_tree_is_prunable_even_though_every_file_differs(repo, tmp_path, content_tables):
+    """The case migration 122's wording would have spared.
+
+    Measured shape, from templedb's claude-code-agent-6352 on 2026-10-03:
+    21 files differing from the DB, all 21 holding a blob the DB recorded
+    and moved past. "Has uncommitted changes" reads that as 21 reasons to
+    keep it; blob age reads it as what it is.
+    """
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tracked_file(pid, 'a.py', 'new content\n', '2026-10-02 00:00:00')
+    _blob(__import__('hashlib').sha256(b'old content\n').hexdigest(),
+          '2026-09-01 00:00:00')
+    (tmp_path / 'ws' / 'a.py').write_text('old content\n')
+
+    v = r.classify_edit_tree(pid, tmp_path / 'ws')
+    assert v['verdict'] == r.TREE_STALE
+    assert [f['file_path'] for f in v['stale']] == ['a.py']
+    assert v['has_work'] == []
+
+
+def test_content_the_db_has_never_stored_is_work(repo, tmp_path, content_tables):
+    """The load-bearing half. A file whose bytes have no content_blobs
+    row has never been through this database, so nothing has reviewed it
+    and the tree is not retired."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tracked_file(pid, 'a.py', 'committed\n', '2026-10-02 00:00:00')
+    (tmp_path / 'ws' / 'a.py').write_text('a genuine edit nobody has seen\n')
+
+    v = r.classify_edit_tree(pid, tmp_path / 'ws')
+    assert v['verdict'] == r.TREE_HAS_WORK
+    assert [f['file_path'] for f in v['has_work']] == ['a.py']
+
+
+def test_a_blob_at_least_as_new_as_the_db_counts_as_work(repo, tmp_path, content_tables):
+    """Stored but not current means a revert or a lost race. Either way
+    it is not staleness, and guessing which is not this function's job."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tracked_file(pid, 'a.py', 'current\n', '2026-10-01 00:00:00')
+    _blob(__import__('hashlib').sha256(b'newer\n').hexdigest(),
+          '2026-10-02 00:00:00')
+    (tmp_path / 'ws' / 'a.py').write_text('newer\n')
+
+    v = r.classify_edit_tree(pid, tmp_path / 'ws')
+    assert v['verdict'] == r.TREE_HAS_WORK
+
+
+def test_a_file_missing_from_the_tree_is_not_work(repo, tmp_path, content_tables):
+    """A tree cut before a commit added files is the ordinary case — it
+    was 5 files on templedb — and absence cannot hold content."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tracked_file(pid, 'added-later.py', 'x\n', '2026-10-02 00:00:00')
+
+    v = r.classify_edit_tree(pid, tmp_path / 'ws')
+    assert v['verdict'] == r.TREE_CLEAN
+    assert v['absent'] == ['added-later.py']
+
+
+def test_an_untracked_file_the_scanner_would_pick_up_is_work(repo, tmp_path, content_tables):
+    """This codebase's most expensive recurring loss: a new file written
+    into a workspace and never committed (commit 7A3BF285 reported
+    "Files: 2" and wrote one). Any of them keeps the tree."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    (tmp_path / 'ws' / 'brand_new.py').write_text('print(1)\n')
+
+    v = r.classify_edit_tree(pid, tmp_path / 'ws')
+    assert v['verdict'] == r.TREE_HAS_WORK
+    assert v['untracked'] == ['brand_new.py']
+
+
+def test_build_debris_does_not_read_as_work(repo, tmp_path, content_tables):
+    """Reuses the scanner's SKIP_DIRS rather than a second list. Without
+    this, every tree has a __pycache__ and nothing is ever prunable."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    cache = tmp_path / 'ws' / '__pycache__'
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / 'mod.cpython-313.pyc').write_bytes(b'\x00')
+    (tmp_path / 'ws' / 'node_modules').mkdir(exist_ok=True)
+    (tmp_path / 'ws' / 'node_modules' / 'x.js').write_text('1')
+
+    v = r.classify_edit_tree(pid, tmp_path / 'ws')
+    assert v['verdict'] == r.TREE_CLEAN, v['untracked']
+
+
+def test_prune_candidates_require_an_ended_owner(repo, tmp_path):
+    """Three rows, one candidate. An unowned row is NOT one, even though
+    resolve() finds it equally adoptable: migration 113's backfill left
+    session_id NULL rather than matching leaf names, so NULL means
+    nobody recorded an owner — not that the owner finished."""
+    r, pid = repo([
+        ('edit', 'unowned', 1, None, True),
+        ('edit', 'live', 1, None, True),
+        ('edit', 'dead', 1, None, True),
+    ])
+    live, dead = _session(), _session(ended=True)
+    execute("UPDATE checkouts SET session_id=? WHERE checkout_path LIKE '%live'",
+            (live,))
+    execute("UPDATE checkouts SET session_id=? WHERE checkout_path LIKE '%dead'",
+            (dead,))
+
+    paths = [c['checkout_path'] for c in r.find_retired_edit_checkouts(pid)]
+    assert len(paths) == 1 and paths[0].endswith('dead')
+
+
+def test_a_workspace_whose_session_row_vanished_is_a_candidate(repo):
+    """resolve() already treats a dangling session_id as adoptable, so
+    the prune has to see it too or it stays ambiguous forever."""
+    r, pid = repo([('edit', 'orphan', 1, None, True)])
+    execute("UPDATE checkouts SET session_id = 9999")
+    assert len(r.find_retired_edit_checkouts(pid)) == 1
+
+
+def test_retiring_a_row_leaves_the_tree_reachable_by_name(repo, tmp_path):
+    """Deactivate, never delete — the reason migration 122 gives for
+    scratch rows. get_by_path does not filter on is_active, so
+    `templedb commit <slug> <dir>` still works on a retired tree."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    path = str(tmp_path / 'ws')
+    row = r.get_by_path(pid, path)
+    r.deactivate(row['id'])
+
+    assert query_one("SELECT is_active FROM checkouts WHERE id=?",
+                     (row['id'],))['is_active'] == 0
+    assert r.get_by_path(pid, path) is not None, "still reachable by name"
+    assert r.resolve(pid, EDIT) is None, "but never resolved to"
+
+
+def test_prune_removes_the_ambiguity_resolve_warns_about(repo, tmp_path, caplog, content_tables):
+    """End to end, in the shape templedb was actually in: two adoptable
+    trees, both stale, both owned by sessions reaped in the same pass."""
+    import logging
+    r, pid = repo([
+        ('edit', 'older', 1, None, True),
+        ('edit', 'newer', 1, None, True),
+    ])
+    _tracked_file(pid, 'a.py', 'published\n', '2026-10-02 00:00:00')
+    _blob(__import__('hashlib').sha256(b'stale\n').hexdigest(),
+          '2026-09-01 00:00:00')
+    for leaf in ('older', 'newer'):
+        (tmp_path / leaf / 'a.py').write_text('stale\n')
+        sid = _session(ended=True)
+        execute("UPDATE checkouts SET session_id=? WHERE checkout_path LIKE ?",
+                (sid, f'%{leaf}'))
+
+    with caplog.at_level(logging.WARNING):
+        r.resolve(pid, EDIT)
+    assert any('candidate edit checkouts' in m for m in caplog.messages)
+
+    for cand in r.find_retired_edit_checkouts(pid):
+        v = r.classify_edit_tree(cand['project_id'], cand['checkout_path'])
+        assert v['verdict'] == r.TREE_STALE
+        r.deactivate(cand['id'])
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert r.resolve(pid, EDIT) is None
+    assert caplog.messages == []
+
+
+def test_a_lone_adoptable_tree_that_predates_the_db_still_warns(
+        repo, tmp_path, caplog, content_tables):
+    """The hole the prune does not close.
+
+    One candidate is not ambiguous, so step 2 returned it with nothing
+    to say — and said nothing about whether it was current either.
+    Retiring templedb's 6352 left the next unpinned `vcs status` reading
+    a tree from 09-26 in silence, which is less noise and no more truth.
+    """
+    import logging
+    r, pid = repo([('edit', 'old-ws', 1, None, True)])
+    _tracked_file(pid, 'a.py', 'published later\n', '2026-10-02 00:00:00')
+    # repo() stamps checkout_at as 2026-09-10, before that blob.
+    with caplog.at_level(logging.WARNING):
+        got = r.resolve(pid, EDIT)
+    assert got['checkout_path'].endswith('old-ws'), "still resolves"
+    assert any('newer content for 1 file' in m for m in caplog.messages)
+
+
+def test_a_current_lone_tree_is_adopted_without_complaint(
+        repo, tmp_path, caplog, content_tables):
+    """The warning has to stay rare or it is the next thing skimmed
+    past. A tree newer than every blob says nothing."""
+    import logging
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tracked_file(pid, 'a.py', 'x\n', '2026-09-01 00:00:00')
+    with caplog.at_level(logging.WARNING):
+        assert r.resolve(pid, EDIT)['checkout_path'].endswith('ws')
+    assert caplog.messages == []

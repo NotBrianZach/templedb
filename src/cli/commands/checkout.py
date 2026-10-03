@@ -273,23 +273,37 @@ class CheckoutCommand:
 
                 if getattr(args, 'dry_run', False):
                     print(f"\n   --dry-run: nothing removed.")
-                    return 0
+                    # Falls through rather than returning: every mutation
+                    # below is individually dry-run guarded, and returning
+                    # here meant a --dry-run that happened to find a stale
+                    # row reported nothing about the edit-tree prune or
+                    # the orphaned snapshots — a preview that silently
+                    # covers less than the real run is worse than none.
+                    stale_checkouts = []
+                else:
+                    # Confirm deletion unless --force
+                    if not (hasattr(args, 'force') and args.force):
+                        response = input(f"\nRemove {len(stale_checkouts)} stale checkout(s)? (yes/no): ")
+                        if response.lower() != 'yes':
+                            print("Cancelled")
+                            return 0
 
-                # Confirm deletion unless --force
-                if not (hasattr(args, 'force') and args.force):
-                    response = input(f"\nRemove {len(stale_checkouts)} stale checkout(s)? (yes/no): ")
-                    if response.lower() != 'yes':
-                        print("Cancelled")
-                        return 0
+                    # Delete stale checkouts (CASCADE removes snapshots)
+                    removed = 0
+                    for co in stale_checkouts:
+                        self.checkout_repo.delete(co['id'])
+                        removed += 1
+                        logger.info(f"Removed: {co['checkout_path']}")
 
-                # Delete stale checkouts (CASCADE will remove snapshots)
-                removed = 0
-                for co in stale_checkouts:
-                    self.checkout_repo.delete(co['id'])
-                    removed += 1
-                    logger.info(f"Removed: {co['checkout_path']}")
+                    logger.info(f"Removed {removed} stale checkout(s)")
 
-                logger.info(f"Removed {removed} stale checkout(s)")
+            # Retire edit trees whose session has ended and which hold
+            # nothing the DB has not already stored. Phase 4 of
+            # reports/2026-09-27-2103-checkout-role-and-session-scoped-
+            # resolution-design.html, deferred out of migration 122
+            # because the second half of the test is a content comparison
+            # against the filesystem and cannot be written in SQL.
+            self._prune_retired_edit_checkouts(args)
 
             # Orphan pruning runs even when no checkout was stale — the
             # debris below outlives the rows that created it.
@@ -330,6 +344,88 @@ class CheckoutCommand:
         except Exception as e:
             logger.error(f"Error cleaning up checkouts: {e}", exc_info=True)
             return 1
+
+    def _prune_retired_edit_checkouts(self, args) -> None:
+        """Deactivate edit rows whose session ended and whose tree holds
+        no content the DB has never seen.
+
+        Why this is a gc step and not a migration: the owner-has-ended
+        half is SQL, but "holds no work" is a hash of every file in the
+        tree against content_blobs, so migration 122 named the prune and
+        left it here.
+
+        Why it reports per tree instead of just acting: the three
+        verdicts mean different things to a reader, and a tree that is
+        kept needs to say why it was kept or the next person re-runs the
+        command expecting a different answer. A tree holding work is
+        never retired by this command at any force level — the only way
+        past it is to commit the work or name the tree explicitly.
+        """
+        project_id = None
+        if getattr(args, 'project_slug', None):
+            project = self.project_repo.get_by_slug(args.project_slug)
+            if not project:
+                return                  # already reported by the caller
+            project_id = project['id']
+
+        candidates = self.checkout_repo.find_retired_edit_checkouts(project_id)
+        if not candidates:
+            print("   No edit checkouts with an ended session")
+            return
+
+        repo = self.checkout_repo
+        prunable, kept = [], []
+        for row in candidates:
+            verdict = repo.classify_edit_tree(
+                row['project_id'], row['checkout_path'])
+            if verdict['verdict'] == repo.TREE_HAS_WORK:
+                kept.append((row, verdict))
+            else:
+                prunable.append((row, verdict))
+
+        print(f"\n   Edit checkouts whose session has ended: "
+              f"{len(candidates)}")
+        for row, v in prunable:
+            why = (f"{len(v['stale'])} file(s) older than the DB"
+                   if v['stale'] else "matches the DB")
+            extra = f", {len(v['absent'])} not in the tree" if v['absent'] else ""
+            print(f"      retire  {row['checkout_path']}")
+            print(f"              session '{row['session_name']}' ended "
+                  f"{row['ended_at']}; {why}{extra}")
+        for row, v in kept:
+            print(f"      keep    {row['checkout_path']}")
+            if v.get('error'):
+                print(f"              {v['error']}")
+            if v['has_work']:
+                shown = ", ".join(f['file_path'] for f in v['has_work'][:3])
+                print(f"              {len(v['has_work'])} file(s) with "
+                      f"content the DB has never stored: {shown}")
+            if v['untracked']:
+                shown = ", ".join(v['untracked'][:3])
+                print(f"              {len(v['untracked'])} untracked "
+                      f"file(s): {shown}")
+            print(f"              commit it, or name the tree explicitly: "
+                  f"templedb commit {row['project_slug']} "
+                  f"{row['checkout_path']}")
+
+        if not prunable:
+            return
+        if getattr(args, 'dry_run', False):
+            print(f"\n   --dry-run: would retire {len(prunable)} edit "
+                  f"checkout row(s). The directories are not touched.")
+            return
+        if not getattr(args, 'force', False):
+            response = input(
+                f"\nRetire {len(prunable)} edit checkout row(s)? The "
+                f"directories stay on disk. (yes/no): ")
+            if response.lower() != 'yes':
+                print("Cancelled")
+                return
+
+        for row, _ in prunable:
+            repo.deactivate(row['id'])
+            print(f"   Retired {row['checkout_path']}")
+        logger.info(f"Retired {len(prunable)} edit checkout row(s)")
 
     def status(self, args) -> int:
         """Show status of a checkout

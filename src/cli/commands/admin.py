@@ -34,7 +34,8 @@ def register(cli):
     checkout_cmd = CheckoutCommand()
     gc_p = subparsers.add_parser(
         'checkout-gc',
-        help='Deactivate/remove checkout rows whose directory is gone')
+        help='Remove checkout rows whose directory is gone, and retire '
+             'edit trees whose session ended with no work in them')
     gc_p.add_argument('project_slug', nargs='?',
                       help='Limit to one project (default: all)')
     gc_p.add_argument('--force', '-f', action='store_true',
