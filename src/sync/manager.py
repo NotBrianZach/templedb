@@ -7,7 +7,7 @@ import hashlib
 import os
 import socket
 from pathlib import Path
-from typing import Optional, Dict, List, Set
+from typing import Any, Optional, Dict, List, Set
 from db_utils import get_connection
 from logger import get_logger
 
@@ -56,6 +56,30 @@ class SyncManager:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
+    def get_checkout_row(self, purpose: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """The resolved checkout row, not just its path.
+
+        get_checkout_path throws away `kind`, which is the one field a
+        reader needs to know what they are looking at: with no edit tree
+        available, resolution falls back to the canonical tree, and
+        `vcs status` then labelled the publish-owned tree "writable
+        (edit mode)" — true about its permissions and misleading about
+        everything else, since the next materialise overwrites it. The
+        column exists precisely to answer that; it just was not reaching
+        the display.
+
+        Returns None when nothing resolves, so callers keep their own
+        fallbacks (get_checkout_path still has the repo_url one).
+        Resolve ONCE per command through this: resolve() logs a warning
+        when it adopts someone's leftover tree, and asking twice prints
+        it twice.
+        """
+        from repositories.checkout_repository import CheckoutRepository
+        return CheckoutRepository().resolve(
+            self.project_id,
+            purpose or CheckoutRepository.PURPOSE_EDIT,
+        )
+
     def get_checkout_path(self, purpose: Optional[str] = None) -> Path:
         """Get checkout path for this project.
 
@@ -69,12 +93,7 @@ class SyncManager:
         PURPOSE_EDIT for status/add/commit/diff. Defaults to EDIT, which
         is what every caller of this method meant before roles existed.
         """
-        from repositories.checkout_repository import CheckoutRepository
-        checkout_repo = CheckoutRepository()
-        checkout = checkout_repo.resolve(
-            self.project_id,
-            purpose or CheckoutRepository.PURPOSE_EDIT,
-        )
+        checkout = self.get_checkout_row(purpose)
         if checkout:
             return Path(checkout['checkout_path'])
         if self.repo_url:

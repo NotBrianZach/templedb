@@ -716,8 +716,21 @@ class VCSCommands(Command):
             if not project:
                 return emit_error(args, "NOT_FOUND", f"Project '{args.project}' not found")
 
+            # Deliberately CheckoutRepository.current_session_id, which
+            # never creates a session — VCSService.get_current_session
+            # does, and `vcs status` must not open a session just by
+            # asking whose workspace this is.
+            def _current_session_id():
+                from repositories.checkout_repository import CheckoutRepository
+                return CheckoutRepository().current_session_id()
+
             sync_mgr = SyncManager(project['slug'])
-            checkout_path = sync_mgr.get_checkout_path()
+            # Resolve once and reuse the row: calling get_checkout_path
+            # as well would run resolve() a second time and print its
+            # adopted-a-stale-tree warning twice.
+            checkout_row = sync_mgr.get_checkout_row()
+            checkout_path = (Path(checkout_row['checkout_path'])
+                             if checkout_row else sync_mgr.get_checkout_path())
             edit_session = sync_mgr.get_edit_session()
 
             checkout_info = None
@@ -726,6 +739,16 @@ class VCSCommands(Command):
                 checkout_info = {
                     "path": str(checkout_path),
                     "writable": writable,
+                    # What the tree IS, not just whether the OS will let
+                    # you write to it. Without this the canonical tree
+                    # read as "writable (edit mode)" — which invites the
+                    # edit that the next materialise silently discards.
+                    "kind": (checkout_row or {}).get('kind'),
+                    "owned_by_me": bool(
+                        checkout_row
+                        and checkout_row.get('session_id') is not None
+                        and checkout_row['session_id'] == _current_session_id()
+                    ),
                     "edit_session_started": edit_session['started_at'] if edit_session else None,
                 }
 
@@ -803,8 +826,28 @@ class VCSCommands(Command):
                     )
                 if d['checkout']:
                     c = d['checkout']
-                    mode = "writable (edit mode)" if c['writable'] else "read-only"
-                    print(f"Checkout: {c['path']}  [{mode}]")
+                    access = "writable" if c['writable'] else "read-only"
+                    kind = c.get('kind')
+                    if kind == 'canonical':
+                        role = "canonical, published tree"
+                    elif kind == 'edit':
+                        role = ("your edit workspace" if c.get('owned_by_me')
+                                else "adopted edit workspace")
+                    elif kind == 'scratch':
+                        role = "scratch tree"
+                    else:
+                        # Pre-migration-113 row, or a DB where resolution
+                        # fell back to repo_url and there is no row at
+                        # all. Say so rather than guessing a role.
+                        role = "unclassified"
+                    print(f"Checkout: {c['path']}  [{role}, {access}]")
+                    if kind == 'canonical':
+                        # The permissions do not stop you — this tree is
+                        # mode 755 with 644 files — so the warning has to
+                        # be about what happens next, not about access.
+                        print(f"          Edits here are overwritten by the "
+                              f"next materialise. Run `templedb edit "
+                              f"{d['project']}` for a workspace that commits.")
 
                 if d.get('all_sessions_view') is not None:
                     if not d['all_sessions_view']:
