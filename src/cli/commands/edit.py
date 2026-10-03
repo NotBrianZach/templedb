@@ -1,10 +1,25 @@
 #!/usr/bin/env python3
-"""`templedb edit <slug>` — the interactive-editing on-ramp.
+"""`templedb edit <slug>` — provision a writable workspace for a project.
 
-Creates or reuses a stable writable checkout for the project and (optionally)
-launches $EDITOR in it. On exit, prints the commit hint. You get a real
-directory the editor understands, and you commit back with
-`templedb commit <slug> <workspace>`.
+Creates or reuses a stable writable checkout and prints the path plus the
+commit hint. You get a real directory an editor understands, and you commit
+back with `templedb commit <slug> <workspace>`.
+
+Pass --editor to also launch $EDITOR on the workspace and block until it
+exits. That is opt-in rather than the default because the overwhelming
+majority of callers are agents and scripts provisioning a tree, not humans
+starting an editing session: `templedb edit <slug>` is the documented way
+for an agent to get its own session-scoped workspace, and resolve() now
+requires one per session.
+
+Launching by default made that path actively hostile. An agent asking for
+a workspace got a blocked `subprocess.call([editor, workspace])` holding
+the terminal until a human closed the window, and the command looked hung
+with no indication why. On 2026-10-02 it opened a stray GUI emacs in a
+user's running session and the invocation only "finished" minutes later
+when that window was closed. Nothing about `templedb edit <slug>` in
+CLAUDE.md suggests it blocks on an editor, so the first symptom is a
+timeout that reads as a TempleDB hang.
 
 Workspace lives at `~/.config/templedb/edit-workspaces/<slug>/` by default so
 it survives across `templedb edit` invocations (unlike `/tmp/*` on reboot).
@@ -15,6 +30,7 @@ This lets two agents on the same slug each have their own writable tree
 so `templedb edit` invocations don't stomp each other. Humans without
 the env var continue to share the top-level per-slug workspace.
 """
+import argparse
 import os
 import re
 import subprocess
@@ -132,15 +148,38 @@ class EditCommands:
             target = str(workspace / args.path)
 
         editor = os.environ.get("EDITOR")
-        if args.no_editor or not editor:
-            if not editor and not args.no_editor:
-                print("$EDITOR not set — not launching an editor.")
+
+        # Opt-in, and the no-editor branch is the default path. --no-editor
+        # is kept as an accepted no-op: it was the only way to get this
+        # behaviour before, so scripts and muscle memory still carry it and
+        # erroring on it would break callers asking for exactly what they
+        # now get by default.
+        if not args.editor:
             print()
             print(f"  Workspace:  {workspace}")
+            if args.path:
+                # `path` exists only to tell an editor which file to open,
+                # so without --editor it would silently do nothing. Print
+                # the resolved file instead -- that is the useful half of
+                # the request, and it is what the caller actually named.
+                print(f"  File:       {target}")
             print()
             print("  When done editing, commit back to the DB with:")
             print(f"    templedb commit {slug} {workspace} -m \"your message\"")
+            if args.path:
+                print()
+                print("  To open it in $EDITOR instead (blocks until the "
+                      "editor exits):")
+                print(f"    templedb edit {slug} {args.path} --editor")
             return 0
+
+        if not editor:
+            # Asked for an editor explicitly, so this is a real failure
+            # rather than something to quietly skip past.
+            logger.error(
+                "--editor given but $EDITOR is not set. Set it, or drop "
+                "--editor to just provision the workspace.")
+            return 1
 
         print(f"Launching: {editor} {target}")
         try:
@@ -163,7 +202,8 @@ def register(cli):
     cmd = EditCommands()
     parser = cli.register_command(
         'edit', None,
-        help_text='Open a project workspace for interactive editing'
+        help_text='Provision a writable workspace for a project '
+                  '(add --editor to open it in $EDITOR)'
     )
     parser.add_argument('project_slug', help='Project slug to edit')
     parser.add_argument('path', nargs='?', default=None,
@@ -179,6 +219,11 @@ def register(cli):
                         help='Overwrite local edits during --refresh (default: '
                              'abort with a diff and require explicit --force). '
                              'Has no effect without --refresh.')
+    parser.add_argument('--editor', '-e', action='store_true',
+                        help='Also launch $EDITOR on the workspace and block '
+                             'until it exits. Off by default: most callers are '
+                             'agents provisioning a tree, and a blocking '
+                             'editor makes the command look hung.')
     parser.add_argument('--no-editor', action='store_true',
-                        help="Don't launch $EDITOR; just prepare the workspace and print hints")
+                        help=argparse.SUPPRESS)
     cli.commands['edit'] = cmd.edit

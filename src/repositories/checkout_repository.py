@@ -108,6 +108,31 @@ class CheckoutRepository(BaseRepository):
         # tree is never resolved to.
         session_id = self.current_session_id() if kind == 'edit' else None
 
+        # Migration 122 made "one active canonical row per project" a
+        # UNIQUE index, which turns a path change into a hard failure
+        # unless the old row is retired first. The canonical path is
+        # derived from $HOME, so it changes for a reason as ordinary as
+        # running under a different user or a relocated config dir: the
+        # INSERT below would then add a second canonical row for the
+        # project while the first is still is_active = 1, and the
+        # constraint would abort the checkout entirely.
+        #
+        # Retiring the others here keeps the invariant true by
+        # construction rather than by luck, and expresses the thing that
+        # was always meant: the tree being checked out IS the canonical
+        # one, so whatever used to hold that role no longer does. Scoped
+        # to a different path so a plain re-checkout of the same tree
+        # falls through to the upsert untouched.
+        if kind == 'canonical':
+            self.execute("""
+                UPDATE checkouts
+                   SET is_active = 0
+                 WHERE project_id = ?
+                   AND kind = 'canonical'
+                   AND is_active = 1
+                   AND checkout_path != ?
+            """, (project_id, checkout_path))
+
         # Upsert in place. The previous INSERT OR REPLACE was destructive:
         # REPLACE deletes the conflicting row and inserts a new one with a
         # NEW rowid, which (a) silently reset last_sync_at to NULL because

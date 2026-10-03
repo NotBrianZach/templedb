@@ -471,8 +471,8 @@ templedb nixos dotfiles-remove &lt;p&gt; &lt;s&gt;   # remove mapping
 templedb nixos dotfiles-apply [--force]    # create symlinks</pre>
 
 <h3 style="margin-top:1rem">Interactive editing</h3>
-<pre style="font-size:0.75rem">templedb edit &lt;slug&gt;                      # $EDITOR in writable workspace
-templedb edit &lt;slug&gt; --no-editor           # prepare workspace, no editor
+<pre style="font-size:0.75rem">templedb edit &lt;slug&gt;                      # prepare writable workspace
+templedb edit &lt;slug&gt; --editor              # ...and open it in $EDITOR
 templedb commit &lt;slug&gt; &lt;workspace&gt; -m …   # diff workspace → DB commit</pre>
 </div>
 

@@ -79,7 +79,7 @@ cat new_code.py | templedb file set templedb src/foo.py
 templedb file set templedb src/foo.py --content "..." --skip-intent  # bypass
 
 # Recommended: interactive edit workspace (Phase 0 + edit-workspaces/)
-templedb edit templedb                                  # $EDITOR in workspace
+templedb edit templedb                                  # prepare workspace (no editor)
 # ...edit files in ~/.config/templedb/edit-workspaces/templedb/...
 templedb commit templedb ~/.config/templedb/edit-workspaces/templedb -m "..."
 ```
@@ -153,10 +153,18 @@ For a full-editor session on a project (multi-file, LSP, navigation),
 use the workspace on-ramp:
 
 ```bash
-templedb edit templedb              # opens $EDITOR in a writable workspace
-templedb edit templedb --no-editor  # just prepare the workspace, don't launch
-templedb edit bza src/foo.tsx       # optional: jump directly to a file
+templedb edit templedb              # prepare a writable workspace, print the path
+templedb edit templedb --editor     # ...and open $EDITOR on it (blocks until exit)
+templedb edit bza src/foo.tsx       # optional: name a file (add --editor to open it)
 ```
+
+**The editor is opt-in.** Plain `templedb edit <slug>` provisions the
+workspace and returns immediately — that is the form agents and scripts
+want, and it is how you get your own session-scoped tree. `--editor`
+runs `$EDITOR` in the foreground and **blocks until you close it**, so
+never use it from a tool call or any non-interactive context: the command
+will appear to hang with no indication why. (`--no-editor` still works and
+is now redundant.)
 
 The workspace lives at `~/.config/templedb/edit-workspaces/<slug>/` and
 persists across `templedb edit` invocations. Edit files there normally,

@@ -3419,6 +3419,8 @@ WantedBy=timers.target
              self._check_exec_targets_are_executable),
             ('wal_within_size_budget',
              self._check_wal_within_size_budget),
+            ('no_new_unmaintained_columns',
+             self._check_no_new_unmaintained_columns),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -3822,6 +3824,180 @@ WantedBy=timers.target
             f"PRAGMA wal_checkpoint(TRUNCATE) reclaims it"
         ]
 
+    # Tuning for _check_no_new_unmaintained_columns. Module-level because
+    # migrations/123's seed was generated with these exact values -- change
+    # one and the baseline stops describing the same set.
+    UNMAINTAINED_MIN_ROWS = 500
+    # `__crsql_` is mid-name (sync_entities__crsql_clock), so it must not be
+    # anchored; the FTS shadow suffixes must be.
+    UNMAINTAINED_SKIP_TABLE = (
+        r'(__crsql_|_(data|idx|content|docsize|config|segdir|segments|stat)$)')
+    # Large payload columns. COUNT(DISTINCT content_text) over content_blobs
+    # is a multi-GB scan to answer a question that cannot be interesting:
+    # a blob column is content, not state a reader draws conclusions from.
+    UNMAINTAINED_SKIP_COLUMN = {
+        'content_text', 'content_blob', 'sample_issues_json',
+        'metadata_json', 'diff_text',
+    }
+
+    def _check_no_new_unmaintained_columns(self):
+        """Invariant: no column has started holding no information.
+
+        The pattern, named in the "Wider point" of reports/2026-09-27-2103-
+        checkout-role-and-session-scoped-resolution-design.html:
+        `checkouts.is_active` was a boolean nothing ever cleared, so it
+        decayed into a constant while still looking like state --
+        `WHERE is_active = 1` matched all 61 rows while appearing to
+        filter, and five readers each layered a different heuristic on
+        top. That report found three instances by hand. Measuring every
+        column on 2026-10-02 found 47.
+
+        Reports REGRESSIONS, not the backlog. The 47 known cases are
+        seeded into unmaintained_columns_baseline by migration 123 and
+        stay quiet; only a column absent from that table fires. Without
+        the baseline this check would be 47 issues red on day one, which
+        trains people to skip the whole surface -- the same way
+        checkout_matches_db's false /tmp/tdb-land entry did.
+
+        Two shapes, differing in how they mislead:
+
+          all_null  reader gets None and falls back to a hardcoded
+                    default. vcs_sessions.reap_policy and
+                    expected_lifetime_seconds are ALL NULL across 953
+                    rows, yet session gc prints "lifetime 86400s,
+                    policy=orphan_stages" for every one -- from code, not
+                    from the column.
+          constant  worse, because the value is plausible.
+                    vcs_commits.lines_removed is 0 on all 1039 rows, so
+                    anything rendering a diffstat is confidently wrong
+                    and nothing about the read looks broken.
+
+        Deliberately ignores a third shape: "sparse" -- one distinct value
+        plus many NULLs. COUNT(DISTINCT) ignores NULLs, so
+        edit_intents.cancelled_at (1 of 780 set) and vcs_sessions.host
+        (952 of 953) are indistinguishable from constants by that measure,
+        and both are correct. Counting non-nulls separately is what keeps
+        them out, and is why this check can be precise enough to act on.
+
+        Shape is compared too, not just the name: a baselined all_null
+        column that someone starts writing a single constant value into
+        has changed into a different hazard and should resurface.
+
+        Known limitation: a baseline row whose column later starts varying
+        is not reported as stale, so it lingers and would suppress a
+        future regression on that one column. Pruning those is a manual
+        pass against the table.
+        """
+        import re
+        from db_utils import query_all, query_one
+
+        LIMIT = 40
+
+        # Degrade rather than fail on a DB predating migration 123 -- the
+        # same contract resolve() keeps for pre-113 databases, since a
+        # health check that errors is worse than one that abstains.
+        # Ask sqlite_master rather than catching the failure: db_utils logs
+        # at ERROR before re-raising, so letting it throw would print
+        # "no such table" on a healthy pre-123 database and report OK in
+        # the same breath -- a check whose own output contradicts itself.
+        if not query_one(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name = 'unmaintained_columns_baseline'"):
+            logger.debug(
+                "unmaintained_columns_baseline missing; skipping check "
+                "(apply migration 123)")
+            return []
+        baseline_rows = query_all(
+            "SELECT table_name, column_name, shape "
+            "FROM unmaintained_columns_baseline")
+        baseline = {(r['table_name'], r['column_name']): r['shape']
+                    for r in baseline_rows}
+
+        skip_table = re.compile(self.UNMAINTAINED_SKIP_TABLE)
+        issues = []
+
+        tables = query_all(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name")
+
+        for trow in tables:
+            t = trow['name']
+            if skip_table.search(t):
+                continue
+            try:
+                n = query_one('SELECT COUNT(*) AS n FROM "%s"' % t)['n']
+            except Exception:
+                continue
+            if n < self.UNMAINTAINED_MIN_ROWS:
+                continue
+
+            try:
+                cols = query_all('PRAGMA table_info("%s")' % t)
+            except Exception:
+                continue
+            names = [c['name'] for c in cols
+                     if not c['pk']
+                     and 'BLOB' not in (c['type'] or '').upper()
+                     and c['name'] not in self.UNMAINTAINED_SKIP_COLUMN]
+            if not names:
+                continue
+
+            # One scan per table rather than one per column: this check
+            # walks every table in the DB, and per-column scans turned a
+            # 0.9s pass into minutes on the larger ones.
+            # Explicit aliases rather than relying on the generated names
+            # of bare COUNT() expressions: query_one returns a dict, so two
+            # expressions that stringified the same would silently collide
+            # into one key and shift every later column's reading by one.
+            sel = ', '.join(
+                'COUNT(DISTINCT "%s") AS d%d, COUNT("%s") AS n%d' % (c, i, c, i)
+                for i, c in enumerate(names))
+            try:
+                row = query_one('SELECT %s FROM "%s"' % (sel, t))
+            except Exception:
+                continue
+            if not row:
+                continue
+
+            for i, col in enumerate(names):
+                ndistinct, nonnull = row['d%d' % i], row['n%d' % i]
+                if ndistinct == 0:
+                    shape = 'all_null'
+                elif ndistinct == 1 and nonnull == n:
+                    shape = 'constant'
+                else:
+                    continue
+
+                known = baseline.get((t, col))
+                if known == shape:
+                    continue
+                if len(issues) >= LIMIT:
+                    return issues + [
+                        f"... output capped at {LIMIT}; rerun after "
+                        f"resolving these"]
+
+                if known is None:
+                    detail = (
+                        f"{t}.{col} holds no information across {n} rows "
+                        f"({'every row NULL' if shape == 'all_null' else 'every row the same value'}) "
+                        f"and is not in unmaintained_columns_baseline. "
+                        f"Either populate it or drop it -- a column nothing "
+                        f"maintains is worse than a missing one, because a "
+                        f"missing column cannot be trusted by mistake. To "
+                        f"accept it deliberately, add a baseline row in a "
+                        f"migration with the reason.")
+                else:
+                    detail = (
+                        f"{t}.{col} changed shape: baselined as '{known}', "
+                        f"now '{shape}' across {n} rows. Something started "
+                        f"writing it without making it vary, which is a "
+                        f"different hazard than the one accepted -- a "
+                        f"plausible constant is trusted more readily than a "
+                        f"NULL. Re-triage, then update the baseline row.")
+                issues.append(detail)
+
+        return issues
+
     def _check_exec_targets_are_executable(self):
         """Invariant: systemd ExecStart targets TempleDB writes can run.
 
@@ -3902,30 +4078,48 @@ WantedBy=timers.target
             reads the checkout (nix, commit) silently uses the stale
             version.
 
-        Resolves the checkout the same way the tools do
-        (CheckoutRepository.get_active_for_project), so it inspects the
-        directory that would actually be built from — not the hardcoded
-        ~/.config/templedb/checkouts/<slug>, which is frequently not the
-        live tree when a project is in edit mode.
+        Resolves the checkout the same way the tools do, so it inspects
+        the directory that would actually be built from — not the
+        hardcoded ~/.config/templedb/checkouts/<slug>, which is
+        frequently not the live tree when a project is in edit mode.
+
+        That means CheckoutRepository.resolve(), and going through it is
+        load-bearing rather than tidiness. This check previously ran its
+        own `is_active = 1 ORDER BY checkout_at DESC` query — the
+        pre-migration-113 recency rule — while every tool it claims to
+        mirror had moved to role-and-session resolution. A check that
+        audits a different tree than the one commands read is worse than
+        no check: on 2026-10-02 it reported "templedb: src/db_utils.py
+        DIFFERS between DB and checkout ... builds and commits reading
+        /tmp/tdb-land will silently use the checkout's version" about a
+        scratch tree that resolve() ignores for every purpose. The claim
+        was false and the tree was unreachable, which is exactly how the
+        true entries alongside it get skimmed past.
+
+        PURPOSE_EDIT, not PURPOSE_BUILD: the data-loss modes in the list
+        above are all commit-path, and commit reads the edit tree.
         """
-        from db_utils import query_all, query_one
+        from db_utils import query_all
         from pathlib import Path
+        from repositories.checkout_repository import CheckoutRepository
 
         LIMIT = 50
         issues = []
         projects = query_all(
             "SELECT id, slug FROM projects WHERE slug IS NOT NULL ORDER BY slug")
 
+        checkout_repo = CheckoutRepository()
+
         for proj in projects:
-            checkout = query_one(
-                """SELECT checkout_path FROM checkouts
-                    WHERE project_id = ? AND is_active = 1
-                    ORDER BY checkout_at DESC""", (proj['id'],))
+            checkout = checkout_repo.resolve(
+                proj['id'], purpose=CheckoutRepository.PURPOSE_EDIT)
             if not checkout:
                 continue
             root = Path(checkout['checkout_path'])
-            # Stale /tmp checkouts from old runs linger with is_active=1.
-            # A vanished directory isn't drift, it's an untidy table.
+            # resolve() already filters to extant directories for the
+            # branches that can return one, but the no-canonical fallback
+            # can hand back a row whose tree is gone. A vanished directory
+            # isn't drift, it's an untidy table.
             if not root.is_dir():
                 continue
 
