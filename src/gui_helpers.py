@@ -130,6 +130,14 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("domains",  "/domains",   "Domains",    ", O"),
             ("docs",     "/docs",      "Docs",       ", k"),
             ("code",     "/code",      "Code",       ", C"),
+            # The one entry the dead nav in gui.py had and this one did
+            # not, found by diffing the two while removing that copy —
+            # so the dashboard was the ONLY page linking to a page that
+            # has been registered and serving 200 the whole time.
+            # No keybinding: the old nav used ", A", which this list
+            # already gives to Asks, and a silently shadowed key is how
+            # the next person loses an afternoon.
+            ("config-ast", "/config-ast", "Config AST", ""),
             ("graph",    "/graph",     "Graph",      ", g"),
             ("schema-browser", "/schema-browser", "Schema", ", Q"),
             ("settings", "/settings",  "Settings",   ", S"),
