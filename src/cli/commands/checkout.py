@@ -641,7 +641,10 @@ class CheckoutCommand:
             # Whichever baseline is chosen, the gate and the printed diff must
             # come from the same one.
             if since_checkout:
+                # baseline_label names the left side of each diff;
+                # baseline_phrase reads inside a sentence.
                 baseline_label = 'at checkout'
+                baseline_phrase = 'what was materialized here'
                 rows = self.checkout_repo.query_all("""
                     SELECT
                         pf.file_path,
@@ -657,6 +660,7 @@ class CheckoutCommand:
                 baseline_by_path = {r['file_path']: r for r in rows}
             else:
                 baseline_label = 'database'
+                baseline_phrase = 'the database'
                 db_files = self.file_repo.get_files_for_project(project['id'], include_content=True)
                 baseline_by_path = {f['file_path']: f for f in db_files}
 
@@ -723,10 +727,18 @@ class CheckoutCommand:
                     print(f"   Checkout: {local_content.file_size} bytes")
 
             if changed == 0:
-                print(f"No differences between checkout and {baseline_label}.")
+                print(f"No differences between checkout and {baseline_phrase}.")
             else:
                 noun = "file" if changed == 1 else "files"
-                print(f"\n{changed} {noun} differ from the {baseline_label}.")
+                verb = "differs" if changed == 1 else "differ"
+                print(f"\n{changed} {noun} {verb} from {baseline_phrase}.")
+
+            if since_checkout:
+                # Files created in the tree have no checkout_snapshots row, so
+                # this baseline cannot see them. Say so rather than let the
+                # count read as a complete answer.
+                print("(Files created in this tree have no checkout baseline "
+                      "and are not listed.)")
 
             return 0
 

@@ -590,7 +590,9 @@ def register(cli):
         help='Compare against what was materialized into this tree, not the '
              'current database — i.e. what was edited here. Use this before '
              'deleting a workspace; the default answers the different '
-             'question of what committing this tree would change.')
+             'question of what committing this tree would change. Files '
+             'created in the tree have no checkout baseline and are not '
+             'listed.')
     cli.commands['project.checkout-diff'] = checkout_cmd.diff
 
     # project commit
