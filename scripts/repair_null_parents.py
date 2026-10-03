@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
-"""Relink empty commits whose parent_commit_id went NULL.
+"""Relink commits whose parent_commit_id is NULL but should not be.
 
-These are commits with no vcs_file_states and no commit_files rows AND a
-NULL parent despite not being the earliest commit in their project — the
-signature of a commit row that was committed by an inner autocommit while
-the rest of its transaction rolled back (see db_utils.transaction).
+The cause was create_commit treating its parent as optional: `templedb
+commit` passed none at all, and `vcs merge` wrote the vcs_commit_parents
+row without setting the column. Fixed in commit 2CE3184B; this repairs
+the rows written before that.
 
-They are NOT deleted. Each carries a distinct commit message describing
-real work and has no retry twin elsewhere in its project, so the row is
-the only surviving record of that commit; removing it would erase
-history. The file list is already unrecoverable. What is recoverable is
-the chain, so this restores parent_commit_id (and the matching
-vcs_commit_parents row) to the preceding commit on the same branch.
+Nothing is deleted. A commit row is the only surviving record of its
+commit — the first tranche all carried distinct messages describing real
+work with no retry twin anywhere in their project — and the file list is
+already unrecoverable. The chain is what can be restored.
 
-Applied 2026-10-03: 61 relinked, 1 left NULL (commit 36 is genuinely the
-earliest on its branch). Nothing deleted; commit and empty-commit counts
-unchanged at 1046 and 354.
+Parent preference: the order-0 vcs_commit_parents row if one exists
+(authoritative), else the preceding commit on the same branch by
+(commit_timestamp, id). That ordering is strictly earlier, so a cycle is
+impossible by construction; --apply verifies none inside the transaction
+anyway and rolls back if the check fails.
 
-Do not expect this to resurface history. It corrects lineage, so tools
-that walk parents (provenance, ingest, log) stop seeing 61 false root
-commits — but only 4 commits became newly reachable from a branch head.
-888 of 1046 commits remain unreachable from any head, which is a separate
-and much larger problem than the NULL parents this repairs.
+Applied in two tranches on 2026-10-03:
+  61  empty commits with the ghost signature (the first pass, when the
+      cause was still assumed to be the rollback bug). Lineage only:
+      +4 reachable, because those sit on side-chains no head points into.
+ 246  the rest, once create_commit was identified as the real cause.
+      This is the tranche that matters for reachability.
+One commit (36) is genuinely its branch's earliest and keeps a NULL parent.
 
 Usage: repair_null_parents.py <db-path> [--apply]
 Default is a dry run. Run against a copy first; the --apply path verifies
@@ -30,17 +32,21 @@ no cycles inside the transaction and rolls back if that check fails.
 import sqlite3
 import sys
 
-EMPTY = """NOT EXISTS (SELECT 1 FROM vcs_file_states f WHERE f.commit_id = vc.id)
-       AND NOT EXISTS (SELECT 1 FROM commit_files cf WHERE cf.commit_id = vc.id)"""
-
-FIND = f"""
+FIND = """
 SELECT vc.id, vc.project_id, vc.branch_id, vc.commit_timestamp, p.slug
   FROM vcs_commits vc
   JOIN projects p ON p.id = vc.project_id
- WHERE {EMPTY}
-   AND vc.parent_commit_id IS NULL
+ WHERE vc.parent_commit_id IS NULL
    AND vc.id > (SELECT MIN(id) FROM vcs_commits x WHERE x.project_id = vc.project_id)
  ORDER BY vc.id
+"""
+
+# A parent already recorded in the join table is authoritative — prefer it
+# over inference. (None existed on this DB, but `vcs merge` wrote join rows
+# without setting the column, so the shape is real.)
+JOIN_PARENT = """
+SELECT parent_commit_id FROM vcs_commit_parents
+ WHERE commit_id = ? ORDER BY parent_order LIMIT 1
 """
 
 # Strictly earlier on the same branch, so a cycle is impossible by construction.
@@ -57,6 +63,10 @@ def plan(conn):
     conn.row_factory = sqlite3.Row
     out, skipped = [], []
     for r in conn.execute(FIND).fetchall():
+        known = conn.execute(JOIN_PARENT, (r['id'],)).fetchone()
+        if known:
+            out.append((r['id'], known['parent_commit_id'], r['slug']))
+            continue
         pred = conn.execute(
             PRED, (r['project_id'], r['branch_id'], r['commit_timestamp'], r['id'])
         ).fetchone()
