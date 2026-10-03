@@ -404,6 +404,18 @@ class CheckoutCommand:
                 shown = ", ".join(v['untracked'][:3])
                 print(f"              {len(v['untracked'])} untracked "
                       f"file(s): {shown}")
+            if v['stale']:
+                # A kept tree that is ALSO stale is the dangerous shape,
+                # and omitting this made "keep" read as "this tree is
+                # fine". templedb's claude-code-agent-fixups was held
+                # back for one untracked migration while 38 of its files
+                # were older than the DB, so committing from it to
+                # rescue that one file would have reverted the other 38.
+                oldest = min(f['tree_blob_created'] for f in v['stale'])
+                print(f"              WARNING: also {len(v['stale'])} "
+                      f"file(s) older than the DB (oldest from {oldest}) "
+                      f"— copy the work out rather than committing from "
+                      f"this tree")
             print(f"              commit it, or name the tree explicitly: "
                   f"templedb commit {row['project_slug']} "
                   f"{row['checkout_path']}")
