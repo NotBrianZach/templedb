@@ -214,16 +214,48 @@ def _pooled_cursor(conn: sqlite3.Connection):
         cursor.close()
 
 
+def _in_explicit_transaction() -> bool:
+    """True while a transaction() block is open on this thread."""
+    return getattr(_thread_local, 'tx_depth', 0) > 0
+
+
 @contextmanager
 def transaction():
-    """Context manager for database transactions"""
+    """Context manager for database transactions.
+
+    While this is open, `execute(commit=True)` does NOT commit. That
+    default exists for the many callers that write a single row and
+    expect it durable, but when one of them is reached from inside a
+    transaction its commit ends the *caller's* transaction too, and
+    everything written up to that point silently becomes permanent.
+
+    That is not hypothetical. `project commit` wrapped its whole write
+    sequence in this context manager, inserted the vcs_commits row, then
+    resolved the VCS session — and session creation inserts into
+    vcs_sessions with the commit=True default. The commit row was
+    committed by that call, so when a later per-file write raised, the
+    rollback below discarded the file states but could not undo the
+    commit row: a commit with zero vcs_file_states, listed in the log
+    and breaking the parent chain. Reproduced on demand 2026-10-03;
+    commit 3ae8d2dc in this repo's own history is one of these.
+
+    Suppressing the inner commit makes the block actually atomic no
+    matter what it calls, rather than requiring every transitive callee
+    to remember to pass commit=False.
+    """
     conn = get_connection()
+    depth = getattr(_thread_local, 'tx_depth', 0)
+    _thread_local.tx_depth = depth + 1
     try:
         yield conn
-        conn.commit()
+        if depth == 0:
+            conn.commit()
     except Exception:
-        conn.rollback()
+        if depth == 0:
+            conn.rollback()
         raise
+    finally:
+        _thread_local.tx_depth = depth
 
 
 def query_one(sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
@@ -287,7 +319,9 @@ def execute(sql: str, params: tuple = (), commit: bool = True) -> int:
         conn = get_connection()
         with _pooled_cursor(conn) as cursor:
             cursor.execute(sql, params)
-            if commit:
+            # Inside transaction(), the caller owns the commit; see there
+            # for what committing here used to cost.
+            if commit and not _in_explicit_transaction():
                 conn.commit()
             return cursor.lastrowid
     except sqlite3.IntegrityError as e:
@@ -323,7 +357,7 @@ def executemany(sql: str, params_list: List[tuple], commit: bool = True) -> None
         conn = get_connection()
         with _pooled_cursor(conn) as cursor:
             cursor.executemany(sql, params_list)
-            if commit:
+            if commit and not _in_explicit_transaction():
                 conn.commit()
     except sqlite3.IntegrityError as e:
         logger.error(f"Database constraint violation in batch operation: {e}")

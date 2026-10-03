@@ -326,6 +326,15 @@ class CommitCommand:
                     logger.error(f"Strategy '{strategy}' not yet implemented")
                     return 1
 
+            # Resolve the owning session BEFORE opening the transaction.
+            # Session creation inserts into vcs_sessions and is not part of
+            # this commit: it should survive a failed commit, and it must
+            # not run inside the transaction, where it would once have
+            # committed the half-written commit row (see db_utils.
+            # transaction). transaction() now suppresses that inner commit,
+            # so this hoist is about the session outliving a rollback.
+            session_id = self._resolve_session_id()
+
             # Commit changes (atomic transaction)
             logger.info("Committing changes to database...")
 
@@ -353,7 +362,6 @@ class CommitCommand:
                 # session_id=NULL means "already published" (matches
                 # pre-Phase-B behavior); publish (fast-forward-or-fail)
                 # clears session_id on the range at reconciliation time.
-                session_id = self._resolve_session_id()
                 if session_id is not None:
                     self.vcs_repo.execute(
                         "UPDATE vcs_commits SET session_id = ? WHERE id = ?",
