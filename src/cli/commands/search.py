@@ -30,42 +30,50 @@ class SearchCommands(Command):
         use_fts = not (hasattr(args, 'no_fts') and args.no_fts)
 
         if use_fts:
-            # Use FTS5 for fast full-text search
-            # FTS5 query syntax: can use boolean operators, phrases, etc.
-            if project_slug:
-                sql = """
-                    SELECT
-                        fsv.project_slug,
-                        fsv.file_path,
-                        fsv.file_name,
-                        fsv.file_type,
-                        fsv.line_count,
-                        snippet(file_contents_fts, 1, '<b>', '</b>', '...', 32) AS snippet,
-                        rank
-                    FROM file_contents_fts
-                    JOIN file_search_view fsv ON fsv.file_path = file_contents_fts.file_path
-                    WHERE file_contents_fts MATCH ? AND fsv.project_slug = ?
-                    ORDER BY rank
-                    LIMIT 100
-                """
-                params = (pattern, project_slug)
-            else:
-                sql = """
-                    SELECT
-                        fsv.project_slug,
-                        fsv.file_path,
-                        fsv.file_name,
-                        fsv.file_type,
-                        fsv.line_count,
-                        snippet(file_contents_fts, 1, '<b>', '</b>', '...', 32) AS snippet,
-                        rank
-                    FROM file_contents_fts
-                    JOIN file_search_view fsv ON fsv.file_path = file_contents_fts.file_path
-                    WHERE file_contents_fts MATCH ?
-                    ORDER BY rank
-                    LIMIT 100
-                """
-                params = (pattern,)
+            # Joined on file_contents_fts.rowid, which migration 110
+            # established IS project_files.id -- "which gives each current
+            # file exactly one row". The previous query joined
+            # file_search_view on file_path instead, and file_path is not
+            # unique across projects: 14 projects have a README.md, so one
+            # FTS hit fanned out to 14 rows, one per project owning that
+            # path. With -p that filter then PASSED for a project whose
+            # file does not contain the term at all.
+            #
+            # Observed 2026-10-04: `search content rusqlite -p
+            # trig-navigator` reported trig-navigator/README.md as a match
+            # and rendered templedb-rust's README as the snippet. Only
+            # templedb-rust contains that word. A miss would have been
+            # obvious; a wrong attribution carrying its own evidence is
+            # not, which is why this outranks the staleness bug 110 fixed.
+            #
+            # The two branches were identical but for the filter, so they
+            # are one statement now. file_types and file_contents are
+            # LEFT joined deliberately: the FTS index is built from
+            # project_files + file_contents + content_blobs and never
+            # consults file_types, so an inner join on it -- which is what
+            # file_search_view does -- silently dropped indexed files
+            # whose type was unresolved.
+            sql = """
+                SELECT
+                    p.slug          AS project_slug,
+                    pf.file_path,
+                    pf.file_name,
+                    ft.type_name    AS file_type,
+                    fc.line_count,
+                    snippet(file_contents_fts, 1, '<b>', '</b>', '...', 32) AS snippet,
+                    rank
+                FROM file_contents_fts
+                JOIN project_files pf ON pf.id = file_contents_fts.rowid
+                JOIN projects p ON p.id = pf.project_id
+           LEFT JOIN file_types ft ON ft.id = pf.file_type_id
+           LEFT JOIN file_contents fc
+                  ON fc.file_id = pf.id AND fc.is_current = 1
+                WHERE file_contents_fts MATCH ?
+                  AND (? IS NULL OR p.slug = ?)
+                ORDER BY rank
+                LIMIT 100
+            """
+            params = (pattern, project_slug, project_slug)
 
             results = self.file_repo.query_all(sql, params)
 
