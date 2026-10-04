@@ -3428,6 +3428,8 @@ WantedBy=timers.target
              self._check_exec_targets_are_executable),
             ('wal_within_size_budget',
              self._check_wal_within_size_budget),
+            ('crsqlite_extension_loads',
+             self._check_crsqlite_extension_loads),
             ('no_new_unmaintained_columns',
              self._check_no_new_unmaintained_columns),
             ('deployed_build_matches_db',
@@ -3868,6 +3870,90 @@ WantedBy=timers.target
                    "nothing pins it; journal_size_limit keeps it bounded "
                    "afterwards")
         return [detail]
+
+    def _check_crsqlite_extension_loads(self):
+        """Invariant: the cr-sqlite extension actually loads.
+
+        It is supplied by home-manager's `programs.templedb.extraPackages`,
+        so a generation that drops the package leaves every path
+        `sync_engine._find_crsqlite()` probes dangling. Loading is
+        deliberately non-fatal -- a fresh install with no extension must
+        still work for reads and non-sync writes -- so the condition is
+        silent until something writes to a `sync_*` table and a CRDT
+        trigger fails with `no such function: crsql_internal_sync_bit`,
+        an internal symbol that names neither the cause nor the fix.
+
+        That cost ten days of hourly `ingest git` failures in 2026-09:
+        234 runs, 2026-09-06 through 2026-09-24, all the same line. The
+        swallow was fixed afterwards -- db_utils records
+        CRSQLITE_LOAD_ERROR and warns once per process -- but a warning
+        on stderr scrolls past, and the only durable trace was the
+        cumulative error count in `summary`, which does not distinguish a
+        live outage from one that closed weeks ago. Hence a check.
+
+        Opens its own connection rather than trusting the module global:
+        CRSQLITE_LOAD_ERROR is only populated once something has gone
+        through apply_standard_pragmas with loading enabled, and reading
+        it unprimed would report OK for a broken extension -- the exact
+        false green this check exists to prevent.
+        """
+        import sqlite3
+        from config import DB_PATH
+
+        try:
+            from db_utils import apply_standard_pragmas
+            import db_utils
+        except Exception as exc:
+            return [f"cannot import db_utils to test extension load: {exc}"]
+
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=10.0)
+            apply_standard_pragmas(conn)
+            err = getattr(db_utils, 'CRSQLITE_LOAD_ERROR', None)
+
+            if not err:
+                # Prove the symbol the CRDT triggers call is really
+                # resolvable. A load that "succeeded" against the wrong
+                # library would otherwise pass.
+                try:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM pragma_function_list "
+                        "WHERE name = 'crsql_internal_sync_bit'"
+                    ).fetchone()
+                    if row and not row[0]:
+                        err = ("extension loaded but "
+                               "crsql_internal_sync_bit is not registered")
+                except sqlite3.Error:
+                    # pragma_function_list is unavailable on old SQLite.
+                    # Absence of the probe is not evidence of a fault.
+                    pass
+        except Exception as exc:
+            return [f"could not test cr-sqlite load: {exc}"]
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+
+        if not err:
+            return []
+
+        try:
+            from sync_engine import CRSQLITE_PATH
+            tried = CRSQLITE_PATH
+        except Exception:
+            tried = "<unresolved>"
+
+        return [
+            f"cr-sqlite did not load ({err}). Reads and non-sync writes "
+            f"still work, but every write to a sync_* table will fail with "
+            f"'no such function: crsql_internal_sync_bit'. Resolved path: "
+            f"{tried}. Check for crsqlite.so in the home-manager profile "
+            f"lib/ and re-add programs.templedb.extraPackages if it is gone; "
+            f"TEMPLEDB_CRSQLITE_PATH overrides the search"
+        ]
 
     def _wal_holders(self):
         """(pid, short-name, start-time) for processes with the DB open.
