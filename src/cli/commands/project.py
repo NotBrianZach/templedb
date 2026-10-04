@@ -566,6 +566,9 @@ def register(cli):
     checkout_cleanup_parser = subparsers.add_parser('checkout-cleanup', help='Remove stale checkouts')
     checkout_cleanup_parser.add_argument('project_slug', nargs='?', help='Project slug (optional, cleans all if omitted)')
     checkout_cleanup_parser.add_argument('--force', '-f', action='store_true', help='Skip confirmation')
+    checkout_cleanup_parser.add_argument('--dry-run', action='store_true',
+                                         help='Show what would be removed or retired '
+                                              'without touching anything')
     cli.commands['project.checkout-cleanup'] = checkout_cmd.cleanup_checkouts
 
     # project checkout-status
