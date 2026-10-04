@@ -103,6 +103,16 @@ def apply_standard_pragmas(
     loading on fresh DBs.
     """
     conn.execute("PRAGMA journal_mode=WAL")
+    # Cap the -wal file so a checkpoint TRUNCATES back to this instead of
+    # leaving it at high-water mark forever. Without it (the default is -1,
+    # unlimited, and the pragma was set nowhere in the tree) a WAL that
+    # spikes once stays spiked for the life of the database file: on
+    # 2026-10-04 this one sat at 4.0 GB against a 776 MB database and a
+    # 105 MB doctor budget, and would not have shrunk on its own even
+    # after the reader pinning it went away. This does not slow growth --
+    # that is wal_autocheckpoint's job and a reader holding an old
+    # snapshot defeats both -- it bounds what is left behind afterwards.
+    conn.execute("PRAGMA journal_size_limit=67108864")   # 64 MiB
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size=-64000")

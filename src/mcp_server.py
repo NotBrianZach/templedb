@@ -105,6 +105,7 @@ class MCPServer:
 
         # SQLite connection for reuse (with thread check)
         self._db_conn = None
+        self._db_cursor = None
 
         # Default project context (for context switching feature)
         self._default_project = None
@@ -157,13 +158,54 @@ class MCPServer:
         if self._db_conn is None:
             self._db_conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
             self._db_conn.row_factory = sqlite3.Row
-            # Enable WAL mode for concurrent access
-            self._db_conn.execute("PRAGMA journal_mode=WAL")
-            self._db_conn.execute("PRAGMA busy_timeout=30000")
-            self._db_conn.execute("PRAGMA synchronous=NORMAL")
-            self._db_conn.execute("PRAGMA cache_size=-64000")
-            self._db_conn.execute("PRAGMA foreign_keys=ON")
+            # Was an inline copy of the pragma list, which meant tuning
+            # applied in apply_standard_pragmas never reached the
+            # longest-lived connection in the system. journal_size_limit
+            # landed there on 2026-10-04 to bound the -wal file, and this
+            # connection -- the one belonging to `ai agent serve`, which
+            # outlives every CLI process -- would have been the single
+            # most important one to miss.
+            from db_utils import apply_standard_pragmas
+            apply_standard_pragmas(self._db_conn)
         return self._db_conn
+
+    def _fresh_cursor(self, conn):
+        """Hand out a cursor, retiring the previous one.
+
+        This server keeps its own connection for the life of the process,
+        so a cursor left holding an un-finalized statement holds a READ
+        transaction open with it, and in WAL mode that pins the
+        checkpoint: wal_checkpoint(TRUNCATE) cannot reclaim past the
+        pinned frame and the -wal file grows without bound. db_utils
+        fixed this for pooled callers on 2026-10-02 via _pooled_cursor,
+        but this module has its own connection and its own raw
+        conn.cursor() calls, so that fix never reached it. Measured on
+        2026-10-04: a 4.0 GB -wal pinned at frame 371 by `ai agent
+        serve`, 779,432 frames unreclaimable, with PASSIVE reporting
+        busy=0 -- no lock contention, just an old snapshot nobody closed.
+
+        _release_db_connection() is not enough on its own. It commits or
+        rolls back after every request, which ends a stray *write*
+        transaction, but neither commit nor rollback finalizes a dangling
+        read statement -- so the pin survived the very mechanism written
+        to prevent this class of problem.
+
+        Retiring on handout rather than only at release means an
+        exception between the two still cannot leak more than one cursor.
+        """
+        self._close_cursor()
+        self._db_cursor = conn.cursor()
+        return self._db_cursor
+
+    def _close_cursor(self):
+        """Finalize the tracked cursor, if any. Never raises."""
+        cur = self._db_cursor
+        if cur is not None:
+            self._db_cursor = None
+            try:
+                cur.close()
+            except Exception:
+                pass
 
     def _release_db_connection(self):
         """Commit (or rollback on failure) any open transaction on the shared connection.
@@ -172,6 +214,9 @@ class MCPServer:
         hold an uncommitted write transaction between requests — which would block
         all writers in other processes indefinitely.
         """
+        # Before the commit, not after: a dangling read statement is what
+        # pins WAL checkpoints, and commit() does not finalize one.
+        self._close_cursor()
         if self._db_conn is not None:
             try:
                 self._db_conn.commit()
@@ -641,7 +686,7 @@ class MCPServer:
         """Read a resource by URI"""
         try:
             conn = self._get_db_connection()
-            cursor = conn.cursor()
+            cursor = self._fresh_cursor(conn)
 
             if uri == "templedb://schema":
                 # Return complete schema
@@ -840,7 +885,7 @@ class MCPServer:
             format_type = args.get("format", "json")
 
             conn = self._get_db_connection()
-            cursor = conn.cursor()
+            cursor = self._fresh_cursor(conn)
             # Block write queries - this is a read-only tool
             if re.search(r'\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE)\b', query, re.IGNORECASE):
                 return self._error_response("Write queries are not allowed. Use dedicated tools for modifications.")
@@ -1000,7 +1045,7 @@ class MCPServer:
             key = args["key"]
 
             conn = self._get_db_connection()
-            cursor = conn.cursor()
+            cursor = self._fresh_cursor(conn)
 
             cursor.execute("""
                 SELECT key, value, description, updated_at
@@ -1031,7 +1076,7 @@ class MCPServer:
             scope = args.get("scope", "host")
 
             conn = self._get_db_connection()
-            cursor = conn.cursor()
+            cursor = self._fresh_cursor(conn)
 
             if scope != "global":
                 host = args.get("host")
