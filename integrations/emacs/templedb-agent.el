@@ -454,7 +454,7 @@ SECTION-NAME is a string; entries are plists with :id :text :timestamp.")
 Empty categories are elided; if every category is empty the whole
 badge is dropped so the modeline stays short in fresh sessions."
   (let* ((findings (length templedb-agent--findings))
-         (todos-open (cl-count-if-not (lambda (t) (plist-get t :done))
+         (todos-open (cl-count-if-not (lambda (td) (plist-get td :done))
                                       templedb-agent--todos))
          (qs-open (cl-count-if-not (lambda (q) (plist-get q :answered))
                                    templedb-agent--open-questions))
@@ -1091,44 +1091,111 @@ its state was mutated."
 
 ;;;; Agent-to-user asks (mcp__templedb__templedb_ask_user)
 
+(defvar templedb-agent--asks-seen (make-hash-table :test 'equal)
+  "Ask ids already prompted for, so a redelivered event cannot double-prompt.")
+
 (defun templedb-agent--handle-ask-question (data)
-  "Prompt the user via completing-read for each question in DATA, then
-send the responses back to the agent via ask.respond so the MCP tool's
-tool_result can return to Claude."
+  "Queue the questions in DATA to be asked from the command loop.
+
+Deliberately does NOT prompt here.  This function runs inside the agent
+process filter, and `completing-read' must never block in a filter:
+while the minibuffer waits for input Emacs keeps reading subprocess
+output, so the filter is re-entered and re-renders the agent buffer
+underneath the live minibuffer.  The visible result was that the prompt
+and your half-typed option reappeared on every redraw and RET never
+took, which made an option impossible to select.  `run-at-time' 0 hands
+the prompt to the top-level event loop, where blocking is legal."
   (let ((ask-id (alist-get 'ask_id data))
         (questions (alist-get 'questions data)))
-    (if (not (and ask-id questions))
-        (message "Temple Agent: malformed ask event, ignoring")
-      ;; Post a marker on the current exchange so the log shows Claude asked,
-      ;; before we block on completing-read for the answers.
+    (cond
+     ((not (and ask-id questions))
+      (message "Temple Agent: malformed ask event, ignoring"))
+     ;; Redelivery: the service marks asks dispatched, but a restarted
+     ;; poll loop or a replayed event must not open a second minibuffer.
+     ((gethash ask-id templedb-agent--asks-seen) nil)
+     (t
+      (puthash ask-id t templedb-agent--asks-seen)
+      ;; Post a marker on the current exchange so the log shows Claude
+      ;; asked, before the prompt appears.
       (templedb-agent--add-message
        "Ask"
        (mapconcat (lambda (q)
                     (format "Q: %s" (alist-get 'question q)))
                   questions "\n"))
-      (let ((answers '()))
+      (let ((buf (current-buffer)))
+        (run-at-time
+         0 nil
+         (lambda ()
+           (when (buffer-live-p buf)
+             (with-current-buffer buf
+               (templedb-agent--ask-questions ask-id questions))))))))))
+
+(defun templedb-agent--ask-prompt (question-text)
+  "Collapse QUESTION-TEXT into a single-line minibuffer prompt.
+Embedded newlines make the prompt span lines, which breaks completion
+UIs and pushes the candidates off screen."
+  (let ((one-line (string-trim
+                   (replace-regexp-in-string "[ \t\n\r]+" " "
+                                             (or question-text "")))))
+    (concat one-line (if (string-suffix-p "?" one-line) " " ": "))))
+
+(defun templedb-agent--ask-questions (ask-id questions)
+  "Prompt for each of QUESTIONS, then send answers back under ASK-ID.
+Must be called from the command loop, never from a process filter."
+  (let ((answers '())
+        (cancelled nil))
+    (condition-case nil
         (dolist (q (append questions nil))
           (let* ((question-text (alist-get 'question q))
                  (options (append (alist-get 'options q) nil))
                  (labels (mapcar (lambda (o) (alist-get 'label o)) options))
+                 ;; label -> description, for the annotation below.
+                 (descs (mapcar (lambda (o)
+                                  (cons (alist-get 'label o)
+                                        (or (alist-get 'description o) "")))
+                                options))
                  (multi (alist-get 'multiSelect q))
-                 (prompt (format "%s " question-text))
+                 (prompt (templedb-agent--ask-prompt question-text))
+                 ;; Show each option's description beside its label. The
+                 ;; labels alone are often too terse to choose between,
+                 ;; which is what drove people to type them out by hand.
+                 (completion-extra-properties
+                  (list :annotation-function
+                        (lambda (label)
+                          (let ((desc (cdr (assoc label descs))))
+                            (unless (or (null desc) (string-empty-p desc))
+                              (concat "  " desc))))))
+                 ;; A minibuffer may already be open when the ask lands.
+                 (enable-recursive-minibuffers t)
                  (choice (if multi
                              (completing-read-multiple prompt labels nil t)
                            (completing-read prompt labels nil t))))
             (push (cons question-text choice) answers)))
-        (templedb-agent--send
-         "ask.respond"
-         `((ask_id . ,ask-id)
-           (response . ((answers . ,(nreverse answers))))))
-        (templedb-agent--add-message
-         "Answered"
-         (mapconcat (lambda (a)
-                      (format "%s → %s" (car a)
-                              (if (listp (cdr a))
-                                  (mapconcat #'identity (cdr a) ", ")
-                                (cdr a))))
-                    (reverse answers) "; "))))))
+      ;; C-g used to leave the MCP tool blocked for its full 600s timeout.
+      (quit (setq cancelled t)))
+    ;; Bind the result of nreverse: the old code called nreverse and then
+    ;; reverse on the same variable, so the "Answered" line rendered a
+    ;; truncated list whenever an ask carried more than one question.
+    (setq answers (nreverse answers))
+    (if cancelled
+        (progn
+          (templedb-agent--send
+           "ask.respond"
+           `((ask_id . ,ask-id)
+             (response . ((cancelled . t)))))
+          (templedb-agent--add-message "Answered" "(cancelled by user)"))
+      (templedb-agent--send
+       "ask.respond"
+       `((ask_id . ,ask-id)
+         (response . ((answers . ,answers)))))
+      (templedb-agent--add-message
+       "Answered"
+       (mapconcat (lambda (a)
+                    (format "%s → %s" (car a)
+                            (if (listp (cdr a))
+                                (mapconcat #'identity (cdr a) ", ")
+                              (cdr a))))
+                  answers "; ")))))
 
 (defun templedb-agent--handle-agent-message (data)
   "Render a one-way message from the agent as an ewoc message entry."
