@@ -106,6 +106,7 @@ class MCPServer:
         # SQLite connection for reuse (with thread check)
         self._db_conn = None
         self._db_cursor = None
+        self._db_conn_opened_at = None
 
         # Default project context (for context switching feature)
         self._default_project = None
@@ -167,6 +168,8 @@ class MCPServer:
             # most important one to miss.
             from db_utils import apply_standard_pragmas
             apply_standard_pragmas(self._db_conn)
+            import time as _time
+            self._db_conn_opened_at = _time.monotonic()
         return self._db_conn
 
     def _fresh_cursor(self, conn):
@@ -197,6 +200,52 @@ class MCPServer:
         self._db_cursor = conn.cursor()
         return self._db_cursor
 
+    # A connection older than this is closed at the end of a request, so
+    # the daemon reopens on the next one. 60s keeps a burst of MCP calls
+    # on one connection while bounding the worst case.
+    DB_CONN_MAX_AGE_SECONDS = 60
+
+    def _retire_connection_if_old(self):
+        """Close the shared connection once it has outlived its bound.
+
+        This is the connection-lifetime control a database server would
+        give us as `idle_in_transaction_session_timeout`. SQLite has no
+        server, so nothing outside a process can end that process's
+        transaction -- the only lever is the holder closing its own
+        connection, which makes it this daemon's job rather than an
+        operator's.
+
+        Why the daemon specifically: it is the process that outlives every
+        CLI invocation, so it is the only one that can accumulate an old
+        read snapshot. On 2026-10-04 it held one at WAL frame 371 for
+        twelve hours while 1.87 million frames piled up behind it, and
+        nothing could reclaim 7.4 GB until the process exited. Finalizing
+        cursors (fixed separately) removes the known leak; bounding the
+        connection removes the whole class, including leaks not yet found.
+
+        Reopening costs about 21 ms against this database, paid at most
+        once a minute, which is why the bound is a lifetime and not
+        close-after-every-request.
+        """
+        if self._db_conn is None or self._db_conn_opened_at is None:
+            return
+        import time as _time
+        if _time.monotonic() - self._db_conn_opened_at < self.DB_CONN_MAX_AGE_SECONDS:
+            return
+        try:
+            self._db_conn.commit()
+        except Exception:
+            try:
+                self._db_conn.rollback()
+            except Exception:
+                pass
+        try:
+            self._db_conn.close()
+        except Exception:
+            pass
+        self._db_conn = None
+        self._db_conn_opened_at = None
+
     def _close_cursor(self):
         """Finalize the tracked cursor, if any. Never raises."""
         cur = self._db_cursor
@@ -217,6 +266,7 @@ class MCPServer:
         # Before the commit, not after: a dangling read statement is what
         # pins WAL checkpoints, and commit() does not finalize one.
         self._close_cursor()
+        self._retire_connection_if_old()
         if self._db_conn is not None:
             try:
                 self._db_conn.commit()

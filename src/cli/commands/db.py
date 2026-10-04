@@ -12,6 +12,10 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
+class _HoldersAlreadyListed(Exception):
+    """Internal: /proc already produced the holder list."""
+
+
 class DBCommands(Command):
     """Database management command handlers"""
 
@@ -139,6 +143,80 @@ class DBCommands(Command):
 
         return 0 if ok else 1
 
+    def _probe_checkpoint(self, db_path):
+        """(pinned, log_frames, checkpointed_frames) via a PASSIVE checkpoint.
+
+        pinned=True when the checkpoint could not advance to the end of the
+        log, meaning a reader holds a snapshot partway through it.
+        (None, None, None) if the probe itself failed.
+
+        PASSIVE never waits on a reader and never blocks one, so this is
+        safe against a live database -- it is the checkpoint SQLite already
+        runs automatically. The `busy` flag it returns is NOT the signal of
+        interest: busy=0 with checkpointed far below log_frames is exactly
+        the pinned case, so reading busy alone reports that as healthy.
+        """
+        import sqlite3
+        try:
+            conn = sqlite3.connect(db_path, timeout=5)
+            try:
+                conn.execute("PRAGMA busy_timeout=3000")
+                row = conn.execute(
+                    "PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            return (None, None, None)
+        if not row or len(row) < 3:
+            return (None, None, None)
+        log_frames, ckpt = row[1], row[2]
+        if log_frames is None or ckpt is None:
+            return (None, None, None)
+        # Two frames of slack: the log can gain entries between the
+        # checkpoint finishing and this comparison, and calling that
+        # "pinned" would make the check cry wolf on a busy database.
+        return (ckpt < log_frames - 2, log_frames, ckpt)
+
+    def _db_holders(self, db_path):
+        """[(pid, short-name, start-time)] holding the DB open, oldest first.
+
+        Best-effort by construction: /proc may be absent, a pid can vanish
+        mid-scan, another user's fds are unreadable. Each is a reason to
+        report less, never to fail a health check that otherwise works.
+        """
+        import glob
+        import os
+        import datetime
+        from pathlib import Path
+        out = []
+        try:
+            target = os.path.realpath(db_path)
+            for fddir in glob.glob('/proc/[0-9]*/fd'):
+                pid = fddir.split('/')[2]
+                try:
+                    for fd in os.listdir(fddir):
+                        try:
+                            if os.path.realpath(f"{fddir}/{fd}") == target:
+                                break
+                        except OSError:
+                            continue
+                    else:
+                        continue
+                    proc = Path(fddir).parent
+                    cmd = (proc / 'cmdline').read_bytes().replace(b'\0', b' ')
+                    name = cmd.decode('utf-8', 'replace').strip()
+                    name = ' '.join(
+                        w for w in name.split()
+                        if not w.startswith('/nix/store/'))[:34] or 'python'
+                    out.append((int(pid), name, proc.stat().st_mtime))
+                except (OSError, PermissionError):
+                    continue
+            out.sort(key=lambda r: r[2])
+            return [(p, n, datetime.datetime.fromtimestamp(t)
+                     .strftime('%m-%d %H:%M')) for p, n, t in out]
+        except Exception:
+            return []
+
     def check(self, args) -> int:
         """Comprehensive DB health check: integrity, locks, WAL, and processes."""
         import os
@@ -164,8 +242,48 @@ class DBCommands(Command):
         print(f"  DB size:  {db_size / 1024 / 1024:.1f} MB")
         print(f"  WAL size: {wal_size / 1024 / 1024:.1f} MB")
         print(f"  SHM size: {shm_size} bytes")
+        # A large WAL has two causes with opposite remedies, and saying
+        # "checkpoint may be blocked" told the operator neither. PINNED: a
+        # reader holds an old snapshot, so the backlog cannot be folded
+        # into the DB and nothing reclaims the file until that process
+        # exits. UN-TRUNCATED: nothing is pinning it, the frames are
+        # already copied, and one wal_checkpoint(TRUNCATE) reclaims it
+        # right now. On 2026-10-04 this was the first case for twelve
+        # hours while the message read as though it might be the second.
+        #
+        # Probing with a PASSIVE checkpoint is why this lives here and not
+        # in `doctor`: doctor is deliberately read-only and runs on a
+        # timer, so it can report the size but never the pinned frame.
+        # This command is the active prober, the same split as
+        # doctor-versus-reconcile. PASSIVE is the checkpoint SQLite
+        # already runs automatically every ~1000 pages; it copies
+        # committed frames and never blocks a reader.
         if wal_size > 50 * 1024 * 1024:
-            problems.append(f"WAL is large ({wal_size / 1024 / 1024:.0f} MB) — checkpoint may be blocked")
+            pinned_at, log_frames, ckpt_frames = self._probe_checkpoint(db_path)
+            mb = wal_size / 1024 / 1024
+            if log_frames is None:
+                problems.append(
+                    f"WAL is large ({mb:.0f} MB) and the checkpoint probe "
+                    f"failed — cannot tell pinned from un-truncated"
+                )
+            elif pinned_at:
+                holders = self._db_holders(db_path)
+                oldest = holders[0] if holders else None
+                who = (f"; oldest holder is pid {oldest[0]} {oldest[1]} "
+                       f"(since {oldest[2]})" if oldest else "")
+                problems.append(
+                    f"WAL is {mb:.0f} MB and PINNED: a reader holds a "
+                    f"snapshot at frame {ckpt_frames:,} of {log_frames:,}, "
+                    f"so nothing can reclaim it{who}. It releases when that "
+                    f"process exits; TRUNCATE will return busy until then"
+                )
+            else:
+                problems.append(
+                    f"WAL is {mb:.0f} MB but NOT pinned — "
+                    f"{ckpt_frames:,} of {log_frames:,} frames are already "
+                    f"checkpointed, so it is merely un-truncated. Reclaim "
+                    f"now: PRAGMA wal_checkpoint(TRUNCATE)"
+                )
 
         # 2. Read access
         try:
@@ -205,8 +323,27 @@ class DBCommands(Command):
             problems.append(f"Integrity check error: {e}")
 
         # 5. Processes using the DB
-        print(f"\nProcesses using DB:")
+        #
+        # Oldest first, with the nix store paths stripped. Every templedb
+        # process is the same python3 interpreter out of the same store
+        # path, so an untrimmed cmdline truncated to 80 characters printed
+        # six identical-looking lines and identified nothing. The role
+        # (`ai mcp daemon`, `gui`, `ai agent serve`) and the start time are
+        # the two facts that matter, because a PASSIVE checkpoint stalls at
+        # the oldest snapshot.
+        print(f"\nProcesses using DB (oldest first):")
+        holders = self._db_holders(db_path)
+        if holders:
+            for pid, name, since in holders:
+                print(f"  pid {pid:<7} {name:<34} since {since}")
+            print(f"  ({len(holders)} holder(s))")
+            # fall through to the legacy enumeration only when /proc gave
+            # us nothing, so the two never print the same thing twice.
+        else:
+            print(f"  (/proc gave nothing — falling back to lsof)")
         try:
+            if holders:
+                raise _HoldersAlreadyListed
             result = subprocess.run(
                 ["lsof", db_path, wal_path, shm_path],
                 capture_output=True, text=True, timeout=5
@@ -238,6 +375,8 @@ class DBCommands(Command):
                     print(f"  (none found)")
             except Exception:
                 print(f"  (could not enumerate — lsof not available)")
+        except _HoldersAlreadyListed:
+            pass
         except Exception as e:
             print(f"  (error: {e})")
 
