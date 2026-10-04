@@ -91,11 +91,15 @@ the commit finds nothing staged in "this session" and prints
 avoid this:
 
 ```bash
-# Option A (recommended): pin a session at the start of the workflow.
-templedb vcs session start --pin --name claude-agent
-# Every subsequent templedb call on this host adopts that session,
-# even across fresh shells. Unpin when done, or let it expire in 24h.
-templedb vcs session unpin
+# Option A (recommended): declare a session NAME in the wrapper's env.
+# There is no pin subcommand — the env var IS the mechanism.
+templedb vcs session start --name claude-agent   # do this FIRST (see below)
+export TEMPLEDB_SESSION=claude-agent
+# Every templedb call on this host with that name set shares one
+# session across fresh shells. Sessions are keyed on
+# (author, host, name) and expire after 24h. Two agents that want
+# isolation on the same host pick different names.
+# `vcs session start` prints both this and the TEMPLEDB_SESSION_ID form.
 
 # Option B: write + commit atomically in one call. No cross-shell
 # session sharing needed. Session-scoped, so only the just-set file
@@ -103,10 +107,26 @@ templedb vcs session unpin
 echo "..." | templedb file set <slug> path/to/file --commit -m "msg"
 ```
 
-Full session details: see "Sessions: `TEMPLEDB_SESSION_ID`" below. The
-pin mechanism is validated against (author, host, ≤24h, still-active),
-so a leftover pin from a different user or ended session is silently
-ignored.
+**Why `session start` comes first, not just the export.** The two
+functions that answer "which session is this?" differ on whether they
+may create one. `VCSService.get_current_session()` — the staging path —
+auto-creates a session for an unknown `TEMPLEDB_SESSION` name, so
+Option A works for `file set` / `vcs add` / `vcs commit` with the export
+alone. `CheckoutRepository.current_session_id()` — which stamps the
+`checkouts` row — deliberately never creates one, so if `templedb edit`
+is the *first* call after setting the var, the workspace gets the right
+directory name and `session_id IS NULL`: an unowned tree, exactly the
+gap in "Open gap in that tranche" above. Verified 2026-10-03:
+`TEMPLEDB_SESSION=zz-probe2 templedb edit regr-test` produced
+`edit-workspaces/regr-test/zz-probe2` with a NULL owner, while opening
+the session first produced an owned row. Any templedb call that stages
+something also creates the session, so this only bites when `edit` leads.
+
+Full session details: see "Sessions: `TEMPLEDB_SESSION_ID`" below.
+`TEMPLEDB_SESSION_ID` must reference a still-live session row and raises
+if it does not; `TEMPLEDB_SESSION` is validated against
+(author, host, still-active), so a leftover name from a different user
+or an ended session is silently ignored rather than adopted.
 
 ## Recommended: CLI-first workflow
 
@@ -290,24 +310,26 @@ templedb vcs status templedb --all    # grouped view of every session's stage
 have rows staged, prints a `Staged in other sessions` footer so surprise
 sweeps aren't possible.
 
-**Agent / setsid workflows — use `--pin`.** Under Claude Code (and any
-wrapper that runs each `templedb` call in a fresh Bash tool invocation),
-each call gets its own SID and inherits no env vars, so both
-`TEMPLEDB_SESSION_ID` and the SID-based auto-share fail — every stage
-ends up in its own session, and the next `vcs commit` says "No changes
-staged for commit in this session." Two fixes:
+**Agent / setsid workflows — declare a session name.** Under Claude Code
+(and any wrapper that runs each `templedb` call in a fresh Bash tool
+invocation), each call gets its own SID and inherits no env vars, so the
+SID-based auto-share fails — every stage ends up in its own session, and
+the next `vcs commit` says "No changes staged for commit in this
+session." Two fixes:
 
 ```bash
-# Option A: persist a filesystem pin (best for multi-step workflows).
-templedb vcs session start --pin --name agent-<slug>
+# Option A: declare a session name in the wrapper's env (best for
+# multi-step workflows). Open the session, then export the name.
+templedb vcs session start --name agent-<slug>
+export TEMPLEDB_SESSION=agent-<slug>
 
-# Any subsequent `templedb` call on this host resolves to that session,
-# even in fresh shells / under setsid / with no env vars:
+# Any subsequent `templedb` call that sees that env var resolves to the
+# same session, even in fresh shells / under setsid:
 templedb vcs add    -p <slug> path/to/file
 templedb vcs commit -p <slug> -m "..."
 
 # When done:
-templedb vcs session unpin
+templedb vcs session end <id>
 
 # Option B: fold write + commit into one call (best for one-off edits).
 # Skips the whole "which session did I stage into" question because the
@@ -315,12 +337,22 @@ templedb vcs session unpin
 echo "..." | templedb file set <slug> path/to/file --commit -m "msg"
 ```
 
-The pin lives at `$XDG_STATE_HOME/templedb/session.pin` (usually
-`~/.local/state/templedb/session.pin`). It's validated against
-`(author, host, age ≤ 24h, session-still-active)` — a pin left over
-from a different user or an ended session is silently ignored, so
-you can't accidentally cross-contaminate. `templedb vcs session current`
-now also reports pin status.
+There is **no pin subcommand and no pin file**. `vcs session start` has
+only `--name` and `--author`; `--pin`, `vcs session unpin`, and the
+`$XDG_STATE_HOME/templedb/session.pin` file described here through
+2026-10-03 were removed, and nothing in the tree reads that path any
+more — a leftover `session.pin` on disk is inert, not honoured. The env
+vars are the whole mechanism:
+
+- `TEMPLEDB_SESSION_ID=<int>` — an exact session id. Must reference a
+  still-live row; raises `ResourceNotFoundError` if it does not.
+- `TEMPLEDB_SESSION=<name>` — a declared name, resolved against
+  `(author, host, still-active)` and newest-first. The staging path
+  auto-creates it when absent; `templedb edit` does not (see the TL;DR
+  above), which is why `session start` comes first.
+
+`templedb vcs session current` reports the resolved session; it does not
+report pin status, because there is nothing to pin.
 
 Design and semantics:
 `reports/2026-08-20-session-scoped-vcs-staging-design.html`.
