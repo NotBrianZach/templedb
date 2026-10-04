@@ -434,12 +434,36 @@ class MCPDaemon:
         )
 
         def shutdown(signum, frame):
+            """Ask serve_forever() to stop. Must not block.
+
+            The previous version called self._http_server.shutdown()
+            directly from here and deadlocked every time.
+            BaseServer.shutdown() blocks until serve_forever() returns,
+            and a Python signal handler runs on the main thread -- which
+            is the thread inside serve_forever(). So it waited for a loop
+            that could not proceed until it returned.
+
+            The visible symptom was not a hang but a slow restart:
+            `systemctl --user restart templedb-mcp` sat in
+            deactivating/stop-sigterm for the full TimeoutStopUSec of
+            1min 30s and only finished when systemd escalated to SIGKILL.
+            Twice on 2026-10-04. SIGKILL meant the daemon never got to
+            close its DB connection, so every restart left WAL recovery
+            to the next opener.
+
+            Reproduced standalone before fixing: an HTTPServer whose
+            SIGTERM handler calls shutdown() inline is still alive three
+            seconds later, while one that hands it to a thread exits
+            immediately and serve_forever() returns.
+
+            Cleanup moved to the finally below. Doing it here was also
+            wrong on its own terms -- it ran while the server loop was
+            still live, and sys.exit() from a signal handler raises
+            SystemExit inside whatever the main thread was doing.
+            """
             logger.info("Shutting down...")
-            self._hook_socket.stop()
-            self._http_server.shutdown()
-            if self._db_conn:
-                self._db_conn.close()
-            sys.exit(0)
+            threading.Thread(
+                target=self._http_server.shutdown, daemon=True).start()
 
         signal.signal(signal.SIGTERM, shutdown)
         signal.signal(signal.SIGINT, shutdown)
@@ -454,7 +478,26 @@ class MCPDaemon:
         print(f"  MCP:  http://127.0.0.1:{self.port}/mcp", file=sys.stderr)
         print(f"  Hook: {HOOK_SOCKET_PATH}", file=sys.stderr)
 
-        self._http_server.serve_forever()
+        try:
+            self._http_server.serve_forever()
+        finally:
+            # Runs once the loop has actually stopped, so the order is
+            # real: stop accepting, release the socket, then close the DB.
+            try:
+                self._hook_socket.stop()
+            except Exception:
+                pass
+            try:
+                self._http_server.server_close()
+            except Exception:
+                pass
+            if self._db_conn:
+                try:
+                    self._db_conn.close()
+                except Exception:
+                    pass
+                self._db_conn = None
+            logger.info("Shutdown complete")
 
 
 def main(port: int = DEFAULT_PORT):
