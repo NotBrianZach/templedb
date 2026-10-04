@@ -305,6 +305,26 @@ class CheckoutCommand:
             # against the filesystem and cannot be written in SQL.
             self._prune_retired_edit_checkouts(args)
 
+            # Name the graph rows this command's CASCADE just stranded.
+            # Deleting a checkouts row cascades to its snapshots, which
+            # can remove the last project_files row backing a File
+            # entity; ingest is add-and-refresh only and never deletes,
+            # so those entities survive and
+            # entity_counts_match_source_tables goes red. On 2026-10-04
+            # retiring six dead workspaces orphaned 1,969 File entities,
+            # including in trig-navigator and woofs_projects — projects
+            # the cleanup never touched, because a no-slug run sweeps
+            # every project. Both halves behaved correctly and nobody
+            # owned the seam, so the operator met it as a red invariant
+            # later instead of a sentence here.
+            #
+            # Reports, never prunes: `entity prune-orphans` inverts the
+            # usual convention on purpose (dry-run default, --apply
+            # opt-in) because nobody looks at these rows, and deleting
+            # graph rows as a side effect of a checkout sweep is exactly
+            # the surprise that convention exists to prevent.
+            self._report_cascade_orphans()
+
             # Orphan pruning runs even when no checkout was stale — the
             # debris below outlives the rows that created it.
 
@@ -344,6 +364,38 @@ class CheckoutCommand:
         except Exception as e:
             logger.error(f"Error cleaning up checkouts: {e}", exc_info=True)
             return 1
+
+    def _report_cascade_orphans(self) -> None:
+        """Print a count of File entities whose source row is gone.
+
+        Same predicate as EntityCommands._ORPHAN_SOURCES['File'] — an
+        entity whose '<slug>/<path>' external_ref matches no active
+        project_files row. Kept as a count plus the repair command rather
+        than a list: the useful number is "did this sweep strand
+        anything", and 1,969 paths is not a thing to print.
+
+        Never raises. A diagnostic that breaks the command it annotates
+        is worse than no diagnostic.
+        """
+        try:
+            from db_utils import query_one
+            row = query_one(
+                """SELECT COUNT(*) AS n FROM entities e
+                    WHERE e.kind = 'File'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM project_files pf
+                            JOIN projects p ON p.id = pf.project_id
+                           WHERE pf.status = 'active'
+                             AND e.external_ref =
+                                 p.slug || '/' || pf.file_path)""")
+            n = (row or {}).get('n', 0)
+            if n:
+                print(f"   {n} File entit(ies) now have no source row — "
+                      f"`ingest all` will NOT clear these (it never "
+                      f"deletes). Run `templedb entity prune-orphans "
+                      f"--kind File` to preview, then `--apply`")
+        except Exception:
+            pass
 
     def _prune_retired_edit_checkouts(self, args) -> None:
         """Deactivate edit rows whose session ended and whose tree holds

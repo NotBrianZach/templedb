@@ -3421,6 +3421,8 @@ WantedBy=timers.target
              self._check_wal_within_size_budget),
             ('no_new_unmaintained_columns',
              self._check_no_new_unmaintained_columns),
+            ('deployed_build_matches_db',
+             self._check_deployed_build_matches_db),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -3839,6 +3841,96 @@ WantedBy=timers.target
         'content_text', 'content_blob', 'sample_issues_json',
         'metadata_json', 'diff_text',
     }
+
+    def _check_deployed_build_matches_db(self):
+        """Invariant: the installed package runs the code the DB holds.
+
+        The failure this exists for is not a crash. On 2026-10-04
+        src/cli/commands/checkout.py was 874 lines in the DB and 766 in
+        ~/.nix-profile, so the entire Phase 4 edit-tree prune was
+        committed, published, and inert. `project checkout-cleanup`
+        printed neither of its two verdict branches -- it skipped the
+        stage in silence, because the deployed binary had no such code.
+        The command did not fail. It succeeded at doing nothing, which is
+        indistinguishable from "there was nothing to do".
+
+        Why an invariant and not a startup banner: hashing a few hundred
+        files cannot go on a path that runs before argument parsing, which
+        is the same reason resolve_dev_checkout() settles for an
+        existence-only check. doctor already runs on a timer and feeds
+        `templedb summary`, so the fact lands where someone is looking at
+        zero per-invocation cost.
+
+        Deliberately reads the INSTALLED package, not the running one:
+        under TEMPLEDB_DEV_MODE the running code is a checkout, and
+        "is the checkout current" is a different question that
+        _dev_mode_staleness_banner already answers. Resolving
+        ~/.nix-profile/bin/templedb reaches the package even when this
+        code is executing from somewhere else entirely.
+
+        Silent when the profile is absent (not a nix install, or a
+        source checkout): nothing to compare, so nothing to report.
+        """
+        import hashlib
+        from pathlib import Path
+        from db_utils import query_all
+
+        launcher = Path.home() / ".nix-profile" / "bin" / "templedb"
+        if not launcher.exists():
+            return []
+        try:
+            root = launcher.resolve().parent.parent
+        except OSError:
+            return []
+        site = next(iter(sorted(root.glob("lib/python3.*/site-packages"))), None)
+        if site is None or not (site / "cli").is_dir():
+            return []
+
+        rows = query_all(
+            """SELECT pf.file_path, fc.content_hash
+                 FROM project_files pf
+                 JOIN projects p ON p.id = pf.project_id
+                 JOIN file_contents fc
+                      ON fc.file_id = pf.id AND fc.is_current = 1
+                WHERE p.slug = 'templedb'
+                  AND pf.status = 'active'
+                  AND pf.file_path LIKE 'src/%'
+                  AND pf.file_path LIKE '%.py'""")
+
+        behind = []
+        for r in rows:
+            # The nix install flattens src/ into site-packages, so
+            # 'src/cli/commands/x.py' lives at '<site>/cli/commands/x.py'.
+            rel = r['file_path'][4:]
+            disk = site / rel
+            if not disk.exists():
+                # Absent entirely: a module that landed after this build.
+                behind.append((r['file_path'], 'missing'))
+                continue
+            try:
+                h = hashlib.sha256(disk.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            if h != r['content_hash']:
+                behind.append((r['file_path'], 'differs'))
+
+        if not behind:
+            return []
+
+        missing = [f for f, why in behind if why == 'missing']
+        differs = [f for f, why in behind if why == 'differs']
+        detail = []
+        if differs:
+            detail.append(f"{len(differs)} file(s) differ "
+                          f"(e.g. {differs[0]})")
+        if missing:
+            detail.append(f"{len(missing)} absent from the build "
+                          f"(e.g. {missing[0]})")
+        return [
+            f"installed package {site.parent.parent.parent.name} is behind "
+            f"the DB: {'; '.join(detail)} — committed code is not what runs. "
+            f"Run `templedb reload` (publish + relock + rebuild + migrate)"
+        ]
 
     def _check_no_new_unmaintained_columns(self):
         """Invariant: no column has started holding no information.
@@ -4441,7 +4533,7 @@ WantedBy=timers.target
                         f"(delta {delta}) — {delta} entit(ies) outlived "
                         f"their source row. `ingest all` will NOT fix this; "
                         f"it never deletes. Run "
-                        f"`templedb entity prune-orphans --kind {kind}` to preview, then `--apply`"
+                        f"`templedb entity prune-orphans --kind {kind} --dry-run`"
                     )
                 else:
                     issues.append(

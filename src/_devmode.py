@@ -39,6 +39,19 @@ def _db_path() -> str:
         Path.home() / ".local" / "share" / "templedb" / "templedb.sqlite")
 
 
+def _env_session() -> Optional[str]:
+    """This process's declared session NAME, or None.
+
+    Only the name form is useful here: the message's job is to say "that
+    tree belongs to someone else", and the owner we have from SQL is a
+    name. Resolving TEMPLEDB_SESSION_ID to a name would mean a second
+    query on a startup path, to sharpen a diagnostic that is already
+    correct without it — an unpinned caller simply gets the neutral
+    wording. Deliberately does not create or validate anything.
+    """
+    return os.environ.get("TEMPLEDB_SESSION", "").strip() or None
+
+
 def resolve_dev_checkout(warn=True) -> Optional[Path]:
     """Return the src/ dir dev mode should run from, or None if there is none.
 
@@ -83,14 +96,20 @@ def _resolve_uncached(warn: bool) -> Optional[Path]:
         import sqlite3
         con = sqlite3.connect(f"file:{_db_path()}?mode=ro", uri=True)
         try:
-            ordered = """SELECT c.checkout_path FROM checkouts c
-                           JOIN projects p ON p.id = c.project_id
-                          WHERE p.slug = 'templedb' AND c.is_active = 1
-                          ORDER BY CASE c.kind WHEN 'edit' THEN 0
-                                               WHEN 'canonical' THEN 1
-                                               ELSE 2 END,
-                                   c.checkout_at DESC"""
-            legacy = """SELECT c.checkout_path FROM checkouts c
+            # kind/session come back so an accepted non-canonical tree
+            # can name itself and its owner. Arity matches the legacy
+            # query's padding below so the unpack is shape-stable.
+            ordered = """SELECT c.checkout_path, c.kind, s.name
+                            FROM checkouts c
+                            JOIN projects p ON p.id = c.project_id
+                       LEFT JOIN vcs_sessions s ON s.id = c.session_id
+                           WHERE p.slug = 'templedb' AND c.is_active = 1
+                           ORDER BY CASE c.kind WHEN 'edit' THEN 0
+                                                WHEN 'canonical' THEN 1
+                                                ELSE 2 END,
+                                    c.checkout_at DESC"""
+            legacy = """SELECT c.checkout_path, NULL AS kind, NULL AS name
+                           FROM checkouts c
                           JOIN projects p ON p.id = c.project_id
                          WHERE p.slug = 'templedb' AND c.is_active = 1
                          ORDER BY c.checkout_at DESC"""
@@ -106,7 +125,7 @@ def _resolve_uncached(warn: bool) -> Optional[Path]:
         finally:
             con.close()
 
-        for (path,) in rows:
+        for (path, kind, owner) in rows:
             candidate = Path(path) / "src"
             if not (candidate / "cli").is_dir():
                 continue
@@ -118,6 +137,27 @@ def _resolve_uncached(warn: bool) -> Optional[Path]:
                           f"{len(gaps)} file(s) (e.g. {gaps[0]})",
                           file=sys.stderr)
                 continue
+            # Announce an accepted non-canonical tree. The check above is
+            # existence-only by design (hashing every file before argparse
+            # is too expensive), so a tree holding stale CONTENTS of a file
+            # that exists passes silently and runs old code. On 2026-10-04
+            # that cost an hour: dev mode served
+            # edit-workspaces/templedb/claude-code-agent-3528, whose
+            # project.py was 626 lines against the canonical 629 while its
+            # checkout.py was current at 874, so a new parser flag kept
+            # being rejected while the feature it sat next to worked. The
+            # half-stale tree is the confusing case and nothing named it.
+            # Saying which tree was chosen is cheap and turns a silent
+            # wrong answer into a visible one.
+            if warn and kind != 'canonical':
+                whose = f"session '{owner}'" if owner else "no live session"
+                mine = _env_session()
+                if owner and mine and owner != mine:
+                    whose += " — NOT yours"
+                print(f"ℹ  dev mode: running {base} ({whose}), not the "
+                      f"canonical tree. Only MISSING files are detected, so "
+                      f"stale contents here run silently. Override with "
+                      f"TEMPLEDB_DEV_SRC=<tree>/src.", file=sys.stderr)
             return candidate
         # Nothing usable. None disables dev mode, rather than silently
         # running whichever stale tree happened to sort first.
