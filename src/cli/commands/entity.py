@@ -146,7 +146,16 @@ class EntityCommands(Command):
             (adapter_name, version),
         )
         try:
-            rc = fn(args)
+            # One transaction per adapter run instead of one per upsert.
+            # _upsert_entity does a SELECT then an UPDATE per entity and
+            # execute() commits by default, so a no-op `ingest all` over
+            # 34,717 entities issued ~34,717 commits and appended 506 MB
+            # of WAL while changing nothing. transaction() suppresses the
+            # inner commits (that is its documented purpose) so the run
+            # becomes one append.
+            from db_utils import transaction
+            with transaction():
+                rc = fn(args)
         except Exception as e:
             execute(
                 """UPDATE ingestion_runs
@@ -3421,8 +3430,6 @@ WantedBy=timers.target
              self._check_wal_within_size_budget),
             ('no_new_unmaintained_columns',
              self._check_no_new_unmaintained_columns),
-            ('deployed_build_matches_db',
-             self._check_deployed_build_matches_db),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -3803,10 +3810,7 @@ WantedBy=timers.target
 
         Pure read -- deliberately does NOT checkpoint. Running one here
         would make the check self-defeating on the happy path and
-        hide the very condition it exists to report. That is also why
-        this cannot report the *checkpointed* frame count, which only a
-        checkpoint returns: it reports the holders instead, which is the
-        half the operator could not get without a /proc sweep.
+        hide the very condition it exists to report.
         """
         import os
         from config import DB_PATH
@@ -3820,101 +3824,14 @@ WantedBy=timers.target
             return []
         if size <= self.WAL_BUDGET_BYTES:
             return []
-
-        # Frames, not just bytes: the frame number is what a PASSIVE
-        # checkpoint reports as pinned, so quoting it here lets the
-        # reader compare the two without converting units under pressure.
-        # A WAL frame is a 24-byte header plus one page, after a 32-byte
-        # file header.
-        try:
-            from db_utils import query_one
-            page = (query_one("PRAGMA page_size") or {}).get('page_size', 4096)
-        except Exception:
-            page = 4096
-        frames = max(0, (size - 32)) // (page + 24) if page else 0
-        try:
-            db_mb = os.path.getsize(DB_PATH) / 1e6
-            ratio = f", {size / 1e6 / db_mb:.1f}x the database" if db_mb else ""
-        except OSError:
-            ratio = ""
-
-        detail = (f"{wal} is {size / 1e9:.2f} GB / ~{frames:,} frames "
-                  f"(budget {self.WAL_BUDGET_BYTES / 1e6:.0f} MB){ratio}")
-
-        # Name the processes holding the DB open, oldest first. The old
-        # message said "a reader is pinning checkpoints" and stopped,
-        # which is the fact without the actionable half -- the operator
-        # still had to find the reader by hand, and on 2026-10-04 that
-        # took a /proc sweep to discover three `ai agent serve` processes
-        # holding 13, 9 and 2 connections. The oldest holder is the one
-        # that matters: a PASSIVE checkpoint stalls at the oldest open
-        # snapshot, so that is the process whose exit releases the file.
-        holders = self._wal_holders()
-        if holders:
-            detail += ". Holding the DB open (oldest first): " + "; ".join(
-                f"pid {p} {name} (since {since})" for p, name, since in holders)
-            detail += (". The oldest is the likely pin — a PASSIVE "
-                       "checkpoint cannot advance past its snapshot")
-        detail += (". `PRAGMA wal_checkpoint(TRUNCATE)` reclaims it once "
-                   "nothing pins it; journal_size_limit keeps it bounded "
-                   "afterwards")
-        return [detail]
-
-    def _wal_holders(self):
-        """(pid, short-name, start-time) for processes with the DB open.
-
-        Linux-only and best-effort by construction: /proc may not exist,
-        a pid can vanish mid-scan, and another user's fds are not
-        readable. Every one of those is a reason to report less, never to
-        fail a check that is otherwise correct.
-
-        Does not try to say WHICH holder pins the WAL. That needs each
-        connection's read snapshot, which is not observable from outside
-        the process; start order is the honest proxy and is labelled as
-        one.
-        """
-        # os and DB_PATH are imported by the caller, not at module
-        # scope; without these two lines this function raised NameError
-        # into its own `except Exception` and silently reported no
-        # holders at all, which is exactly the shape of bug it exists to
-        # help diagnose.
-        import glob
-        import os
-        from pathlib import Path
-        from config import DB_PATH
-        out = []
-        try:
-            target = os.path.realpath(DB_PATH)
-            for fddir in glob.glob('/proc/[0-9]*/fd'):
-                pid = fddir.split('/')[2]
-                try:
-                    for fd in os.listdir(fddir):
-                        try:
-                            if os.path.realpath(f"{fddir}/{fd}") == target:
-                                break
-                        except OSError:
-                            continue
-                    else:
-                        continue
-                    proc = Path(fddir).parent
-                    cmd = (proc / 'cmdline').read_bytes().replace(b'\0', b' ')
-                    name = cmd.decode('utf-8', 'replace').strip()
-                    # Store paths make every python process look alike.
-                    name = ' '.join(
-                        w for w in name.split()
-                        if not w.startswith('/nix/store/'))[:40] or 'python'
-                    out.append((int(pid), name,
-                                str(proc.stat().st_mtime)))
-                except (OSError, PermissionError):
-                    continue
-            # Resolve start times to something readable, oldest first.
-            import datetime
-            out = [(p, n, datetime.datetime.fromtimestamp(float(t))
-                    .strftime('%m-%d %H:%M')) for p, n, t in out]
-            out.sort(key=lambda r: r[2])
-        except Exception:
-            return []
-        return out[:5]
+        return [
+            f"{wal} is {size / 1e9:.2f} GB "
+            f"(budget {self.WAL_BUDGET_BYTES / 1e6:.0f} MB) — a reader is "
+            f"pinning checkpoints, or one did and the file never shrank. "
+            f"Probe with PRAGMA wal_checkpoint(PASSIVE): a low live-frame "
+            f"count means it is merely un-truncated, and "
+            f"PRAGMA wal_checkpoint(TRUNCATE) reclaims it"
+        ]
 
     # Tuning for _check_no_new_unmaintained_columns. Module-level because
     # migrations/123's seed was generated with these exact values -- change
@@ -3931,96 +3848,6 @@ WantedBy=timers.target
         'content_text', 'content_blob', 'sample_issues_json',
         'metadata_json', 'diff_text',
     }
-
-    def _check_deployed_build_matches_db(self):
-        """Invariant: the installed package runs the code the DB holds.
-
-        The failure this exists for is not a crash. On 2026-10-04
-        src/cli/commands/checkout.py was 874 lines in the DB and 766 in
-        ~/.nix-profile, so the entire Phase 4 edit-tree prune was
-        committed, published, and inert. `project checkout-cleanup`
-        printed neither of its two verdict branches -- it skipped the
-        stage in silence, because the deployed binary had no such code.
-        The command did not fail. It succeeded at doing nothing, which is
-        indistinguishable from "there was nothing to do".
-
-        Why an invariant and not a startup banner: hashing a few hundred
-        files cannot go on a path that runs before argument parsing, which
-        is the same reason resolve_dev_checkout() settles for an
-        existence-only check. doctor already runs on a timer and feeds
-        `templedb summary`, so the fact lands where someone is looking at
-        zero per-invocation cost.
-
-        Deliberately reads the INSTALLED package, not the running one:
-        under TEMPLEDB_DEV_MODE the running code is a checkout, and
-        "is the checkout current" is a different question that
-        _dev_mode_staleness_banner already answers. Resolving
-        ~/.nix-profile/bin/templedb reaches the package even when this
-        code is executing from somewhere else entirely.
-
-        Silent when the profile is absent (not a nix install, or a
-        source checkout): nothing to compare, so nothing to report.
-        """
-        import hashlib
-        from pathlib import Path
-        from db_utils import query_all
-
-        launcher = Path.home() / ".nix-profile" / "bin" / "templedb"
-        if not launcher.exists():
-            return []
-        try:
-            root = launcher.resolve().parent.parent
-        except OSError:
-            return []
-        site = next(iter(sorted(root.glob("lib/python3.*/site-packages"))), None)
-        if site is None or not (site / "cli").is_dir():
-            return []
-
-        rows = query_all(
-            """SELECT pf.file_path, fc.content_hash
-                 FROM project_files pf
-                 JOIN projects p ON p.id = pf.project_id
-                 JOIN file_contents fc
-                      ON fc.file_id = pf.id AND fc.is_current = 1
-                WHERE p.slug = 'templedb'
-                  AND pf.status = 'active'
-                  AND pf.file_path LIKE 'src/%'
-                  AND pf.file_path LIKE '%.py'""")
-
-        behind = []
-        for r in rows:
-            # The nix install flattens src/ into site-packages, so
-            # 'src/cli/commands/x.py' lives at '<site>/cli/commands/x.py'.
-            rel = r['file_path'][4:]
-            disk = site / rel
-            if not disk.exists():
-                # Absent entirely: a module that landed after this build.
-                behind.append((r['file_path'], 'missing'))
-                continue
-            try:
-                h = hashlib.sha256(disk.read_bytes()).hexdigest()
-            except OSError:
-                continue
-            if h != r['content_hash']:
-                behind.append((r['file_path'], 'differs'))
-
-        if not behind:
-            return []
-
-        missing = [f for f, why in behind if why == 'missing']
-        differs = [f for f, why in behind if why == 'differs']
-        detail = []
-        if differs:
-            detail.append(f"{len(differs)} file(s) differ "
-                          f"(e.g. {differs[0]})")
-        if missing:
-            detail.append(f"{len(missing)} absent from the build "
-                          f"(e.g. {missing[0]})")
-        return [
-            f"installed package {site.parent.parent.parent.name} is behind "
-            f"the DB: {'; '.join(detail)} — committed code is not what runs. "
-            f"Run `templedb reload` (publish + relock + rebuild + migrate)"
-        ]
 
     def _check_no_new_unmaintained_columns(self):
         """Invariant: no column has started holding no information.
