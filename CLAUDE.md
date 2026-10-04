@@ -369,6 +369,35 @@ and mirrors the content to the checkout dir, so a subsequent
 content. If you observe this class of bug returning, verify those three
 commits are in your build.
 
+**`file set` replaces the WHOLE file — use `--if-match` on anything you
+did not just read.** A copy fetched earlier is effectively a lock on the
+entire file: anything committed between your read and your write is
+reverted silently, with no conflict, and `--verify` does not catch it
+(it only confirms that what you wrote is what landed, not that you meant
+to drop the rest). This happened twice on 2026-10-04 to
+`src/cli/commands/entity.py`, a 5,239-line file four fixes were landing
+in; the first instance went unnoticed for three commits and the second
+was caught only because a brand-new doctor check answered "Unknown
+check" right after the deploy that added it.
+
+```bash
+# read, capture the base hash, patch, write only if nothing moved
+templedb source snapshot <slug> <path> --meta     # prints content_hash
+templedb file cat <slug> <path> > /tmp/f
+# ...patch /tmp/f...
+templedb file set <slug> <path> --if-match <hash12> --verify < /tmp/f
+```
+
+`--if-match` takes a full sha256 or any prefix of >= 8 hex chars, so the
+truncated hashes printed by `file where`, `source snapshot --meta` and
+doctor all work. It exits 2 on mismatch and names both hashes. On a path
+with no current content it says so explicitly rather than silently
+treating the write as a create.
+
+For multi-file work prefer an edit workspace plus
+`templedb commit <slug> <workspace>`, which diffs against the DB instead
+of overwriting blind.
+
 **Belt-and-suspenders check** (run after any critical write).
 
 Read the file back and compare it to what you meant to write. This beats

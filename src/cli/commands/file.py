@@ -224,6 +224,53 @@ class FileCommands(Command):
             new_hash = _hashlib.sha256(
                 content.encode('utf-8') if isinstance(content, str) else content
             ).hexdigest()
+
+            # Optimistic lock. `file set` replaces the WHOLE file, so a
+            # copy fetched earlier is effectively a lock on all of it:
+            # anything committed between the read and the write is
+            # reverted silently, with no conflict and a clean --verify
+            # (which only checks that what you wrote is what landed, not
+            # that you meant to drop the rest). That happened twice on
+            # 2026-10-04 to src/cli/commands/entity.py, a 5,239-line file
+            # four separate fixes were landing in; the first instance went
+            # unnoticed for three commits.
+            #
+            # Prefix match because every place that shows a hash
+            # truncates it -- `file where`, `source snapshot --meta`,
+            # doctor output -- so requiring 64 characters would mean
+            # nobody uses the flag.
+            expected = getattr(args, 'if_match', None)
+            if expected:
+                exp = expected.strip().lower()
+                if len(exp) < 8 or any(c not in '0123456789abcdef' for c in exp):
+                    logger.error(
+                        f"--if-match wants at least 8 hex chars of a sha256, "
+                        f"got {expected!r}"
+                    )
+                    return 2
+                if not prev_hash:
+                    logger.error(
+                        f"--if-match {exp[:12]} given but {args.file_path} has "
+                        f"no current content in {args.project} — it is a new "
+                        f"file, so there is no base to match. Drop --if-match "
+                        f"if creating it is what you meant."
+                    )
+                    return 2
+                if not prev_hash.startswith(exp):
+                    logger.error(
+                        f"--if-match mismatch on {args.project}/"
+                        f"{args.file_path}: expected {exp[:12]}, DB currently "
+                        f"holds {prev_hash[:12]}. Something changed the file "
+                        f"since you read it, and writing now would revert it."
+                    )
+                    logger.error(
+                        f"  Re-read and re-apply:  templedb file cat "
+                        f"{args.project} {args.file_path}"
+                    )
+                    logger.error(
+                        f"  Or overwrite anyway:   drop --if-match"
+                    )
+                    return 2
             try:
                 _session_id = self.ctx.get_vcs_service().get_current_session()['id']
             except Exception:
@@ -254,6 +301,7 @@ class FileCommands(Command):
                     project_id=project['id'],
                     file_path=args.file_path,
                     content=content,
+                    base_revision=prev_hash,
                 )
 
             # Link the just-staged working-state row to the intent
@@ -493,7 +541,9 @@ class FileCommands(Command):
             return 1
 
     def _record_and_apply_intent(self, project_id: int, file_path: str,
-                                 content) -> Optional[int]:
+                                 content,
+                                 base_revision: Optional[str] = None
+                                 ) -> Optional[int]:
         """Create an EditIntent row for this write and mark it applied.
 
         Bookkeeping only — the actual file_contents write still happens
@@ -531,9 +581,18 @@ class FileCommands(Command):
                         base_revision, new_content_hash,
                         patch_summary, author, description,
                         status, applied_at)
-                     VALUES (?, ?, ?, 'current', ?, ?, ?,
+                     VALUES (?, ?, ?, ?, ?, ?, ?,
                              'file set', 'applied', datetime('now'))""",
-                (sid, project_id, file_path, new_hash,
+                # base_revision was the literal string 'current' on all
+                # 886 rows -- migration 123 catalogues it as a `constant`
+                # in unmaintained_columns_baseline. The field designed to
+                # record what an edit was made against never recorded
+                # anything, which is why a stale-base overwrite left no
+                # trace to audit. 'new-file' rather than NULL when there
+                # is no prior content, so the two cases stay
+                # distinguishable from a column that is merely unfilled.
+                (sid, project_id, file_path,
+                 base_revision or 'new-file', new_hash,
                  f"{len(content_bytes)} bytes", author),
             )
             return intent_id
@@ -1008,6 +1067,15 @@ def register(cli):
     set_parser.add_argument('file_path', help='Path to file within project')
     set_parser.add_argument('-c', '--content', help='Content to write (otherwise reads from stdin)')
     set_parser.add_argument('-s', '--stage', action='store_true', help='Stage file after writing')
+    set_parser.add_argument('--if-match', metavar='HASH', dest='if_match',
+                            help='Refuse the write unless the file currently '
+                                 'hashes to HASH (full sha256 or a prefix of '
+                                 '>=8 hex chars). Exits 2 on mismatch. Use it '
+                                 'whenever the content being written was '
+                                 'derived from a copy read earlier: file set '
+                                 'replaces the whole file, so a stale base '
+                                 'silently reverts anything committed in '
+                                 'between.')
     set_parser.add_argument('--verify', action='store_true',
                             help='After write, confirm file_contents.is_current holds the written hash. '
                                  'Exits 2 on mismatch. Guards against silent revert (see docs/known-bugs).')
