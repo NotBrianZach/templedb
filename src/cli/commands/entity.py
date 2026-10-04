@@ -4441,7 +4441,7 @@ WantedBy=timers.target
                         f"(delta {delta}) — {delta} entit(ies) outlived "
                         f"their source row. `ingest all` will NOT fix this; "
                         f"it never deletes. Run "
-                        f"`templedb entity prune-orphans --kind {kind} --dry-run`"
+                        f"`templedb entity prune-orphans --kind {kind}` to preview, then `--apply`"
                     )
                 else:
                     issues.append(
