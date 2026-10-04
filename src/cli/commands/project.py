@@ -426,6 +426,77 @@ class ProjectCommands(Command):
             print(f"  {k} = {v}")
         return 0
 
+    def set_path(self, args) -> int:
+        """Point a project at where it actually lives.
+
+        `repo_url` carries two different kinds of value: a filesystem
+        origin, or the `templedb://<slug>` sentinel that `project create`
+        writes for a project with no filesystem origin at all. Nothing
+        could set either after creation, so a project whose directory
+        moved or was a tmpdir kept a dead pointer, and the only remedies
+        were raw SQL or `project checkout --force`, which overwrites the
+        target. Hence this command.
+        """
+        from db_utils import get_connection
+
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id, slug, repo_url FROM projects WHERE slug = ?",
+            (args.slug,)
+        ).fetchone()
+        if not row:
+            print(f"Project '{args.slug}' not found", file=sys.stderr)
+            return 1
+
+        sentinel = f"templedb://{args.slug}"
+        registered = None
+
+        if args.path in ('db', 'db-native') or args.path == sentinel:
+            # Match `project create`'s spelling exactly rather than
+            # inventing a second one readers would also have to learn.
+            new_url = sentinel
+        else:
+            path = Path(args.path).expanduser()
+            if not path.is_absolute():
+                path = (Path.cwd() / path).resolve()
+            if not path.exists() and not args.force:
+                print(f"Path does not exist: {path}", file=sys.stderr)
+                print("  Pass 'db' for a project with no filesystem "
+                      "origin, or --force to set it anyway.",
+                      file=sys.stderr)
+                return 1
+            new_url = str(path)
+
+            # A tree under checkouts/ or edit-workspaces/ is one templedb
+            # resolves against, so record it in `checkouts` too. An
+            # unregistered canonical tree is invisible to resolve() even
+            # while it sits on disk fully current, which is its own
+            # confusing failure: commands report no checkout and then
+            # refuse to overwrite the directory that is right there.
+            if path.exists() and not args.no_register:
+                from repositories.checkout_repository import CheckoutRepository
+                kind = CheckoutRepository.classify_path(str(path))
+                if kind == 'scratch':
+                    print(f"Note: {path} is not under checkouts/ or "
+                          "edit-workspaces/, so it was not registered as "
+                          "a resolvable tree.", file=sys.stderr)
+                else:
+                    CheckoutRepository().create_or_update(
+                        row['id'], str(path),
+                        branch_name=args.branch, kind=kind)
+                    registered = kind
+
+        conn.execute("UPDATE projects SET repo_url = ? WHERE slug = ?",
+                     (new_url, args.slug))
+        conn.commit()
+
+        print(f"Updated '{args.slug}':")
+        print(f"  repo_url was: {row['repo_url'] or '(empty)'}")
+        print(f"  repo_url now: {new_url}")
+        if registered:
+            print(f"  registered in checkouts as kind={registered}")
+        return 0
+
     def generate_envrc(self, args) -> int:
         """Generate .envrc file for a project"""
         project = self.project_repo.get_by_slug(args.slug)
@@ -535,6 +606,26 @@ def register(cli):
                                 dest='flake_status',
                                 help='Set flake_check_status')
     cli.commands['project.set-category'] = cmd.set_category
+
+    # project set-path
+    set_path_parser = subparsers.add_parser(
+        'set-path',
+        help="Set where a project lives (repo_url), and register the tree")
+    set_path_parser.add_argument('slug', help='Project slug')
+    set_path_parser.add_argument(
+        'path',
+        help="Directory the project lives in, or 'db' for a project with "
+             "no filesystem origin (stores templedb://<slug>)")
+    set_path_parser.add_argument(
+        '--branch', default='main',
+        help='Branch to record for the checkout (default: main)')
+    set_path_parser.add_argument(
+        '--no-register', action='store_true', dest='no_register',
+        help='Update repo_url only; do not register the tree in checkouts')
+    set_path_parser.add_argument(
+        '--force', '-f', action='store_true',
+        help='Set the path even though it does not exist')
+    cli.commands['project.set-path'] = cmd.set_path
 
     # project rm
     rm_parser = subparsers.add_parser('rm', help='Remove project from database')
