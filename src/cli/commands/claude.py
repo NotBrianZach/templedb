@@ -111,6 +111,7 @@ SYSTEM_REDIRECTS = {
 
 def _is_templedb_project(cwd: str) -> bool:
     """Check if the current directory is a TempleDB-managed project."""
+    conn = None
     try:
         conn = get_simple_connection()
         cursor = conn.cursor()
@@ -119,14 +120,17 @@ def _is_templedb_project(cwd: str) -> bool:
             WHERE repo_url = ? OR repo_url LIKE ?
         """, (cwd, f"%{os.path.basename(cwd)}%"))
         result = cursor.fetchone()
-        conn.close()
         return result is not None
     except Exception:
         return False
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _detect_project_slug(cwd: str) -> str:
     """Try to detect the project slug from the working directory."""
+    conn = None
     try:
         conn = get_simple_connection()
         cursor = conn.cursor()
@@ -134,10 +138,12 @@ def _detect_project_slug(cwd: str) -> str:
         cursor.execute("SELECT slug FROM projects WHERE slug = ? OR repo_url LIKE ?",
                        (basename, f"%{basename}%"))
         result = cursor.fetchone()
-        conn.close()
         return result[0] if result else None
     except Exception:
         return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 class ClaudeCommands(Command):
@@ -366,6 +372,7 @@ class ClaudeCommands(Command):
             os.path.join(home, ".config", "templedb", "checkouts"),
         ]
 
+        conn = None
         try:
             conn = get_simple_connection()
             cursor = conn.cursor()
@@ -374,9 +381,11 @@ class ClaudeCommands(Command):
                 repo_url = row[1]
                 if repo_url and os.path.isabs(repo_url):
                     blocked_prefixes.append(repo_url)
-            conn.close()
         except Exception:
             pass
+        finally:
+            if conn is not None:
+                conn.close()
 
         for prefix in blocked_prefixes:
             if file_path.startswith(prefix):
@@ -391,6 +400,7 @@ class ClaudeCommands(Command):
                             rel_path = parts[1] if len(parts) > 1 else rest
 
                         if not slug:
+                            conn = None
                             try:
                                 conn = get_simple_connection()
                                 cursor = conn.cursor()
@@ -399,12 +409,14 @@ class ClaudeCommands(Command):
                                     (bp,)
                                 )
                                 r = cursor.fetchone()
-                                conn.close()
                                 if r:
                                     slug = r[0]
                                     rel_path = file_path[len(bp):].lstrip("/")
                             except Exception:
                                 pass
+                            finally:
+                                if conn is not None:
+                                    conn.close()
                         break
 
                 if slug:
@@ -487,6 +499,7 @@ class ClaudeCommands(Command):
         print(f"  Hook command: {hook_cmd}")
         print(f"  Git commands will be blocked in TempleDB-managed projects")
 
+        conn = None
         try:
             conn = get_simple_connection()
             conn.execute("""
@@ -498,9 +511,11 @@ class ClaudeCommands(Command):
                 VALUES ('claude.hooks.command', ?, datetime('now'))
             """, (hook_cmd,))
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.debug(f"Could not update system_config: {e}")
+        finally:
+            if conn is not None:
+                conn.close()
 
         return 0
 
@@ -528,6 +543,7 @@ class ClaudeCommands(Command):
             print(f"  Settings: not configured")
             print(f"  Run: templedb ai claude setup")
 
+        conn = None
         try:
             conn = get_simple_connection()
             cursor = conn.cursor()
@@ -535,9 +551,11 @@ class ClaudeCommands(Command):
             row = cursor.fetchone()
             enabled = row[0] if row else "false"
             print(f"  DB config: claude.hooks.enabled = {enabled}")
-            conn.close()
         except Exception:
             print(f"  DB config: not available")
+        finally:
+            if conn is not None:
+                conn.close()
 
         return 0
 
