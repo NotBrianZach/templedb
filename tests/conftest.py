@@ -204,8 +204,49 @@ def temp_workspace() -> Generator[Path, None, None]:
     shutil.rmtree(workspace, ignore_errors=True)
 
 
+@pytest.fixture(scope="session")
+def bootstrap_schema() -> str:
+    """Apply the full schema to the bootstrap DB that db_utils is bound to.
+
+    Distinct from `db_path`, and the distinction is the whole point.
+    `db_path` migrates its OWN throwaway file, but `db_utils` captured
+    DB_PATH at import time from the TEMPLEDB_PATH set at the top of this
+    module — so anything going through db_utils's execute/query_one talks
+    to the bootstrap DB instead, and that one starts schema-less by design
+    so individual groups can build only the tables they need.
+
+    `test_project` goes through db_utils. It therefore needs real tables,
+    and without them every consumer died on "no such table: projects".
+    That was invisible for a while because the seven modules involved were
+    also failing at collection (see pytest.ini's pythonpath note), so the
+    fixture rot sat behind an import error.
+
+    Idempotent and additive: schema.sql is IF NOT EXISTS throughout, so
+    groups that build their own tables into the bootstrap DB keep whatever
+    they had.
+    """
+    db = os.environ["TEMPLEDB_PATH"]
+    root = Path(__file__).parent.parent
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript((root / "migrations" / "schema.sql").read_text())
+        # file_types must be non-empty: project_files carries an FK to it.
+        if not conn.execute("SELECT 1 FROM file_types LIMIT 1").fetchone():
+            try:
+                conn.executescript(
+                    (root / "migrations" / "file_tracking_schema.sql").read_text())
+            except sqlite3.OperationalError:
+                conn.execute("INSERT OR IGNORE INTO file_types "
+                             "(type_name, category) VALUES ('python', 'backend')")
+        conn.commit()
+    finally:
+        conn.close()
+    return db
+
+
 @pytest.fixture
-def test_project(temp_project_dir: Path) -> Generator[Dict[str, Any], None, None]:
+def test_project(bootstrap_schema: str,
+                 temp_project_dir: Path) -> Generator[Dict[str, Any], None, None]:
     """Create and cleanup a test project in database"""
     project_slug = f"test_{os.getpid()}"
 
@@ -237,6 +278,31 @@ def test_project(temp_project_dir: Path) -> Generator[Dict[str, Any], None, None
 # CLI Helper Functions
 # ============================================================================
 
+def _templedb_entrypoint() -> str:
+    """Resolve how to invoke the CLI.
+
+    This used to be a hardcoded `Path(__file__).parent.parent / "templedb"`
+    — a repo-root entry point that does not exist. CLAUDE.md records the
+    same trap for /home/zach/templeDB/templedb: that directory holds
+    sources only, and pointing anything at it fails (templedb-mcp.service
+    crash-looped on exactly this with status=203/EXEC). Here it surfaced as
+    FileNotFoundError across test_concurrent, test_snapshot, test_workflow
+    and test_transactions, and stayed hidden because those modules were
+    also failing at collection.
+
+    Order: TEMPLEDB_CLI override, then a repo entry point if one really
+    exists, then the installed CLI on PATH — which is how every other
+    caller invokes it, tests/test_write_path_regressions.py included.
+    """
+    override = os.environ.get("TEMPLEDB_CLI")
+    if override:
+        return override
+    local = Path(__file__).parent.parent / "templedb"
+    if local.is_file() and os.access(local, os.X_OK):
+        return str(local)
+    return "templedb"
+
+
 def run_templedb_cmd(args: list, check: bool = True) -> subprocess.CompletedProcess:
     """
     Run templedb CLI command
@@ -248,8 +314,7 @@ def run_templedb_cmd(args: list, check: bool = True) -> subprocess.CompletedProc
     Returns:
         CompletedProcess with stdout, stderr, returncode
     """
-    templedb_path = Path(__file__).parent.parent / "templedb"
-    cmd = [str(templedb_path)] + args
+    cmd = [_templedb_entrypoint()] + args
 
     result = subprocess.run(
         cmd,
