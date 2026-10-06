@@ -53,7 +53,7 @@ class PublishCommands(Command):
         # change lands in the same commit as everything else).
         pin_inputs = getattr(args, 'pin_input', None) or []
         if pin_inputs:
-            self._pin_flake_inputs(project_slug, pin_inputs)
+            self._pin_flake_inputs(project_slug, pin_inputs, failures)
 
         # Step 1: VCS commit (if there are staged changes)
 
@@ -361,7 +361,8 @@ class PublishCommands(Command):
 
         return 0
 
-    def _pin_flake_inputs(self, project_slug: str, input_names: list) -> None:
+    def _pin_flake_inputs(self, project_slug: str, input_names: list,
+                          failures: list = None) -> None:
         """Rewrite <input>.url in flake.nix to pin ?rev=<HEAD>.
 
         For each input name, look up the current git HEAD of
@@ -374,6 +375,8 @@ class PublishCommands(Command):
         from argparse import Namespace
         from cli.commands.file import FileCommands
 
+        if failures is None:
+            failures = []
         fc = FileCommands()
 
         # Read current flake.nix from DB.
@@ -416,7 +419,22 @@ class PublishCommands(Command):
             rev = r.stdout.strip()
             new_content = self._rewrite_flake_url(content, name, rev)
             if new_content == content:
-                print(f"  Pin: {name} — no {name}.url line found in flake.nix")
+                # No change has two very different causes and the old
+                # message asserted the alarming one for both. "Already
+                # at the target rev" is success; "no such line" means
+                # the pin silently did not happen and the rebuild will
+                # use whatever the stale url resolves to. Tell them
+                # apart, and only the second is a failure.
+                if re.search(rf'^\s*{re.escape(name)}\.url\s*=',
+                             content, re.MULTILINE):
+                    print(f"  Pin: {name} — already at rev={rev[:12]}")
+                else:
+                    msg = (f"pin {name}: no {name}.url line in "
+                           f"{project_slug}/flake.nix — the input was NOT "
+                           f"pinned and the rebuild will resolve it from "
+                           f"the unpinned url")
+                    print(f"  Pin: {name} — {msg}")
+                    failures.append(msg)
                 continue
             content = new_content
             print(f"  Pin: {name} → rev={rev[:12]}")

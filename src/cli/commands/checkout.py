@@ -287,6 +287,85 @@ class CheckoutCommand:
             logger.error(f"Error listing checkouts: {e}", exc_info=True)
             return 1
 
+    def lock_checkouts(self, args) -> int:
+        """Restore read-only mode on canonical checkouts.
+
+        Counterpart to the checkout_files_are_mode_locked invariant.
+        That check reports a canonical tree whose DB-tracked files are
+        writable, which is how a checkout silently diverges from the DB;
+        until now there was a detector and no way to act on it, because
+        lock_checkout() was only reachable from generate-all.
+
+        Scoped to kind='canonical'. Edit workspaces are writable by
+        design and must not be touched -- locking one would break the
+        session using it.
+        """
+
+
+        slug = getattr(args, 'project_slug', None)
+        rows = [r for r in self.checkout_repo.get_all()
+                if r.get('checkout_path')]
+        canonical = {}
+        for r in rows:
+            if slug and r['project_slug'] != slug:
+                continue
+            path = Path(r['checkout_path'])
+            # get_all() does not expose `kind`; the canonical tree is
+            # the one publish materialises, i.e. <checkouts>/<slug>.
+            if path.parent.name != 'checkouts' or path.name != r['project_slug']:
+                continue
+            if path.is_dir():
+                canonical[r['project_slug']] = path
+
+        if not canonical:
+            print("No canonical checkouts found"
+                  + (f" for {slug}" if slug else ""))
+            return 0
+
+        # DB-tracked files only -- deliberately NOT SystemService.
+        # lock_checkout(), which rglobs the whole tree. On this install
+        # that is 148,864 files under bza and 58,496 under
+        # woofs_projects, almost all node_modules; chmodding those 0444
+        # breaks the very builds the checkout exists to serve. Only a
+        # file the DB owns can diverge from the DB, so only those are
+        # worth locking, and that is exactly the set
+        # checkout_files_are_mode_locked reports.
+        from db_utils import query_all
+        tracked = query_all(
+            """SELECT p.slug AS slug, pf.file_path AS path
+                 FROM project_files pf
+                 JOIN projects p ON p.id = pf.project_id
+                WHERE pf.status = 'active'"""
+        )
+        by_slug = {}
+        for row in tracked:
+            by_slug.setdefault(row['slug'], []).append(row['path'])
+
+        total = 0
+        for name, path in sorted(canonical.items()):
+            n = 0
+            for rel in by_slug.get(name, []):
+                fp = path / rel
+                try:
+                    if fp.is_symlink() or not fp.is_file():
+                        continue
+                    mode = fp.stat().st_mode
+                    if not mode & 0o200:
+                        continue
+                    if not args.dry_run:
+                        fp.chmod(mode & ~0o222)
+                    n += 1
+                except OSError as e:
+                    logger.warning(f"  {name}/{rel}: {e}")
+            verb = "would lock" if args.dry_run else "locked"
+            print(f"  {name}: {verb} {n} DB-tracked file(s)")
+            total += n
+
+        verb = "would lock" if args.dry_run else "locked"
+        print(f"\n{verb} {total} file(s) across "
+              f"{len(canonical)} canonical checkout(s)")
+        return 0
+
     def cleanup_checkouts(self, args) -> int:
         """Remove stale checkouts (where directory no longer exists)
 

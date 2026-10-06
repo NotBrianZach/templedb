@@ -1777,7 +1777,15 @@ WantedBy=timers.target
         # dead-imports purposes that's the desired semantics.
         for (doc, file_id, project_relative, module_sym_id,
              file_defs, local_sym_to_id) in doc_ctx:
-            emitted_imports_this_file = set()  # dedupe within-doc
+            # target_file_id -> whether ANY reference to it survives type
+            # erasure. Collected across the whole document before
+            # emitting, because the old code emitted on the first
+            # cross-file reference and then deduped: if that first
+            # reference happened to be a type and a later one was a
+            # constructor call, the file would have been mislabelled
+            # type-only for good. Order of occurrences is not something
+            # to depend on.
+            import_targets = {}
             for occ in doc.get('occurrences', []):
                 roles = occ.get('symbol_roles', 0)
                 if roles & 1:
@@ -1791,18 +1799,16 @@ WantedBy=timers.target
                 # if we resolved the target to a File in this index.
                 if not target_scip.startswith('local '):
                     target_file_id = scip_sym_to_file_id.get(target_scip)
-                    if (target_file_id
-                            and target_file_id != file_id
-                            and target_file_id not in emitted_imports_this_file):
-                        if self._upsert_relation(
-                            file_id, 'imports', target_file_id, authority
-                        ):
-                            added_r += 1
-                        touched_relations.add(
-                            (file_id, 'imports', target_file_id)
+                    if target_file_id and target_file_id != file_id:
+                        import_targets[target_file_id] = (
+                            import_targets.get(target_file_id, False)
+                            or self._scip_ref_is_runtime(target_scip)
                         )
-                        emitted_imports_this_file.add(target_file_id)
 
+            # The edge is still emitted for type-only imports -- the
+            # dead-imports doctor needs to see them or it would report a
+            # live `import type` as unused. It is annotated instead, and
+            # the cycle check skips annotated edges.
                 # Resolve target — locals are file-scoped, globals via
                 # the cross-file map.
                 if target_scip.startswith('local '):
@@ -1828,6 +1834,21 @@ WantedBy=timers.target
                 ):
                     added_r += 1
                 touched_relations.add((source_id, 'uses', target_id))
+
+            # Emitted after the occurrence loop, not inside it, so that
+            # a later runtime reference can upgrade an edge first seen
+            # as type-only. Must stay outside: `uses` above is per
+            # occurrence and depends on `occ`.
+            for target_file_id, is_runtime in import_targets.items():
+                attrs = None if is_runtime else {'type_only': True}
+                if self._upsert_relation(
+                    file_id, 'imports', target_file_id, authority,
+                    attributes=attrs,
+                ):
+                    added_r += 1
+                touched_relations.add(
+                    (file_id, 'imports', target_file_id)
+                )
 
         # --- 5. Prune stale scip-authority edges (defines + uses).
         # Two-pass, mirrors python adapter's discipline:
@@ -3722,6 +3743,12 @@ WantedBy=timers.target
         Only inspects Files with at least one outbound imports
         edge; isolated files trivially can't participate."""
         from db_utils import query_all
+        # Type-only edges are excluded: TypeScript erases `import type`
+        # and any reference that only reaches into a type, so such an
+        # edge imposes no load order and cannot form a runtime cycle.
+        # The adapter annotates them (attributes_json.type_only) rather
+        # than omitting them, because dead-imports still needs to see a
+        # live `import type` to avoid calling it unused.
         edges = query_all(
             """SELECT e1.external_ref AS src,
                       e2.external_ref AS dst
@@ -3730,7 +3757,10 @@ WantedBy=timers.target
                  JOIN entities e2 ON e2.id = r.to_entity_id
                 WHERE r.kind = 'imports'
                   AND e1.kind = 'File'
-                  AND e2.kind = 'File'"""
+                  AND e2.kind = 'File'
+                  AND COALESCE(
+                        json_extract(r.attributes_json, '$.type_only'),
+                        0) != 1"""
         )
         adj = {}
         for row in edges:
@@ -4178,7 +4208,7 @@ WantedBy=timers.target
                     f"read-only checkout are owner-writable — {shown}"
                     f"{more}. Nothing prevents a write that would make "
                     f"checkout_matches_db diverge; re-lock with "
-                    f"`templedb file checkout {slug}`."
+                    f"`templedb admin lock-checkouts {slug}`."
                 )
         return issues
 
@@ -5355,9 +5385,17 @@ WantedBy=timers.target
         return True
 
     def _upsert_relation(self, from_id: int, kind: str, to_id: int,
-                         authority: str) -> bool:
-        """Insert-or-refresh a relation. Returns True on new insert."""
+                         authority: str, attributes=None) -> bool:
+        """Insert-or-refresh a relation. Returns True on new insert.
+
+        attributes, when given, is written to attributes_json on insert
+        AND on refresh -- an edge whose character changed (a type-only
+        import that gained a runtime reference) must not keep the stale
+        annotation, or the first ingest would pin it forever.
+        """
+        import json
         from db_utils import execute, query_one
+        attrs_json = json.dumps(attributes) if attributes else None
         existing = query_one(
             """SELECT id FROM relations
                 WHERE from_entity_id=? AND kind=? AND to_entity_id=?""",
@@ -5365,18 +5403,50 @@ WantedBy=timers.target
         )
         if existing:
             execute(
-                """UPDATE relations SET observed_at = datetime('now')
+                """UPDATE relations
+                      SET observed_at = datetime('now'),
+                          attributes_json = ?
                     WHERE id = ?""",
-                (existing['id'],),
+                (attrs_json, existing['id']),
             )
             return False
         execute(
             """INSERT INTO relations
-                   (from_entity_id, kind, to_entity_id, source_authority)
-                 VALUES (?, ?, ?, ?)""",
-            (from_id, kind, to_id, authority),
+                   (from_entity_id, kind, to_entity_id, source_authority,
+                    attributes_json)
+                 VALUES (?, ?, ?, ?, ?)""",
+            (from_id, kind, to_id, authority, attrs_json),
         )
         return True
+
+    @staticmethod
+    def _scip_ref_is_runtime(scip_sym: str) -> bool:
+        """Does this SCIP reference survive TypeScript's type erasure?
+
+        A file that only reaches into another file's *types* has no
+        load-order dependency on it -- `import type` is erased, and so
+        is a reference to an interface or to a member of one. Treating
+        those as imports is what made no_import_cycles report
+        nekoProvider.ts <-> provider.ts, where nekoProvider imports only
+        `import type { BrowserProvider, BrowserSession, CreateSessionOpts }`
+        while provider.ts genuinely constructs `new NekoProvider(...)`.
+        The code is correct and idiomatic; the edge was not.
+
+        Read from SCIP's descriptor grammar, since
+        scip-typescript@0.4.0 leaves symbol_roles=0 on every reference
+        and cannot be asked directly:
+          `foo.ts`/Bar#              a type            -> erased
+          `foo.ts`/Bar#baz.          member of a type  -> erased
+          `foo.ts`/Bar#`<constructor>`().  invocation  -> runtime
+          `foo.ts`/qux.              top-level term    -> runtime
+          `foo.ts`/                  the module itself -> not a value
+        """
+        descriptor = (scip_sym or '').rsplit('/', 1)[-1]
+        if not descriptor:
+            return False
+        if '(' in descriptor:
+            return True
+        return '#' not in descriptor
 
     def _entity_id(self, kind: str, external_ref: str) -> Optional[int]:
         from db_utils import query_one

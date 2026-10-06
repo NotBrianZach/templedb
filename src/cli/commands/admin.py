@@ -44,6 +44,24 @@ def register(cli):
                       help='List what would be removed and exit')
     cli.commands['admin.checkout-gc'] = checkout_cmd.cleanup_checkouts
 
+    # lock_checkout() existed as a service method called after
+    # generate-all, with no way to invoke it. So when a canonical tree
+    # ended up writable there was no supported way to put it back, and
+    # the checkout_files_are_mode_locked invariant could report the
+    # condition while naming no real remedy. Measured 2026-10-06: 8 of
+    # 11 canonical checkouts had every DB-tracked file at mode 644.
+    lock_p = subparsers.add_parser(
+        'lock-checkouts',
+        help='Restore read-only mode on canonical checkouts. Edits '
+             'belong in `templedb edit <slug>`; a writable canonical '
+             'tree is how DB-vs-checkout divergence starts.')
+    lock_p.add_argument('project_slug', nargs='?',
+                        help='Limit to one project (default: every '
+                             'canonical checkout)')
+    lock_p.add_argument('--dry-run', action='store_true',
+                        help='Report what would be locked and exit')
+    cli.commands['admin.lock-checkouts'] = checkout_cmd.lock_checkouts
+
     # --- admin db ---
     db_cmd = DBCommands()
     db_parser = subparsers.add_parser('db', help='Database management (migrations, integrity)')

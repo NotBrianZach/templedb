@@ -307,6 +307,31 @@ class SystemService:
             # 771 tracked files. Two 203/EXEC outages came from that.
             self._apply_git_file_modes(checkout_dir, files)
 
+            # Re-lock what _ensure_writable just unlocked. Without this,
+            # materialize silently retires the read-only guard: it adds
+            # u+w to every file it writes and nothing ever puts it back,
+            # so one publish leaves the whole checkout writable forever.
+            # lock_checkout() is reachable from exactly one caller
+            # (nixos generate-all), which is why 8 of 11 canonical
+            # checkouts measured 100% writable on 2026-10-06 while the
+            # three never materialized since creation stayed locked.
+            #
+            # Clears the write bits only, rather than chmod 0444: the
+            # exec bit was just restored from `git ls-files -s` directly
+            # above, and git owns it. Ordering matters -- re-locking
+            # before _apply_git_file_modes would make its chmod fail.
+            for f in files:
+                try:
+                    fpath = checkout_dir / f["file_path"]
+                    mode = fpath.stat().st_mode
+                    if mode & 0o222:
+                        fpath.chmod(mode & ~0o222)
+                except OSError:
+                    # Same contract as _ensure_writable: best effort. A
+                    # file we cannot chmod is not worth failing a
+                    # materialize over.
+                    pass
+
             # Delete files that exist on disk but are no longer in the DB
             # active set — closes the drift class where materialize copied
             # additively and never cleaned up (task #13). Sample impact
