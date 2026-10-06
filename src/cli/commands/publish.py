@@ -40,6 +40,15 @@ class PublishCommands(Command):
 
         print(f"Publishing {project_slug}...")
 
+        # Non-fatal step failures accumulate here and set the exit code
+        # at the end. Each step below is individually survivable -- a
+        # failed commit still leaves correct content to materialize, a
+        # failed push to one mirror shouldn't abort the others -- but
+        # "survivable" is not "successful", and `reload` chains four
+        # commands checking rc != 0 between each. Returning 0 through a
+        # failure makes that guard unreachable.
+        failures = []
+
         # Pre-step: pin flake inputs (before VCS commit, so the pin
         # change lands in the same commit as everything else).
         pin_inputs = getattr(args, 'pin_input', None) or []
@@ -82,10 +91,25 @@ class PublishCommands(Command):
                     if rc == 0:
                         print(f"  Committed: {message}")
                     else:
+                        # Materialize still runs: it reads the DB, which
+                        # holds the right content whether or not a
+                        # vcs_commits row was written. What must NOT
+                        # happen is reporting success -- a failed commit
+                        # means the change ships to the mirrors with no
+                        # entry in templedb's own VCS history, and the
+                        # message is lost. Observed 2026-10-06: six files
+                        # published to a public mirror with no commit row,
+                        # exit 0, and `reload` happily rebuilding on top.
+                        failures.append(
+                            f"vcs commit failed (exit {rc}); content was "
+                            f"materialized but no vcs_commits row exists "
+                            f"and the message was dropped"
+                        )
                         print(f"  Commit failed (exit {rc}); continuing with materialize")
                 else:
                     print(f"  No staged changes to commit")
         except Exception as e:
+            failures.append(f"vcs commit raised: {e}")
             print(f"  VCS commit skipped: {e}")
 
         # Step 1.5: Reconcile session HEADs into shared branch HEAD
@@ -176,6 +200,16 @@ class PublishCommands(Command):
             print(f"\n  No mirrors configured.")
             print(f"  Add one: templedb publish mirror-add {project_slug} github <url>")
             print(f"  The git repo is at: {checkout}")
+            # Still honour accumulated failures: having no mirror to
+            # push to does not make a failed commit a success.
+            if failures:
+                print(
+                    f"\n✗ publish completed with {len(failures)} failure(s):",
+                    file=sys.stderr,
+                )
+                for f in failures:
+                    print(f"    - {f}", file=sys.stderr)
+                return 1
             return 0
 
         pushed = 0
@@ -208,10 +242,23 @@ class PublishCommands(Command):
                 print(f"    Pushed to {name}/{branch_name}")
                 pushed += 1
             else:
+                failures.append(
+                    f"push to {name} ({url}) failed: "
+                    f"{result.stderr.strip()[:300]}"
+                )
                 print(f"    Push failed: {result.stderr.strip()}")
 
         if pushed:
             print(f"\n  Published to {pushed} mirror(s)")
+
+        if failures:
+            print(
+                f"\n✗ publish completed with {len(failures)} failure(s):",
+                file=sys.stderr,
+            )
+            for f in failures:
+                print(f"    - {f}", file=sys.stderr)
+            return 1
         return 0
 
     def mirror_add(self, args) -> int:
