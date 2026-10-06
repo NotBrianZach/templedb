@@ -40,6 +40,11 @@
           # consecutive hourly `ingest git` runs failed that way over ten
           # days. Don't remove this without also removing the sync_* shadow
           # tables.
+          # SCIP indexer for the `ingest scip` adapter. See
+          # nix/scip-typescript.nix for why this is an npx wrapper
+          # rather than buildNpmPackage (upstream ships yarn only).
+          scip-typescript = pkgs.callPackage ./nix/scip-typescript.nix { };
+
           crsqlite = pkgs.stdenv.mkDerivation {
             pname = "crsqlite";
             version = "0.16.3";
@@ -126,10 +131,24 @@
             # sys.path preference when TEMPLEDB_DEV_MODE=1. Default behavior
             # (env var unset) is equivalent to `python -m cli`.
             # Design: reports/2026-08-16-nix-profile-staleness-design.html
+            # scip + scip-typescript go on the wrapper's PATH, not the
+            # user's: the SCIP ingest adapter shells out to both, and
+            # scoping them here keeps them available to `templedb ingest
+            # scip` without polluting the global environment.
+            #
+            # This wiring was described as shipped in recap 7
+            # (2026-09-05) but was absent from flake.nix in every backup
+            # from 2026-09-22 onward, so `ingest scip` failed with
+            # "scip-typescript not on PATH" for a month while
+            # nix/scip-typescript.nix sat in the tree unreferenced.
+            # Same silent-package-loss shape as the crsqlite note above.
+            # Don't remove without also removing the scip adapter.
             makeWrapper ${pythonEnv}/bin/python3 "$out/bin/templedb" \
               --add-flags "$SITE/_launcher.py" \
               --set PYTHONPATH "$SITE" \
-              --prefix PATH : "${pkgs.swi-prolog}/bin"
+              --prefix PATH : "${pkgs.swi-prolog}/bin" \
+              --prefix PATH : "${scip-typescript}/bin" \
+              --prefix PATH : "${pkgs.scip}/bin"
 
             ln -s "$out/bin/templedb" "$out/bin/tdb"
 
@@ -324,6 +343,10 @@
         packages = {
           templedb = mkPackage pkgs;
           default = mkPackage pkgs;
+          # Exposed so `nix build .#scip-typescript` can re-derive the
+          # hash independently of a full templedb build.
+          scip-typescript =
+            pkgs.callPackage ./nix/scip-typescript.nix { };
         };
 
         devShells.default = pkgs.mkShell {
@@ -336,6 +359,12 @@
             git
             just
             google-cloud-sdk
+
+            # dev-mode `ingest scip` bypasses the nix wrapper, so the
+            # indexer and the SCIP reader have to be on the shell PATH
+            # too, not only the wrapper's.
+            scip
+            (callPackage ./nix/scip-typescript.nix { })
 
             # Python env with all templedb dependencies
             (python3.withPackages (ps: with ps; [

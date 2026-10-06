@@ -777,7 +777,7 @@ WantedBy=timers.target
                 Path-segment-aware match: 'os' must not match
                 'cli/commands/nixos.py'. We require the match to be
                 either the whole path OR to be preceded by '/'.
-                (Bug caught by the no_python_import_cycles doctor
+                (Bug caught by the no_import_cycles doctor
                 invariant on 2026-09-04: logger.py's 'import os' was
                 resolving to nixos.py under a naive endswith.)
 
@@ -2998,8 +2998,27 @@ WantedBy=timers.target
             EditIntent) — those should be corrected in the source
             table, not via graph forget.
           - --dry-run prints what would go without acting.
+
+        With --authority, removes every entity under one source
+        authority in a single recorded operation. That mode exists
+        because its absence was load-bearing: this command took one
+        entity at a time, so the 2026-10-02 removal of 12,428
+        scip-typescript Symbols could not realistically go through the
+        CLI, went through raw SQL instead, and left no trace -- dating
+        it later took a bisect over six nightly backups. A bulk path
+        that records is the only way the audit table is reachable for
+        the operations people actually perform.
         """
-        from db_utils import query_one, execute
+        from db_utils import query_one, query_all, execute
+
+        if getattr(args, 'authority', None):
+            return self._forget_by_authority(args)
+
+        if not getattr(args, 'entity', None):
+            logger.error(
+                "Give an entity (`<kind>/<ref>`) or --authority NAME"
+            )
+            return 1
         kind, sep, ref = args.entity.partition('/')
         if not sep:
             logger.error(
@@ -3067,6 +3086,97 @@ WantedBy=timers.target
         execute("DELETE FROM entities WHERE id=?", (eid,))
         print(f"✓ Forgot: {summary}")
         print(f"  recorded in entity_deletions; {n_arch} archive row(s) kept")
+        return 0
+
+    def _forget_by_authority(self, args) -> int:
+        """Bulk half of `entity forget`: remove one authority's entities.
+
+        Dry-run by default, like prune-orphans and for the same reason:
+        the operations this enables are large, and the first run of an
+        unfamiliar bulk delete should show rather than act.
+
+        --reason is mandatory here even though it is optional for a
+        single entity. A bulk removal is exactly the event someone will
+        later be trying to explain, and 'no reason given' across 12,000
+        rows is barely better than the silence this replaces.
+        """
+        from db_utils import query_all, query_one, execute
+
+        authority = args.authority
+        kind = getattr(args, 'kind', None)
+        reason = getattr(args, 'reason', None)
+        if not reason:
+            logger.error(
+                "--reason is required with --authority: a bulk removal "
+                "is what someone will later need explained."
+            )
+            return 1
+
+        params = [authority]
+        where = "source_authority = ?"
+        if kind:
+            where += " AND kind = ?"
+            params.append(kind)
+
+        rows = query_all(
+            f"SELECT id, kind, external_ref, label FROM entities "
+            f"WHERE {where}", tuple(params)
+        )
+        if not rows:
+            print(f"No entities with source_authority={authority!r}"
+                  + (f" and kind={kind!r}" if kind else ""))
+            return 0
+
+        AUTHORITATIVE = {'Commit', 'Deployment', 'Machine',
+                         'Report', 'EditIntent'}
+        hit = sorted({r['kind'] for r in rows} & AUTHORITATIVE)
+        if hit and not args.force:
+            logger.error(
+                f"Refusing without --force: would remove authoritative "
+                f"kind(s) {', '.join(hit)}. Correct those at the source "
+                f"table, not in the graph."
+            )
+            return 3
+
+        n_rel = query_one(
+            f"""SELECT COUNT(*) AS n FROM relations
+                 WHERE from_entity_id IN (SELECT id FROM entities WHERE {where})
+                    OR to_entity_id   IN (SELECT id FROM entities WHERE {where})""",
+            tuple(params) * 2,
+        )['n']
+
+        by_kind = {}
+        for r in rows:
+            by_kind[r['kind']] = by_kind.get(r['kind'], 0) + 1
+        summary = ', '.join(f"{k}×{v}" for k, v in sorted(by_kind.items()))
+        print(f"authority {authority!r}: {len(rows)} entit(ies) "
+              f"({summary}), {n_rel} relation(s) cascade")
+        for r in rows[:10]:
+            print(f"    {r['kind']}/{r['external_ref']}")
+        if len(rows) > 10:
+            print(f"    ... and {len(rows) - 10} more")
+
+        if not args.apply:
+            print(f"\nDry run. Re-run with --apply to remove, recording "
+                  f"{len(rows)} row(s) in entity_deletions.")
+            return 0
+
+        execute(
+            f"""INSERT INTO entity_deletions
+                  (entity_id, entity_kind, entity_ref, label,
+                   source_authority, deleted_via, reason, relations_removed)
+                SELECT e.id, e.kind, e.external_ref, e.label,
+                       e.source_authority, 'forget_authority', ?,
+                       (SELECT COUNT(*) FROM relations r
+                         WHERE r.from_entity_id = e.id
+                            OR r.to_entity_id = e.id)
+                  FROM entities e WHERE {where}""",
+            (reason, *params),
+        )
+        # relations CASCADE via FK; observations_archive is KEPT (mig 124)
+        execute(f"DELETE FROM entities WHERE {where}", tuple(params))
+        print(f"\n✓ Removed {len(rows)} entit(ies) and {n_rel} relation(s); "
+              f"recorded in entity_deletions. Archive rows kept.")
         return 0
 
     def graph_observations_gc(self, args) -> int:
@@ -3432,8 +3542,8 @@ WantedBy=timers.target
              self._check_entities_have_sync_scope),
             ('machine_local_kinds_never_fleet_scope',
              self._check_machine_local_scope_boundary),
-            ('no_python_import_cycles',
-             self._check_no_python_import_cycles),
+            ('no_import_cycles',
+             self._check_no_import_cycles),
             ('hygiene_no_untracked_dead_growth',
              self._check_hygiene_no_regression),
             ('no_expired_active_sessions',
@@ -3589,15 +3699,26 @@ WantedBy=timers.target
         return [f"Commit {r['slug']}/{r['commit_hash'][:12]} not in "
                 f"entities table (run `templedb ingest git`)" for r in rows]
 
-    def _check_no_python_import_cycles(self):
+    def _check_no_import_cycles(self):
         """Invariant: the File → imports → File graph has no cycles.
 
         DFS-based cycle detection. Each cycle reported once as
-        'A → B → C → A'. Cycles are a real code smell in Python
-        (they make module-load order fragile). Catching them
-        mechanically here is much cheaper than tribal knowledge.
+        'A → B → C → A'. Cycles are a real code smell -- they make
+        module-load order fragile -- and catching them mechanically is
+        much cheaper than tribal knowledge.
 
-        Uses the imports relations from python ingest (v1.3+).
+        Language-agnostic, and named that way since 2026-10-06. The
+        query filters on kind='imports' between File entities and
+        nothing else, so it consumes every authority that emits those
+        edges: python ingest (v1.3+) and, since the scip adapter landed
+        File→imports→File, scip-typescript as well. It found a real
+        TypeScript cycle the first time scip edges were present
+        (bza/frontend/lib/browser/nekoProvider.ts → provider.ts →
+        nekoProvider.ts), which the old name `no_python_import_cycles`
+        made look misfiled. Migration 125 carries the 109 runs of
+        history recorded under that name forward, so `doctor history`
+        stays continuous across the rename.
+
         Only inspects Files with at least one outbound imports
         edge; isolated files trivially can't participate."""
         from db_utils import query_all
@@ -4424,6 +4545,37 @@ WantedBy=timers.target
             except Exception:
                 continue
             if not row:
+                continue
+
+            # Single-event tables abstain. An append-only audit table
+            # whose rows all arrived in one write has every column
+            # constant by construction -- not because nothing maintains
+            # them, but because one event cannot demonstrate variation
+            # either way. entity_deletions did exactly this on
+            # 2026-10-06: a single bulk removal of 8,133 rows made
+            # entity_kind, source_authority, deleted_via, reason and
+            # deleted_at all read as 'constant' the moment the table
+            # was first used.
+            #
+            # Detected via a `*_at` column with one distinct value
+            # across every row, which is what "written in one event"
+            # looks like. Self-clearing: a second write at a different
+            # timestamp makes it vary and the table is judged normally
+            # from then on. This is the same call migration 123 makes
+            # for the 'sparse' shape -- precision over coverage, since
+            # an invariant that cries wolf on correct tables is how it
+            # becomes noise nobody reads.
+            single_event = False
+            for i, col in enumerate(names):
+                if not col.endswith('_at'):
+                    continue
+                if row['d%d' % i] == 1 and row['n%d' % i] == n:
+                    single_event = True
+                    break
+            if single_event:
+                logger.debug(
+                    "%s: all %d row(s) share one timestamp; abstaining "
+                    "until a second write event", t, n)
                 continue
 
             for i, col in enumerate(names):
@@ -5337,7 +5489,18 @@ def register(cli):
              'entity_deletions. Archive rows are kept. --dry-run to '
              'preview. --force for authoritative kinds.',
     )
-    forget.add_argument('entity', help='<kind>/<external_ref>')
+    forget.add_argument('entity', nargs='?',
+                        help='<kind>/<external_ref>. Omit when using '
+                             '--authority.')
+    forget.add_argument('--authority',
+                        help='Bulk mode: remove every entity with this '
+                             'source_authority (e.g. scip-typescript). '
+                             'Dry-run unless --apply. Requires --reason.')
+    forget.add_argument('--kind',
+                        help='With --authority, restrict to one kind')
+    forget.add_argument('--apply', action='store_true',
+                        help='With --authority, actually remove '
+                             '(default is a dry run)')
     forget.add_argument('--force', action='store_true',
                         help='Required for authoritative kinds '
                              '(Commit, Deployment, Machine, Report, '
