@@ -1501,26 +1501,35 @@ WantedBy=timers.target
         touched_relations = set()  # (from_id, kind, to_id)
         processed_file_ids = set()
 
-        # --- 1. Locate the checkout the indexer will run against.
-        checkout_dir = Path.home() / '.config' / 'templedb' / 'checkouts' / slug
-        if not checkout_dir.exists():
-            logger.error(
-                f"No checkout at {checkout_dir}. "
-                f"Run: templedb project checkout {slug} {checkout_dir.parent}"
-            )
-            return 1
-        index_root = checkout_dir / subdir if subdir else checkout_dir
-        if not index_root.exists():
-            logger.error(f"Subdir does not exist: {index_root}")
-            return 1
-
-        # --- 2. Run scip-typescript unless the caller passed an index.
+        # --- 1+2. Obtain an index. The checkout is only ever needed as
+        # the indexer's working tree, so a caller who already has an
+        # index.scip must not be required to materialize one -- that
+        # requirement is what used to send people at `project checkout`
+        # with the parent directory, whose --force recursively unlinks
+        # every other project's sources (see checkout.py).
         if existing_index:
             scip_path = Path(existing_index).expanduser().resolve()
             if not scip_path.exists():
                 logger.error(f"--scip-index does not exist: {scip_path}")
                 return 1
         else:
+            checkout_dir = (
+                Path.home() / '.config' / 'templedb' / 'checkouts' / slug
+            )
+            if not checkout_dir.exists():
+                logger.error(
+                    f"No checkout at {checkout_dir}. "
+                    f"Run: templedb project checkout {slug} {checkout_dir}"
+                )
+                logger.info(
+                    "  (or pass --scip-index PATH to ingest an index you "
+                    "already built, which needs no checkout)"
+                )
+                return 1
+            index_root = checkout_dir / subdir if subdir else checkout_dir
+            if not index_root.exists():
+                logger.error(f"Subdir does not exist: {index_root}")
+                return 1
             scip_path = index_root / 'index.scip'
             try:
                 subprocess.run(
@@ -2999,7 +3008,8 @@ WantedBy=timers.target
             )
             return 1
         row = query_one(
-            "SELECT id, label FROM entities WHERE kind=? AND external_ref=?",
+            "SELECT id, label, source_authority FROM entities "
+            "WHERE kind=? AND external_ref=?",
             (kind, ref),
         )
         if not row:
@@ -3038,13 +3048,25 @@ WantedBy=timers.target
             print(f"Would delete: {summary}")
             return 0
 
+        # Record BEFORE deleting, while the row is still readable. The
+        # archive is deliberately left in place: it is the only durable
+        # trace that the entity existed, so clearing it alongside the
+        # entity destroys the evidence exactly when it becomes the sole
+        # record (migration 124).
         execute(
-            "DELETE FROM observations_archive WHERE entity_id=?",
-            (eid,),
+            """INSERT INTO entity_deletions
+                 (entity_id, entity_kind, entity_ref, label,
+                  source_authority, deleted_via, reason, relations_removed)
+               VALUES (?, ?, ?, ?, ?, 'graph_forget', ?, ?)""",
+            (eid, kind, ref, row['label'],
+             row['source_authority'] or 'unknown',
+             getattr(args, 'reason', None) or 'graph forget (no reason given)',
+             n_out + n_in),
         )
         # relations CASCADE via FK
         execute("DELETE FROM entities WHERE id=?", (eid,))
         print(f"✓ Forgot: {summary}")
+        print(f"  recorded in entity_deletions; {n_arch} archive row(s) kept")
         return 0
 
     def graph_observations_gc(self, args) -> int:
@@ -3434,6 +3456,10 @@ WantedBy=timers.target
              self._check_no_new_unmaintained_columns),
             ('deployed_build_matches_db',
              self._check_deployed_build_matches_db),
+            ('checkout_files_are_mode_locked',
+             self._check_checkout_files_are_mode_locked),
+            ('ingested_authorities_not_emptied',
+             self._check_ingested_authorities_not_emptied),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -3870,6 +3896,170 @@ WantedBy=timers.target
                    "nothing pins it; journal_size_limit keeps it bounded "
                    "afterwards")
         return [detail]
+
+    def _check_ingested_authorities_not_emptied(self):
+        """Invariant: an authority that once had entities still has some,
+        or its removal is on the record.
+
+        On 2026-10-02 every `scip-typescript` entity vanished -- 12,428
+        Symbols and 22,906 relations, present in the 05:04 backup and
+        gone by the next morning's. Nothing noticed for 31 days. The
+        existing counts could not notice: `entity_counts_match_source_
+        tables` compares against source tables, and an authority with no
+        source table (the scip adapter projects straight into the graph)
+        has nothing to disagree with. `summary` showed only a stale
+        "last ran" date, which looks the same as an adapter nobody has
+        driven lately.
+
+        The signal used here is observations_archive: a row there proves
+        an entity under that authority existed at some point. So an
+        authority present in the archive with zero live entities was
+        emptied. That is generic -- it covers every adapter, not just
+        scip -- and it needs no per-adapter expected count.
+
+        A recorded deletion excuses it. If entity_deletions (migration
+        124) carries rows for the authority, the removal went through
+        the CLI and was deliberate, so retiring an adapter is not a
+        permanent red. Only an unexplained disappearance is.
+        """
+        from db_utils import query_all
+
+        try:
+            archived = query_all(
+                """SELECT source_authority AS auth, COUNT(*) AS n
+                     FROM observations_archive
+                    WHERE source_authority IS NOT NULL
+                      AND source_authority <> ''
+                    GROUP BY source_authority"""
+            )
+        except Exception as exc:
+            return [f"cannot read observations_archive: {exc}"]
+
+        if not archived:
+            return []
+
+        live = {
+            r['auth']: r['n'] for r in query_all(
+                """SELECT source_authority AS auth, COUNT(*) AS n
+                     FROM entities GROUP BY source_authority"""
+            )
+        }
+
+        # Absent table (migration 124 not yet applied) must not turn
+        # this check into a false green OR a crash. Probed rather than
+        # caught: letting the query raise emits a stray "no such table"
+        # ERROR line on every doctor run, which reads like a fault.
+        recorded = {}
+        if query_all(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='entity_deletions'"
+        ):
+            recorded = {
+                r['auth']: r['n'] for r in query_all(
+                    """SELECT source_authority AS auth, COUNT(*) AS n
+                         FROM entity_deletions GROUP BY source_authority"""
+                )
+            }
+
+        issues = []
+        for row in archived:
+            auth = row['auth']
+            if live.get(auth, 0):
+                continue
+            if recorded.get(auth, 0):
+                continue
+            issues.append(
+                f"authority '{auth}' has 0 live entities but "
+                f"{row['n']} archived observation(s) and no recorded "
+                f"deletion — it was emptied out of band. Re-run its "
+                f"adapter, or record the removal via "
+                f"`templedb entity forget` so this reads as intentional."
+            )
+        return issues
+
+    def _check_checkout_files_are_mode_locked(self):
+        """Invariant: files in a read-only checkout are not writable.
+
+        CLAUDE.md and `lock_checkout()` both say canonical checkouts are
+        read-only, and `checkout_matches_db` reports when one diverges
+        from the DB. But nothing enforced the mode, so the divergence had
+        no preventer -- only a detector. Observed 2026-10-06:
+        bza/frontend/package-lock.json sat at mode 644 inside a tree
+        documented as read-only, and `checkout_matches_db` had been red
+        on bza for days.
+
+        A detector without a preventer produces recurring red that
+        nobody can act on, which is how an invariant becomes noise. This
+        check closes the loop: if the mode is wrong, the write that
+        caused the divergence was possible.
+
+        Scoped deliberately, in two ways. Only the canonical checkouts
+        root -- edit workspaces under edit-workspaces/ are writable by
+        design, and a project checked out elsewhere with --writable is a
+        deliberate choice. And only files tracked in project_files: an
+        untracked scratch file being writable cannot cause the
+        divergence this exists to prevent, so flagging it would be the
+        noise the check is meant to avoid. Walking the trees instead
+        reported 11 checkouts red on first run, mostly .git internals
+        and node_modules.
+        """
+        import stat
+        from pathlib import Path
+        from db_utils import query_all
+
+        # Keyed off the registry rather than the path: `kind` is the
+        # authoritative role (canonical | edit | scratch), so an edit
+        # tree that happens to sit under checkouts/ is not flagged, and
+        # a canonical tree relocated elsewhere still is.
+        canonical = query_all(
+            """SELECT p.slug AS slug, c.checkout_path AS path
+                 FROM checkouts c
+                 JOIN projects p ON p.id = c.project_id
+                WHERE c.kind = 'canonical'"""
+        )
+        if not canonical:
+            return []
+        roots = {row['slug']: Path(row['path']) for row in canonical}
+
+        tracked = query_all(
+            """SELECT p.slug AS slug, pf.file_path AS path
+                 FROM project_files pf
+                 JOIN projects p ON p.id = pf.project_id
+                WHERE pf.status = 'active'"""
+        )
+        by_slug = {}
+        for row in tracked:
+            if row['slug'] in roots:
+                by_slug.setdefault(row['slug'], []).append(row['path'])
+
+        issues = []
+        for slug, paths in sorted(by_slug.items()):
+            base = roots[slug]
+            if not base.is_dir():
+                continue
+            writable = []
+            for rel in paths:
+                fp = base / rel
+                try:
+                    if fp.is_symlink() or not fp.is_file():
+                        continue
+                    mode = fp.stat().st_mode
+                except OSError:
+                    continue
+                if mode & stat.S_IWUSR:
+                    writable.append(rel)
+            if writable:
+                shown = ', '.join(sorted(writable)[:3])
+                more = (f" (+{len(writable) - 3} more)"
+                        if len(writable) > 3 else "")
+                issues.append(
+                    f"{slug}: {len(writable)} DB-tracked file(s) in the "
+                    f"read-only checkout are owner-writable — {shown}"
+                    f"{more}. Nothing prevents a write that would make "
+                    f"checkout_matches_db diverge; re-lock with "
+                    f"`templedb file checkout {slug}`."
+                )
+        return issues
 
     def _check_crsqlite_extension_loads(self):
         """Invariant: the cr-sqlite extension actually loads.
@@ -4736,7 +4926,7 @@ WantedBy=timers.target
     _ORPHAN_SOURCES = {
         # File external_ref is '<project-slug>/<file_path>'.
         'File': """
-            SELECT e.id, e.external_ref, e.label
+            SELECT e.id, e.external_ref, e.label, e.source_authority
               FROM entities e
              WHERE e.kind = 'File'
                AND NOT EXISTS (
@@ -4789,10 +4979,27 @@ WantedBy=timers.target
                 print(f"    ... and {len(rows) - 20} more")
             if not args.dry_run:
                 for r in rows:
-                    # Same order as graph_forget: archive rows have no FK
-                    # so they must go by hand; relations CASCADE.
-                    execute("DELETE FROM observations_archive WHERE entity_id=?",
-                            (r['id'],))
+                    # Record first, while the row is still readable, then
+                    # delete. The observations_archive rows are KEPT on
+                    # purpose (migration 124): they are the only durable
+                    # trace an entity existed, and this path used to
+                    # clear them, which is what left the 2026-10-02 scip
+                    # removal unattributable. relations CASCADE.
+                    n_rel = query_all(
+                        "SELECT COUNT(*) AS n FROM relations "
+                        "WHERE from_entity_id=? OR to_entity_id=?",
+                        (r['id'], r['id']),
+                    )[0]['n']
+                    execute(
+                        """INSERT INTO entity_deletions
+                             (entity_id, entity_kind, entity_ref, label,
+                              source_authority, deleted_via, reason,
+                              relations_removed)
+                           VALUES (?, ?, ?, ?, ?, 'prune_orphans', ?, ?)""",
+                        (r['id'], kind, r['external_ref'], r['label'],
+                         r['source_authority'] or 'unknown',
+                         f'no live source row for {kind}', n_rel),
+                    )
                     execute("DELETE FROM entities WHERE id=?", (r['id'],))
 
         if total and args.dry_run:
@@ -5126,8 +5333,9 @@ def register(cli):
 
     forget = esub.add_parser(
         'forget',
-        help='Delete an entity + its relations + archive rows. '
-             '--dry-run to preview. --force for authoritative kinds.',
+        help='Delete an entity + its relations, recording the removal in '
+             'entity_deletions. Archive rows are kept. --dry-run to '
+             'preview. --force for authoritative kinds.',
     )
     forget.add_argument('entity', help='<kind>/<external_ref>')
     forget.add_argument('--force', action='store_true',
@@ -5136,6 +5344,10 @@ def register(cli):
                              'EditIntent)')
     forget.add_argument('--dry-run', action='store_true',
                         help='Preview what would go without acting')
+    forget.add_argument('--reason',
+                        help='Why it is being removed. Stored in '
+                             'entity_deletions so the next person to '
+                             'find a hole in the graph can attribute it.')
     cli.commands['entity.forget'] = cmd.graph_forget
 
     prune = esub.add_parser(

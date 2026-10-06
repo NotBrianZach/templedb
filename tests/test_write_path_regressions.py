@@ -439,3 +439,164 @@ class TestBug4AddedFileReactivatesTombstone:
             f"content_hash={fc['content_hash'][:12]}, "
             f"expected {expected[:12]}"
         )
+
+
+class TestBug5WorkingStateSettlesOnWorkspaceCommit:
+    """`templedb commit <slug> <workspace>` committed content but never
+    retired the vcs_working_state row, so files stayed state='modified'
+    forever after being successfully committed.
+
+    commit.py touched vcs_working_state in exactly one place —
+    _commit_deleted_file — with the comment "the deletion just committed
+    subsumes any prior staged edit/delete". The same is true of added and
+    modified files, but it was only implemented for deletes.
+    _commit_added_file and _commit_modified_file never touched the table.
+
+    Measured on bza 2026-10-06: 38 of 288 rows stuck at 'modified' with
+    content_hash already equal to file_contents.is_current, stamped two
+    days earlier by the workspace-diff path. The cost was not cosmetic —
+    a lying state column and a genuinely stale checkout produce the same
+    `vcs status` output, so 38 false positives buried the real warning
+    that the canonical tree was two commits behind.
+
+    `vcs commit` (cli/commands/vcs.py) always did this correctly, keyed
+    on staged_by_session_id. The workspace-diff path has no session, so
+    the fix keys on content instead.
+    """
+
+    def _ws_row(self, pid, path):
+        return query_one(
+            """SELECT ws.state, ws.content_hash, ws.staged_by_session_id
+                   FROM vcs_working_state ws
+                   JOIN project_files pf ON pf.id = ws.file_id
+                  WHERE ws.project_id = ? AND pf.file_path = ?""",
+            (pid, path),
+        )
+
+    def _seed_and_stage(self, pid, slug, tmp_path, path, committed, pending):
+        """Commit `committed` at `path`, then put `pending` in the
+        workspace and hand-insert the vcs_working_state row that a
+        `vcs status --refresh` against that workspace would have written.
+
+        The row is inserted directly rather than by driving --refresh,
+        because refresh resolves ~/.config/templedb/checkouts/<slug> and
+        would read the wrong tree under pytest's tmp_path.
+        """
+        import hashlib
+        (tmp_path / path).write_text(committed)
+        r = subprocess.run(
+            ['templedb', 'commit', slug, str(tmp_path), '-m', f'seed {path}'],
+            capture_output=True, timeout=60,
+        )
+        assert r.returncode == 0, f"seed failed: {r.stderr.decode()[:400]}"
+
+        file_id = query_one(
+            "SELECT id FROM project_files WHERE project_id = ? AND file_path = ?",
+            (pid, path),
+        )["id"]
+        branch_id = query_one(
+            "SELECT id FROM vcs_branches WHERE project_id = ?", (pid,)
+        )["id"]
+
+        # Now the workspace diverges, and working_state records it.
+        (tmp_path / path).write_text(pending)
+        execute(
+            """INSERT INTO vcs_working_state
+                   (project_id, branch_id, file_id, content_hash, state,
+                    staged_by_session_id)
+               VALUES (?, ?, ?, ?, 'modified', NULL)
+               ON CONFLICT(project_id, branch_id, file_id) DO UPDATE SET
+                   content_hash = excluded.content_hash,
+                   state = 'modified',
+                   staged_by_session_id = NULL""",
+            (pid, branch_id, file_id,
+             hashlib.sha256(pending.encode()).hexdigest()),
+        )
+        return file_id, branch_id
+
+    def test_workspace_commit_settles_the_row_it_made_stale(
+        self, fresh_project, tmp_path,
+    ):
+        """The regression. After committing the workspace, the row that
+        tracked exactly those bytes must no longer claim 'modified'."""
+        import hashlib
+        pid, slug = fresh_project
+        path = 'settles.py'
+        self._seed_and_stage(pid, slug, tmp_path, path,
+                             committed="# committed\n", pending="# pending\n")
+
+        before = self._ws_row(pid, path)
+        assert before["state"] == 'modified', "test setup did not stage the row"
+
+        r = subprocess.run(
+            ['templedb', 'commit', slug, str(tmp_path), '-m', 'commit pending'],
+            capture_output=True, timeout=60,
+        )
+        assert r.returncode == 0, f"commit failed: {r.stderr.decode()[:400]}"
+
+        # The content landed...
+        expected = hashlib.sha256(b"# pending\n").hexdigest()
+        fc = query_one(
+            """SELECT fc.content_hash FROM project_files pf
+                   JOIN file_contents fc ON fc.file_id=pf.id AND fc.is_current=1
+                  WHERE pf.project_id = ? AND pf.file_path = ?""",
+            (pid, path),
+        )
+        assert fc["content_hash"] == expected, "commit did not land the content"
+
+        # ...so the row must have retired. This is the assertion that
+        # failed before the fix.
+        after = self._ws_row(pid, path)
+        assert after is None or after["state"] == 'unmodified', (
+            f"vcs_working_state still claims state={after['state']!r} for "
+            f"content that was just committed — `vcs status` will report this "
+            f"file as uncommitted forever"
+        )
+
+    def test_workspace_commit_preserves_a_divergent_pending_edit(
+        self, fresh_project, tmp_path,
+    ):
+        """The safety property, and the reason the fix keys on
+        content_hash instead of resetting every row for the file.
+
+        If another session has a genuinely different pending edit
+        staged, committing this workspace must NOT mark it settled —
+        that would silently discard the only record that their change
+        exists. `vcs commit` protects this via staged_by_session_id;
+        the workspace-diff path has no session to key on, so it keys on
+        the bytes.
+        """
+        import hashlib
+        pid, slug = fresh_project
+        path = 'divergent.py'
+        file_id, branch_id = self._seed_and_stage(
+            pid, slug, tmp_path, path,
+            committed="# committed\n", pending="# pending\n")
+
+        # Someone else's pending edit: different bytes than either the
+        # committed content or what this workspace is about to commit.
+        other = "# SOMEONE ELSE'S UNRELATED EDIT\n"
+        other_hash = hashlib.sha256(other.encode()).hexdigest()
+        execute(
+            """UPDATE vcs_working_state SET content_hash = ?, state = 'modified'
+                WHERE project_id = ? AND branch_id = ? AND file_id = ?""",
+            (other_hash, pid, branch_id, file_id),
+        )
+
+        r = subprocess.run(
+            ['templedb', 'commit', slug, str(tmp_path), '-m', 'commit pending'],
+            capture_output=True, timeout=60,
+        )
+        assert r.returncode == 0, f"commit failed: {r.stderr.decode()[:400]}"
+
+        row = self._ws_row(pid, path)
+        assert row is not None, (
+            "the other session's working_state row was deleted outright"
+        )
+        assert row["content_hash"] == other_hash, (
+            "the other session's pending content_hash was overwritten"
+        )
+        assert row["state"] == 'modified', (
+            f"the other session's pending edit was marked {row['state']!r}; "
+            "their change is now invisible to `vcs status`"
+        )

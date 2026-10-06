@@ -54,6 +54,44 @@ class CheckoutCommand:
                 logger.info(f"  Or import one: templedb project import /path/to/repo --slug {project_slug}")
                 return 1
 
+            # Refuse --force when target_dir encloses OTHER projects'
+            # checkouts. The stray-purge below walks target_dir
+            # recursively and unlinks every scanner-recognized file whose
+            # relative path isn't in THIS project's file list -- so
+            # pointing --force at the checkouts parent deletes the
+            # sources of every other project, silently, reporting only a
+            # count. Nothing downstream bounds the purge, so the only
+            # place to stop it is before it is honoured.
+            if args.force:
+                foreign = []
+                for row in self.checkout_repo.get_all():
+                    other = row.get('checkout_path')
+                    if not other or row.get('project_slug') == project_slug:
+                        continue
+                    try:
+                        other_path = Path(other).resolve()
+                    except (OSError, ValueError):
+                        continue
+                    if (other_path == target_dir
+                            or target_dir in other_path.parents):
+                        foreign.append(f"{row['project_slug']}: {other_path}")
+                if foreign:
+                    logger.error(
+                        f"Refusing --force: {target_dir} encloses "
+                        f"{len(foreign)} other project checkout(s), whose "
+                        f"files would be purged as strays."
+                    )
+                    for entry in foreign[:5]:
+                        logger.error(f"    {entry}")
+                    if len(foreign) > 5:
+                        logger.error(f"    ... and {len(foreign) - 5} more")
+                    logger.info(
+                        f"  target_dir is the checkout itself, not its "
+                        f"parent. Did you mean: templedb project checkout "
+                        f"{project_slug} {target_dir / project_slug}"
+                    )
+                    return 1
+
             # Check if target directory exists and is not empty
             if target_dir.exists() and any(target_dir.iterdir()):
                 if not args.force:
@@ -98,10 +136,19 @@ class CheckoutCommand:
                     try:
                         stray.unlink()
                         purged += 1
-                        logger.debug(f"Purged stray file: {rel}")
+                        # Names, not just a count: a purge is a deletion,
+                        # and a bare total cannot be audited after the
+                        # fact. First 20 is enough to recognise a
+                        # wrong-directory mistake.
+                        if purged <= 20:
+                            logger.warning(f"  purged stray: {rel}")
                     except OSError as e:
                         logger.warning(f"Could not purge stray file {rel}: {e}")
                 if purged:
+                    if purged > 20:
+                        logger.warning(
+                            f"  ... and {purged - 20} more"
+                        )
                     logger.info(f"Purged {purged} stray file(s) not in DB")
 
             # Write files to filesystem

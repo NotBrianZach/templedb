@@ -702,6 +702,8 @@ class CommitCommand:
               change.content.hash_sha256, change.content.file_size,
               change.content.line_count), commit=False)
 
+        self._settle_working_state(file_id, change.content.hash_sha256)
+
         # Store file_id in change for later snapshot update
         change.file_id = file_id
 
@@ -777,6 +779,41 @@ class CommitCommand:
         """, (commit_id, change.file_id, change.file_path,
               change.content.hash_sha256, change.content.file_size,
               change.content.line_count), commit=False)
+
+        self._settle_working_state(change.file_id, change.content.hash_sha256)
+
+    def _settle_working_state(self, file_id: int, committed_hash: str):
+        """Retire the working-state row for content that just got committed.
+
+        _commit_deleted_file has always cleared vcs_working_state, on the
+        reasoning that "the deletion just committed subsumes any prior staged
+        edit". That reasoning is identical for added and modified files, but
+        until now it was only implemented for deletes — so this path committed
+        content and left the row saying state='modified' forever. `vcs status`
+        then reported files as uncommitted that were byte-identical to
+        file_contents.is_current. Measured on bza 2026-10-06: 38 of 288 rows
+        stuck that way for two days, which buried a real stale-checkout warning
+        in false positives, because a lying state column and a genuinely stale
+        tree produce the same status output.
+
+        Scoped by content_hash, NOT by file_id alone and NOT by session. A row
+        holding exactly the bytes we just committed has nothing left to report.
+        A row holding DIFFERENT bytes is another session's real pending edit
+        and must survive — a blanket per-file reset would silently discard it,
+        which is the session-isolation property `vcs commit` is careful about.
+        Rows with staged_by_session_id IS NULL are covered too: those are the
+        orphans this path and the stale-session reaper both produce, and they
+        are precisely the ones that were never getting cleaned up.
+
+        commit=False: runs inside the caller's transaction, so the row retires
+        atomically with the commit that made it stale.
+        """
+        self.file_repo.execute("""
+            UPDATE vcs_working_state
+               SET state = 'unmodified',
+                   staged_by_session_id = NULL
+             WHERE file_id = ? AND content_hash = ?
+        """, (file_id, committed_hash), commit=False)
 
     def _commit_deleted_file(self, project_id: int, commit_id: int, change: FileChange):
         """Commit a deleted file"""
