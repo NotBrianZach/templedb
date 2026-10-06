@@ -245,6 +245,15 @@ class PublishCommands(Command):
             # Fetch only to bootstrap a mirror we have never pushed to,
             # where there is no ref and the lease would otherwise fail
             # on a legitimate first publish.
+            # Detect branch name first -- the lease probe below is keyed
+            # on refs/remotes/<name>/<branch>, so it cannot run before
+            # the branch is known.
+            branch_result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=str(checkout), capture_output=True, text=True
+            )
+            branch_name = branch_result.stdout.strip() or "main"
+
             has_ref = subprocess.run(
                 ["git", "rev-parse", "--verify", "--quiet",
                  f"refs/remotes/{name}/{branch_name}"],
@@ -255,13 +264,6 @@ class PublishCommands(Command):
                     ["git", "fetch", name, "--quiet"],
                     cwd=str(checkout), capture_output=True, check=False
                 )
-
-            # Detect branch name
-            branch_result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=str(checkout), capture_output=True, text=True
-            )
-            branch_name = branch_result.stdout.strip() or "main"
 
             # --force-with-lease, not --force. Materialize commits are
             # append-only, so an ordinary push almost always suffices;
