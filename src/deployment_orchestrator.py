@@ -944,7 +944,7 @@ class DeploymentOrchestrator:
         vcs_repo = VCSRepository()
         commit = vcs_repo.query_one("""
             SELECT * FROM vcs_commits
-            WHERE project_id = ? AND commit_hash = ?
+            WHERE project_id = ? AND commit_hash = ? COLLATE NOCASE
         """, (self.project['id'], to_commit_hash))
 
         if not commit:

@@ -3591,6 +3591,8 @@ WantedBy=timers.target
              self._check_checkout_files_are_mode_locked),
             ('ingested_authorities_not_emptied',
              self._check_ingested_authorities_not_emptied),
+            ('commit_hash_case_is_unambiguous',
+             self._check_commit_hash_case_is_unambiguous),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -4127,6 +4129,50 @@ WantedBy=timers.target
                 f"`templedb entity forget` so this reads as intentional."
             )
         return issues
+
+    def _check_commit_hash_case_is_unambiguous(self):
+        """Invariant: no two commits in a project share a hash bar case.
+
+        vcs_commits.commit_hash carries two namespaces in two cases:
+        `vcs commit` writes sha256()[:16].upper() (842 rows on
+        2026-10-06) and git-history import writes the raw 40-char git
+        SHA, which git emits lowercase (261 rows). Both go into the same
+        column, in the same projects -- templedb alone has 395 of the
+        first and 192 of the second.
+
+        That is survivable only because the two never collide. Commit
+        lookups resolve COLLATE NOCASE, because SQLite's `=` is
+        case-sensitive while LIKE is not, so a hash typed in the other
+        case silently returns no rows instead of erroring -- the failure
+        mode that made five handoff-referenced commits look absent from
+        history on 2026-10-06 when they were merely stored lowercase.
+
+        The UNIQUE(project_id, commit_hash) constraint is case-SENSITIVE
+        and so does not enforce what those lookups assume: 'ABC...' and
+        'abc...' could both be inserted, and then a NOCASE lookup would
+        match two rows and silently return whichever came first. This
+        check is the missing half of that constraint. It is green today
+        and should stay that way; if it ever fires, the NOCASE lookups
+        have become ambiguous and the colliding pair must be resolved
+        before anything else.
+        """
+        from db_utils import query_all
+
+        rows = query_all(
+            """SELECT p.slug AS slug, lower(c.commit_hash) AS lh,
+                      COUNT(*) AS n,
+                      GROUP_CONCAT(c.commit_hash, ' / ') AS variants
+                 FROM vcs_commits c
+                 JOIN projects p ON p.id = c.project_id
+                GROUP BY c.project_id, lower(c.commit_hash)
+               HAVING COUNT(*) > 1"""
+        )
+        return [
+            f"{r['slug']}: {r['n']} commits differ only by case — "
+            f"{r['variants']}. Lookups resolve COLLATE NOCASE, so these "
+            f"are now ambiguous and one will shadow the other."
+            for r in rows
+        ]
 
     def _check_checkout_files_are_mode_locked(self):
         """Invariant: files in a read-only checkout are not writable.

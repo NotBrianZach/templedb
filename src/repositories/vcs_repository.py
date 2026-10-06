@@ -33,10 +33,24 @@ class VCSRepository(BaseRepository):
             Commit dictionary or None
         """
         logger.debug(f"Looking up commit {commit_hash[:8]} for project {project_id}")
+        # COLLATE NOCASE because commit_hash holds two namespaces in two
+        # cases: `vcs commit` writes sha256()[:16].upper() (842 rows) and
+        # git-history import writes the raw 40-char git SHA, which git
+        # emits lowercase (261 rows). Both land in the same column, in
+        # the same projects. SQLite's `=` is case-sensitive while LIKE is
+        # not, so a lookup written in the other case returns NO ROWS
+        # rather than an error -- indistinguishable from "that commit
+        # does not exist". That misread cost real time on 2026-10-06,
+        # when five handoff-referenced commits appeared to be absent from
+        # history and were simply stored lowercase.
+        #
+        # Safe: hex differing only in case is the same identifier, and
+        # there are zero case-insensitive duplicates (guarded by the
+        # commit_hash_case_is_unambiguous invariant).
         return self.query_one("""
             SELECT id, commit_hash, author, commit_message, commit_timestamp, branch_id, parent_commit_id
             FROM vcs_commits
-            WHERE project_id = ? AND commit_hash = ?
+            WHERE project_id = ? AND commit_hash = ? COLLATE NOCASE
         """, (project_id, commit_hash))
 
     def get_or_create_branch(self, project_id: int, branch_name: str = 'main') -> int:
