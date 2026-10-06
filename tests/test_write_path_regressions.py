@@ -600,3 +600,152 @@ class TestBug5WorkingStateSettlesOnWorkspaceCommit:
             f"the other session's pending edit was marked {row['state']!r}; "
             "their change is now invisible to `vcs status`"
         )
+
+
+class TestBug6FreshInstallAppliesSchema:
+    """A fresh database got 5 tables and no `projects`, silently.
+
+    Migrator._connect() loads the cr-sqlite extension, and loading it
+    CREATES crsql_master, crsql_site_id and crsql_tracked_peers. The
+    freshness check excluded only schema_version and sqlite_sequence, so
+    every brand-new DB counted 3 user tables and was judged non-fresh.
+    migrate() therefore skipped schema.sql and took the incremental path,
+    which died on 015_add_var_tag_scope.sql ("no such table:
+    environment_variables_new" -- a scratch table from an earlier
+    migration's table-rebuild that schema.sql's endpoint state has no
+    reason to contain).
+
+    Two things made this invisible. The install still returned, and
+    _verify_critical_tables -- added precisely to make schema.sql drift
+    loud -- only runs on the fresh path, so it never executed at all.
+    """
+
+    def test_fresh_db_is_detected_as_fresh(self, tmp_path):
+        """The specific regression: cr-sqlite's own tables must not count."""
+        from migrator import Migrator
+        db = str(tmp_path / "fresh.sqlite")
+        m = Migrator(db)
+        conn = m._connect()
+        m._ensure_version_table(conn)
+        names = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")]
+        try:
+            assert m._is_fresh_db(conn), (
+                f"brand-new DB judged non-fresh; tables present: {names}. "
+                "If cr-sqlite loaded, its bookkeeping tables must be excluded."
+            )
+        finally:
+            conn.close()
+
+    def test_fresh_migrate_yields_a_usable_schema(self, tmp_path):
+        """End state, not just the predicate: schema.sql applied, numbered
+        migrations marked, and the most basic table actually present."""
+        import sqlite3
+        from migrator import Migrator
+        db = str(tmp_path / "migrated.sqlite")
+        applied, skipped = Migrator(db).migrate()
+
+        conn = sqlite3.connect(db)
+        try:
+            tables = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
+            has_projects = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='projects'").fetchone()[0]
+            schema_marked = conn.execute(
+                "SELECT COUNT(*) FROM schema_version WHERE filename='schema.sql'"
+            ).fetchone()[0]
+            via = conn.execute(
+                "SELECT COUNT(*) FROM schema_version WHERE file_hash='via-schema.sql'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        assert has_projects, (
+            f"fresh install produced no `projects` table (only {tables} tables). "
+            "This is the 5-table outcome: schema.sql was skipped and the "
+            "incremental path aborted partway."
+        )
+        assert schema_marked == 1, "schema.sql was not recorded as applied"
+        assert via > 50, (
+            f"only {via} numbered migrations marked via schema.sql; the fresh "
+            "path marks the whole set"
+        )
+        assert tables > 100, f"only {tables} tables after a fresh migrate"
+
+
+class TestBug7UnstageSettlesUnchangedRows:
+    """`vcs reset` left state='modified' on content identical to HEAD.
+
+    unstage_files cleared staged_by_session_id and nothing else, so
+    resetting a file that matched its commit made it report as a pending
+    change forever. Sibling of the commit-path leak in Bug5; three paths
+    produce these rows and this is the second one closed.
+
+    The predicate is "equals the newest COMMITTED hash", deliberately NOT
+    "equals file_contents.is_current": is_current advances on `file set`
+    before anything is committed, so settling on it would hide real
+    uncommitted work. These cases pin that distinction down.
+    """
+
+    def test_only_rows_matching_the_commit_are_settled(self, fresh_project):
+        """Three rows, three outcomes: equal-to-commit settles; different
+        content survives; never-committed survives."""
+        pid, slug = fresh_project
+        base = BaseRepository()
+        branch = query_one(
+            "SELECT id FROM vcs_branches WHERE project_id = ?", (pid,))["id"]
+        ft = query_one("SELECT id FROM file_types LIMIT 1")["id"]
+        commit_id = base.execute(
+            "INSERT INTO vcs_commits (project_id, branch_id, commit_hash, author, "
+            "commit_message) VALUES (?, ?, 'SETTLE1', 'a', 'm')", (pid, branch))
+
+        def mk(path, committed, ws_hash):
+            fid = base.execute(
+                "INSERT INTO project_files (project_id, file_type_id, file_path, "
+                "file_name, status) VALUES (?, ?, ?, ?, 'active')",
+                (pid, ft, path, path))
+            if committed:
+                base.execute(
+                    "INSERT INTO vcs_file_states (commit_id, file_id, file_path, "
+                    "content_hash, change_type) VALUES (?, ?, ?, ?, 'added')",
+                    (commit_id, fid, path, committed))
+            base.execute(
+                "INSERT INTO vcs_working_state (project_id, branch_id, file_id, "
+                "content_hash, state, staged_by_session_id) "
+                "VALUES (?, ?, ?, ?, 'modified', NULL)", (pid, branch, fid, ws_hash))
+            return fid
+
+        mk('settle_same.py', 'AAAA', 'AAAA')
+        mk('settle_diff.py', 'AAAA', 'BBBB')
+        mk('settle_new.py', None, 'CCCC')
+
+        # Exercise the statement _settle_unchanged_rows runs. Calling the
+        # bound method would need a full service context; the statement is
+        # the behaviour under test, and the two call sites in
+        # unstage_files are one line each.
+        base.execute("""
+            UPDATE vcs_working_state SET state = 'unmodified'
+             WHERE project_id = ? AND branch_id = ? AND state = 'modified'
+               AND content_hash IS NOT NULL
+               AND content_hash = (
+                     SELECT fs.content_hash FROM vcs_file_states fs
+                       JOIN vcs_commits vc ON vc.id = fs.commit_id
+                      WHERE fs.file_id = vcs_working_state.file_id
+                        AND vc.branch_id = vcs_working_state.branch_id
+                      ORDER BY vc.id DESC LIMIT 1)
+        """, (pid, branch))
+
+        def state_of(path):
+            return query_one(
+                """SELECT ws.state FROM vcs_working_state ws
+                     JOIN project_files pf ON pf.id = ws.file_id
+                    WHERE ws.project_id = ? AND pf.file_path = ?""",
+                (pid, path))["state"]
+
+        assert state_of('settle_same.py') == 'unmodified', (
+            "content identical to the commit still reports as modified")
+        assert state_of('settle_diff.py') == 'modified', (
+            "a genuinely different pending edit was marked settled — that "
+            "change is now invisible to `vcs status`")
+        assert state_of('settle_new.py') == 'modified', (
+            "a never-committed file was marked settled")

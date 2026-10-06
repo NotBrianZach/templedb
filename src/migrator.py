@@ -226,10 +226,34 @@ class Migrator:
         return {r["filename"]: dict(r) for r in rows}
 
     def _is_fresh_db(self, conn: sqlite3.Connection) -> bool:
-        """Check if this is a brand new database with no user tables."""
+        """Check if this is a brand new database with no user tables.
+
+        The exclusions are not cosmetic. `_connect()` loads the cr-sqlite
+        extension, and loading it CREATES crsql_master, crsql_site_id and
+        crsql_tracked_peers before this check ever runs. Counting those as
+        user tables made every brand-new database look non-fresh, so
+        migrate() skipped schema.sql entirely and went down the
+        incremental path instead — where it died on
+        015_add_var_tag_scope.sql ("no such table:
+        environment_variables_new", a temp table from an earlier
+        migration's table-rebuild that schema.sql's endpoint state has no
+        reason to contain). The result was a 5-table database with no
+        `projects`, and _verify_critical_tables never ran at all, because
+        it only runs on the fresh path. Fresh installs were broken and
+        said nothing.
+
+        Verified 2026-10-06: with these exclusions a fresh DB reports
+        fresh, applies schema.sql, marks 83 numbered migrations via
+        schema.sql and ends with 148 tables; without them, 5 tables.
+
+        Same exclusion rule as scripts/regen_schema.py, for the same
+        reason: cr-sqlite's bookkeeping is extension state, not schema.
+        """
         tables = conn.execute(
             "SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' "
-            "AND name NOT IN ('schema_version', 'sqlite_sequence')"
+            "AND name NOT IN ('schema_version', 'sqlite_sequence') "
+            "AND name NOT LIKE 'sqlite_%' "
+            "AND name NOT LIKE 'crsql%' AND name NOT LIKE '%_crsql_%'"
         ).fetchone()
         return tables["c"] == 0
 

@@ -1131,6 +1131,7 @@ class VCSService(BaseService):
                   AND staged_by_session_id = ?
             """, (project['id'], branch['id'], sid))
 
+            self._settle_unchanged_rows(project['id'], branch['id'])
             return count
 
         elif file_patterns:
@@ -1154,10 +1155,55 @@ class VCSService(BaseService):
                     """, (file['id'],))
                     count += 1
 
+            self._settle_unchanged_rows(project['id'], branch['id'])
             return count
 
         else:
             raise ValidationError("Must specify either file_patterns or unstage_all")
+
+    def _settle_unchanged_rows(self, project_id: int, branch_id: int) -> int:
+        """Mark rows 'unmodified' when they hold exactly the committed bytes.
+
+        Unstaging only clears staged_by_session_id; it left state='modified'
+        behind, so `vcs reset` on a file whose content matches HEAD made that
+        file report as a pending change forever. Reproduced 2026-10-06 by
+        resetting a file that was byte-identical to its commit and watching
+        it immediately appear under "Changes not staged for commit".
+
+        Sibling of CommitCommand._settle_working_state, which closes the
+        same leak on the workspace-diff commit path. Three code paths
+        produce these rows -- that commit path, this unstage path, and
+        reap_stale_sessions' 'orphan_stages' branch (which says so in its
+        own docstring) -- and the first two are now covered.
+
+        The predicate is "equals the newest COMMITTED hash on this branch",
+        which is the correct yardstick and deliberately not "equals
+        file_contents.is_current". A row matching is_current may still be a
+        real uncommitted change, because is_current moves on `file set`
+        before anything is committed; treating those as settled would hide
+        genuine pending work. Measured on 2026-10-06, that distinction is
+        the difference between 0 and 110 rows on system_config, every one of
+        which is a real uncommitted change.
+
+        Rows with no commit on this branch yet (committed_hash NULL) are
+        left alone: an added-but-never-committed file is genuinely pending.
+        """
+        return self.vcs_repo.execute("""
+            UPDATE vcs_working_state
+               SET state = 'unmodified'
+             WHERE project_id = ?
+               AND branch_id = ?
+               AND state = 'modified'
+               AND content_hash IS NOT NULL
+               AND content_hash = (
+                     SELECT fs.content_hash
+                       FROM vcs_file_states fs
+                       JOIN vcs_commits vc ON vc.id = fs.commit_id
+                      WHERE fs.file_id = vcs_working_state.file_id
+                        AND vc.branch_id = vcs_working_state.branch_id
+                      ORDER BY vc.id DESC
+                      LIMIT 1)
+        """, (project_id, branch_id))
 
     def get_status(self, project_slug: str) -> Dict[str, Any]:
         """
