@@ -105,9 +105,42 @@ class BackupManager:
             source.close()
             dest.close()
 
+            # Verify before anyone is told this succeeded. The online
+            # backup API is the right mechanism, but under concurrent
+            # write load it can still land a structurally broken file,
+            # and nothing checked: on 2026-10-06 a backup taken at 21:35
+            # during heavy activity produced "2nd reference to page
+            # 149642" and unused pages, while every nightly one (taken
+            # 00:00-05:00 on an idle system) was clean. The live DB was
+            # fine throughout -- only the copy was bad.
+            #
+            # Without this the failure is maximally silent: the caller
+            # prints "Backup uploaded" and the corrupt file becomes the
+            # off-site copy you would reach for after losing the
+            # original. quick_check rather than integrity_check because
+            # it skips the (expensive) index-content pass while still
+            # catching page-level damage, which is what goes wrong here.
+            verify = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True)
+            try:
+                result = verify.execute("PRAGMA quick_check").fetchone()[0]
+            finally:
+                verify.close()
+            if result != "ok":
+                first = result.split("\n")[1] if "\n" in result else result
+                logger.error(
+                    f"Backup FAILED verification and was discarded: "
+                    f"{first[:200]}. The source database is not implicated "
+                    f"-- check it with `templedb admin db check` -- but a "
+                    f"copy taken under write load can be torn. Retry when "
+                    f"quieter."
+                )
+                backup_path.unlink(missing_ok=True)
+                return None
+
             # Get file size
             size_mb = backup_path.stat().st_size / (1024 * 1024)
-            logger.info(f"Local backup created successfully ({size_mb:.2f} MB)")
+            logger.info(
+                f"Local backup created and verified ({size_mb:.2f} MB)")
 
             return backup_path
 

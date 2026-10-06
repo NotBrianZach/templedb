@@ -3591,8 +3591,8 @@ WantedBy=timers.target
              self._check_checkout_files_are_mode_locked),
             ('ingested_authorities_not_emptied',
              self._check_ingested_authorities_not_emptied),
-            ('commit_hash_case_is_unambiguous',
-             self._check_commit_hash_case_is_unambiguous),
+            ('commit_hash_is_canonical',
+             self._check_commit_hash_is_canonical),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -4130,49 +4130,64 @@ WantedBy=timers.target
             )
         return issues
 
-    def _check_commit_hash_case_is_unambiguous(self):
-        """Invariant: no two commits in a project share a hash bar case.
+    def _check_commit_hash_is_canonical(self):
+        """Invariant: commit_hash holds native ids, git SHAs go in
+        git_commit_hash.
 
-        vcs_commits.commit_hash carries two namespaces in two cases:
-        `vcs commit` writes sha256()[:16].upper() (842 rows on
-        2026-10-06) and git-history import writes the raw 40-char git
-        SHA, which git emits lowercase (261 rows). Both go into the same
-        column, in the same projects -- templedb alone has 395 of the
-        first and 192 of the second.
+        Replaces commit_hash_case_is_unambiguous, which guarded the
+        symptom. Until migration 126 the column carried two namespaces
+        at once -- sha256()[:16].upper() native ids from `vcs commit`,
+        and raw 40-char lowercase git SHAs written straight through by
+        git-history import -- while git_commit_hash, which exists for
+        the latter, was NULL on all 1,109 rows.
 
-        That is survivable only because the two never collide. Commit
-        lookups resolve COLLATE NOCASE, because SQLite's `=` is
-        case-sensitive while LIKE is not, so a hash typed in the other
-        case silently returns no rows instead of erroring -- the failure
-        mode that made five handoff-referenced commits look absent from
-        history on 2026-10-06 when they were merely stored lowercase.
-
-        The UNIQUE(project_id, commit_hash) constraint is case-SENSITIVE
-        and so does not enforce what those lookups assume: 'ABC...' and
-        'abc...' could both be inserted, and then a NOCASE lookup would
-        match two rows and silently return whichever came first. This
-        check is the missing half of that constraint. It is green today
-        and should stay that way; if it ever fires, the NOCASE lookups
-        have become ambiguous and the colliding pair must be resolved
-        before anything else.
+        The old check asserted only that the two never collided
+        case-insensitively, so that COLLATE NOCASE lookups stayed
+        unambiguous. That made the collision survivable rather than
+        impossible, and cost an invariant slot to say so. Asserting the
+        format instead makes the mixed state unrepresentable, which is
+        the thing actually worth a slot: it fails the moment an importer
+        starts writing SHAs into the wrong column again, which is how
+        this arose and would be the only way it returns.
         """
         from db_utils import query_all
 
+        issues = []
+
         rows = query_all(
-            """SELECT p.slug AS slug, lower(c.commit_hash) AS lh,
-                      COUNT(*) AS n,
-                      GROUP_CONCAT(c.commit_hash, ' / ') AS variants
+            """SELECT p.slug AS slug, COUNT(*) AS n,
+                      MIN(c.commit_hash) AS sample
                  FROM vcs_commits c
                  JOIN projects p ON p.id = c.project_id
-                GROUP BY c.project_id, lower(c.commit_hash)
-               HAVING COUNT(*) > 1"""
+                WHERE c.commit_hash <> upper(c.commit_hash)
+                   OR length(c.commit_hash) = 40
+                GROUP BY p.slug"""
         )
-        return [
-            f"{r['slug']}: {r['n']} commits differ only by case — "
-            f"{r['variants']}. Lookups resolve COLLATE NOCASE, so these "
-            f"are now ambiguous and one will shadow the other."
-            for r in rows
-        ]
+        for r in rows:
+            issues.append(
+                f"{r['slug']}: {r['n']} commit_hash value(s) are not "
+                f"canonical native ids (e.g. {r['sample'][:20]}) — a "
+                f"40-char or lowercase value is a git SHA and belongs in "
+                f"git_commit_hash. See migration 126."
+            )
+
+        rows = query_all(
+            """SELECT p.slug AS slug, COUNT(*) AS n
+                 FROM vcs_commits c
+                 JOIN projects p ON p.id = c.project_id
+                WHERE c.git_commit_hash IS NOT NULL
+                  AND (length(c.git_commit_hash) <> 40
+                       OR c.git_commit_hash <> lower(c.git_commit_hash))
+                GROUP BY p.slug"""
+        )
+        for r in rows:
+            issues.append(
+                f"{r['slug']}: {r['n']} git_commit_hash value(s) are not "
+                f"40-char lowercase — that column holds git SHAs exactly "
+                f"as git emits them."
+            )
+
+        return issues
 
     def _check_checkout_files_are_mode_locked(self):
         """Invariant: files in a read-only checkout are not writable.

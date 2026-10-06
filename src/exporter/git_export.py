@@ -133,7 +133,7 @@ class GitExporter:
             # Find the database commit with this hash
             base_commit = self.vcs_repo.query_one("""
                 SELECT id FROM vcs_commits
-                WHERE project_id = ? AND commit_hash = ? COLLATE NOCASE
+                WHERE project_id = ? AND commit_hash = ?
             """, (self.project_id, since_commit))
 
             if not base_commit:

@@ -196,9 +196,22 @@ class Migrator:
         from db_utils import apply_standard_pragmas
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
-        # Migrations don't insert into sync-tracked tables; skip crsqlite
-        # load so a fresh DB migration doesn't require the extension.
-        apply_standard_pragmas(conn, load_crsqlite=False)
+        # Migrations CAN touch sync-tracked tables, so the extension has
+        # to be available. 126 rewrites Commit entities' external_ref;
+        # that fires entities_sync_fleet_upd, which writes sync_entities,
+        # which is crsqlite-backed -- and the whole migration died on
+        # "no such function: crsql_internal_sync_bit", an internal symbol
+        # that names neither the cause nor the fix. The old assumption
+        # ("migrations don't insert into sync-tracked tables") held until
+        # a migration needed to repair projected data.
+        #
+        # Safe for the fresh-install case the previous comment protected:
+        # apply_standard_pragmas records CRSQLITE_LOAD_ERROR and carries
+        # on rather than raising, so a DB without the extension still
+        # migrates -- it only fails if a migration actually touches a
+        # sync-tracked table, which is the honest outcome and a far
+        # clearer failure than the one above.
+        apply_standard_pragmas(conn, load_crsqlite=True)
         return conn
 
     def _ensure_version_table(self, conn: sqlite3.Connection):

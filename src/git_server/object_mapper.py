@@ -107,7 +107,7 @@ class ObjectMapper:
             SELECT c.*, b.branch_name
             FROM vcs_commits c
             JOIN vcs_branches b ON c.branch_id = b.id
-            WHERE c.project_id = ? AND c.commit_hash = ? COLLATE NOCASE
+            WHERE c.project_id = ? AND c.commit_hash = ?
         """, (self.project_id, commit_hash)).fetchone()
 
         if not commit_row:
@@ -174,7 +174,7 @@ class ObjectMapper:
         # Get commit ID
         commit_row = self.db.execute("""
             SELECT id FROM vcs_commits
-            WHERE project_id = ? AND commit_hash = ? COLLATE NOCASE
+            WHERE project_id = ? AND commit_hash = ?
         """, (self.project_id, commit_hash)).fetchone()
 
         if not commit_row:
