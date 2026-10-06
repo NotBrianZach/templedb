@@ -216,15 +216,45 @@ class PublishCommands(Command):
         for name, url in mirrors.items():
             print(f"  Pushing to {name} ({url})...")
 
-            # Ensure remote exists
-            subprocess.run(
-                ["git", "remote", "remove", name],
+            # Point the remote at the configured URL without destroying
+            # its remote-tracking refs. The previous remove+add pair
+            # deleted refs/remotes/<name>/* on every run, which is why
+            # the push below had to be --force: with no tracking ref
+            # there is nothing to compare against, so --force-with-lease
+            # cannot work. set-url (falling back to add) keeps the ref
+            # the last successful push left behind.
+            if subprocess.run(
+                ["git", "remote", "set-url", name, url],
                 cwd=str(checkout), capture_output=True, check=False
-            )
-            subprocess.run(
-                ["git", "remote", "add", name, url],
+            ).returncode != 0:
+                subprocess.run(
+                    ["git", "remote", "add", name, url],
+                    cwd=str(checkout), capture_output=True, check=False
+                )
+
+            # Deliberately NOT fetching when a tracking ref already
+            # exists. --force-with-lease compares the remote against
+            # refs/remotes/<name>/<branch>, so that ref has to mean
+            # "where this checkout last left the mirror". Fetching right
+            # before the push refreshes it to whatever the remote holds
+            # now, the lease then always matches, and it will happily
+            # overwrite the very commit it exists to protect -- a
+            # vacuous lease is worse than none, because it reads as
+            # safe.
+            #
+            # Fetch only to bootstrap a mirror we have never pushed to,
+            # where there is no ref and the lease would otherwise fail
+            # on a legitimate first publish.
+            has_ref = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet",
+                 f"refs/remotes/{name}/{branch_name}"],
                 cwd=str(checkout), capture_output=True, check=False
-            )
+            ).returncode == 0
+            if not has_ref:
+                subprocess.run(
+                    ["git", "fetch", name, "--quiet"],
+                    cwd=str(checkout), capture_output=True, check=False
+                )
 
             # Detect branch name
             branch_result = subprocess.run(
@@ -233,11 +263,31 @@ class PublishCommands(Command):
             )
             branch_name = branch_result.stdout.strip() or "main"
 
-            # Push
+            # --force-with-lease, not --force. Materialize commits are
+            # append-only, so an ordinary push almost always suffices;
+            # the force existed for the rare re-materialize that rewrites
+            # history (e.g. the "re-materialize bootstrap" commit). A
+            # bare --force also silently discards any commit on the
+            # mirror that is not in this checkout, which for a public
+            # mirror is someone else's work. The lease keeps the
+            # history-rewrite capability but refuses when the remote has
+            # moved somewhere we have not seen.
             result = subprocess.run(
-                ["git", "push", name, branch_name, "--force"],
+                ["git", "push", name, branch_name, "--force-with-lease"],
                 cwd=str(checkout), capture_output=True, text=True
             )
+            if result.returncode != 0 and 'stale info' in (
+                    result.stderr or '').lower():
+                # Name the override rather than making the caller derive
+                # it: a rejected lease is the one case where a human has
+                # to decide whether the mirror's extra commits matter.
+                print(
+                    f"    Lease rejected — {name} has commits this "
+                    f"checkout has not seen. Inspect with "
+                    f"`git -C {checkout} log {name}/{branch_name}`, then "
+                    f"override with `git -C {checkout} push {name} "
+                    f"{branch_name} --force` if they are disposable."
+                )
             if result.returncode == 0:
                 print(f"    Pushed to {name}/{branch_name}")
                 pushed += 1
