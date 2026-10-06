@@ -1,16 +1,17 @@
 -- TempleDB canonical schema
 -- Generated from live database, sourced with migrations 001-125 applied.
--- Regenerate after adding any new migration via the same dump:
---     python3 scripts/regen_schema.py        (see commit 55D1721E for the method)
+-- Regenerate after adding any new migration:
+--     python3 scripts/regen_schema.py
 --
--- FTS5 shadow tables (_data/_idx/_content/_docsize/_config) are excluded
--- deliberately: CREATE VIRTUAL TABLE creates them, and emitting them
--- directly fails with 'object name reserved for internal use'.
+-- FTS5 shadow tables (_data/_idx/_content/_docsize/_config) and cr-sqlite
+-- internals are excluded deliberately. CREATE VIRTUAL TABLE generates the
+-- former; emitting them directly fails with 'object name reserved for
+-- internal use'. The latter is extension state rather than schema.
 --
--- Staleness here is silent and expensive. Migrator marks every numbered
--- migration as applied via a synthetic 'via-schema.sql' hash on a fresh
--- DB, so anything missing from this file simply never runs and the
--- install reports success. See Migrator._verify_critical_tables.
+-- Staleness here is SILENT: on a fresh DB the Migrator applies this file and
+-- then marks every numbered migration applied via a synthetic 'via-schema.sql'
+-- hash, so anything missing simply never runs and the install still succeeds.
+-- That failure mode has bitten twice (075-082, then 084-125). Use --check in CI.
 
 -- ======================================================================
 -- Tables (132)
