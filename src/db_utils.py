@@ -313,6 +313,36 @@ def query_all(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
         raise
 
 
+LIKE_ESCAPE_CHAR = '\\'
+
+
+def like_escape(text: str) -> str:
+    """Escape a user string for use as a LITERAL inside a LIKE pattern.
+
+    Pair with `ESCAPE '\\'` in the SQL, e.g.
+
+        WHERE LOWER(external_ref) LIKE ? ESCAPE '\\'
+
+    LIKE gives `%` and `_` wildcard meaning, and `_` in particular is
+    not an exotic character here: it is in 9,846 of the 55,196
+    `entities` rows and in roughly a third of this database's slugs and
+    paths. Interpolating a query straight into a pattern therefore
+    turns an underscore into "any character" and silently widens the
+    result set -- `entity search deploy_` returned 858 rows against a
+    ground truth of 256, the extras being things like
+    `SafeDeploymentQueries` where `deploym` matched `deploy_`. Nothing
+    in the output distinguished a wildcard hit from a real one.
+
+    Lives here, next to query_all, so that escaping is written once
+    rather than re-derived by each caller that builds a pattern. The
+    backslash itself is escaped first, otherwise it would escape the
+    escape the SQL engine then inserts.
+    """
+    return (text.replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR * 2)
+                .replace('%', LIKE_ESCAPE_CHAR + '%')
+                .replace('_', LIKE_ESCAPE_CHAR + '_'))
+
+
 def execute(sql: str, params: tuple = (), commit: bool = True) -> int:
     """Execute statement and return lastrowid
 

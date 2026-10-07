@@ -3028,12 +3028,14 @@ WantedBy=timers.target
         print(queue[0][1][0])
 
         current_depth = 0
+        any_truncated = False
         while queue and current_depth < depth:
             next_queue = []
             for eid, prefix in queue:
-                edges = self._fetch_edges(
+                edges, truncated = self._fetch_edges(
                     eid, direction, via, fanout_limit,
                 )
+                any_truncated = any_truncated or truncated
                 for e in edges:
                     peer_id = e['peer_id']
                     if peer_id in visited:
@@ -3051,52 +3053,77 @@ WantedBy=timers.target
                     next_queue.append((peer_id, prefix + [arrow]))
             queue = next_queue
             current_depth += 1
+        # Say so when the cap bit. The cap itself is defensible here --
+        # the fan-out *is* the output, and a StorePath node with 1,301
+        # edges would bury the answer -- but a short list that looks
+        # complete is not. Omitting this is how `entity paths` came to
+        # report "no path" across an edge that existed.
+        if any_truncated:
+            print()
+            print(f"  (fan-out capped at {fanout_limit} per node and "
+                  f"direction; some edges not shown — raise with "
+                  f"--limit N)")
         return 0
 
     def _fetch_edges(self, entity_id, direction, via, limit):
-        """Fetch one hop from entity_id in the given direction,
-        filtered by via (set of relation kinds) if provided."""
+        """Fetch one hop from entity_id, filtered by via if provided.
+
+        Returns `(rows, truncated)`. `limit` caps the fan-out per
+        direction; `None` means no cap, and then `truncated` is always
+        False.
+
+        The ORDER BY is load-bearing rather than cosmetic. A bare LIMIT
+        with no ORDER BY leaves the choice of rows to the query
+        planner, so `entity trace Machine/zMothership2` could print a
+        different ten of that machine's 156 `ran` edges on two
+        consecutive runs. Ordering by (relation kind, peer kind, peer
+        ref) makes a truncated slice reproducible, and is applied
+        whether or not a cap is in force so that a capped read is a
+        prefix of the uncapped one.
+
+        Truncation is detected by asking for one row beyond the cap and
+        discarding it. That distinguishes "exactly `limit` edges exist"
+        from "more than `limit` exist" -- two cases a bare LIMIT
+        renders identical, which is why the old cap could drop edges
+        without saying so.
+        """
         from db_utils import query_all
         rows = []
-        if direction in ('out', 'both'):
-            where = "r.from_entity_id = ?"
+        truncated = False
+        if limit is None:
+            limit_sql, limit_params = "", ()
+        else:
+            limit_sql, limit_params = "\n                     LIMIT ?", (limit + 1,)
+
+        # The outbound and inbound reads differ only in which column
+        # anchors the entity and which one the peer joins through.
+        for want, peer_col, anchor_col in (
+                ('out', 'r.to_entity_id', 'r.from_entity_id'),
+                ('in', 'r.from_entity_id', 'r.to_entity_id')):
+            if direction not in (want, 'both'):
+                continue
+            where = f"{anchor_col} = ?"
             if via:
                 placeholders = ','.join('?' for _ in via)
                 where += f" AND r.kind IN ({placeholders})"
             params = [entity_id] + list(via) if via else [entity_id]
-            outbound = query_all(
+            got = query_all(
                 f"""SELECT r.kind AS relkind,
                            e.id AS peer_id, e.kind AS peer_kind,
                            e.external_ref AS peer_ref,
                            e.label AS peer_label
                       FROM relations r
-                      JOIN entities e ON e.id = r.to_entity_id
+                      JOIN entities e ON e.id = {peer_col}
                      WHERE {where}
-                     LIMIT ?""",
-                tuple(params) + (limit,),
+                     ORDER BY r.kind, e.kind, e.external_ref{limit_sql}""",
+                tuple(params) + limit_params,
             )
-            for r in outbound:
-                rows.append({**dict(r), 'dir': 'out'})
-        if direction in ('in', 'both'):
-            where = "r.to_entity_id = ?"
-            if via:
-                placeholders = ','.join('?' for _ in via)
-                where += f" AND r.kind IN ({placeholders})"
-            params = [entity_id] + list(via) if via else [entity_id]
-            inbound = query_all(
-                f"""SELECT r.kind AS relkind,
-                           e.id AS peer_id, e.kind AS peer_kind,
-                           e.external_ref AS peer_ref,
-                           e.label AS peer_label
-                      FROM relations r
-                      JOIN entities e ON e.id = r.from_entity_id
-                     WHERE {where}
-                     LIMIT ?""",
-                tuple(params) + (limit,),
-            )
-            for r in inbound:
-                rows.append({**dict(r), 'dir': 'in'})
-        return rows
+            if limit is not None and len(got) > limit:
+                truncated = True
+                got = got[:limit]
+            for r in got:
+                rows.append({**dict(r), 'dir': want})
+        return rows, truncated
 
     def graph_forget(self, args) -> int:
         """Delete an entity + its relations + observations_archive.
@@ -3389,20 +3416,37 @@ WantedBy=timers.target
           templedb entity search 'auth cookie'   # find commits about auth
           templedb entity search zMothership --kind Machine
         """
-        from db_utils import query_all
-        clauses = ["(LOWER(label) LIKE ? OR LOWER(external_ref) LIKE ?)"]
-        pattern = f"%{args.query.lower()}%"
+        from db_utils import query_all, like_escape
+        # The query is a literal, not a pattern. Without escaping, `_`
+        # means "any character" to LIKE: `entity search deploy_` matched
+        # 858 rows against a ground truth of 256, pulling in names like
+        # SafeDeploymentQueries where `deploym` satisfied `deploy_`, and
+        # nothing in the output marked the difference. Underscores are
+        # the normal case for anyone searching Python identifiers or
+        # Nix store paths. See db_utils.like_escape.
+        clauses = ["(LOWER(label) LIKE ? ESCAPE '\\' "
+                   "OR LOWER(external_ref) LIKE ? ESCAPE '\\')"]
+        pattern = f"%{like_escape(args.query.lower())}%"
         params = [pattern, pattern]
         if args.kind:
             clauses.append("kind = ?")
             params.append(args.kind)
         where = " AND ".join(clauses)
+        # The tie-break is required for the paging to mean anything.
+        # `entities` holds 55,196 rows across only 47 distinct
+        # observed_at values -- ingest stamps a whole batch with one
+        # second, and the largest timestamp covers 11,093 rows. With
+        # `ORDER BY observed_at DESC` alone, any query matching more
+        # than --limit left the choice of which rows you saw to the
+        # query planner, so two identical runs could answer
+        # differently and the first page was not the newest N in any
+        # meaningful sense.
         rows = query_all(
             f"""SELECT kind, external_ref, label, source_authority,
                        observed_at
                   FROM entities
                  WHERE {where}
-                 ORDER BY observed_at DESC
+                 ORDER BY observed_at DESC, kind, external_ref
                  LIMIT ?""",
             tuple(params) + (int(args.limit),),
         )
@@ -3473,7 +3517,24 @@ WantedBy=timers.target
                 break
             if depth >= max_depth:
                 continue
-            edges = self._fetch_edges(cur, direction, via, 100)
+            # Uncapped, deliberately. This BFS used to fetch a
+            # hardcoded 100 neighbours per node, so a node with more
+            # edges than that contributed an arbitrary hundred and the
+            # rest were simply absent from the graph being searched.
+            # 122 entities exceed 100 edges and the largest has 1,301,
+            # so the cap turned a yes into a no: `entity paths` printed
+            # "no path" between two entities joined by a direct
+            # `invoked` edge, while the same relation on the same node
+            # was found when it happened to fall inside the first
+            # hundred. A cap is defensible where the fan-out is the
+            # output, as in `trace`; it is not when the whole answer is
+            # a single yes or no.
+            #
+            # Cost is bounded without it: `parent` admits each entity
+            # once, so the search is linear in `relations` (64k rows),
+            # and the uncapped worst case -- no path at max depth --
+            # measures well under a second.
+            edges, _ = self._fetch_edges(cur, direction, via, None)
             for e in edges:
                 nxt = e['peer_id']
                 if nxt in parent:

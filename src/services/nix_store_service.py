@@ -448,17 +448,39 @@ class NixStoreService(BaseService):
             ORDER BY generation_number DESC LIMIT 1
         """, (machine_name, generation_number)).fetchone()
 
+        # Resolve the registry row for this host, by name, the way
+        # migration 130's backfill did.
+        #
+        # Writing it here is what keeps the FK from going stale again.
+        # Migration 130 observed that machine_id was NULL on all 156
+        # rows and called the declared FK "decoration"; its backfill
+        # then matched 0 of them, because no fleet_machines row existed
+        # to join to. Migration 134 added that row and re-ran the
+        # backfill, which fixed the rows that already existed -- and
+        # generation 327, recorded minutes later, still came in NULL,
+        # because nothing on the insert path had ever populated the
+        # column. A one-off backfill cannot fix a field nobody writes.
+        #
+        # Stays NULL for an unregistered host, which is the honest
+        # answer and the one machines_with_generations_are_registered
+        # reports on.
+        machine_row = conn.execute(
+            "SELECT id FROM fleet_machines WHERE machine_name = ? LIMIT 1",
+            (machine_name,)).fetchone()
+        machine_id = machine_row["id"] if machine_row else None
+
         now = _now()
         conn.execute("BEGIN")
         try:
             cursor = conn.execute("""
                 INSERT OR REPLACE INTO nix_generations
-                (machine_name, generation_number, toplevel_path, closure_id,
-                 commit_id, commit_hash, project_id, system_deployment_id,
+                (machine_id, machine_name, generation_number, toplevel_path,
+                 closure_id, commit_id, commit_hash, project_id,
+                 system_deployment_id,
                  nixos_version, kernel_version, previous_generation_id,
                  switched_at, switch_action, switch_success, boot_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-            """, (machine_name, generation_number, toplevel_path,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """, (machine_id, machine_name, generation_number, toplevel_path,
                   closure["id"] if closure else None,
                   commit_id, commit_hash, project_id,
                   system_deployment_id,
