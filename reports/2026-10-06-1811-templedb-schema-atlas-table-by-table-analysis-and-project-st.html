@@ -973,15 +973,77 @@ checker plus the existing <code>test_runs.commit_id</code> FK would start auto-a
 warranted claims from work that already happens. This is the highest-leverage
 <em>new</em> capability available, because it is mostly already built.</p>
 
-<p><strong>Delete a stratum.</strong> The <code>fleet_*</code> family (6 tables, 6
-triggers, 4 views, 0 operational rows) and the stratum-II code-intelligence family
-(<code>code_symbols</code>, <code>code_symbol_dependencies</code>,
-<code>code_search_index</code>, <code>code_search_fts</code>,
-<code>impact_transitive_cache</code>, <code>code_cluster_*</code>) are both superseded by
-things that work. Removing them would cut the table count by roughly 10% and remove two
-entire wrong answers to "where do I look for symbols / how do I deploy". The
-<code>unmaintained_columns_baseline</code> ratchet already demonstrates this project can
-retire things deliberately; this is the table-level version of the same move.</p>
+<p><strong>Delete a stratum.</strong> <span class="dim">(Corrected — see below. The
+original text here said the <code>fleet_*</code> family was "6 tables, 6 triggers, 4
+views, 0 operational rows". Three of the six are empty, not all six, and
+<code>fleet_machines</code> is load-bearing.)</span></p>
+
+<p>
+  Two families look deletable and only one is. Checking before acting changed the
+  recommendation in both cases, which is the argument for not treating §11 as a to-do
+  list.
+</p>
+
+<p>
+  <strong>Fleet splits in half.</strong> <code>fleet_machines</code> (5 rows) is live:
+  read by <code>reconcile.py</code>, the
+  <code>fleet_machines_reconciled_within_7_days</code> invariant, <code>summary</code>,
+  <code>nix_deploy_backend</code>, the Prolog engine and three GUI pages.
+  <code>fleet_networks</code> is its parent. Only <strong>three</strong> tables are
+  empty — <code>fleet_deployments</code>, <code>fleet_machine_deployments</code>,
+  <code>fleet_resources</code> — and those are the deployment-<em>execution</em> half of
+  a nixops4-shaped model that has never run. The registry half stays; the execution half
+  is the deletable part, and deleting it is the decision that TempleDB stays an observer
+  rather than becoming an orchestrator again. The data already made that choice: 156
+  generations and 11 reconcile runs against zero fleet deployments, ever.
+</p>
+
+<p>
+  Related defect found while checking: <strong><code>nix_generations.machine_id</code> is
+  NULL on all 156 rows</strong> despite <code>fleet_machines</code> holding 5. The
+  generation↔machine join runs entirely through the denormalised
+  <code>machine_name</code> string; the declared FK has never been used. Worth fixing
+  whichever way the fleet question goes, and an argument for keeping the registry.
+</p>
+
+<p>
+  <strong>Stratum II is much bigger than its tables.</strong> Seven near-empty tables,
+  yes — <code>code_symbols</code> holds 12 rows against 21,036 <code>Symbol</code>
+  entities — but behind them sit ~3,650 lines of service layer
+  (<code>symbol_extraction</code>, <code>impact_analysis_engine</code>,
+  <code>impact_analysis_service</code>, <code>dependency_graph_builder</code>,
+  <code>code_search_service</code>, <code>community_detection_service</code>,
+  <code>graph_frecency</code>), plus <code>knowledge_graph.py</code>,
+  <code>fuzzy_matcher.py</code>, a CLI command, three GUI pages, and
+  <strong>three passing test modules</strong>. Describing it as "effectively dead" is true
+  by row count and false by code.
+</p>
+
+<p>
+  And the direction is genuinely unresolved, because the project points both ways:
+  roadmap item 3 says move sidecar tables onto <code>entities.attributes_json</code>,
+  while <code>relations.attributes_json</code>'s own DDL comment says the opposite —
+  <em>"if a relation grows more than 2–3 attributes or a lifecycle, promote it to a span
+  with its own table."</em> A symbol carrying complexity metrics, a typed signature, a
+  line range and an embedding is exactly the case where "promote to a table" wins. So the
+  recommendation here is <strong>don't delete yet</strong>: resolve where attribute-heavy
+  code facts live first, or you throw away the only existing schema for them and
+  re-derive it worse later. Deleting also removes three passing test modules, which is a
+  poor trade for a table count.
+</p>
+
+<p>
+  <strong>What's actually missing is a way to say "dormant, deliberately."</strong> The
+  schema has an excellent answer at <em>column</em> level —
+  <code>unmaintained_columns_baseline</code>, with the shape recorded so a column
+  changing shape stays visible, and a ratchet check enforcing it. There is no table-level
+  equivalent, so a dormant subsystem is indistinguishable from a live one in
+  <code>sqlite_master</code> and every reader has to re-derive "is this used?" from row
+  counts and greps. That is what produced the wrong fleet claim above. A
+  <code>dormant_tables</code> registry on the same pattern — table, reason, row count at
+  acceptance, and the thing that would revive it — would convert both of these from
+  "delete or keep?" into "documented hold", which is the honest state of each.
+</p>
 
 <p><strong>Resolve the SCIP question.</strong> 15,821 of 20,916 <code>Symbol</code>
 entities come from <code>scip-typescript</code>, sharing a unique namespace with 5,095
@@ -1040,7 +1102,158 @@ the redundant <code>UNIQUE(project_id, commit_hash)</code>; reconcile
   briefly invisible. Documented in place rather than deleted.
 </p>
 
-<h2>13. Method</h2>
+<h2>13. Second batch — what using the tools found</h2>
+
+<p>
+  Everything in §10 came from reading the schema. This section came from <em>using</em>
+  it: six further defects, each found by running a command rather than by querying a
+  table. That asymmetry is the most useful thing in this report. The schema review found
+  what was structurally wrong; the session found what was operationally wrong, and the
+  operational ones were worse.
+</p>
+
+<h3>13.1 — <code>publish</code> pushed content it had failed to commit <span class="bad">(critical, fixed)</span></h3>
+<p>
+  When the commit step failed, publish continued to materialize <em>and push</em>, then
+  reported partial failure. Net effect: content on a public GitHub mirror with no
+  <code>vcs_commits</code> row behind it and the commit message silently discarded.
+  Happened <strong>twice in one session</strong>, to two different public repos, each
+  time reported <em>after</em> the push had gone out.
+</p>
+<p>
+  The trigger is mundane and therefore common: <code>vcs commit</code> needs a tree the
+  caller may write to, and ending a session retires its edit checkout — so any caller
+  that cleaned up after itself hits this on its next publish. Fixed by auto-provisioning
+  a workspace when that is the only thing missing, and gating the push on commit success
+  (<code>--push-anyway</code> overrides). Materialize still runs: it is local and the DB
+  holds the right content either way. Only the irreversible outward-facing step is
+  gated.
+</p>
+
+<h3>13.2 — 78 files sat ahead of HEAD, the oldest since July <span class="warn">(open)</span></h3>
+<table>
+<tr><th>project</th><th>files ahead of HEAD</th><th>oldest</th></tr>
+<tr><td>nixos_anywhere_vultr_woofs</td><td class="n">68</td><td>2026-07-18</td></tr>
+<tr><td>math-academy-scraper</td><td class="n">6</td><td>2026-07-16</td></tr>
+<tr><td>slimevr_fitness_arena</td><td class="n">2</td><td>2026-09-05</td></tr>
+<tr><td>system_config</td><td class="n">1</td><td>2026-08-25</td></tr>
+<tr><td>emacs-config</td><td class="n">1</td><td>2026-07-15</td></tr>
+</table>
+<p>
+  <code>file set</code> landing content without a commit is documented and intended.
+  Three months of it is not, and nothing said so. All of it had been materialized and
+  pushed, so the mirrors carried content templedb's own history had no row for — the DB
+  and the world agreed, and only the VCS disagreed with both. Now reported by
+  <code>no_long_uncommitted_content</code> (14-day grace). <strong>Still red
+  deliberately:</strong> this is real uncommitted work in five projects and clearing it
+  is the owner's call, not a sweep.
+</p>
+<p class="dim">
+  <strong>Correction.</strong> I initially called two of these — <code>ROADMAP.md</code>
+  and <code>docs/ENTITY_GRAPH_DESIGN.md</code> — a scanner false positive, having
+  compared the workspace against <code>file_contents</code> (the current snapshot, which
+  matched) instead of against HEAD (which did not). "Modified" in a VCS means differs
+  from the last commit. The scanner was right throughout; both files held real work, and
+  <code>ROADMAP.md</code> was the −662/+28 stub rewrite that <code>CLAUDE.md</code>
+  already described as existing.
+</p>
+
+<h3>13.3 — The unmaintained-columns ratchet had gone stale <span class="ok">(fixed, mig 129)</span></h3>
+<p>
+  A baseline row tells <code>no_new_unmaintained_columns</code> to stop reporting a
+  column. That is correct only while the row stays true — and nothing re-checked, so a
+  column that started being written kept its row, and the one mechanism meant to make
+  dead columns visible quietly hid a live one. Three were stale. The sharpest:
+  <code>vcs_commits.git_commit_hash</code>, recorded as <code>all_null</code> and then
+  <strong>populated by migration 126 itself</strong>, suppressed for three migrations.
+  <code>relations.attributes_json</code> now has 143 populated rows, which is a
+  deviation from the promote-to-a-span policy worth seeing rather than suppressing.
+</p>
+
+<h3>13.4 — <code>reference_count</code> was wrong at the insert too <span class="ok">(fixed, mig 128)</span></h3>
+<p>
+  Migration 127 fixed the missing UPDATE trigger and backfilled; the backfill looked
+  clean and drifted within the hour. Four INSERT sites hardcoded
+  <code>reference_count = 1</code> on blob creation, so
+  <code>increment_blob_reference</code> then took a single-referent blob to 2, and a
+  cancelled intent's blob sat at 1 with no referent at all. Caught by
+  <code>blob_refcount_is_accurate</code> hours after it was added — the first time a
+  check in this series paid for itself.
+</p>
+
+<h3>13.5 — Blob collection had no audit <span class="ok">(fixed, mig 128)</span></h3>
+<p>
+  The first <code>gc --apply</code> removed 8,715 blobs and 378 MB and recorded nothing;
+  reconstructing it took arithmetic over before/after counts. Same gap migration 124
+  closed for entities, higher stakes — an entity can be re-derived by re-running ingest,
+  a blob is the only copy of its bytes. <code>blob_deletions</code> now records each
+  doomed row before deletion, grouped by run id. It holds 0 rows, correctly: the only
+  collection so far predates it, and <code>storage blob deletions</code> says so rather
+  than implying nothing was ever collected.
+</p>
+
+<h3>13.6 — Two fixes that were broken in the same way they were fixing</h3>
+<p>
+  Worth recording together, because the pattern is the point.
+</p>
+<ul>
+  <li><strong><code>gc --vacuum</code> was unreachable.</strong> <code>gc</code> returned
+      early on "nothing to collect", skipping the vacuum branch — but after the first
+      <code>--apply</code>, "nothing to collect, everything to reclaim" <em>is</em> the
+      steady state, and exactly when someone types <code>--vacuum</code>. Found by
+      running the command I had just shipped.</li>
+  <li><strong><code>_adopt_relocked_flake_lock</code> silently did nothing.</strong> It
+      built a path from <code>config.CHECKOUT_DIR</code>, a constant that does not exist;
+      the best-effort wrapper caught the <code>AttributeError</code> and logged it at
+      debug, making total failure indistinguishable from "nothing to adopt". Now queries
+      the <code>checkouts</code> table and prints failures. <strong>Generalise this:</strong>
+      <code>except Exception: logger.debug(...)</code> around a side-effect is the
+      silent-no-op pattern this whole report is about, and the codebase uses it in
+      several places.</li>
+</ul>
+
+<h3>13.7 — What the session work added</h3>
+<table>
+<tr><th>Addition</th><th>Why</th></tr>
+<tr><td><code>Session</code> + <code>Checkout</code> entities</td><td>"what did session N do" was four ad-hoc joins. Now <code>entity explore Session/&lt;id&gt;</code>.</td></tr>
+<tr><td>Claims from doctor</td><td>2 rows → 64, with 32 covering HEAD. Every passing invariant asserts one, scoped to the commit it observed.</td></tr>
+<tr><td><code>templedb admin which</code></td><td>Its <em>importing from</em> line is the running interpreter's own view — the thing a <code>/nix/store</code> glob gets wrong, as it did here.</td></tr>
+<tr><td>Dev mode prefers your own tree</td><td>Ranked by recency before, so another agent's workspace on the same host could win.</td></tr>
+<tr><td><code>--yes</code> reaches the generate prompt</td><td>Previously <code>input()</code> hit EOF and cancelled the whole switch. It now <em>skips</em> generate rather than running it — generate rewrites <code>flake.nix</code>, where <code>--pin-input</code> writes the templedb rev.</td></tr>
+</table>
+
+<p>
+  One deliberate omission: <strong>no <code>Session -committed-&gt; Commit</code>
+  edge</strong>, despite <code>vcs_commits.session_id</code> existing and looking exactly
+  like that FK. It is a visibility flag, not provenance —
+  <code>publish_session_head</code> sets it back to NULL once a commit becomes shared, and
+  only 7 of 1,126 commits carry one at any moment. An edge built on it would delete
+  itself precisely when the work became real. The honest path is
+  <code>Session → EditIntent → Commit</code>, 614 live edges since migration 127 started
+  writing <code>applied_commit_id</code>.
+</p>
+
+<h3>13.8 — Still open</h3>
+<ul>
+  <li><strong>78 uncommitted files</strong> across five projects (§13.2). Owner's call.</li>
+  <li><strong><code>nix_generations.machine_id</code></strong> NULL on all 156 rows.</li>
+  <li><strong>A <code>dormant_tables</code> registry</strong> (§11), which would have
+      prevented the wrong fleet claim.</li>
+  <li><strong>The fleet-execution deletion and the stratum-II decision</strong> (§11).</li>
+  <li><strong>The SCIP namespace collision</strong> — two authorities writing
+      <code>Symbol</code> into one <code>UNIQUE(kind, external_ref)</code> with no
+      discriminator.</li>
+  <li><strong>Claims carry only <code>scoped-to</code> graph edges</strong>; evidence is
+      in <code>claim_evidence</code> but not mirrored as relations, so
+      "what rests on this test run" is SQL rather than a traversal.</li>
+  <li><strong>The flake.lock fix installs one generation late</strong> — each switch runs
+      the <em>previous</em> build, so generations 322 and 323 still drifted and were
+      repaired by hand. 324 onward should self-heal; worth confirming once.</li>
+  <li><strong>The 37 MB duplicate FTS content copy</strong> (§10.4) and the
+      cheap-hardening list (§11), all untouched.</li>
+</ul>
+
+<h2>14. Method</h2>
 
 <p>
   Everything above was read from the live database at
