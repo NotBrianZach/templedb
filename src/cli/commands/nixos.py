@@ -173,9 +173,24 @@ def _adopt_relocked_flake_lock(slug: str) -> None:
     try:
         from pathlib import Path
         from db_utils import query_one
-        import config as _cfg
 
-        lock = Path(_cfg.CHECKOUT_DIR) / slug / "flake.lock"
+        # Ask the checkouts table where the canonical tree is rather
+        # than rebuilding ~/.config/templedb/checkouts/<slug> from
+        # parts. There is no shared constant for that root -- the
+        # first version of this function invented `config.CHECKOUT_DIR`,
+        # which does not exist, and the best-effort wrapper below
+        # swallowed the AttributeError so it silently did nothing. The
+        # table is authoritative and honours a relocated checkout.
+        ck = query_one(
+            """SELECT c.checkout_path AS path
+                 FROM checkouts c
+                 JOIN projects p ON p.id = c.project_id
+                WHERE p.slug = ? AND c.kind = 'canonical'
+                  AND c.is_active = 1
+                ORDER BY c.checkout_at DESC LIMIT 1""", (slug,))
+        if not ck:
+            return
+        lock = Path(ck['path']) / "flake.lock"
         if not lock.exists():
             return
         disk = lock.read_text()
@@ -204,7 +219,12 @@ def _adopt_relocked_flake_lock(slug: str) -> None:
                   "adopted; `checkout_matches_db` will report it",
                   file=sys.stderr)
     except Exception as e:
-        logger.debug(f"flake.lock adoption skipped: {e}")
+        # Loud, not debug. The first version of this failed on a
+        # nonexistent config attribute and logged at debug, so it
+        # looked exactly like "there was nothing to adopt" -- the
+        # silent-no-op failure mode this whole batch is about.
+        print(f"   ⚠️  flake.lock adoption failed: {e}", file=sys.stderr)
+        logger.debug("flake.lock adoption failed", exc_info=True)
 
 
 def _check_dirty_and_prompt(assume_yes: bool = False) -> bool:
