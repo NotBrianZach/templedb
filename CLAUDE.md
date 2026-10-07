@@ -1,387 +1,20 @@
 # TempleDB Development Instructions
 
-## Where the plan landed
+TempleDB manages this project. Prefer `templedb` commands over raw git
+and standard tools. Design docs and project history live in `reports/`
+(dated) and `docs/ENTITY_GRAPH_DESIGN.md` — this file is operating
+instructions only.
 
-The observer/integrator plan (see
-[`reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html`](reports/))
-completed Phases 0–3 during 2026-09-01 through 2026-09-03. Session recap
-at [`reports/2026-09-03-1530-session-recap-*.html`](reports/).
+## Read this first: three ways to lose work
 
-**Current stance**: TempleDB observes source (git is authoritative), owns
-intents + relationships + the cross-authority knowledge graph. Nine
-ingest adapters keep the graph in sync (hourly systemd timer). 23 doctor
-invariants + one active-probe reconcile (daily systemd timer) detect
-drift. See [`docs/ENTITY_GRAPH_DESIGN.md`](docs/ENTITY_GRAPH_DESIGN.md)
-for the categorical framing.
-
-Fastest orientation (the counts above drift — `templedb summary` is
-authoritative):
-```bash
-templedb summary                      # health at a glance
-templedb entity search <keyword>      # search the 31k-entity graph
-templedb provenance machine <host>    # what motivated the code running there
-templedb gui                          # /entities and /summary in the browser
-```
-
-### Tranches
-
-Design work for a tranche goes in a dated `reports/` doc that carries
-its own phase numbering and rollout table; those are the real plan
-documents. [`ROADMAP.md`](ROADMAP.md) is a stub pointing back here.
-
-**Landed — checkout roles and session-scoped resolution.** Phases 0–4 of
-[`reports/2026-09-27-2103-checkout-role-and-session-scoped-resolution-design.html`](reports/),
-shipped 2026-09-27 through 2026-10-03: which tree is authoritative when
-the canonical checkout, several edit workspaces, and the DB disagree.
-Blob-age guard so a stale disk cannot overwrite a newer blob,
-`resolve(purpose)` so a writer never reconciles against the published
-copy, migration 122's partial unique indexes, `session_id` populated on
-create, and `admin checkout-gc` to retire ended-session trees. This was
-the bulk of recent commit volume and it is the abstraction every write
-path depends on — it was never polish, and listing it here is how it
-stops being invisible. Phases 0–3 are unconditional; phase 4's
-guarantee holds only for callers that pin a session, which is the gap
-below.
-
-**Open gap in that tranche.** `session_id` on an edit tree is populated
-from `TEMPLEDB_SESSION_ID` or `TEMPLEDB_SESSION` and nothing else —
-`CheckoutRepository.current_session_id()` has no PID fallback and
-deliberately never creates a session, so resolving a path cannot have
-the side effect of opening one. An agent that exports neither var
-therefore creates edit trees with `session_id IS NULL`, and SQLite
-treats NULLs as distinct in a unique index, so migration 122's
-per-session index does not constrain precisely the rows that are still
-ambiguous. The design report predicted this: the NULL set "only becomes
-meaningful once sessions populate the column."
-
-Those projects fall back to "newest active edit tree wins", which a
-materialise elsewhere can change mid-session — the `vcs status` warning
-names the losers when it happens. So `checkout_matches_db` and
-`checkout_roles_are_unambiguous` going red is usually an unpinned agent
-rather than dead data, and `admin checkout-gc` will not clear it: those
-trees are live, not stale. Pin the session before `templedb edit`, and
-name the tree explicitly for anything that matters.
-
-**Remaining — Phase 5**: retire the authority-over-source vocabulary.
-This section is Phase 5; there is nothing else to track for it.
-
-**Deferred — SCIP for cross-language code facts**, which held the Phase 4
-slot. The `scip` ingest adapter exists and last ran 2026-09-05; nothing
-has driven it since and no phase doc was ever written. Python via
-tree-sitter already covers the language TempleDB itself is written in,
-so what SCIP buys is coverage for the TS/JS and Nix projects — real, but
-not the binding constraint. Either pick it up or retire the adapter;
-what it should not do is keep reading as in-flight.
-```bash
-templedb ingest scip --project <slug>
-```
-
-## Dogfooding: Use TempleDB For Everything
-
-This project is managed by TempleDB. Use `templedb` commands instead of
-raw `git` and standard tools wherever possible.
-
-## TL;DR for agents (Claude Code and similar wrappers)
-
-Each Bash tool call gets a fresh shell with a fresh session-leader PID
-and no inherited env, so `templedb file set` in one call and
-`templedb vcs commit` in another end up in *different* VCS sessions —
-the commit finds nothing staged in "this session" and prints
-`23 file(s) staged in other sessions were not included`. Two ways to
-avoid this:
+**1. `file set` replaces the WHOLE file.** A copy you fetched earlier is
+a lock on the entire file: anything committed between your read and your
+write is reverted silently, with no conflict. `--verify` does not catch
+it — it confirms that what you wrote is what landed, not that you meant
+to drop the rest. Always pass `--if-match` on a file you did not just
+read:
 
 ```bash
-# Option A (recommended): declare a session NAME in the wrapper's env.
-# There is no pin subcommand — the env var IS the mechanism.
-templedb vcs session start --name claude-agent   # do this FIRST (see below)
-export TEMPLEDB_SESSION=claude-agent
-# Every templedb call on this host with that name set shares one
-# session across fresh shells. Sessions are keyed on
-# (author, host, name) and expire after 24h. Two agents that want
-# isolation on the same host pick different names.
-# `vcs session start` prints both this and the TEMPLEDB_SESSION_ID form.
-
-# Option B: write + commit atomically in one call. No cross-shell
-# session sharing needed. Session-scoped, so only the just-set file
-# lands in the commit — other sessions' stages stay untouched.
-echo "..." | templedb file set <slug> path/to/file --commit -m "msg"
-```
-
-**Why `session start` comes first, not just the export.** The two
-functions that answer "which session is this?" differ on whether they
-may create one. `VCSService.get_current_session()` — the staging path —
-auto-creates a session for an unknown `TEMPLEDB_SESSION` name, so
-Option A works for `file set` / `vcs add` / `vcs commit` with the export
-alone. `CheckoutRepository.current_session_id()` — which stamps the
-`checkouts` row — deliberately never creates one, so if `templedb edit`
-is the *first* call after setting the var, the workspace gets the right
-directory name and `session_id IS NULL`: an unowned tree, exactly the
-gap in "Open gap in that tranche" above. Verified 2026-10-03:
-`TEMPLEDB_SESSION=zz-probe2 templedb edit regr-test` produced
-`edit-workspaces/regr-test/zz-probe2` with a NULL owner, while opening
-the session first produced an owned row. Any templedb call that stages
-something also creates the session, so this only bites when `edit` leads.
-
-Full session details: see "Sessions: `TEMPLEDB_SESSION_ID`" below.
-`TEMPLEDB_SESSION_ID` must reference a still-live session row and raises
-if it does not; `TEMPLEDB_SESSION` is validated against
-(author, host, still-active), so a leftover name from a different user
-or an ended session is silently ignored rather than adopted.
-
-## Recommended: CLI-first workflow
-
-The CLI reads/writes SQLite directly and is the safest interface for any
-automation, agent, or scripted change. Under the observer model
-(Phase 3+), edits go through EditIntent, and source snapshots come from
-git via ingest adapters. The workflow:
-
-```bash
-# Read files (snapshot from DB — populated by ingest)
-templedb file cat templedb src/services/vcs_service.py
-templedb file ls  templedb src/cli/ -l                  # with line counts
-
-# Read at a specific revision (source_snapshots view — Phase 1)
-templedb source snapshot templedb src/foo.py --rev abc123 --meta
-
-# Write files (routes through EditIntent — Phase 2)
-templedb file set templedb src/foo.py --content "..."   # creates+applies intent
-cat new_code.py | templedb file set templedb src/foo.py
-templedb file set templedb src/foo.py --content "..." --skip-intent  # bypass
-
-# Recommended: interactive edit workspace (Phase 0 + edit-workspaces/)
-templedb edit templedb                                  # prepare workspace (no editor)
-# ...edit files in ~/.config/templedb/edit-workspaces/templedb/...
-templedb commit templedb ~/.config/templedb/edit-workspaces/templedb -m "..."
-```
-
-`templedb commit` (alias for `templedb project commit`) compares your
-workspace directory against DB and creates a commit from filesystem
-content. **Use it instead of `templedb vcs commit`** — see "Known bugs"
-below.
-
-## VCS: use templedb, not git
-
-```bash
-templedb vcs status  templedb --refresh
-templedb vcs add     -p templedb --all
-templedb vcs log     templedb
-templedb vcs diff    templedb --staged
-templedb publish run templedb -m "msg"       # commit + materialize + push
-
-# Branches
-templedb vcs branch templedb                 # list
-templedb vcs branch templedb feature-x       # create
-templedb vcs switch templedb feature-x       # switch
-templedb vcs merge  templedb feature-x       # merge (add --squash if wanted)
-templedb vcs branch templedb -d feature-x    # delete
-```
-
-`templedb vcs commit -p <slug> -m "msg"` exists but has a known
-correctness bug (see below). Prefer `templedb commit <slug> <workspace>`.
-
-## Search: pick the right one
-
-Three commands search three different things. Picking wrong makes code
-that exists look like it doesn't.
-
-```bash
-# Searching file CONTENTS — the usual "where is this symbol?" question
-templedb search content  "apply_standard_pragmas"   # FTS5 index, fast, ranked
-templedb graph who-uses  "apply_standard_pragmas"   # substring scan, slower
-
-# Searching NAMES and metadata — paths, projects, env vars, commit messages
-templedb graph search    "merge_resolver"
-
-# Structure
-templedb graph build-deps templedb           # dependency graph
-templedb graph importers templedb src/file   # who imports this?
-templedb graph callers   templedb someFunc   # who calls this?
-```
-
-| Command | Searches | Notes |
-|---|---|---|
-| `search content X` | file contents | FTS5; supports `"phrase"`, `AND`/`OR`/`NOT`, `pre*` |
-| `graph who-uses X` | file contents | plain substring, no tokenisation; use for underscores/punctuation |
-| `graph search X` | names, paths, commit messages | **not** file contents |
-
-`graph search` returning nothing means "no such path or commit message",
-not "this string appears nowhere". It says so in its own output now.
-
-The FTS index behind `search content` is maintained by triggers on
-`file_contents` (migration 110). If results ever look impossibly thin,
-that's the symptom of it going stale again — it had no INSERT trigger at
-all before 110, so it silently stopped growing and matched 39 files
-across a 197k-line corpus. Rebuild:
-
-```bash
-templedb search reindex     # or re-run migrations/110_fix_fts_content_index.sql
-```
-
-## Interactive editing: `templedb edit <slug>`
-
-For a full-editor session on a project (multi-file, LSP, navigation),
-use the workspace on-ramp:
-
-```bash
-templedb edit templedb              # prepare a writable workspace, print the path
-templedb edit templedb --editor     # ...and open $EDITOR on it (blocks until exit)
-templedb edit bza src/foo.tsx       # optional: name a file (add --editor to open it)
-```
-
-**The editor is opt-in.** Plain `templedb edit <slug>` provisions the
-workspace and returns immediately — that is the form agents and scripts
-want, and it is how you get your own session-scoped tree. `--editor`
-runs `$EDITOR` in the foreground and **blocks until you close it**, so
-never use it from a tool call or any non-interactive context: the command
-will appear to hang with no indication why. (`--no-editor` still works and
-is now redundant.)
-
-The workspace lives at `~/.config/templedb/edit-workspaces/<slug>/` and
-persists across `templedb edit` invocations. Edit files there normally,
-then commit back to the DB:
-
-```bash
-templedb commit <slug> ~/.config/templedb/edit-workspaces/<slug> -m "…"
-```
-
-For a single-file edit without a full workspace, use
-`templedb file edit <slug> <path>` (opens `$EDITOR` on the DB blob).
-
-## Dev mode: `TEMPLEDB_DEV_MODE=1`
-
-When you're actively editing templedb source, set `TEMPLEDB_DEV_MODE=1`
-in your shell. The nix-installed `templedb` binary then prefers the
-materialized checkout at `~/.config/templedb/checkouts/templedb/src` over
-the frozen nix package — so `templedb file set …` followed by `templedb
-<subcommand>` picks up the edit immediately, no rebuild needed.
-
-```bash
-export TEMPLEDB_DEV_MODE=1
-templedb file set templedb src/cli/commands/foo.py --content "..."
-templedb foo bar    # runs the new code from the checkout
-```
-
-Bonus: if the checkout is behind the DB (e.g. you did `file set` without
-`file checkout`), you'll get a one-line stderr warning naming the disk
-and DB hashes plus the fix (`templedb publish run templedb`). Silent
-otherwise.
-
-Anyone with `direnv` can also `direnv allow` the templedb repo directory
-— an `.envrc` there auto-sets the env var when you `cd` in and unsets it
-when you leave.
-
-Default (env var unset): behavior unchanged. The frozen nix package
-wins, reproducibility preserved. Only enable if you're editing templedb
-itself.
-
-Design and options considered:
-`reports/2026-08-16-nix-profile-staleness-design.html`.
-
-## Sessions: `TEMPLEDB_SESSION_ID`
-
-`vcs add` / `vcs commit` are scoped to a **session** — a row in
-`vcs_sessions` that identifies who staged a file. Parallel agents can
-stage into the same project without sweeping each other's work into a
-commit, because `vcs commit` only reads rows staged by the current
-session.
-
-For a single interactive user in one shell, sessions are invisible:
-sequential `templedb` invocations from the same shell auto-share an
-implicit session (matched on `author`, `host`, `ppid`), so
-`vcs add X; vcs commit -m …` works exactly like it always did.
-
-For multi-agent or auditable workflows, be explicit:
-
-```bash
-# Start a named session, export the ID
-eval "$(templedb vcs session start --name my-refactor | grep '^  export')"
-
-# All subsequent templedb calls in this shell use session $TEMPLEDB_SESSION_ID
-templedb vcs add -p templedb src/foo.py
-templedb vcs commit -p templedb -m "refactor foo"
-
-# Or list / inspect
-templedb vcs session list --active
-templedb vcs session show <id>
-templedb vcs status templedb --all    # grouped view of every session's stage
-```
-
-`vcs status` displays the current session badge and, when other sessions
-have rows staged, prints a `Staged in other sessions` footer so surprise
-sweeps aren't possible.
-
-**Agent / setsid workflows — declare a session name.** Under Claude Code
-(and any wrapper that runs each `templedb` call in a fresh Bash tool
-invocation), each call gets its own SID and inherits no env vars, so the
-SID-based auto-share fails — every stage ends up in its own session, and
-the next `vcs commit` says "No changes staged for commit in this
-session." Two fixes:
-
-```bash
-# Option A: declare a session name in the wrapper's env (best for
-# multi-step workflows). Open the session, then export the name.
-templedb vcs session start --name agent-<slug>
-export TEMPLEDB_SESSION=agent-<slug>
-
-# Any subsequent `templedb` call that sees that env var resolves to the
-# same session, even in fresh shells / under setsid:
-templedb vcs add    -p <slug> path/to/file
-templedb vcs commit -p <slug> -m "..."
-
-# When done:
-templedb vcs session end <id>
-
-# Option B: fold write + commit into one call (best for one-off edits).
-# Skips the whole "which session did I stage into" question because the
-# write and commit happen in the same process.
-echo "..." | templedb file set <slug> path/to/file --commit -m "msg"
-```
-
-There is **no pin subcommand and no pin file**. `vcs session start` has
-only `--name` and `--author`; `--pin`, `vcs session unpin`, and the
-`$XDG_STATE_HOME/templedb/session.pin` file described here through
-2026-10-03 were removed, and nothing in the tree reads that path any
-more — a leftover `session.pin` on disk is inert, not honoured. The env
-vars are the whole mechanism:
-
-- `TEMPLEDB_SESSION_ID=<int>` — an exact session id. Must reference a
-  still-live row; raises `ResourceNotFoundError` if it does not.
-- `TEMPLEDB_SESSION=<name>` — a declared name, resolved against
-  `(author, host, still-active)` and newest-first. The staging path
-  auto-creates it when absent; `templedb edit` does not (see the TL;DR
-  above), which is why `session start` comes first.
-
-`templedb vcs session current` reports the resolved session; it does not
-report pin status, because there is nothing to pin.
-
-Design and semantics:
-`reports/2026-08-20-session-scoped-vcs-staging-design.html`.
-Investigation of the related revert regression:
-`reports/2026-08-21-vcs-commit-revert-regression-investigation.html`.
-
-## Write-path history and remaining hazards
-
-**Recently fixed (2026-08-04, commits DBB417D8, 40BAE4CF, 189F33CA):**
-The "`vcs commit` silently reverts `file set` writes" bug. `templedb
-file set` now writes the new `content_hash` into `vcs_working_state`
-and mirrors the content to the checkout dir, so a subsequent
-`vcs commit` or `vcs status --refresh` no longer clobbers the intended
-content. If you observe this class of bug returning, verify those three
-commits are in your build.
-
-**`file set` replaces the WHOLE file — use `--if-match` on anything you
-did not just read.** A copy fetched earlier is effectively a lock on the
-entire file: anything committed between your read and your write is
-reverted silently, with no conflict, and `--verify` does not catch it
-(it only confirms that what you wrote is what landed, not that you meant
-to drop the rest). This happened twice on 2026-10-04 to
-`src/cli/commands/entity.py`, a 5,239-line file four fixes were landing
-in; the first instance went unnoticed for three commits and the second
-was caught only because a brand-new doctor check answered "Unknown
-check" right after the deploy that added it.
-
-```bash
-# read, capture the base hash, patch, write only if nothing moved
 templedb source snapshot <slug> <path> --meta     # prints content_hash
 templedb file cat <slug> <path> > /tmp/f
 # ...patch /tmp/f...
@@ -389,219 +22,309 @@ templedb file set <slug> <path> --if-match <hash12> --verify < /tmp/f
 ```
 
 `--if-match` takes a full sha256 or any prefix of >= 8 hex chars, so the
-truncated hashes printed by `file where`, `source snapshot --meta` and
-doctor all work. It exits 2 on mismatch and names both hashes. On a path
-with no current content it says so explicitly rather than silently
-treating the write as a create.
+truncated hashes from `file where`, `source snapshot --meta` and doctor
+all work. It exits 2 on mismatch and names both hashes.
 
-For multi-file work prefer an edit workspace plus
-`templedb commit <slug> <workspace>`, which diffs against the DB instead
-of overwriting blind.
+**2. Commit the session workspace, not its parent.** Edit workspaces are
+per-session: `~/.config/templedb/edit-workspaces/<slug>/<session-name>/`.
+The parent `<slug>/` directory may itself look like a project root while
+being months stale and containing every other session's tree. Committing
+it reverts everything newer and sweeps in thousands of phantom paths.
+Always commit the full path including the session name, and get it from
+`templedb edit` rather than typing it:
 
-**Belt-and-suspenders check** (run after any critical write).
+```bash
+templedb edit <slug>                       # prints the exact path — use that
+templedb commit <slug> <that-path> -m "…"
+```
 
-Read the file back and compare it to what you meant to write. This beats
-querying the DB directly because it exercises the same read path everyone
-else uses:
+**3. Staging is session-scoped.** `vcs add` / `vcs commit` only see rows
+staged by the *current* session, and each agent Bash tool call gets a
+fresh shell with a fresh session-leader PID and no inherited env. Stage
+in one call and commit in another and the commit finds nothing. See
+[Sessions](#sessions) for the fix.
+
+## Orientation
+
+```bash
+templedb summary                      # health at a glance; authoritative
+templedb entity search <keyword>      # search the entity graph
+templedb provenance machine <host>    # what motivated the code running there
+templedb gui                          # /entities and /summary (port 8420)
+```
+
+## Reading code
+
+Source of truth for source code is git; TempleDB records what it
+observed. `file_contents` is a snapshot table — the `is_current=1` row is
+the most recent *observation*, not "the truth of the file."
+
+```bash
+templedb file cat <slug> <path>                      # current snapshot
+templedb file ls  <slug> src/ -l                     # with line counts
+templedb source snapshot <slug> <path> --rev <hash>  # at a revision
+templedb source snapshot <slug> <path> --meta        # hash, observed_at
+templedb source revisions <slug> <path>              # every known revision
+```
+
+Backing view: `source_snapshots (project_slug, file_path, revision,
+content_hash, content_text, content_blob, content_type,
+file_size_bytes, line_count, observed_at, source_authority)`.
+
+## Search: pick the right one
+
+Three commands search three different things. Picking wrong makes code
+that exists look like it doesn't.
+
+| Command | Searches | Notes |
+|---|---|---|
+| `search content X` | file contents | FTS5; supports `"phrase"`, `AND`/`OR`/`NOT`, `pre*` |
+| `graph who-uses X` | file contents | plain substring, no tokenisation; use for underscores/punctuation |
+| `graph search X` | names, paths, commit messages | **not** file contents |
+
+```bash
+templedb search content  "apply_standard_pragmas"   # fast, ranked
+templedb graph who-uses  "apply_standard_pragmas"   # substring, slower
+templedb graph search    "merge_resolver"           # paths + commit messages
+
+templedb graph build-deps <slug>              # dependency graph
+templedb graph importers  <slug> src/file     # who imports this?
+templedb graph callers    <slug> someFunc     # who calls this?
+```
+
+`graph search` returning nothing means "no such path or commit message",
+not "this string appears nowhere."
+
+If `search content` results look impossibly thin, the FTS index is
+stale: `templedb search reindex`.
+
+## Writing code
+
+**Multi-file work — edit workspace (recommended).** Diffs against the DB
+instead of overwriting blind.
+
+```bash
+templedb edit <slug>                          # provision workspace, print path
+# ...edit files at the printed path...
+templedb commit <slug> <that-path> -m "…"
+```
+
+`templedb edit` does **not** open an editor and returns immediately —
+that is the form agents and scripts want. `--editor` runs `$EDITOR` in
+the foreground and blocks until you close it; never use it from a tool
+call or the command will appear to hang with no indication why.
+
+**Single file — `file set`.** Routes through EditIntent. Re-read
+immediately before writing and pass `--if-match` (see hazard 1).
+
+```bash
+cat new_code.py | templedb file set <slug> src/foo.py --if-match <hash12>
+templedb file set <slug> src/foo.py --content "..." --skip-intent   # bypass intent
+echo "..." | templedb file set <slug> <path> --commit -m "msg"      # write+commit atomically
+```
+
+`file set` lands content *without* a commit. "No changes" from
+status/add/commit afterwards is expected, not a failed write.
+
+**Verify after any critical write.** Read it back through the same path
+everyone else uses:
 
 ```bash
 templedb file cat <slug> <path> | sha256sum      # must match your source
 templedb file cat <slug> <path> | wc -l          # must match your line count
 ```
 
-Do **not** reach for a bare `sqlite3 ...` one-liner: `sqlite3` is on the
-PATH of the wrapped `templedb` binary but not necessarily in your shell,
-so the documented invocation used to exit 127. If you genuinely need SQL,
-go through Python:
+For ad-hoc SQL, neither `sqlite3` nor `python3` is reliably on your
+shell's PATH. Use the MCP `templedb_query` tool, or a nix shell with
+`python3` if you need one outside an MCP client.
+
+## Sessions
+
+A session is a row in `vcs_sessions` identifying who staged a file, so
+parallel agents can stage into one project without sweeping each other's
+work into a commit. For a single interactive shell they are invisible:
+sequential invocations auto-share an implicit session keyed on
+(author, host, session-leader PID).
+
+Three ways to steer identity, highest precedence first:
 
 ```bash
-python3 -c "
-import sqlite3
-c = sqlite3.connect('file:$HOME/.local/share/templedb/templedb.sqlite?mode=ro', uri=True)
-print(c.execute('''SELECT fc.line_count, substr(fc.content_hash,1,12)
-    FROM file_contents fc
-    JOIN project_files pf ON pf.id = fc.file_id
-    JOIN projects p ON p.id = pf.project_id
-   WHERE p.slug = ? AND pf.file_path = ? AND fc.is_current = 1''',
-   ('<slug>', '<path>')).fetchall())"
+# 1. --session flag — explicit at the call site, shows up in --help.
+templedb vcs add    -p <slug> --session <id|name> <path>
+templedb vcs commit -p <slug> --session <id|name> -m "…"
+templedb vcs status    <slug> --session <id|name>
+
+# 2. TEMPLEDB_SESSION_ID=<int> — an exact id. Must reference a live row.
+# 3. TEMPLEDB_SESSION=<name> — resolved against (author, host, active).
 ```
 
-**Fixed 2026-09-19: `file set --stage` reverted the write.** The `--stage`
-branch of `templedb file set` was calling `stage_files()` after
-`_write_content_to_db()` had already auto-staged. `stage_files()`
-internally re-reads the file from the checkout via
-`_refresh_ws_row_from_disk`, and if the disk mirror had any staleness at
-that instant the refresh wrote the *old* content-hash back into
-`vcs_working_state`. The subsequent commit then stored the old blob and
-`is_current` got reset. Fix: `--stage` is now a no-op display flag;
-auto-stage from `_write_content_to_db` is sufficient.
+Accepted on `vcs add`, `reset`, `commit`, `status`. A name is created if
+absent on write commands; `vcs status` resolves strictly and never
+creates one, so a typo errors instead of opening a junk session.
+
+**Agent workflows: open the session before `templedb edit`.** The two
+functions answering "which session is this?" differ on whether they may
+create one. The staging path auto-creates for an unknown name; the
+function that stamps the `checkouts` row deliberately never does, so if
+`templedb edit` is the *first* call after setting the var, you get the
+right directory name and `session_id IS NULL` — an unowned tree that
+`admin checkout-gc` cannot clean and that makes `checkout_matches_db`
+and `checkout_roles_are_unambiguous` go red.
+
+```bash
+templedb vcs session start --name agent-<slug>   # FIRST
+export TEMPLEDB_SESSION=agent-<slug>             # then declare it
+templedb edit <slug>                             # now the tree is owned
+```
+
+Unowned trees fall back to "newest active edit tree wins", which a
+materialise elsewhere can change mid-session. So those two doctor checks
+going red is usually an unpinned agent rather than dead data.
+
+```bash
+templedb vcs session list --active
+templedb vcs session current          # the resolved session
+templedb vcs session show <id>
+templedb vcs session end  <id>
+templedb vcs status <slug> --all      # every session's stage, grouped
+```
+
+## Committing and publishing
+
+```bash
+templedb vcs status <slug> --refresh
+templedb vcs add    -p <slug> --all
+templedb vcs log    <slug>
+templedb vcs diff   <slug> --staged
+templedb publish run <slug> -m "msg"          # commit + materialize + push
+
+templedb vcs branch <slug>                    # list
+templedb vcs branch <slug> feature-x          # create
+templedb vcs switch <slug> feature-x
+templedb vcs merge  <slug> feature-x          # add --squash if wanted
+templedb vcs branch <slug> -d feature-x       # delete
+```
+
+Both `vcs commit -p` and the workspace-diff `templedb commit` work.
+Prefer workspace-diff for scripted or multi-file changes because it
+diffs against the DB rather than relying on what got staged.
+
+"Modified" in `vcs status` means *differs from HEAD*, not *differs from
+`file_contents`* — a file can be byte-identical to `file cat` and still
+genuinely uncommitted.
+
+Only `publish run` reconciles DB-vs-HEAD. For `templedb` that pushes to
+a public GitHub mirror.
 
 ## Rebuilds and the `flake.lock` trap
 
-`flake.lock` is gitignored in `system_config`. Consequence: every
-`nixos-rebuild --flake .` re-locks from scratch because it reads via
-`git+file://` which only sees committed files. Practical implications:
+`flake.lock` is gitignored in `system_config`, so every
+`nixos-rebuild --flake .` re-locks from scratch — it reads via
+`git+file://` and only sees committed files. `nix flake update <input>`
+writes a pin that nixos-rebuild then ignores. The lock is effectively
+transient.
 
-- `nix flake update templedb` writes the new pin to your working-tree
-  `flake.lock` but nixos-rebuild ignores it — the next rebuild re-fetches
-  daemon HEAD.
-- If daemon HEAD hasn't advanced yet (e.g. `templedb publish` is mid-
-  materialize when rebuild starts), the rebuild pins to the previous
-  rev.
-- No amount of `nix flake update` fixes it. The lock is effectively
-  transient.
-
-**The fix:** put the rev directly in `flake.nix`. That's what
-`templedb publish run <slug> --pin-input <input>` does — rewrites
-`<input>.url = "git://…/<input>"` to `"…?rev=<current-HEAD>"` and
-commits it. The pin is authoritative, gitignored `flake.lock` becomes
-irrelevant.
+The fix is to put the rev directly in `flake.nix`, which is what
+`--pin-input` does:
 
 ```bash
-# Typical dev-loop after editing templedb source:
-templedb publish run templedb -m "…"
-templedb publish run system_config --pin-input templedb -m "bump templedb"
+templedb publish run <slug> -m "…"
+templedb publish run system_config --pin-input <slug> -m "bump <slug>"
 templedb nixos system-switch system_config --yes
 ```
 
-## Source snapshots vs `file_contents` (Phase 1 vocabulary)
+Only `nixos system-switch` is durable; a home-rebuild is evicted at the
+next boot. A committed fix is inert until a rebuild — use
+`TEMPLEDB_DEV_MODE=1` to run DB-current code without one.
 
-As of migration 086, `file_contents` is a **snapshot** table, not an
-authoritative-bytes store. The row with `is_current=1` is the most
-recent *observation* of a file, not "the truth of the file." Truth of
-source code lives in git — TempleDB records what it saw.
+## Dev mode: `TEMPLEDB_DEV_MODE=1`
 
-Query surface:
+Set it while editing templedb source. The nix-installed binary then
+prefers a checkout over the frozen nix package, so `file set` followed by
+a `templedb` subcommand picks up the edit with no rebuild.
 
 ```bash
-# Current snapshot (equivalent to templedb file cat)
-templedb source snapshot <slug> <path>
-
-# Historical snapshot at a specific commit
-templedb source snapshot <slug> <path> --rev <commit_hash>
-
-# Metadata only (content_hash, observed_at, source_authority)
-templedb source snapshot <slug> <path> --meta
-
-# Every known revision of a file
-templedb source revisions <slug> <path>
+export TEMPLEDB_DEV_MODE=1
+export TEMPLEDB_DEV_SRC=<workspace>/src    # pin the tree explicitly
+templedb <subcommand>
 ```
 
-Backing view: `source_snapshots` (columns: `project_slug, file_path,
-revision, content_hash, content_text, content_blob, content_type,
-file_size_bytes, line_count, observed_at, source_authority`).
+Pin `TEMPLEDB_DEV_SRC`: dev mode otherwise prefers an edit workspace that
+may hold stale contents. If the chosen tree is behind the DB you get a
+one-line stderr warning naming both hashes. Default (unset) is unchanged
+behaviour — the frozen package wins.
 
-Direct SQL still works:
+## Entity graph
 
-```sql
-SELECT * FROM source_snapshots
- WHERE project_slug = 'templedb'
-   AND file_path = 'src/foo.py'
-   AND revision = 'current';   -- or a real commit_hash
-```
+A typed graph unifying facts across git, nix, agent-runtime, deployment
+and author authorities. Framing in `docs/ENTITY_GRAPH_DESIGN.md`.
 
-This is Phase 1 of the observer/integrator plan. See
-`reports/2026-09-02-1430-from-observer-to-integrator-implementation-plan.html`.
-
-## Entity graph (Phase 3 vocabulary)
-
-As of migrations 089–095, TempleDB carries a typed knowledge graph
-that unifies facts across git, nix, agent-runtime, deployment, and
-author authorities. See [`docs/ENTITY_GRAPH_DESIGN.md`](docs/ENTITY_GRAPH_DESIGN.md)
-for the categorical framing (entities as objects, relations as
-morphisms, first-class spans, commuting-diagram invariants).
-
-**Tables:** `entities (kind, external_ref, source_authority, label,
-observed_at)` + `relations (from, kind, to, source_authority, observed_at,
-attributes_json)` + first-class span tables (`edit_intents`,
-`report_implementations`, `tool_calls`, plus existing `ast_builds`,
+Tables: `entities (kind, external_ref, source_authority, label,
+observed_at)`, `relations (from, kind, to, source_authority,
+observed_at, attributes_json)`, plus span tables (`edit_intents`,
+`report_implementations`, `tool_calls`, `ast_builds`,
 `deployment_history`, `nix_generations`).
 
-### Populate the graph
-
 ```bash
-templedb ingest all                    # all six adapters
-templedb ingest {git,agent,intent,reports,nix,deploy}   # one at a time
-templedb ingest history                # per-adapter freshness telemetry
+templedb ingest all                   # every adapter
+templedb ingest <adapter>             # see `templedb ingest --help`
+templedb ingest history               # per-adapter freshness
+
+templedb entity stats
+templedb entity explore <kind>/<external_ref>          # one hop out + in
+templedb entity trace   <kind>/<ref> --depth N --via K1,K2
+
+templedb provenance machine <name>    # deploy archaeology
+templedb provenance report  <path>    # report → commit
+templedb provenance commit  <hash>    # reverse walk
+templedb provenance intent  <id>      # intent → applied-to
 ```
 
-### Query the graph
+Ingest ok/err counts in `templedb summary` are **cumulative** — a big
+error count is often a long-closed outage. Check
+`MIN/MAX(started_at)` in `ingestion_runs` before calling an adapter
+broken.
+
+Drift detection — doctor is passive, reconcile is network-active:
 
 ```bash
-templedb entity stats                                    # counts by kind
-templedb entity explore <kind>/<external_ref>            # one hop out + in
-templedb entity trace <kind>/<ref> --depth N --via K1,K2 # multi-hop BFS
-
-# Preset workflow queries (thin wrappers over `entity trace`):
-templedb provenance machine <name>       # workflow B: deploy archaeology
-templedb provenance deployment <id>      # deployment ↔ commit + machine
-templedb provenance report <path>        # workflow F: report → commit
-templedb provenance commit <hash>        # reverse walk from a commit
-templedb provenance intent <id>          # workflow A: intent → applied-to
+templedb doctor entities              # commuting invariants
+templedb doctor history [--check NAME]
+templedb reconcile machine <name>     # SSH probe + diff against DB
+templedb reconcile machine all
+templedb reconcile history [--machine]
 ```
 
-### Reconcile (Workflow D)
-
-Active probing of foreign authorities. Where doctor is passive,
-reconcile is network-active:
-
-```bash
-templedb reconcile machine <name>        # SSH probe + diff against DB
-templedb reconcile machine all           # every fleet_machine
-templedb reconcile history [--machine]   # persisted run log (mig 095)
-
-templedb doctor entities                 # passive commuting invariants
-templedb doctor history [--check NAME]   # per-check history (mig 092)
-```
-
-### Cross-session handoff (Phase 2.5)
+## Cross-session handoff
 
 ```bash
 templedb handoff send --topic <t> --subject "..." --body "..."
 templedb handoff send --broadcast --subject "..." --body "..."
 templedb handoff list [--for SID] [--unread]
-templedb handoff show <id>              # marks read
-templedb handoff ack <id> [-m note]     # marks acked
-templedb handoff pop [--for SID]        # show + ack oldest unacked
+templedb handoff show <id>            # marks read
+templedb handoff ack  <id> [-m note]  # marks acked
+templedb handoff pop  [--for SID]     # show + ack oldest unacked
 ```
 
 Unread count appears in `templedb status` when non-zero.
 
-### Web GUI: /entities
-
-`templedb gui` → http://localhost:8420/entities → browse the graph.
-Click a kind for the list; click an entity for its detail with
-inbound/outbound relations as clickable links.
-
 ## What NOT to do
 
-- Do NOT edit files in `~/.config/templedb/checkouts/` directly (read-only,
-  auto-generated by `publish`). Use `templedb edit <slug>` for a writable
-  workspace under `~/.config/templedb/edit-workspaces/<slug>/`.
-- Do NOT use `grep -r` or `find` for code search — use `templedb search
-  content <term>` (file contents) or `templedb graph search <term>`
-  (names, paths, commit messages). These are different searches; see
-  "Search: pick the right one" above before concluding code is absent.
-- Do NOT edit files at `/home/zach/templeDB/` directly — that is a source
-  tree, not the installed CLI, and edits there do nothing.
+- Do NOT edit files in `~/.config/templedb/checkouts/` — read-only,
+  auto-generated by `publish`. Use `templedb edit <slug>`.
+- Do NOT edit files at `/home/zach/templeDB/` — sources only, not the
+  installed CLI. Edits there do nothing.
+- Do NOT use `grep -r` or `find` for code search — see
+  [Search](#search-pick-the-right-one) before concluding code is absent.
+- Do NOT commit the parent of a session workspace (hazard 2).
+- `git add`/`commit`/`push`/`status`/`diff`/`log` in a git checkout are
+  fine — git is authoritative for source; templedb observes via ingest.
 
-**Softened under the observer plan** (no longer forbidden):
-- `git add`/`commit`/`push`/`status`/`diff`/`log` in a git checkout are fine
-  again — git is authoritative for source; templedb observes via ingest.
-  See `docs/ENTITY_GRAPH_DESIGN.md` for the framing.
-- `templedb vcs commit -p` and `templedb file set` both work correctly in
-  the current binary (probed 2026-09-01). The workspace-diff
-  `templedb commit <slug> <workspace>` path is still recommended for
-  scripted / multi-file changes but not the only option.
-
-## Project Info
+## Project info
 
 - **Slug**: `templedb`
 - **DB**: `~/.local/share/templedb/templedb.sqlite`
 - **CLI**: `~/.nix-profile/bin/templedb` (just `templedb` on PATH).
-  `/home/zach/templeDB/templedb` does **not** exist — that directory holds
-  sources only. Pointing anything at it silently fails:
-  `templedb-mcp.service` used that path in its `ExecStart` and crash-looped
-  with `status=203/EXEC` until it was corrected on 2026-09-24.
+  `/home/zach/templeDB/templedb` does not exist; pointing a service at
+  it fails with `status=203/EXEC`.
 - **GUI**: `templedb gui` (port 8420)
-- **Interactive editing**: `templedb edit templedb` (opens `$EDITOR` in `~/.config/templedb/edit-workspaces/templedb/`)

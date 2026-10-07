@@ -77,12 +77,35 @@ class VCSService(BaseService):
             pass
         return "unknown"
 
-    # -- Session pin file (agent-safe cross-invocation session sharing) --
+    # -- Session identity (agent-safe cross-invocation sharing) --
+
+    def set_session_override(self, value: Optional[str]) -> None:
+        """Pin session identity from an explicit `--session <id|name>`.
+
+        Takes precedence over TEMPLEDB_SESSION_ID / TEMPLEDB_SESSION so a
+        caller can name the session at the call site instead of threading
+        an env var through a wrapper. An all-digits value is an exact id;
+        anything else is a declared name, resolved and auto-created
+        exactly like TEMPLEDB_SESSION.
+
+        Deliberately *not* a stored pin. The override lives for the
+        duration of this process only, so it carries none of the hidden
+        global state that got the `session.pin` file removed — the whole
+        point is that the identity is visible in the command you typed.
+        """
+        value = (value or "").strip()
+        self._session_override = value or None
+        if value:
+            # Drop any identity resolved before the flag was applied, so
+            # the override wins over the per-instance cache too.
+            self._current_session = None
 
     def get_current_session(self) -> Dict[str, Any]:
         """Resolve the current VCS session, reusing or creating as needed.
 
         Resolution order:
+          0. `--session <id|name>` flag, via set_session_override() — an
+             explicit caller-side pin that outranks both env vars
           1. TEMPLEDB_SESSION_ID env var (must reference a live session row)
           2. Implicit session cached on this service instance
           3. TEMPLEDB_SESSION env var (declared name; migration 108
@@ -113,21 +136,39 @@ class VCSService(BaseService):
         if cached:
             return cached
 
-        env_id = os.environ.get("TEMPLEDB_SESSION_ID", "").strip()
-        if env_id:
+        # An explicit --session flag outranks the env vars; when it is
+        # set the environment is not consulted at all, so a stray
+        # TEMPLEDB_SESSION_ID in the wrapper cannot shadow what the
+        # caller typed. Digits mean an exact id, anything else a name.
+        override = getattr(self, "_session_override", None)
+        if override:
+            origin = "--session"
+            requested_id = override if override.isdigit() else ""
+            requested_name = "" if override.isdigit() else override
+        else:
+            origin = "TEMPLEDB_SESSION_ID"
+            requested_id = os.environ.get("TEMPLEDB_SESSION_ID", "").strip()
+            requested_name = os.environ.get("TEMPLEDB_SESSION", "").strip()
+
+        if requested_id:
             try:
-                sid = int(env_id)
+                sid = int(requested_id)
             except ValueError:
                 raise ValidationError(
-                    f"TEMPLEDB_SESSION_ID must be an integer, got {env_id!r}"
+                    f"{origin} must be an integer, got {requested_id!r}"
                 )
             row = self.vcs_repo.query_one(
                 "SELECT * FROM vcs_sessions WHERE id = ?", (sid,)
             )
             if not row:
                 raise ResourceNotFoundError(
-                    f"TEMPLEDB_SESSION_ID={sid} references no live session",
-                    solution="Run 'templedb vcs session start' to create one, or unset the env var",
+                    f"{origin}={sid} references no live session",
+                    solution=(
+                        "Pick a live id from 'templedb vcs session list --active', "
+                        "or start one with 'templedb vcs session start --name <name>'"
+                        if override else
+                        "Run 'templedb vcs session start' to create one, or unset the env var"
+                    ),
                 )
             self._current_session = dict(row)
             return self._current_session
@@ -142,7 +183,7 @@ class VCSService(BaseService):
         # is the agent-workflow answer: one env var in the wrapper's
         # settings, no pin file, no runtime detection. If two agents
         # want isolation on the same host, they pick different names.
-        session_name = os.environ.get("TEMPLEDB_SESSION", "").strip()
+        session_name = requested_name
         if session_name:
             existing = self.vcs_repo.query_one(
                 """

@@ -87,6 +87,63 @@ class VCSCommands(Command):
             pass
         return "unknown"
 
+    def _apply_session_override(self, args, allow_create: bool = True) -> None:
+        """Honour an explicit `--session <id|name>` before resolving identity.
+
+        Staging, unstaging, committing and status are all session-scoped,
+        so each of them accepts the flag. Commands without it pass None
+        and keep the env-var/implicit resolution untouched.
+
+        Resolving it here also exports TEMPLEDB_SESSION_ID into this
+        process's environment, which is not redundant: identity is read
+        in two independent places — VCSService.get_current_session() for
+        staging, and CheckoutRepository.current_session_id() for
+        checkout-role resolution — and the latter reads env vars only.
+        Without the export, `vcs status --session mine` resolves staging
+        to the right session while still reporting that no edit tree
+        belongs to it. Process-local, so nothing leaks to the next call.
+
+        allow_create is for write commands only. `vcs status` passes
+        False: it must not open a session just because a name was
+        misspelled, which is the same invariant behind its use of
+        CheckoutRepository.current_session_id().
+        """
+        import os
+
+        value = getattr(args, 'session', None)
+        self.service.set_session_override(value)
+        if not value:
+            return
+        sid = (self.service.get_current_session()['id'] if allow_create
+               else self._resolve_session_strict(value))
+        os.environ['TEMPLEDB_SESSION_ID'] = str(sid)
+        # Drop any conflicting declared name so the two readers cannot
+        # disagree if the id above ever fails a liveness check.
+        os.environ.pop('TEMPLEDB_SESSION', None)
+
+    def _resolve_session_strict(self, value: str) -> int:
+        """Resolve `--session <id|name>` to a live id, never creating one."""
+        from error_handler import ResourceNotFoundError
+
+        if value.isdigit():
+            row = self.vcs_repo.query_one(
+                "SELECT id FROM vcs_sessions WHERE id = ? AND ended_at IS NULL",
+                (int(value),))
+        else:
+            row = self.vcs_repo.query_one(
+                """SELECT id FROM vcs_sessions
+                    WHERE name = ? AND ended_at IS NULL
+                    ORDER BY started_at DESC LIMIT 1""", (value,))
+        if not row:
+            raise ResourceNotFoundError(
+                f"--session={value} references no live session",
+                solution=(
+                    "Pick a live one from 'templedb vcs session list --active', "
+                    "or start it with 'templedb vcs session start --name <name>'"
+                ),
+            )
+        return row['id']
+
     def _refresh_working_state(self, project: dict):
         """Refresh VCS working state by detecting changes.
 
@@ -118,6 +175,7 @@ class VCSCommands(Command):
         """Stage files for commit"""
         from error_handler import ResourceNotFoundError, ValidationError
 
+        self._apply_session_override(args)
         try:
             # Fuzzy match project
             project = fuzzy_match_project(args.project, show_matched=False)
@@ -191,6 +249,7 @@ class VCSCommands(Command):
         """Unstage files"""
         from error_handler import ResourceNotFoundError, ValidationError
 
+        self._apply_session_override(args)
         try:
             # Fuzzy match project
             project = fuzzy_match_project(args.project, show_matched=False)
@@ -401,6 +460,7 @@ class VCSCommands(Command):
 
     def commit(self, args) -> int:
         """Create VCS commit"""
+        self._apply_session_override(args)
         # Fuzzy match project
         project = fuzzy_match_project(args.project, show_matched=False)
         if not project:
@@ -769,6 +829,7 @@ class VCSCommands(Command):
         from cli.json_output import emit, emit_error
 
         try:
+            self._apply_session_override(args, allow_create=False)
             project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
                 return emit_error(args, "NOT_FOUND", f"Project '{args.project}' not found")
@@ -2290,10 +2351,23 @@ def register(cli):
     vcs_parser = cli.register_command('vcs', None, help_text='Version control')
     subparsers = vcs_parser.add_subparsers(dest='vcs_subcommand', required=True)
 
+    # Staging is session-scoped: `vcs commit` only includes files staged
+    # in the *same* session, so a fresh-shell agent that stages and
+    # commits in separate calls finds nothing to commit. Saying so in
+    # --help is the point — before this flag the only way to steer
+    # session identity was an env var nothing in --help mentioned.
+    session_help = (
+        'Act as this staging session: a numeric id, or a declared name '
+        '(created if it does not exist). Outranks TEMPLEDB_SESSION_ID and '
+        'TEMPLEDB_SESSION. Staging is session-scoped — a commit only '
+        'includes files staged in the same session.'
+    )
+
     # vcs add
     add_parser = subparsers.add_parser('add', help='Stage files for commit')
     add_parser.add_argument('-p', '--project', required=True, help='Project name or pattern (fuzzy matching enabled)')
     add_parser.add_argument('-a', '--all', action='store_true', help='Stage all changes')
+    add_parser.add_argument('--session', metavar='ID|NAME', help=session_help)
     add_parser.add_argument('files', nargs='*', help='File patterns to stage (fuzzy matching enabled)')
     cli.commands['vcs.add'] = cmd.add
 
@@ -2302,6 +2376,7 @@ def register(cli):
     reset_parser.add_argument('-p', '--project', required=True, help='Project name or pattern (fuzzy matching enabled)')
     reset_parser.add_argument('-a', '--all', action='store_true', help='Unstage all changes')
     reset_parser.add_argument('files', nargs='*', help='File patterns to unstage (fuzzy matching enabled)')
+    reset_parser.add_argument('--session', metavar='ID|NAME', help=session_help)
     cli.commands['vcs.reset'] = cmd.reset
 
     # vcs edit
@@ -2322,6 +2397,7 @@ def register(cli):
     commit_parser.add_argument('-p', '--project', required=True, help='Project name or pattern (fuzzy matching enabled)')
     commit_parser.add_argument('-b', '--branch', help='Branch name')
     commit_parser.add_argument('-a', '--author', help='Author name')
+    commit_parser.add_argument('--session', metavar='ID|NAME', help=session_help)
     cli.commands['vcs.commit'] = cmd.commit
 
     # vcs status
@@ -2330,6 +2406,7 @@ def register(cli):
     status_parser.add_argument('--refresh', '-r', action='store_true', help='Refresh working state')
     status_parser.add_argument('--all', action='store_true',
                                help='Show staged files from all sessions, grouped by session')
+    status_parser.add_argument('--session', metavar='ID|NAME', help=session_help)
     cli.commands['vcs.status'] = cmd.status
 
     # vcs session {start,end,list,current,show}
