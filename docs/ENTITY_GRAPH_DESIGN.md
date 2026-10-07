@@ -185,8 +185,19 @@ Phase 3 does NOT:
 - Turn `deployment_snapshots` into a proper span. That's a follow-up
   once the span pattern has proven out.
 
-Phase 4 would have added SCIP as an additional local chart; that tranche
-is **deferred** — the adapter exists but has not run since 2026-09-05.
+Phase 4 would have added SCIP as an additional local chart. It was
+written off as deferred, but the data disagrees: `scip-typescript`
+runs, and it owns 15,821 of the 20,916 `Symbol` entities against
+Python's 5,095. What never happened is the tranche *around* it — no
+phase doc, no Rust or Nix adapter, and no decision about the chart
+boundary it quietly crossed. Both adapters write `Symbol` into one
+`UNIQUE(kind, external_ref)` namespace with no authority
+discriminator, so the local charts do not actually commute: nothing in
+the schema stops a Python ref and a TypeScript ref colliding. Either
+`source_authority` becomes part of the `Symbol` ref encoding, or the
+adapter is retired. Until then this is the one place the categorical
+framing is aspirational rather than enforced.
+
 SSH-probe reconcile shipped instead, as `templedb reconcile`. Phase 5
 retires the authority-over-source vocabulary that the observer plan is
 walking away from. Current tranche status lives in
