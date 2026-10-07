@@ -4,6 +4,106 @@ Admin commands - consolidated group for system, db, cache, schema, and bootstrap
 """
 
 
+def _admin_which(args) -> int:
+    """Print which templedb this is and which tree it is running from.
+
+    Exists because "is the code I just wrote the code that is running?"
+    is the single most repeated question in this project, and the usual
+    ways of answering it are wrong in quiet ways.
+
+    On 2026-10-07 I answered it with `grep /nix/store/*templedb-0.1.0*/`,
+    matched a store path that was not the installed one, and reported
+    that a fix had not deployed when it had. The glob is the obvious
+    move and there was nothing that made the correct move easier.
+
+    Prints, in the order they override each other:
+      - the resolved executable and its store path
+      - the directory modules are actually imported from
+      - the dev-mode tree, if dev mode is on, and who owns it
+      - the DB being used, and whether migrations are pending
+    """
+    import json as _json
+    import os
+    import sys
+    from pathlib import Path
+
+    info = {}
+
+    exe = Path(sys.argv[0]).resolve() if sys.argv and sys.argv[0] else None
+    try:
+        import shutil
+        exe = Path(shutil.which("templedb") or exe).resolve()
+    except Exception:
+        pass
+    info['executable'] = str(exe) if exe else None
+    info['store_path'] = None
+    if exe:
+        for part in exe.parents:
+            if part.parent == Path('/nix/store'):
+                info['store_path'] = str(part)
+                break
+
+    # Where modules are ACTUALLY imported from — the only answer that
+    # cannot be wrong, because it is the running interpreter's own view.
+    try:
+        import cli as _cli
+        info['package_dir'] = str(Path(_cli.__file__).resolve().parent.parent)
+    except Exception:
+        info['package_dir'] = None
+
+    info['dev_mode'] = bool(os.environ.get("TEMPLEDB_DEV_MODE"))
+    info['dev_src_override'] = os.environ.get("TEMPLEDB_DEV_SRC") or None
+    info['dev_tree'] = None
+    if info['dev_mode']:
+        try:
+            from _devmode import resolve_dev_checkout
+            tree = resolve_dev_checkout(warn=False)
+            info['dev_tree'] = str(tree) if tree else None
+        except Exception:
+            pass
+
+    try:
+        from config import DB_PATH
+        info['db'] = str(DB_PATH)
+    except Exception:
+        info['db'] = None
+    info['session'] = (os.environ.get("TEMPLEDB_SESSION_ID")
+                       or os.environ.get("TEMPLEDB_SESSION") or None)
+
+    try:
+        from db_utils import query_one
+        info['schema_version'] = (query_one(
+            "SELECT MAX(version) AS v FROM schema_version") or {}).get('v')
+    except Exception:
+        info['schema_version'] = None
+
+    if getattr(args, 'json', False):
+        print(_json.dumps(info, indent=2))
+        return 0
+
+    print(f"executable    {info['executable']}")
+    if info['store_path']:
+        print(f"store path    {info['store_path']}")
+    print(f"importing from{'':1}{info['package_dir']}")
+    print(f"dev mode      {'on' if info['dev_mode'] else 'off'}")
+    if info['dev_mode']:
+        if info['dev_src_override']:
+            print(f"  DEV_SRC     {info['dev_src_override']} (override)")
+        print(f"  running     {info['dev_tree'] or '(no usable tree)'}")
+        if info['dev_tree'] and info['package_dir'] and \
+                not str(info['dev_tree']).startswith(str(info['package_dir'])):
+            # The distinction that matters: dev mode resolved a tree,
+            # but imports came from somewhere else. Means the resolve
+            # happened after import, or an override disagrees with the
+            # launcher — either way the code running is not the code
+            # named above.
+            print("  ⚠  imports did NOT come from the dev tree")
+    print(f"database      {info['db']}")
+    print(f"schema        {info['schema_version']}")
+    print(f"session       {info['session'] or '(unpinned)'}")
+    return 0
+
+
 def register(cli):
     """Register admin commands as subcommands under 'admin' top-level command."""
     from cli.commands.system import SystemCommands
@@ -20,6 +120,13 @@ def register(cli):
     system_cmd = SystemCommands()
     subparsers.add_parser('status', help='Show database and system status')
     cli.commands['admin.status'] = system_cmd.status
+
+    # --- admin which ---
+    which_p = subparsers.add_parser(
+        'which', help='Which templedb is running, and from where')
+    which_p.add_argument('--json', action='store_true',
+                         help='Machine-readable output')
+    cli.commands['admin.which'] = _admin_which
 
     # --- admin checkout-gc ---
     # CheckoutCommands.cleanup_checkouts() and

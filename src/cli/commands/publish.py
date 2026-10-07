@@ -88,6 +88,16 @@ class PublishCommands(Command):
                         branch=None,
                     )
                     rc = vcs_cmd.commit(commit_args)
+                    if rc != 0 and self._provision_edit_workspace(
+                            project_slug):
+                        # The commit had staged rows and no writable tree
+                        # to resolve them against. That is not a conflict
+                        # or a bad state -- it is a missing directory, and
+                        # publish can make one. Ending a session retires
+                        # its edit checkout, so this is the *normal* state
+                        # for any caller that cleaned up after itself, and
+                        # it stranded two publishes on 2026-10-07.
+                        rc = vcs_cmd.commit(commit_args)
                     if rc == 0:
                         print(f"  Committed: {message}")
                     else:
@@ -211,6 +221,33 @@ class PublishCommands(Command):
                     print(f"    - {f}", file=sys.stderr)
                 return 1
             return 0
+
+        # Do NOT push on a failed commit. Materializing anyway is
+        # defensible -- it is local, and the DB holds the right content
+        # whether or not a vcs_commits row was written. Pushing is not:
+        # it is the one step that leaves this machine, it is effectively
+        # irreversible once a mirror is public, and it ships content
+        # that templedb's own history has no entry for. On 2026-10-07
+        # that happened twice in a row, to two different public GitHub
+        # repos, each time reported as a partial failure *after* the
+        # push had already gone out.
+        #
+        # --force overrides, for the case where the mirror is genuinely
+        # the thing you need updated and the commit row can be
+        # backfilled afterwards.
+        if failures and not getattr(args, 'push_anyway', False):
+            print(
+                f"\n✗ Refusing to push: {len(failures)} earlier step(s) "
+                f"failed.", file=sys.stderr)
+            for f in failures:
+                print(f"    - {f}", file=sys.stderr)
+            print(
+                f"\n  Content IS materialized at {checkout} — this only "
+                f"stops it leaving the machine.\n"
+                f"  Fix the commit and re-run, or `publish run "
+                f"{project_slug} --push-anyway` to override.",
+                file=sys.stderr)
+            return 1
 
         pushed = 0
         for name, url in mirrors.items():
@@ -362,6 +399,55 @@ class PublishCommands(Command):
             print(f"    {name:15s} {r['value']}")
 
         return 0
+
+    def _provision_edit_workspace(self, project_slug: str) -> bool:
+        """Make this caller an edit workspace, if that is what is missing.
+
+        `vcs commit` resolves staged paths against a tree the caller may
+        write to, and refuses with NoEditCheckout when there is none: the
+        remaining trees are the published one (committing against it
+        reverts whatever the DB holds that it does not) and other
+        sessions' (committing against those stages someone else's work).
+        Both refusals are right.
+
+        But the usual way to arrive there is mundane — ending a session
+        retires its edit checkout, so *any* caller that cleaned up after
+        itself hits this on the next publish. On 2026-10-07 it stranded
+        two publishes back to back, and both materialized and pushed
+        with no commit row behind them.
+
+        A missing directory is something publish can fix, so it does,
+        once, and retries the commit. Returns True if a workspace now
+        exists that did not before — the caller should only retry on
+        True, or a genuine commit failure turns into an infinite loop.
+
+        Shells out to `project checkout --writable` rather than
+        reimplementing it, so there is one materialize-to-workspace
+        path and this cannot drift from `templedb edit`.
+        """
+        try:
+            from cli.commands.edit import edit_workspace_path
+        except Exception:
+            return False
+
+        workspace = edit_workspace_path(project_slug).expanduser().resolve()
+        if workspace.exists():
+            # Already there — the commit failed for some other reason,
+            # and re-running it would just fail again.
+            return False
+
+        print(f"  No edit workspace; creating {workspace}")
+        workspace.parent.mkdir(parents=True, exist_ok=True)
+        rc = subprocess.call([
+            "templedb", "project", "checkout",
+            project_slug, str(workspace), "--writable",
+        ])
+        if rc != 0:
+            logger.warning(
+                f"Could not provision an edit workspace (exit {rc}); "
+                f"the commit will be reported as failed.")
+            return False
+        return True
 
     def _pin_flake_inputs(self, project_slug: str, input_names: list,
                           failures: list = None) -> None:
@@ -569,6 +655,12 @@ def register(cli):
     run_p.add_argument('--force', '-f', action='store_true',
                        help='Deprecated no-op; publish always overwrites '
                             'the checkout (DB is authoritative).')
+    run_p.add_argument('--push-anyway', action='store_true',
+                       help='Push to mirrors even if the commit step '
+                            'failed. Default is to refuse: a push is the '
+                            'one irreversible, outward-facing step, and '
+                            'shipping content with no vcs_commits row '
+                            'leaves the mirror ahead of templedb history.')
     run_p.add_argument('--pin-input', action='append', metavar='NAME',
                        help='Pin a flake input in this project\'s flake.nix '
                             'to the current git HEAD of that input\'s '

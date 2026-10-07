@@ -52,6 +52,23 @@ def _env_session() -> Optional[str]:
     return os.environ.get("TEMPLEDB_SESSION", "").strip() or None
 
 
+def _env_session_id() -> Optional[int]:
+    """This process's pinned session id, or None.
+
+    The id form is the one agents actually export (`vcs session start`
+    prints both, and TEMPLEDB_SESSION_ID is the exact-match spelling),
+    so resolution has to honour it as well as the name — otherwise the
+    common agent setup is still treated as unpinned. Parsed here rather
+    than trusted: a stale or garbage value must rank nothing first, not
+    raise on a startup path.
+    """
+    raw = os.environ.get("TEMPLEDB_SESSION_ID", "").strip()
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return None
+
+
 def resolve_dev_checkout(warn=True) -> Optional[Path]:
     """Return the src/ dir dev mode should run from, or None if there is none.
 
@@ -99,22 +116,43 @@ def _resolve_uncached(warn: bool) -> Optional[Path]:
             # kind/session come back so an accepted non-canonical tree
             # can name itself and its owner. Arity matches the legacy
             # query's padding below so the unpack is shape-stable.
+            # Rank this caller's OWN tree first, before kind and before
+            # recency. Dev mode exists to run the code you are editing,
+            # and "yours" beats "newest" at saying which that is.
+            #
+            # Without this the order was kind-then-recency, so any
+            # agent sharing the host could win simply by having touched
+            # a workspace more recently. On 2026-10-07 a one-character
+            # slip (exporting session 1046 when the session was 1045)
+            # created a tree under a *different* session's name, and
+            # dev mode then served it to an unrelated process — which
+            # announced itself as "NOT yours ... stale contents here
+            # run silently" and was right. The warning was good; the
+            # choice it was warning about was the bug.
             ordered = """SELECT c.checkout_path, c.kind, s.name
                             FROM checkouts c
                             JOIN projects p ON p.id = c.project_id
                        LEFT JOIN vcs_sessions s ON s.id = c.session_id
                            WHERE p.slug = 'templedb' AND c.is_active = 1
-                           ORDER BY CASE c.kind WHEN 'edit' THEN 0
+                           ORDER BY CASE WHEN (? IS NOT NULL
+                                               AND s.name = ?) THEN 0
+                                         WHEN (? IS NOT NULL
+                                               AND c.session_id = ?) THEN 0
+                                         ELSE 1 END,
+                                    CASE c.kind WHEN 'edit' THEN 0
                                                 WHEN 'canonical' THEN 1
                                                 ELSE 2 END,
                                     c.checkout_at DESC"""
+            mine_name = _env_session()
+            mine_id = _env_session_id()
+            ordered_params = (mine_name, mine_name, mine_id, mine_id)
             legacy = """SELECT c.checkout_path, NULL AS kind, NULL AS name
                            FROM checkouts c
                           JOIN projects p ON p.id = c.project_id
                          WHERE p.slug = 'templedb' AND c.is_active = 1
                          ORDER BY c.checkout_at DESC"""
             try:
-                rows = con.execute(ordered).fetchall()
+                rows = con.execute(ordered, ordered_params).fetchall()
             except sqlite3.OperationalError:
                 rows = con.execute(legacy).fetchall()
             src_files: List[str] = [r[0] for r in con.execute(

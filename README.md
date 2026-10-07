@@ -183,7 +183,10 @@ Interactive editing goes through `templedb edit <slug>` (workspace under `~/.con
 ```bash
 templedb commit bza <workspace> -m "message"     # commit workspace to DB → Commit entity
 templedb publish run bza                          # commit + materialize + push to git remote
+templedb publish run bza --push-anyway            # push even if the commit step failed
 ```
+
+`publish` refuses to push when the commit step failed. Materializing anyway is fine — that is local, and the DB holds the right content either way — but a push leaves the machine and is effectively irreversible once the mirror is public, and it would ship content templedb's own history has no row for. It also provisions an edit workspace for you if the commit failed only because there wasn't one, which is the usual cause: ending a session retires its edit tree.
 
 Or step-by-step VCS:
 
@@ -247,6 +250,10 @@ templedb entity list --kind Deployment            # every Deployment entity
 templedb entity paths --kind Symbol --limit 20    # entity refs by external_ref shape
 templedb entity freshness                         # observed_at lag per kind
 
+# What did one session actually do? (Session/Checkout landed 2026-10-07)
+templedb entity explore Session/1044
+templedb entity trace   Session/1044 --depth 2 --via proposed,applied-to
+
 templedb hygiene dead-imports bza                 # imports with no references
 ```
 
@@ -273,6 +280,34 @@ them:
 | `blob_refcount_is_accurate` | `content_blobs.reference_count` disagreeing with reality — it had no UPDATE trigger, so it over-reported by 2x |
 | `blob_orphans_within_budget` | unreachable blobs accumulating; 378 MB (half the database file) had built up uncollected |
 | `views_are_runnable` | a view whose table was dropped. SQLite validates a view body only at query time, so `related_readmes` sat broken in `sqlite_master` through six migrations |
+| `no_long_uncommitted_content` | content sitting in the DB ahead of HEAD. `file set` lands content without a commit, and 78 files across 5 projects had been that way — the oldest since July, all of them already pushed to mirrors |
+| `baseline_rows_still_describe_reality` | the ratchet below going stale. `vcs_commits.git_commit_hash` was marked all-NULL and then *populated by migration 126* — the ratchet suppressed the column that migration existed to fill |
+
+Doctor also asserts what it proves. Every invariant that passes records
+a [claim](#claims-propositions-that-carry-their-revision) scoped to the
+commit it observed, so "was this true at that revision?" is a query
+rather than a memory.
+
+### Claims: propositions that carry their revision
+
+A claim is a proposition scoped to `(project, commit, host, inputs)`,
+with a `warrant_kind` naming the *inference rule* rather than the
+conclusion, and evidence attachable as `supports` **or** `undercuts` —
+so a claim carries its own contrary evidence instead of the author
+quietly omitting it. `'asserted'` is an explicit warrant meaning "an
+agent's say-so, recorded as such", which is what keeps it
+distinguishable from a checked claim.
+
+```bash
+templedb claims list templedb          # what is claimed, and what covers HEAD
+templedb claims show <id>              # scope, warrant, evidence
+```
+
+Two producers today: `test_runner` (`tests-all-passed`) and `doctor`
+(`doctor-invariant`). Claims are asserted only when the evidence
+supports them — a failing check is still recorded in `invariant_checks`
+as evidence, it just does not produce a claim, so the *absence* of one
+at a revision is meaningful.
 
 ---
 
@@ -644,7 +679,17 @@ use_templedb
 
 ### Shell tips
 
-`nix` installs both `templedb` and `tdb` (alias). `TEMPLEDB_DEV_MODE=1` in your shell makes `file set` edits take effect immediately without a rebuild (dev mode, use only when hacking on templedb itself).
+`nix` installs both `templedb` and `tdb` (alias). `TEMPLEDB_DEV_MODE=1` in your shell makes `file set` edits take effect immediately without a rebuild (dev mode, use only when hacking on templedb itself). Dev mode prefers *your* workspace — the one owned by `TEMPLEDB_SESSION_ID`/`TEMPLEDB_SESSION` — then the canonical tree; it used to rank purely by recency, which let another agent's workspace on the same host win.
+
+When the answer to "is the code I just wrote the code that is running?" matters, ask directly rather than grepping `/nix/store`:
+
+```bash
+templedb admin which          # executable, store path, where modules are
+                              # ACTUALLY imported from, dev tree + owner,
+                              # DB, schema version, session
+```
+
+The *importing from* line is the one that cannot lie — it is the running interpreter's own view. Globbing the store for a version-matched path finds stale builds happily, and reading one is how a landed fix gets reported as undeployed.
 
 ---
 

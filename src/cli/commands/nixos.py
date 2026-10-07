@@ -152,8 +152,80 @@ def _mark_clean():
         pass
 
 
-def _check_dirty_and_prompt() -> bool:
-    """Return True if the caller should proceed, False if aborted."""
+def _adopt_relocked_flake_lock(slug: str) -> None:
+    """Write the lock the rebuild just produced back into the DB.
+
+    nixos-rebuild relocks against the checkout, not the DB, so a
+    successful switch routinely leaves checkouts/<slug>/flake.lock
+    newer than the DB's copy. `checkout_matches_db` then goes red, and
+    the fix is a manual `file set` of the checkout's lock -- which is
+    the documented direction (relock from the DEPLOYED lock, never the
+    DB's, which may be stale). On 2026-10-07 that happened on two
+    consecutive switches and was repaired by hand both times.
+
+    Doing it here closes the loop at the only moment the answer is
+    unambiguous: the build that just succeeded used exactly this lock,
+    so it is the one worth keeping.
+
+    Best-effort and silent on absence. A project with no lock, or no
+    checkout, is not an error -- most projects are neither.
+    """
+    try:
+        from pathlib import Path
+        from db_utils import query_one
+        import config as _cfg
+
+        lock = Path(_cfg.CHECKOUT_DIR) / slug / "flake.lock"
+        if not lock.exists():
+            return
+        disk = lock.read_text()
+
+        row = query_one(
+            """SELECT cb.content_text AS txt
+                 FROM file_contents fc
+                 JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+                 JOIN project_files pf ON pf.id = fc.file_id
+                 JOIN projects p ON p.id = pf.project_id
+                WHERE p.slug = ? AND pf.file_path = 'flake.lock'
+                  AND fc.is_current = 1""", (slug,))
+        if not row or row['txt'] == disk:
+            return
+
+        import subprocess
+        from cli.core import templedb_command
+        rc = subprocess.run(
+            templedb_command("file", "set", slug, "flake.lock"),
+            input=disk, text=True, capture_output=True).returncode
+        if rc == 0:
+            print("   flake.lock: adopted the lock this rebuild produced "
+                  "(the DB's copy was stale)")
+        else:
+            print("   ⚠️  flake.lock differs from the DB and could not be "
+                  "adopted; `checkout_matches_db` will report it",
+                  file=sys.stderr)
+    except Exception as e:
+        logger.debug(f"flake.lock adoption skipped: {e}")
+
+
+def _check_dirty_and_prompt(assume_yes: bool = False) -> bool:
+    """Return True if the caller should proceed, False if aborted.
+
+    `assume_yes` means "the caller passed --yes": proceed without
+    asking, and *skip* the generate rather than running it.
+
+    Skip rather than run, deliberately. --yes on system-switch means
+    "don't ask me to confirm activation"; it does not mean "regenerate
+    my NixOS config from the AST". Those have very different blast
+    radii — a generate rewrites flake.nix, which is exactly where
+    `publish --pin-input` writes the templedb revision, so an implied
+    yes here can silently revert the pin the rebuild is supposed to be
+    testing.
+
+    Before this, --yes did not reach the prompt at all: input() hit
+    EOF in any non-interactive context, returned False, and aborted
+    the entire switch with "Cancelled." A flag that claims to skip
+    prompts has to at minimum not deadlock on one.
+    """
     conn = _get_conn()
     generated, manual = _split_dirty(conn, _changed_keys(conn))
     count = len(generated)
@@ -183,10 +255,23 @@ def _check_dirty_and_prompt() -> bool:
 
     noun = "config key" if count == 1 else "config keys"
     print(f"⚠ {count} {noun} changed since last generate.", file=sys.stderr)
+
+    if assume_yes:
+        print(f"  --yes: skipping generate (it rewrites flake.nix, "
+              f"including any pinned input revs).\n"
+              f"  Run `templedb nixos generate {slug}` first if you "
+              f"wanted the config regenerated.", file=sys.stderr)
+        return True
+
     try:
         answer = input("Generate now? [Y/n] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
-        print("\nCancelled.", file=sys.stderr)
+        # No tty and no --yes. Aborting is right -- this is a real
+        # decision and nobody is there to make it -- but say which
+        # flag resolves it instead of just "Cancelled."
+        print("\nCancelled: no terminal to prompt on. Pass --yes to "
+              "proceed without generating, or run "
+              f"`templedb nixos generate {slug}` first.", file=sys.stderr)
         return False
 
     if answer in ("", "y", "yes"):
@@ -595,7 +680,7 @@ class NixOSCommand(Command):
 
     def home_rebuild(self, args) -> int:
         """Rebuild home-manager only (no full NixOS rebuild)"""
-        if not _check_dirty_and_prompt():
+        if not _check_dirty_and_prompt(getattr(args, 'yes', False)):
             return 1
 
         try:
@@ -707,7 +792,7 @@ class NixOSCommand(Command):
         except Exception:
             pass
 
-        if not _check_dirty_and_prompt():
+        if not _check_dirty_and_prompt(getattr(args, 'yes', False)):
             return 1
 
         if hasattr(args, 'update_input') and args.update_input:
@@ -724,7 +809,7 @@ class NixOSCommand(Command):
 
     def system_switch(self, args) -> int:
         """Switch to system configuration (nixos-rebuild switch)"""
-        if not _check_dirty_and_prompt():
+        if not _check_dirty_and_prompt(getattr(args, 'yes', False)):
             return 1
 
         try:
@@ -767,6 +852,7 @@ class NixOSCommand(Command):
 
             if result['success']:
                 print("\n✅ Switch successful!")
+                _adopt_relocked_flake_lock(args.slug)
                 if result.get('nixos_generation'):
                     print(f"   NixOS generation: {result['nixos_generation']}")
                 if result.get('home_manager'):

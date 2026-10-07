@@ -60,6 +60,12 @@ class EntityCommands(Command):
         'Symbol':       'machine-local',
         'ToolCall':     'machine-local',
         'AgentSession': 'machine-local',
+        # A VCS session is keyed on (author, host, name) and owns trees
+        # on one filesystem, so it cannot mean anything on another
+        # machine.
+        'Session':      'machine-local',
+        # A checkout is a directory on one filesystem.
+        'Checkout':     'machine-local',
         # Nix store: default machine-local since per-machine.
         # Deployment references bump these implicitly at query time.
         'StorePath':    'machine-local',
@@ -2302,6 +2308,86 @@ WantedBy=timers.target
                                          to_id, 'agent-runtime'):
                     added_r += 1
 
+        # ---- Session: the vcs_sessions row as a first-class entity ----
+        #
+        # Sessions are load-bearing for staging, checkout ownership,
+        # commit scoping and dev-mode tree selection, and until now the
+        # graph had no node for one. AgentSession existed; the thing
+        # that actually owns a tree and scopes a commit did not. So
+        # "what did session 1044 do" was four ad-hoc joins every time,
+        # and the question comes up constantly when two agents share a
+        # host.
+        #
+        # Two edges, each a real FK:
+        #   Session -opened->   Checkout   (checkouts.session_id)
+        #   Session -proposed-> EditIntent (edit_intents.session_id)
+        #
+        # Deliberately NOT Session -committed-> Commit, despite
+        # vcs_commits.session_id existing and looking like exactly that
+        # FK. It is not provenance, it is visibility: a non-NULL
+        # session_id marks a commit as private to that session, and
+        # publish_session_head sets it back to NULL once the commit
+        # becomes shared. Only 7 of 1,126 commits carry one at any
+        # moment, and an edge built on it would delete itself on
+        # publish — the graph would quietly lose the link precisely
+        # when the work became real.
+        #
+        # The relationship is still answerable, and honestly:
+        #   Session -proposed-> EditIntent -applied-to-> Commit
+        # which is 614 live edges since migration 127 started writing
+        # applied_commit_id. Two hops that are always true beat one hop
+        # that evaporates.
+        #
+        # Also NOT Session -ran-> AgentSession. vcs_sessions and
+        # agent_sessions have no FK between them — different subsystems
+        # that never agreed on an identifier — so the only way to link
+        # them is guessing from host and time overlap. Manufacturing
+        # provenance is the one thing this graph must not do. Closing
+        # it means giving the agent runtime a vcs session id, not
+        # inferring one here.
+        # Checkout entities first — the Session edges below point at
+        # them, and _entity_id silently returns None for a kind that
+        # does not exist yet, which would drop the edge without saying
+        # so.
+        for ck in query_all(
+                """SELECT c.id, c.checkout_path, c.kind, c.is_active,
+                          p.slug
+                     FROM checkouts c
+                     JOIN projects p ON p.id = c.project_id"""):
+            label = (f"{ck['slug']}: {ck['kind']} "
+                     f"{'' if ck['is_active'] else '(inactive) '}"
+                     f"{ck['checkout_path']}")
+            if self._upsert_entity('Checkout', str(ck['id']),
+                                   'templedb', label=label):
+                added_e += 1
+
+        sess = query_all(
+            """SELECT id, name, author, host, started_at, ended_at
+                 FROM vcs_sessions"""
+        )
+        for s in sess:
+            eref = str(s['id'])
+            state = 'active' if not s['ended_at'] else 'ended'
+            label = (f"{s['name'] or 'session'} #{s['id']} "
+                     f"({s['author'] or '?'}@{s['host'] or '?'}, {state})")
+            if self._upsert_entity('Session', eref, 'templedb', label=label):
+                added_e += 1
+
+        for rel, sql, to_kind in (
+            ('opened',
+             "SELECT session_id AS sid, id AS tid FROM checkouts "
+             "WHERE session_id IS NOT NULL", 'Checkout'),
+            ('proposed',
+             "SELECT session_id AS sid, id AS tid FROM edit_intents "
+             "WHERE session_id IS NOT NULL", 'EditIntent'),
+        ):
+            for row in query_all(sql):
+                from_id = self._entity_id('Session', str(row['sid']))
+                to_id = self._entity_id(to_kind, str(row['tid']))
+                if from_id and to_id:
+                    if self._upsert_relation(from_id, rel, to_id, 'templedb'):
+                        added_r += 1
+
         print(f"✓ ingest agent: +{added_e} entities, +{added_r} relations")
         self._last_counts = {'e': added_e, 'r': added_r}
         return 0
@@ -3599,6 +3685,10 @@ WantedBy=timers.target
              self._check_blob_orphans_within_budget),
             ('views_are_runnable',
              self._check_views_are_runnable),
+            ('no_long_uncommitted_content',
+             self._check_no_long_uncommitted_content),
+            ('baseline_rows_still_describe_reality',
+             self._check_baseline_rows_still_describe_reality),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -3607,6 +3697,12 @@ WantedBy=timers.target
                 return 1
         import json, time
         from db_utils import execute
+        # Scope for the claims these runs assert. Resolved once, before
+        # the loop: every check in this pass observed the same revision,
+        # and re-resolving per check would let HEAD move underneath a
+        # single doctor run and scatter one run's claims across two
+        # commits.
+        claim_scope = self._claim_scope()
         problems = []
         for name, fn in checks:
             t0 = time.monotonic()
@@ -3631,8 +3727,9 @@ WantedBy=timers.target
             if len(issues) > 5:
                 print(f"      ... and {len(issues) - 5} more")
             # Persist to invariant_checks (migration 092).
+            check_row_id = None
             try:
-                execute(
+                check_row_id = execute(
                     """INSERT INTO invariant_checks
                            (check_name, duration_ms, status,
                             issue_count, sample_issues_json)
@@ -3643,8 +3740,80 @@ WantedBy=timers.target
             except Exception as e:
                 # Non-fatal — doctor is diagnostic, not required.
                 logger.debug(f"invariant_checks record failed: {e}")
+            if status == 'ok':
+                self._assert_invariant_claim(claim_scope, name, check_row_id)
             problems.extend(issues)
         return 0 if not problems else 1
+
+    # Project whose revision a doctor run is about. The invariants
+    # describe templedb's own database, so that is the thing a claim
+    # from this command is scoped to.
+    CLAIM_PROJECT_SLUG = 'templedb'
+
+    def _claim_scope(self):
+        """(project_id, commit_id) for claims asserted by this run, or None.
+
+        assert_claim deliberately refuses to resolve HEAD itself — a
+        service that guessed the revision would manufacture exactly the
+        unearned scope the design exists to prevent. So the resolution
+        happens here, where "which revision did these checks observe"
+        is actually known.
+
+        None when there is no HEAD to name (a project with no commits),
+        which correctly means no claims rather than claims about
+        nothing.
+        """
+        try:
+            from db_utils import query_one
+            row = query_one(
+                """SELECT p.id AS project_id, c.id AS commit_id
+                     FROM projects p
+                     JOIN vcs_branches b
+                       ON b.project_id = p.id AND b.is_default = 1
+                     JOIN vcs_commits c ON c.id = b.head_commit_id
+                    WHERE p.slug = ?""", (self.CLAIM_PROJECT_SLUG,))
+            if not row:
+                return None
+            return row['project_id'], row['commit_id']
+        except Exception as e:
+            logger.debug(f"claim scope unresolved: {e}")
+            return None
+
+    def _assert_invariant_claim(self, scope, check_name, check_row_id):
+        """Record 'invariant <name> holds' at the observed revision.
+
+        Only on 'ok', matching claims_service's doctrine: a claim is a
+        positive proposition the system will stand behind, and a
+        violated check is already recorded in invariant_checks as
+        evidence — it just does not produce a claim. The absence of a
+        claim for a revision is therefore meaningful, which is the
+        whole point of scoping claims to a commit.
+
+        Best-effort throughout. Doctor is diagnostic; a claims failure
+        must never change what it reports.
+        """
+        if not scope:
+            return
+        project_id, commit_id = scope
+        try:
+            from services import claims_service
+            if not claims_service.ready():
+                return
+            evidence = ([{"kind": "InvariantCheck", "ref": str(check_row_id)}]
+                        if check_row_id else [])
+            claims_service.assert_claim(
+                project_id=project_id,
+                commit_id=commit_id,
+                statement=f"invariant {check_name} holds",
+                warrant_kind='doctor-invariant',
+                warrant_gloss=(
+                    "the named check in `templedb doctor entities` returned "
+                    "no issues against this revision"),
+                asserted_by='doctor',
+                evidence=evidence,
+            )
+        except Exception as e:
+            logger.debug(f"claim assertion skipped for {check_name}: {e}")
 
     def doctor_history(self, args) -> int:
         """Print the recent history of invariant check results.
@@ -3799,6 +3968,127 @@ WantedBy=timers.target
                 f"(budget {self.BLOB_ORPHAN_BUDGET_BYTES / 1e6:.0f} MB). "
                 f"`templedb storage blob gc` to preview, "
                 f"`--apply` to reclaim"]
+
+    # Grace period for _check_no_long_uncommitted_content. `file set`
+    # landing content without a commit is normal and often deliberate
+    # mid-task; 14 days is long past "mid-task" and well short of the
+    # three months these had actually been sitting.
+    UNCOMMITTED_GRACE_DAYS = 14
+
+    def _check_no_long_uncommitted_content(self):
+        """Invariant: current content is not indefinitely ahead of HEAD.
+
+        `file set` writes file_contents without creating a commit. That
+        is documented and intended -- it is what makes a scripted
+        multi-step edit possible -- but nothing ever said "this has been
+        uncommitted since July".
+
+        Found 2026-10-07 while chasing what I had assumed was a scanner
+        false positive: ROADMAP.md held a -662/+28 rewrite that CLAUDE.md
+        already described as existing, uncommitted since 2026-07-18, and
+        docs/ENTITY_GRAPH_DESIGN.md likewise since 09-03. A sweep then
+        found 78 files across five projects in the same state, the
+        oldest from 07-15. All of them had been materialized and pushed,
+        so the public mirrors carried content templedb's own history had
+        no row for -- the DB and the world agreed, and only the VCS
+        disagreed with both.
+
+        Compares against the file's last committed hash, not against
+        file_contents: 'modified' in a VCS means 'differs from HEAD'.
+        Confusing the two is exactly the mistake that made this look
+        like a false positive for a day.
+        """
+        from db_utils import query_all
+        rows = query_all(
+            f"""WITH head AS (
+                  SELECT v.file_id, v.content_hash,
+                         ROW_NUMBER() OVER (
+                             PARTITION BY v.file_id
+                             ORDER BY c.commit_timestamp DESC, c.id DESC) rn
+                    FROM vcs_file_states v
+                    JOIN vcs_commits c ON c.id = v.commit_id)
+                SELECT p.slug, COUNT(*) AS n,
+                       MIN(fc.updated_at) AS oldest
+                  FROM file_contents fc
+                  JOIN project_files pf ON pf.id = fc.file_id
+                  JOIN projects p ON p.id = pf.project_id
+                  LEFT JOIN head h ON h.file_id = pf.id AND h.rn = 1
+                 WHERE fc.is_current = 1
+                   AND pf.status = 'active'
+                   AND h.content_hash IS NOT NULL
+                   AND h.content_hash <> fc.content_hash
+                   AND fc.updated_at < datetime('now', '-{int(self.UNCOMMITTED_GRACE_DAYS)} days')
+                 GROUP BY p.slug
+                 ORDER BY n DESC""")
+        return [
+            f"{r['slug']}: {r['n']} file(s) ahead of HEAD, oldest "
+            f"{r['oldest'][:10]} — content is in the DB (and in any mirror "
+            f"published since) but has no commit. "
+            f"`templedb vcs status {r['slug']}` to see them"
+            for r in rows]
+
+    def _check_baseline_rows_still_describe_reality(self):
+        """Invariant: every unmaintained_columns_baseline row is still true.
+
+        The baseline is a ratchet: a row in it tells
+        no_new_unmaintained_columns to stop reporting that column. That
+        works exactly as long as the row stays accurate -- and nothing
+        re-checked. A column that starts being written keeps its row,
+        and the ratchet goes on suppressing it, so the one mechanism
+        that is supposed to make dead columns visible quietly hides a
+        live one instead.
+
+        Not hypothetical. edit_intents.base_revision was recorded as
+        `constant` on 2026-10-03 and fixed on 10-04; the stale row
+        survived, and on 10-06 I read it and asserted in a written
+        report that the column was dead on all 978 rows. It was dead on
+        888 and alive on 93. A row claiming `all_null` for a column
+        that now has values is the same failure in the other direction.
+
+        Checks the recorded *shape*, which is why migration 123 stores
+        it rather than just the column name.
+        """
+        from db_utils import query_all, query_one
+        issues = []
+        tables = {r['name'] for r in query_all(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        for row in query_all(
+                "SELECT table_name, column_name, shape, reason "
+                "FROM unmaintained_columns_baseline ORDER BY table_name"):
+            t, c, shape = row['table_name'], row['column_name'], row['shape']
+            if t not in tables:
+                issues.append(
+                    f"{t}.{c}: baseline names a table that no longer exists "
+                    f"— drop the row")
+                continue
+            cols = {r['name'] for r in query_all(f'PRAGMA table_info("{t}")')}
+            if c not in cols:
+                issues.append(
+                    f"{t}.{c}: baseline names a column that no longer exists "
+                    f"— drop the row")
+                continue
+            try:
+                if shape == 'all_null':
+                    n = (query_one(
+                        f'SELECT COUNT(*) AS n FROM "{t}" '
+                        f'WHERE "{c}" IS NOT NULL') or {}).get('n', 0)
+                    if n:
+                        issues.append(
+                            f"{t}.{c}: baseline says all_null but {n:,} row(s) "
+                            f"have a value — the column is maintained now, so "
+                            f"the ratchet is suppressing a live column")
+                elif shape == 'constant':
+                    n = (query_one(
+                        f'SELECT COUNT(DISTINCT "{c}") AS n FROM "{t}"')
+                        or {}).get('n', 0)
+                    if n > 1:
+                        issues.append(
+                            f"{t}.{c}: baseline says constant but the column "
+                            f"holds {n:,} distinct values — drop the row so "
+                            f"no_new_unmaintained_columns can see it again")
+            except Exception as e:
+                issues.append(f"{t}.{c}: could not re-check ({e})")
+        return issues
 
     def _check_views_are_runnable(self):
         """Invariant: every view in sqlite_master can actually be queried.
@@ -5337,6 +5627,28 @@ WantedBy=timers.target
                      JOIN projects p ON p.id = pf.project_id
                     WHERE pf.status = 'active'
                       AND e.external_ref = p.slug || '/' || pf.file_path)
+        """,
+        # Checkout external_ref is the checkouts.id. These go away
+        # often — `admin checkout-gc` retires a tree whenever a session
+        # ends clean — so without a rule here the kind would accumulate
+        # dead nodes faster than File does.
+        'Checkout': """
+            SELECT e.id, e.external_ref, e.label, e.source_authority
+              FROM entities e
+             WHERE e.kind = 'Checkout'
+               AND NOT EXISTS (
+                   SELECT 1 FROM checkouts c
+                    WHERE CAST(c.id AS TEXT) = e.external_ref)
+        """,
+        # Session external_ref is vcs_sessions.id. Reaping is age-based
+        # and does delete rows, so the same applies.
+        'Session': """
+            SELECT e.id, e.external_ref, e.label, e.source_authority
+              FROM entities e
+             WHERE e.kind = 'Session'
+               AND NOT EXISTS (
+                   SELECT 1 FROM vcs_sessions s
+                    WHERE CAST(s.id AS TEXT) = e.external_ref)
         """,
     }
 
