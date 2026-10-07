@@ -389,12 +389,21 @@ class NixStoreService(BaseService):
     def record_generation(self, toplevel_path: str, machine_name: str = None,
                           generation_number: int = None, switch_action: str = "switch",
                           commit_id: int = None, commit_hash: str = None,
-                          project_id: int = None, deployment_id: int = None,
+                          project_id: int = None,
                           system_deployment_id: int = None,
                           conn=None) -> Dict:
         """Record a specific generation with full metadata and closure analysis.
 
         This is the main hook called after switch-to-configuration.
+
+        `deployment_id` is gone as of migration 133. It pointed at
+        fleet_deployments, which migration 130 dropped while leaving the
+        column's REFERENCES clause dangling — and SQLite enforces a FK
+        target at DML time even though it accepts the schema, so every
+        INSERT here raised "no such table: main.fleet_deployments". The
+        caller swallows that into logger.warning, so generations silently
+        stopped being recorded between 130 and 133. Use
+        system_deployment_id; it is the linkage that still has a table.
         """
         from db_utils import get_connection
         conn = conn or get_connection()
@@ -445,14 +454,14 @@ class NixStoreService(BaseService):
             cursor = conn.execute("""
                 INSERT OR REPLACE INTO nix_generations
                 (machine_name, generation_number, toplevel_path, closure_id,
-                 commit_id, commit_hash, project_id, deployment_id, system_deployment_id,
+                 commit_id, commit_hash, project_id, system_deployment_id,
                  nixos_version, kernel_version, previous_generation_id,
                  switched_at, switch_action, switch_success, boot_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """, (machine_name, generation_number, toplevel_path,
                   closure["id"] if closure else None,
                   commit_id, commit_hash, project_id,
-                  deployment_id, system_deployment_id,
+                  system_deployment_id,
                   nixos_version, kernel_version,
                   prev["id"] if prev else None,
                   now, switch_action, boot_id, now))

@@ -856,11 +856,16 @@ class NixDeployBackend(BaseService):
             try:
                 from services.nix_store_service import NixStoreService
                 svc = NixStoreService()
+                # deployment_id is not passed: migration 133 dropped the
+                # column it fed, since it referenced the
+                # fleet_deployments table 130 retired. There is no
+                # surviving table to record a fleet deployment id
+                # against, which is the same reason the caller above is
+                # unreachable.
                 svc.record_generation(
                     toplevel_path=result.new_profile,
                     machine_name=result.machine.machine_name,
                     switch_action="switch",
-                    deployment_id=deployment_id,
                 )
                 logger.info(f"Recorded nix generation for fleet deploy: {result.machine.machine_name}")
             except Exception as e:

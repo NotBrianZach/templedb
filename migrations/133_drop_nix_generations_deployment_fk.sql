@@ -1,0 +1,44 @@
+-- 133_drop_nix_generations_deployment_fk.sql
+--
+-- Migration 130 said it was dropping nix_generations.deployment_id:
+--
+--   "nix_generations.deployment_id references fleet_deployments. It is
+--    NULL on all 156 rows (nothing ever wrote it), so the column is
+--    dropped with the table it pointed at. SQLite does not enforce FKs
+--    to a dropped table, but leaving a column referencing nothing is
+--    how the next reader gets misled"
+--
+-- It never issued the DDL. The column, and its REFERENCES
+-- fleet_deployments(id), are still there -- 130 dropped the parent
+-- table and left the child clause dangling.
+--
+-- The parenthetical is also wrong, which is what made this expensive.
+-- SQLite does not validate a FK target at schema-load time, but it
+-- absolutely does at DML time: with foreign_keys=ON, any INSERT into
+-- the child raises
+--
+--   OperationalError: no such table: main.fleet_deployments
+--
+-- Verified on a copy of this DB 2026-10-07 -- FK ON raises, FK OFF
+-- inserts fine. So the generation recorder has been failing on every
+-- system-switch since 130 landed. NixStoreService.record_generation is
+-- called from SystemService's switch path inside a
+-- `except Exception as e: logger.warning(...)`, so the only evidence
+-- was one line of warning noise in the middle of several hundred lines
+-- of nix build output:
+--
+--   WARNING  Failed to record nix generation: no such table: main.fleet_deployments
+--
+-- Cost: nix_generations stops at generation 323 while
+-- /nix/var/nix/profiles/system points at 325. Two generations missing,
+-- and every future one, on the table `provenance machine` and the
+-- machines_with_generations_are_registered invariant are built from.
+--
+-- Fix is the statement 130 meant to run. ALTER TABLE ... DROP COLUMN
+-- (SQLite 3.35+; this host has 3.51.2) rewrites the schema and keeps
+-- all five indexes and all 156 rows -- confirmed on a copy before
+-- writing this. Nothing reads the column: no view selects it, and the
+-- only caller that ever passed it was the fleet deploy path retired in
+-- the same migration.
+
+ALTER TABLE nix_generations DROP COLUMN deployment_id;
