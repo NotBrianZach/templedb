@@ -791,7 +791,17 @@ class NixDeployBackend(BaseService):
 
     def update_machine_status(self, result: MachineDeployResult,
                               deployment_id: int) -> None:
-        """Write deployment result back to fleet DB tables."""
+        """Write deployment result back to fleet DB tables.
+
+        Currently unreachable: the only caller is
+        FleetCommands._run_fleet_deploy, which hangs off the retired
+        `deploy fleet deploy` verb. The fleet_machines UPDATE below is
+        still valid, but the fleet_machine_deployments one targets a
+        table migration 130 dropped, so reviving a caller without
+        rewriting that statement raises "no such table". Left in place
+        for the same reason as the retired impls in fleet.py — it is the
+        written-down shape of per-machine deploy tracking.
+        """
         import db_utils
 
         now = datetime.now().isoformat()

@@ -50,6 +50,56 @@ class TempleDBArgumentParser(argparse.ArgumentParser):
         self.exit(2)
 
 
+def walk_subcommand_chain(args) -> list:
+    """Return the dotted command path as a list, e.g. deploy/fleet/network/list.
+
+    Each level's dest attribute can be named either `<prefix>_subcommand`
+    or `<prefix>_command` depending on the registrar. The chain is
+    followed as deep as it goes so 4+-level commands resolve — an older
+    3-level cap silently produced "Unknown command" errors.
+
+    `consumed` is what keeps the walk finite. The prefix at each step is
+    the subcommand *value*, not the level, so a verb that repeats one of
+    its ancestors' names sends the walk round in a circle:
+    `deploy fleet deploy` reads deploy_subcommand='fleet', then
+    fleet_subcommand='deploy', then deploy_subcommand again, appending
+    to `parts` forever. That spun on CPU with no output until it was
+    OOM-killed — the worst failure shape available, since a hang looks
+    like slow work. Each dest may now be followed once, which bounds the
+    walk by the number of attrs on the namespace while still resolving
+    the deep keys removing the cap was for.
+
+    Lives at module level, outside execute(), so the loop that caused
+    that hang is reachable from a test without dispatching a command.
+    """
+    command = getattr(args, 'command', None)
+    parts = [command] if command else []
+    consumed = set()
+    while parts:
+        prefix = parts[-1]
+        for suffix in ('_subcommand', '_command'):
+            attr = f"{prefix}{suffix}"
+            if attr in consumed:
+                continue
+            if hasattr(args, attr):
+                nxt = getattr(args, attr)
+                if nxt is not None:
+                    consumed.add(attr)
+                    parts.append(nxt)
+                    break
+                # attr exists but None → user didn't supply the nested
+                # subcommand; stop here so we fall back to the closest
+                # handler.
+                attr = None
+                break
+        else:
+            # No matching attr at this level; stop walking.
+            break
+        if attr is None:
+            break
+    return parts
+
+
 class TempleDBCLI:
     """
     Unified CLI for TempleDB using argparse.
@@ -233,32 +283,7 @@ Use 'templedb <command> --help' for details on any command.
                     # Direct subcommand
                     handler = self.commands.get(args.command)
                 else:
-                    # Walk the subcommand chain. Each level's dest attribute
-                    # can be named either `<prefix>_subcommand` or
-                    # `<prefix>_command` depending on the registrar. We follow
-                    # the chain as deep as it goes so 4+-level commands
-                    # (e.g. `deploy fleet network create`) resolve — the old
-                    # 3-level cap silently produced "Unknown command" errors.
-                    parts = [args.command] if args.command else []
-                    while parts:
-                        prefix = parts[-1]
-                        for suffix in ('_subcommand', '_command'):
-                            attr = f"{prefix}{suffix}"
-                            if hasattr(args, attr):
-                                nxt = getattr(args, attr)
-                                if nxt is not None:
-                                    parts.append(nxt)
-                                    break
-                                # attr exists but None → user didn't supply
-                                # the nested subcommand; stop here so we fall
-                                # back to the closest handler.
-                                attr = None
-                                break
-                        else:
-                            # No matching attr at this level; stop walking.
-                            break
-                        if attr is None:
-                            break
+                    parts = walk_subcommand_chain(args)
 
                     # Try the deepest key first, then progressively shorter.
                     handler = None

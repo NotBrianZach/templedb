@@ -130,19 +130,13 @@ class FleetCommands(Command):
                 ORDER BY machine_name
             """, (network['id'],))
 
-            # Get recent deployments
-            deployments = db_utils.query_all("""
-                SELECT * FROM fleet_deployment_history
-                WHERE network_id = ?
-                LIMIT 10
-            """, (network['id'],))
-
-            # Get resources
-            resources = db_utils.query_all("""
-                SELECT * FROM fleet_resources
-                WHERE network_id = ?
-                ORDER BY resource_type, resource_name
-            """, (network['id'],))
+            # Deployment history and resources were fleet_deployments /
+            # fleet_machine_deployments / fleet_resources, retired in
+            # migration 130 after holding zero rows for their entire
+            # existence. The network registry (networks + machines) is
+            # what survived, so this view shows that and nothing else.
+            deployments = []
+            resources = []
 
             print(f"\n🌐 Network: {network['network_name']}")
             print(f"   Project: {args.project}")
@@ -309,8 +303,43 @@ class FleetCommands(Command):
     # Deployment Operations
     # ========================================================================
 
+    # Message shared by the three verbs whose storage was retired.
+    # Refusing with an explanation beats "no such table:
+    # fleet_deployments", which is what they would otherwise raise.
+    _RETIRED = (
+        "fleet deployment was retired in migration 130.\n"
+        "  The nixops4-shaped model (deploy as a transaction across "
+        "machines, per-machine\n"
+        "  build/activate tracking, resources) never ran once — "
+        "fleet_deployments,\n"
+        "  fleet_machine_deployments and fleet_resources held zero rows "
+        "for their entire\n"
+        "  existence. What deploys machines is "
+        "`templedb nixos system-switch`, recorded in\n"
+        "  nix_generations and system_deployments.\n\n"
+        "  The registry survives: `templedb deploy fleet network list` "
+        "and `machine list`\n"
+        "  still work, and `reconcile machine <name>` probes a host "
+        "for drift."
+    )
+
+    def _retired(self) -> int:
+        print(f"❌ {self._RETIRED}", file=sys.stderr)
+        return 1
+
     def deploy(self, args) -> int:
-        """Deploy a fleet network"""
+        """Retired — see _RETIRED. Was: deploy a fleet network."""
+        return self._retired()
+
+    def _deploy_retired_impl(self, args) -> int:
+        """Original body, kept for reference until the module is cut.
+
+        Unreachable. Left in place rather than deleted because the
+        template-rendering and SSH-probing logic here is the only
+        written-down description of how multi-machine deploy was meant
+        to work, and the decision to drop that model is recent enough
+        that resurrecting it is a real possibility.
+        """
         try:
             network = self._get_network(args.network, args.project)
             if not network:
@@ -418,7 +447,10 @@ class FleetCommands(Command):
             return 1
 
     def destroy(self, args) -> int:
-        """Destroy a fleet network (deactivate and remove from DB)"""
+        """Retired — see _RETIRED. Was: destroy a fleet network."""
+        return self._retired()
+
+    def _destroy_retired_impl(self, args) -> int:
         try:
             network = self._get_network(args.network, args.project)
             if not network:
@@ -581,7 +613,10 @@ class FleetCommands(Command):
             return 1
 
     def deploy_status(self, args) -> int:
-        """Show deployment status"""
+        """Retired — see _RETIRED. Was: show fleet deployment status."""
+        return self._retired()
+
+    def _deploy_status_retired_impl(self, args) -> int:
         try:
             network = self._get_network(args.network, args.project)
             if not network:
