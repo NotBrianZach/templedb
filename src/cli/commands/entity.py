@@ -66,6 +66,11 @@ class EntityCommands(Command):
         'Session':      'machine-local',
         # A checkout is a directory on one filesystem.
         'Checkout':     'machine-local',
+        # Evidence rows projected by claims_service: a test run
+        # happened on this machine, an invariant check ran against
+        # this machine's database.
+        'TestRun':        'machine-local',
+        'InvariantCheck': 'machine-local',
         # Nix store: default machine-local since per-machine.
         # Deployment references bump these implicitly at query time.
         'StorePath':    'machine-local',
@@ -3689,6 +3694,12 @@ WantedBy=timers.target
              self._check_no_long_uncommitted_content),
             ('baseline_rows_still_describe_reality',
              self._check_baseline_rows_still_describe_reality),
+            ('file_states_have_recoverable_content',
+             self._check_file_states_have_recoverable_content),
+            ('symbol_refs_are_authority_disjoint',
+             self._check_symbol_refs_are_authority_disjoint),
+            ('machines_with_generations_are_registered',
+             self._check_machines_with_generations_are_registered),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -3997,6 +4008,14 @@ WantedBy=timers.target
         file_contents: 'modified' in a VCS means 'differs from HEAD'.
         Confusing the two is exactly the mistake that made this look
         like a false positive for a day.
+
+        Excludes rows whose last committed hash is the literal string
+        'DELETED'. That is a sentinel the commit path writes when it
+        has no content hash to record, and comparing real content
+        against it always differs -- so the first version of this
+        check reported 78 files when only 3 were genuinely ahead of
+        HEAD, a 25x over-count. The sentinel rows are a separate and
+        worse problem, reported by file_states_have_recoverable_content.
         """
         from db_utils import query_all
         rows = query_all(
@@ -4016,6 +4035,7 @@ WantedBy=timers.target
                  WHERE fc.is_current = 1
                    AND pf.status = 'active'
                    AND h.content_hash IS NOT NULL
+                   AND h.content_hash <> 'DELETED'
                    AND h.content_hash <> fc.content_hash
                    AND fc.updated_at < datetime('now', '-{int(self.UNCOMMITTED_GRACE_DAYS)} days')
                  GROUP BY p.slug
@@ -4089,6 +4109,127 @@ WantedBy=timers.target
             except Exception as e:
                 issues.append(f"{t}.{c}: could not re-check ({e})")
         return issues
+
+    def _check_file_states_have_recoverable_content(self):
+        """Invariant: a non-deleted file state names content we still have.
+
+        `vcs_file_states.content_hash` is written as the literal string
+        'DELETED' whenever the commit path has no hash to record --
+        `ws_hash = file['content_hash'] or 'DELETED'` in
+        cli/commands/vcs.py, and `new_hash or 'DELETED'` in
+        VCSRepository.record_file_change. For an actual deletion that
+        is a reasonable sentinel. For 'added', 'modified' or
+        'unmodified' it is silent history loss: the commit claims the
+        file had content and the record of what that content was is
+        gone, unrecoverably, because no blob was ever stored.
+
+        Found 2026-10-07: 124 such rows (83 added, 33 modified, 8
+        unmodified). They also mislead everything downstream --
+        `source_snapshots` returns 501 rows pointing at a fabricated
+        content_blobs entry keyed 'DELETED' that claims 8,059 bytes and
+        holds neither text nor blob, and the first version of
+        no_long_uncommitted_content read them as 75 uncommitted files.
+
+        Existing rows cannot be repaired; the bytes were never kept.
+        This check is a ratchet against growth, and the commit path now
+        refuses rather than writing the sentinel for a non-deleted
+        state.
+        """
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT change_type, COUNT(*) AS n,
+                      MIN(c.commit_timestamp) AS oldest,
+                      MAX(c.commit_timestamp) AS newest
+                 FROM vcs_file_states v
+                 JOIN vcs_commits c ON c.id = v.commit_id
+                WHERE v.change_type <> 'deleted'
+                  AND (v.content_hash = 'DELETED'
+                       OR v.content_hash IS NULL)
+                GROUP BY change_type ORDER BY n DESC""")
+        return [
+            f"{r['n']} '{r['change_type']}' file state(s) have no "
+            f"recoverable content hash ({r['oldest'][:10]}..{r['newest'][:10]}) "
+            f"— the commit recorded that the file had content and the "
+            f"content is gone. Not repairable; this must not grow"
+            for r in rows]
+
+    def _check_symbol_refs_are_authority_disjoint(self):
+        """Invariant: no Symbol external_ref is claimed by two authorities.
+
+        `entities` is UNIQUE(kind, external_ref) with no
+        source_authority in the key, and two adapters write Symbol:
+        python (5,215) and scip-typescript (15,821). Nothing in the
+        schema stops them colliding, so whichever ingests second wins
+        and silently relabels the other's node.
+
+        In practice they are disjoint, and for a structural reason
+        worth recording: both encode refs as
+        `<project>:<path>:<symbol>`, and the path carries the file
+        extension, so a collision needs the same project, same path
+        and same symbol from a .py and a .ts at once. Measured 0 on
+        2026-10-07 across 21,036 Symbols.
+
+        That is why this is a check rather than a re-encoding. Folding
+        source_authority into the ref would invalidate 21k external_refs
+        and every relation pointing at them to fix a collision that
+        does not occur -- but the property is currently an accident of
+        two adapters' conventions, with nothing asserting it. Now
+        something does, so the day a third adapter picks a different
+        encoding it surfaces immediately instead of quietly overwriting
+        nodes.
+        """
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT external_ref, COUNT(DISTINCT source_authority) AS n,
+                      GROUP_CONCAT(DISTINCT source_authority) AS auths
+                 FROM entities WHERE kind = 'Symbol'
+                GROUP BY external_ref
+                HAVING COUNT(DISTINCT source_authority) > 1
+                LIMIT 20""")
+        return [f"Symbol/{r['external_ref']} is claimed by {r['n']} "
+                f"authorities ({r['auths']}) — one is silently "
+                f"overwriting the other on each ingest"
+                for r in rows]
+
+    def _check_machines_with_generations_are_registered(self):
+        """Invariant: a machine we have generations for is in the registry.
+
+        Two authorities describe machines and they disagree. The
+        `templedb` authority has `fleet_machines` — bza-localhost,
+        localhost, vultr-woofs, web1, zMothership3 — every one of which
+        `summary` reports as "never deployed via templedb". The `nix`
+        authority has 156 nix_generations, all from **zMothership2**,
+        which is absent from the registry entirely.
+
+        So the registry lists exactly the machines that have done
+        nothing, and omits the one doing everything. The graph papered
+        over it: Machine/zMothership2 exists with
+        source_authority='nix' because the nix adapter synthesised it
+        from generations, sitting alongside five 'templedb' Machines
+        from the registry. Two charts, no agreement, nothing noticing.
+
+        This is also why migration 130's
+        nix_generations.machine_id backfill matched 0 of 156 rows. The
+        backfill is correct — it joins on machine_name — and there is
+        simply no registry row to join to. Fixing the FK means
+        registering the host, which is a decision about the user's
+        fleet rather than a repair, so it is reported rather than
+        performed.
+        """
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT DISTINCT g.machine_name, COUNT(*) AS n
+                 FROM nix_generations g
+                WHERE g.machine_name IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM fleet_machines m
+                                   WHERE m.machine_name = g.machine_name)
+                GROUP BY g.machine_name ORDER BY n DESC""")
+        return [
+            f"{r['machine_name']}: {r['n']} nix generation(s) but no "
+            f"fleet_machines row — nix_generations.machine_id stays NULL "
+            f"for all of them, and Machine/{r['machine_name']} exists in "
+            f"the graph only because the nix adapter synthesised it"
+            for r in rows]
 
     def _check_views_are_runnable(self):
         """Invariant: every view in sqlite_master can actually be queried.

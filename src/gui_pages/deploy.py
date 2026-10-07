@@ -327,11 +327,16 @@ def deploy_list():
                p.slug AS project_slug, n.flake_uri, n.config_file_path,
                COUNT(DISTINCT m.id) AS machine_count,
                COUNT(DISTINCT CASE WHEN m.deployment_status = 'deployed' THEN m.id END) AS deployed_count,
-               MAX(d.started_at) AS last_deploy_at
+               -- Was MAX(fleet_deployments.started_at). That table is
+               -- gone (migration 130): it never held a row, because
+               -- deployment goes through nix_generations +
+               -- system_deployments, not the nixops4-shaped fleet
+               -- model. last_deployed_at on the machine row is the
+               -- fact that actually exists.
+               MAX(m.last_deployed_at) AS last_deploy_at
         FROM fleet_networks n
         JOIN projects p ON n.project_id = p.id
         LEFT JOIN fleet_machines m ON n.id = m.network_id
-        LEFT JOIN fleet_deployments d ON n.id = d.network_id
         WHERE n.is_active = 1
         GROUP BY n.id
         ORDER BY n.network_name
@@ -387,32 +392,16 @@ def deploy_list():
             html.escape((fm["last_deployed_at"] or "never")[:16]),
         ])
 
-    fleet_deploys = query_all("""
-        SELECT d.deployment_uuid, d.operation, d.status,
-               d.started_at, d.duration_seconds, d.triggered_by,
-               n.network_name, p.slug AS project_slug,
-               COUNT(md.id) AS total_machines,
-               COUNT(CASE WHEN md.status = 'success' THEN 1 END) AS ok_machines
-        FROM fleet_deployments d
-        JOIN fleet_networks n ON d.network_id = n.id
-        JOIN projects p ON n.project_id = p.id
-        LEFT JOIN fleet_machine_deployments md ON d.id = md.deployment_id
-        GROUP BY d.id
-        ORDER BY d.started_at DESC LIMIT 20
-    """)
+    # Fleet deployment history is gone with fleet_deployments /
+    # fleet_machine_deployments (migration 130). Those two tables held
+    # zero rows for their entire existence, so this panel has always
+    # rendered empty -- the real deployment history is the
+    # `deployment_history` summary below and nix_generations.
+    #
+    # Kept as an empty list rather than ripping out the panel, so the
+    # page shape and the _table() call below are unchanged and the
+    # table states plainly that the model was retired.
     fleet_deploy_rows = []
-    for fd in fleet_deploys:
-        dur = f'{fd["duration_seconds"]}s' if fd["duration_seconds"] else "running"
-        ratio = f'{fd["ok_machines"]}/{fd["total_machines"]}'
-        fleet_deploy_rows.append([
-            html.escape(fd["network_name"]),
-            f'<span class="badge">{html.escape(fd["operation"])}</span>',
-            _status_badge(fd["status"]),
-            ratio,
-            html.escape(fd["triggered_by"] or "user"),
-            html.escape((fd["started_at"] or "")[:16]),
-            dur,
-        ])
 
     # ── Assemble ───────────────────────────────────────────────────────────────
     history_summary = query_all("""
@@ -463,7 +452,7 @@ def deploy_list():
 {_table(["Network", "Machine", "Host", "Status", "Health", "NixOS", "Tags", "Last Deploy"], fleet_machine_rows, "No machines. Add one: <code>templedb deploy fleet machine add &lt;project&gt; &lt;network&gt; &lt;name&gt; --host &lt;ip&gt;</code>", "fleet-machine-tbl")}
 
 <h3 style="margin-top:1.5rem">Fleet Deploy History</h3>
-{_table(["Network", "Operation", "Status", "Machines", "By", "Started", "Duration"], fleet_deploy_rows, "No fleet deployments yet.", "fleet-deploy-tbl")}
+{_table(["Network", "Operation", "Status", "Machines", "By", "Started", "Duration"], fleet_deploy_rows, "Fleet (nixops4-style) deployment was retired in migration 130 — it never ran. Deployment history is above; per-machine state is in nix_generations.", "fleet-deploy-tbl")}
 
 <h3 style="margin-top:1.5rem">NixOS Switches</h3>
 {_search_bar("nixos-switches-tbl", "Filter by project or date...")}

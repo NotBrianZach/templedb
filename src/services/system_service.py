@@ -171,7 +171,14 @@ class SystemService:
                     if path and parts:
                         git_modes[path] = parts[0]
         except Exception as e:
-            logger.debug(f"Could not read git file modes: {e}")
+            # Warning, not debug. Git owns the POSIX exec bit (decided
+            # 2026-09-25), so failing to read it means every exec bit
+            # this materialise should have set is silently not set --
+            # and the symptom is a script that is not executable, a
+            # long way from here.
+            logger.warning(
+                f"Could not read git file modes ({e}); exec bits will NOT "
+                f"be applied for this materialise")
 
         changed = 0
         for f in files:

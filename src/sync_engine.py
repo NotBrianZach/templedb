@@ -560,12 +560,23 @@ class SyncEngine:
         return changes, db_version
 
     def apply_changes(self, changes: List[dict]) -> int:
-        """Apply changes from a remote peer. Returns count applied."""
+        """Apply changes from a remote peer. Returns count applied.
+
+        A change that cannot be applied is dropped — there is nowhere
+        else to put it — but it is reported at WARNING with a count,
+        not swallowed at debug. Silently discarding replicated rows
+        while returning a success count is the worst available
+        behaviour for a sync: both peers then believe they agree, and
+        the divergence surfaces much later as an unexplained
+        difference. The caller gets `applied`, and the log now carries
+        `dropped` next to it.
+        """
         conn = self._connect()
         if not self._initialized:
             self.initialize()
 
         applied = 0
+        dropped = []
         for c in changes:
             try:
                 pk = base64.b64decode(c["pk"]) if isinstance(c["pk"], str) else c["pk"]
@@ -580,9 +591,19 @@ class SyncEngine:
                 )
                 applied += 1
             except Exception as e:
-                logger.debug(f"Failed to apply change: {e}")
+                dropped.append((c.get("table", "?"), str(e)))
 
         conn.commit()
+        if dropped:
+            by_table = {}
+            for tbl, err in dropped:
+                by_table.setdefault(tbl, []).append(err)
+            logger.warning(
+                "sync applied %d change(s) and DROPPED %d: %s. The peers "
+                "now disagree about those rows and nothing will retry "
+                "them.", applied, len(dropped),
+                "; ".join(f"{t} x{len(v)} ({v[0]})"
+                          for t, v in by_table.items()))
         return applied
 
     def get_site_id(self) -> str:

@@ -143,7 +143,8 @@ def assert_claim(project_id: int,
 # duplicating.
 
 def _upsert_entity(kind: str, external_ref: str, label: Optional[str],
-                   authority: str = CLAIM_AUTHORITY) -> Optional[int]:
+                   authority: str = CLAIM_AUTHORITY,
+                   sync_scope: str = 'fleet') -> Optional[int]:
     """Local mirror of EntityCommands._upsert_entity (src/cli/commands/entity.py)
     — a service importing a CLI class would be the wrong direction."""
     from db_utils import execute, query_one
@@ -157,8 +158,8 @@ def _upsert_entity(kind: str, external_ref: str, label: Optional[str],
         return existing["id"]
     execute("""INSERT INTO entities
                    (kind, external_ref, source_authority, label, sync_scope)
-                 VALUES (?, ?, ?, ?, 'fleet')""",
-            (kind, external_ref, authority, label))
+                 VALUES (?, ?, ?, ?, ?)""",
+            (kind, external_ref, authority, label, sync_scope))
     row = query_one("SELECT id FROM entities WHERE kind=? AND external_ref=?",
                     (kind, external_ref))
     return row["id"] if row else None
@@ -181,6 +182,33 @@ def _link(from_id: Optional[int], kind: str, to_id: Optional[int]) -> None:
                ON CONFLICT(from_entity_id, kind, to_entity_id) DO UPDATE SET
                    observed_at = datetime('now')""",
             (from_id, kind, to_id, CLAIM_AUTHORITY))
+
+
+def _evidence_label(table: str, ref: str, sql: str) -> Optional[str]:
+    """Best-effort human label for an evidence row, or None."""
+    try:
+        from db_utils import query_one
+        row = query_one(sql, (ref,))
+        return row["label"] if row and row["label"] else None
+    except Exception:
+        return None
+
+
+# Evidence kinds this module may project into the graph, with a label
+# query each. A kind absent from here still gets a rests-on edge if an
+# entity happens to exist, but is never created -- so adding a new
+# evidence kind is a deliberate act, not a side effect of asserting a
+# claim with a typo in it.
+_EVIDENCE_KINDS = {
+    "TestRun": lambda ref: _evidence_label(
+        "test_runs", ref,
+        "SELECT (passed || '/' || total_tests || ' passed') AS label "
+        "FROM test_runs WHERE id = ?"),
+    "InvariantCheck": lambda ref: _evidence_label(
+        "invariant_checks", ref,
+        "SELECT (check_name || ' ' || status) AS label "
+        "FROM invariant_checks WHERE id = ?"),
+}
 
 
 def _mirror_to_graph(claim_id: int, project_id: int, commit_id: int,
@@ -216,11 +244,35 @@ def _mirror_to_graph(claim_id: int, project_id: int, commit_id: int,
         if report_ref:
             _link(_entity_id("Report", report_ref), "asserts", cid)
 
-        # Claim --rests-on--> evidence, for evidence kinds that already
-        # have entities (AstBuild does; TestRun has none yet, and this
-        # is a no-op for it rather than a fabricated node).
+        # Claim --rests-on--> evidence.
+        #
+        # This used to resolve only kinds that already had entities,
+        # which in practice meant AstBuild -- so with TestRun and
+        # InvariantCheck being the two producers, every rests-on edge
+        # silently no-op'd and claims carried only their scoped-to
+        # edge. "What rests on this test run" was SQL, not a traversal,
+        # which is the one thing the graph exists to avoid.
+        #
+        # Projecting them is not the "fabricated node" the old comment
+        # warned against: a TestRun is a row in test_runs and an
+        # InvariantCheck is a row in invariant_checks. Making an entity
+        # for an existing typed row is exactly what every ingest
+        # adapter does. Fabrication would be inventing a node for
+        # evidence that was never recorded, and that case still
+        # resolves to None and drops the edge.
+        #
+        # Both are machine-local: a test run happened on this machine,
+        # an invariant check ran against this machine's database.
+        # Registered in EntityCommands._SYNC_SCOPES so
+        # machine_local_kinds_never_fleet_scope enforces it.
         for ev in evidence:
-            _link(cid, "rests-on", _entity_id(ev["kind"], str(ev["ref"])))
+            kind, ref = ev["kind"], str(ev["ref"])
+            target = _entity_id(kind, ref)
+            if target is None and kind in _EVIDENCE_KINDS:
+                target = _upsert_entity(
+                    kind, ref, _EVIDENCE_KINDS[kind](ref),
+                    sync_scope='machine-local')
+            _link(cid, "rests-on", target)
     except Exception as e:
         logger.debug(f"claim {claim_id} not mirrored to graph: {e}")
 

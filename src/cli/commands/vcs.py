@@ -561,6 +561,31 @@ class VCSCommands(Command):
         for file in staged:
             # content_hash in working_state is the hash of the file on disk
             # (set by detect_changes / refresh). Use it for the commit.
+            # 'DELETED' is a sentinel meaning "this state names no
+            # content", and it is only honest for an actual deletion.
+            # Writing it for added/modified/unmodified records that the
+            # file had content while destroying the record of what the
+            # content was -- unrecoverably, because no blob was stored.
+            # 124 such rows exist from before this guard (83 added, 33
+            # modified, 8 unmodified); they also feed 501
+            # source_snapshots rows pointing at a fabricated blob that
+            # claims 8,059 bytes and holds nothing.
+            #
+            # Refusing is the right failure. A staged non-deleted file
+            # with no content hash means detect_changes never computed
+            # one, which `vcs status --refresh` fixes -- so the caller
+            # has a remedy, and taking it costs a re-run instead of a
+            # permanent hole in history.
+            if not file['content_hash'] and file['state'] != 'deleted':
+                logger.error(
+                    f"Refusing to commit {file.get('file_path', '?')}: "
+                    f"state is '{file['state']}' but working state has no "
+                    f"content hash, so the commit could only record the "
+                    f"'DELETED' sentinel and the content would be "
+                    f"unrecoverable.\n"
+                    f"  Fix: templedb vcs status {args.project} --refresh"
+                )
+                return 1
             ws_hash = file['content_hash'] or 'DELETED'
             file_size = file.get('file_size_bytes', 0) or 0
             line_count = file.get('line_count')
