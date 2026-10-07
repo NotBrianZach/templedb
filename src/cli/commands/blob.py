@@ -433,6 +433,17 @@ class BlobCommands(Command):
 
         if n == 0:
             print("\n✅ Nothing to collect")
+            # --vacuum still runs. Collection and compaction are
+            # separate operations on separate things: gc deletes rows,
+            # VACUUM returns pages those deletions already freed. The
+            # first run of this command deleted 8,715 blobs and left
+            # 436 MB of free pages behind, so the state where there is
+            # nothing to collect and everything to reclaim is the
+            # normal one, not an edge case. Returning early here made
+            # `gc --apply --vacuum` silently skip the only half the
+            # operator still wanted.
+            if getattr(args, 'vacuum', False):
+                return self._vacuum()
             return 0
 
         biggest = self.query_all(
@@ -627,6 +638,13 @@ class BlobCommands(Command):
         import sqlite3
 
         before = os.path.getsize(self.db_path)
+        free = self.query_one(
+            "SELECT (SELECT * FROM pragma_freelist_count()) * "
+            "(SELECT * FROM pragma_page_size()) AS b") or {}
+        freeable = free.get('b') or 0
+        if freeable:
+            print(f"  {freeable / 1e6:.0f} MB of {before / 1e6:.0f} MB is "
+                  f"free pages — that is what VACUUM returns to the OS.")
         print(f"  VACUUM: rewriting {before / 1e6:.0f} MB "
               f"(exclusive lock; this takes a while)...")
         conn = sqlite3.connect(self.db_path, isolation_level=None, timeout=30)

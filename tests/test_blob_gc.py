@@ -552,6 +552,51 @@ class BlobDeletionAuditTest(unittest.TestCase):
         ).fetchone()[0], 1)
 
 
+class VacuumReachabilityTest(unittest.TestCase):
+    """`--vacuum` must survive the nothing-to-collect path.
+
+    gc returned early when no blob was eligible, which skipped the
+    vacuum branch entirely. That is backwards: the first --apply run
+    deleted 8,715 blobs and left 436 MB of free pages, so "nothing to
+    collect, everything to reclaim" is the steady state, and it is
+    exactly when an operator types --vacuum. Collection and compaction
+    act on different things — rows versus already-freed pages — so one
+    having no work must not suppress the other.
+    """
+
+    def test_early_return_is_guarded_by_the_vacuum_flag(self):
+        import inspect
+        from cli.commands.blob import BlobCommands
+        src = inspect.getsource(BlobCommands.gc)
+        head, _, tail = src.partition("Nothing to collect")
+        self.assertTrue(tail, "the early-return branch moved; re-check this")
+        # The vacuum escape must appear between the message and the
+        # return that follows it.
+        branch = tail.split('return 0')[0]
+        self.assertIn('vacuum', branch,
+                      "gc returns before --vacuum can run when there is "
+                      "nothing to collect")
+
+    def test_vacuum_cannot_run_inside_a_transaction(self):
+        """Why _vacuum needs its own autocommit connection."""
+        import sqlite3
+        import tempfile
+        import os
+        fd, p = tempfile.mkstemp(suffix='.sqlite'); os.close(fd)
+        try:
+            c = sqlite3.connect(p)            # default isolation: implicit txn
+            c.execute("CREATE TABLE t (a)")
+            c.execute("INSERT INTO t VALUES (1)")   # opens a transaction
+            with self.assertRaises(sqlite3.OperationalError):
+                c.execute("VACUUM")
+            c.close()
+            c2 = sqlite3.connect(p, isolation_level=None)   # autocommit
+            c2.execute("VACUUM")              # must not raise
+            c2.close()
+        finally:
+            os.unlink(p)
+
+
 class ReferentCoverageTest(unittest.TestCase):
     """Every blob-hash column must be classified before gc can be safe.
 
