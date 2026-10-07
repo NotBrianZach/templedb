@@ -3700,6 +3700,8 @@ WantedBy=timers.target
              self._check_symbol_refs_are_authority_disjoint),
             ('machines_with_generations_are_registered',
              self._check_machines_with_generations_are_registered),
+            ('generation_log_covers_profile_links',
+             self._check_generation_log_covers_profile_links),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -4230,6 +4232,96 @@ WantedBy=timers.target
             f"for all of them, and Machine/{r['machine_name']} exists in "
             f"the graph only because the nix adapter synthesised it"
             for r in rows]
+
+    def _check_generation_log_covers_profile_links(self):
+        """Invariant: every system generation still on disk is logged.
+
+        `record_generation` is called from SystemService's switch path
+        inside `except Exception as e: logger.warning(...)`. When it
+        fails it therefore fails *quietly* -- one warning line in the
+        several hundred lines of nix build output a switch produces --
+        and nothing downstream notices that the generation log has
+        simply stopped growing. Every consumer (`provenance machine`,
+        machines_with_generations_are_registered, the nix adapter)
+        reads the table and sees a shorter history, not a broken one.
+
+        That is not hypothetical, which is why this check exists.
+        Migration 130 dropped fleet_deployments while leaving
+        nix_generations.deployment_id's REFERENCES clause pointing at
+        it. SQLite accepts such a schema but enforces FK targets at DML
+        time, so every INSERT raised "no such table:
+        main.fleet_deployments". The log stopped at generation 323
+        while /nix/var/nix/profiles/system pointed at 325, and the only
+        reason anyone found out was a person happening to read build
+        output. Migration 133 fixed the column; this is the check that
+        would have caught it on the next doctor run instead.
+
+        Compared against all the profile symlinks rather than only the
+        current one, so a hole in the middle is caught and not just a
+        log that has fallen behind.
+
+        Two deliberate asymmetries keep it quiet when it should be:
+
+        - One-directional. Nix garbage-collects old profile links, so
+          the DB legitimately holds generations no longer on disk.
+          Only on-disk-but-absent-from-the-DB is a problem.
+        - Floored at the first generation this machine has a row for.
+          Links older than anything templedb ever recorded predate it
+          watching, and are not evidence of a failure.
+
+        Local host only: /nix/var/nix/profiles describes this machine.
+        The equivalent question for a remote one is what
+        `reconcile machine <name>` asks.
+        """
+        import os
+        import re
+        from pathlib import Path
+        from db_utils import query_all
+
+        profiles = Path('/nix/var/nix/profiles')
+        if not profiles.is_dir():
+            return []          # not a nix-profiles host; nothing to assert
+
+        on_disk = {}
+        for link in profiles.glob('system-*-link'):
+            m = re.fullmatch(r'system-(\d+)-link', link.name)
+            if m:
+                on_disk[int(m.group(1))] = link
+        if not on_disk:
+            return []
+
+        machine = os.uname().nodename
+        rows = query_all(
+            """SELECT generation_number FROM nix_generations
+                WHERE machine_name = ?""", (machine,))
+        known = {r['generation_number'] for r in rows}
+        if not known:
+            # No rows at all for this host is a different fault, and
+            # machines_with_generations_are_registered is the check
+            # that speaks to it. Saying "all 18 generations missing"
+            # here would just be the same finding twice.
+            return []
+
+        floor = min(known)
+        missing = sorted(g for g in on_disk if g not in known and g >= floor)
+        if not missing:
+            return []
+
+        live = None
+        current = profiles / 'system'
+        if current.is_symlink():
+            m = re.fullmatch(r'system-(\d+)-link',
+                             os.path.basename(os.readlink(current)))
+            if m:
+                live = int(m.group(1))
+
+        return [
+            f"{machine}: generation {g}"
+            f"{' (the live one)' if g == live else ''} is on disk at "
+            f"{on_disk[g]} but has no nix_generations row — "
+            f"record_generation failed silently for it, the way it did "
+            f"between migrations 130 and 133"
+            for g in missing]
 
     def _check_views_are_runnable(self):
         """Invariant: every view in sqlite_master can actually be queried.

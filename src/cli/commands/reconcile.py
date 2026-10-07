@@ -104,8 +104,13 @@ class ReconcileCommands(Command):
         return 1 if any_drift else 0
 
     def _probe_one(self, machine, verbose=False) -> int:
-        """SSH one machine, diff its state against the DB, record the
-        result to reconcile_runs (migration 095)."""
+        """Probe one machine, diff its state against the DB, record the
+        result to reconcile_runs (migration 095).
+
+        Remote machines are probed over SSH; this host is probed
+        directly -- see the comment at the branch below for why that is
+        a correctness requirement and not an optimisation.
+        """
         import json
         import os
         import time
@@ -126,33 +131,66 @@ class ReconcileCommands(Command):
         port = machine['target_port'] or 22
 
         # Ask the machine what's on it.
+        #
+        # The version comes from /run/current-system/nixos-version, the
+        # file, and NOT from the nixos-version command. They disagree:
+        # the command appends the release codename, so it answers
+        # "26.05.20261006.b253099 (Yarara)" where the file says
+        # "26.05.20261006.b253099". NixStoreService.record_generation
+        # populates nix_generations.nixos_version by reading that same
+        # file out of the toplevel, so asking the command here compared
+        # a codenamed string against a bare one and reported permanent
+        # drift on a machine that had not drifted at all.
+        #
+        # This stayed invisible because reconcile skips machines with
+        # last_deployed_at IS NULL and, until migration 134 registered
+        # this host, that was all five of them -- the comparison had
+        # never once run. The command is kept as a fallback for a host
+        # without the file.
         probe_cmd = (
             "printf '%s\\n%s\\n%s\\n' "
             "\"$(readlink -f /run/current-system)\" "
-            "\"$(nixos-version 2>/dev/null || echo unknown)\" "
+            "\"$(cat /run/current-system/nixos-version 2>/dev/null "
+            "|| nixos-version 2>/dev/null || echo unknown)\" "
             "\"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null "
             "|| echo unknown)\""
         )
-        ssh_cmd = [
-            "ssh",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=8",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-p", str(port),
-            f"{user}@{host}",
-            probe_cmd,
-        ]
+        # Probing this host does not need SSH, and must not use it.
+        # Migration 134 registered zMothership2 -- the machine that owns
+        # every nix_generations row -- so `machine all` now reaches a
+        # row describing the host it is running on. Going out through
+        # `ssh root@localhost` to ask would need a root key that need
+        # not exist, and would have turned the daily reconcile timer
+        # into a daily 'unreachable' for the one machine whose state we
+        # can read with certainty. Matched on the machine's own name
+        # rather than on target_host, so a host registered by LAN
+        # address still takes this path when it is us.
+        is_self = (machine_name == os.uname().nodename
+                   or host in ('localhost', '127.0.0.1', '::1'))
+        if is_self:
+            cmd, how, where = ["bash", "-c", probe_cmd], "local", "this host"
+        else:
+            cmd = [
+                "ssh",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=8",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-p", str(port),
+                f"{user}@{host}",
+                probe_cmd,
+            ]
+            how, where = "SSH", f"{host}:{port}"
         try:
             result = subprocess.run(
-                ssh_cmd,
+                cmd,
                 capture_output=True, text=True, timeout=15,
             )
         except subprocess.TimeoutExpired:
             elapsed = int((time.monotonic() - t0) * 1000)
             print(f"  ? {machine_name:<20} "
-                  f"SSH timeout ({host}:{port})")
+                  f"{how} timeout ({where})")
             self._record_run(machine_name, 'unreachable', None,
-                             None, 'SSH timeout', elapsed)
+                             None, f'{how} timeout', elapsed)
             return 2
 
         elapsed = int((time.monotonic() - t0) * 1000)
@@ -160,7 +198,7 @@ class ReconcileCommands(Command):
             err = (result.stderr or '').strip().splitlines()
             hint = err[-1] if err else '(no stderr)'
             print(f"  ✗ {machine_name:<20} "
-                  f"SSH failed: {hint[:60]}")
+                  f"{how} failed: {hint[:60]}")
             self._record_run(machine_name, 'unreachable',
                              result.returncode, None, hint, elapsed)
             return 2
