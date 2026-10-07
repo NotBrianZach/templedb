@@ -87,11 +87,17 @@ class IntentCommands(Command):
 
         # Stash the content in content_blobs so apply can find it.
         # OK to insert even if the same hash exists (INSERT OR IGNORE).
+        #
+        # reference_count 0: a proposed intent's blob has no
+        # file_contents row pointing at it yet, and may never get one
+        # if the intent is cancelled. The increment_blob_reference
+        # trigger counts it if and when apply writes that row. See
+        # migration 128 for what seeding 1 here cost.
         execute(
             """INSERT OR IGNORE INTO content_blobs
                    (hash_sha256, content_text, content_type, encoding,
                     file_size_bytes, reference_count)
-                 VALUES (?, ?, 'text', 'utf-8', ?, 1)""",
+                 VALUES (?, ?, 'text', 'utf-8', ?, 0)""",
             (new_hash, content, len(content_bytes)),
         )
 

@@ -568,11 +568,21 @@ class FileCommands(Command):
                 sid = None
             # Insert content_blobs so `intent apply` (if replayed
             # from CLI) could find it. Idempotent via OR IGNORE.
+            #
+            # reference_count starts at 0, not 1. A blob row is not a
+            # reference to itself -- the count means "how many
+            # file_contents rows point here", and the
+            # increment_blob_reference trigger is what answers that.
+            # Seeding 1 here made every blob born through the intent
+            # path over-count from birth: the trigger then took it to
+            # 2 for a single file_contents row. Caught by
+            # blob_refcount_is_accurate within hours of that check
+            # landing; see migration 128.
             execute(
                 """INSERT OR IGNORE INTO content_blobs
                        (hash_sha256, content_text, content_type,
                         encoding, file_size_bytes, reference_count)
-                     VALUES (?, ?, 'text', 'utf-8', ?, 1)""",
+                     VALUES (?, ?, 'text', 'utf-8', ?, 0)""",
                 (new_hash, content, len(content_bytes)),
             )
             intent_id = execute(
@@ -822,19 +832,22 @@ class FileCommands(Command):
         line_count = 0 if is_binary else (content.count('\n') + 1 if content else 0)
 
         # Upsert content blob
+        # reference_count 0 on insert: the increment_blob_reference
+        # trigger counts the file_contents row that follows. See the
+        # note in _record_and_apply_intent and migration 128.
         if is_binary:
             base.execute("""
                 INSERT OR IGNORE INTO content_blobs
                 (hash_sha256, content_text, content_blob, content_type, encoding,
                  file_size_bytes, reference_count)
-                VALUES (?, NULL, ?, 'binary_asset', NULL, ?, 1)
+                VALUES (?, NULL, ?, 'binary_asset', NULL, ?, 0)
             """, (content_hash, content_bytes, len(content_bytes)))
         else:
             base.execute("""
                 INSERT OR IGNORE INTO content_blobs
                 (hash_sha256, content_text, content_blob, content_type, encoding,
                  file_size_bytes, reference_count)
-                VALUES (?, ?, NULL, 'text', 'utf-8', ?, 1)
+                VALUES (?, ?, NULL, 'text', 'utf-8', ?, 0)
             """, (content_hash, content, len(content_bytes)))
 
         # Check if file exists

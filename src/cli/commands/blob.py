@@ -453,6 +453,19 @@ class BlobCommands(Command):
                   f"Re-run with --apply to delete.")
             return 0
 
+        # Record BEFORE deleting, while the rows are still readable —
+        # same ordering as entity prune-orphans, and for the same
+        # reason: afterwards there is nothing left to describe. The
+        # first gc run (2026-10-07, 8,715 blobs / 378 MB) had no audit
+        # and could only be reconstructed by arithmetic. Migration 128
+        # exists so that cannot happen twice.
+        run_id = self._new_gc_run_id()
+        reason = (f"unreferenced by any content-hash column; "
+                  f"older than {min_age}d" if min_age > 0
+                  else "unreferenced by any content-hash column")
+        audited = self._audit_pending_deletions(pred, age_clause, params,
+                                                run_id, reason)
+
         # execute() returns lastrowid, not rowcount, so the count
         # printed is the one measured above — same predicate, same
         # transaction-free window. Close enough for a report, and the
@@ -465,6 +478,9 @@ class BlobCommands(Command):
 
         print(f"\n✓ Deleted {n:,} blob(s), freed "
               f"{reclaimable / 1024 / 1024:.1f} MB of rows")
+        if audited:
+            print(f"  Recorded in blob_deletions as run {run_id} "
+                  f"(`templedb storage blob deletions --run {run_id}`)")
 
         if getattr(args, 'vacuum', False):
             return self._vacuum()
@@ -478,6 +494,114 @@ class BlobCommands(Command):
         print("  Pages are free inside the file but not returned to "
               "the OS.\n  Re-run with --vacuum (exclusive lock, "
               "needs ~2x free disk) to shrink it.")
+        return 0
+
+    def _new_gc_run_id(self) -> str:
+        """Short id grouping one gc invocation in blob_deletions.
+
+        Timestamp plus random suffix: the timestamp makes a run
+        sortable and recognisable in a log, the suffix keeps two runs
+        in the same second distinct. SQLite has no uuid(), which is
+        why migration 128 says the caller assigns this.
+        """
+        import secrets
+        from datetime import datetime
+        return (datetime.now().strftime('%Y%m%dT%H%M%S')
+                + '-' + secrets.token_hex(3))
+
+    def _audit_pending_deletions(self, pred: str, age_clause: str,
+                                 params: tuple, run_id: str,
+                                 reason: str) -> int:
+        """Copy the doomed rows into blob_deletions. Returns the count.
+
+        INSERT ... SELECT rather than a Python loop: 8,715 rows went
+        through the first run, and a per-row round trip would make the
+        audit cost more than the collection.
+
+        Non-fatal if blob_deletions is missing — a half-migrated
+        database should still be collectable, and a gc that refuses to
+        run because its audit table is absent is a gc nobody runs. The
+        warning says so rather than failing silently.
+        """
+        try:
+            self.execute(
+                f"""INSERT INTO blob_deletions
+                        (hash_sha256, file_size_bytes, content_type,
+                         blob_created_at, deleted_via, reason, gc_run_id)
+                    SELECT cb.hash_sha256, cb.file_size_bytes,
+                           cb.content_type, cb.created_at,
+                           'blob_gc', ?, ?
+                      FROM content_blobs cb
+                     WHERE {pred} {age_clause}""",
+                (reason, run_id) + tuple(params))
+        except Exception as e:
+            print_warning(
+                f"blob_deletions not written ({e}). Deleting anyway, but "
+                f"this run will be unattributable — apply migration 128.")
+            return 0
+        row = self.query_one(
+            "SELECT COUNT(*) AS n FROM blob_deletions WHERE gc_run_id = ?",
+            (run_id,)) or {}
+        return row.get('n', 0)
+
+    @handle_errors("blob deletions")
+    def deletions(self, args) -> int:
+        """
+        Show what blob gc has collected.
+
+        Usage: ./templedb storage blob deletions [--run ID] [--limit N]
+
+        Without --run, summarises each gc run. With --run, lists the
+        individual blobs it took.
+        """
+        run = getattr(args, 'run', None)
+        limit = getattr(args, 'limit', None) or 50
+
+        if not run:
+            runs = self.query_all(
+                """SELECT gc_run_id, COUNT(*) AS n,
+                          SUM(file_size_bytes) AS bytes,
+                          MIN(deleted_at) AS at, deleted_via
+                     FROM blob_deletions
+                    GROUP BY gc_run_id, deleted_via
+                    ORDER BY MIN(deleted_at) DESC
+                    LIMIT ?""", (limit,))
+            if not runs:
+                print("No recorded blob deletions.")
+                # The first run predates migration 128 and left no
+                # rows. Saying so beats implying nothing was ever
+                # collected.
+                print("  (gc runs before migration 128 were not audited)")
+                return 0
+            print(f"{'RUN':<24} {'WHEN':<20} {'BLOBS':>8} {'SIZE':>10}  VIA")
+            for r in runs:
+                print(f"{r['gc_run_id'] or '-':<24} {r['at']:<20} "
+                      f"{r['n']:>8,} {(r['bytes'] or 0) / 1e6:>8.1f} MB  "
+                      f"{r['deleted_via']}")
+            return 0
+
+        rows = self.query_all(
+            """SELECT hash_sha256, file_size_bytes, content_type,
+                      blob_created_at, reason
+                 FROM blob_deletions WHERE gc_run_id = ?
+                ORDER BY file_size_bytes DESC LIMIT ?""", (run, limit))
+        if not rows:
+            print(f"No deletions recorded for run {run}")
+            return 1
+        total = self.query_one(
+            """SELECT COUNT(*) AS n, SUM(file_size_bytes) AS bytes
+                 FROM blob_deletions WHERE gc_run_id = ?""", (run,)) or {}
+        print(f"Run {run}: {total.get('n', 0):,} blob(s), "
+              f"{(total.get('bytes') or 0) / 1e6:.1f} MB")
+        print(f"  {rows[0]['reason']}\n")
+        for r in rows:
+            print(f"  {r['hash_sha256'][:16]}  "
+                  f"{r['file_size_bytes'] / 1024:>10.1f} KB  "
+                  f"{(r['content_type'] or '?'):<13} "
+                  f"created {r['blob_created_at']}")
+        if total.get('n', 0) > len(rows):
+            print(f"  ... and {total['n'] - len(rows):,} more "
+                  f"(--limit {total['n']} for all)")
         return 0
 
     def _vacuum(self) -> int:

@@ -163,3 +163,10 @@ def register(cli):
                            help='VACUUM after --apply to shrink the file '
                                 '(exclusive lock, needs ~2x free disk)')
     cli.commands['storage.blob.gc'] = blob_cmd.gc
+
+    del_parser = blob_sub.add_parser(
+        'deletions', help='What blob gc has collected (migration 128)')
+    del_parser.add_argument('--run', help='Show one gc run in detail')
+    del_parser.add_argument('--limit', type=int,
+                            help='Rows to show (default 50)')
+    cli.commands['storage.blob.deletions'] = blob_cmd.deletions

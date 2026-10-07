@@ -348,6 +348,210 @@ class DanglingViewTest(unittest.TestCase):
             self.conn.execute("SELECT COUNT(*) FROM live").fetchone()[0], 1)
 
 
+class SeededRefcountTest(unittest.TestCase):
+    """Migration 128: blobs must not be born over-counted.
+
+    Four INSERT sites hardcoded reference_count = 1 on blob creation,
+    so increment_blob_reference then took a single-referent blob to 2.
+    This is why 127's backfill looked clean and drifted within the
+    hour — the backfill was right, and the next five writes re-broke
+    it. Caught by blob_refcount_is_accurate, which is the first time
+    a check added in this series paid for itself.
+    """
+
+    def setUp(self):
+        self.conn = sqlite3.connect(':memory:')
+        self.conn.executescript(BlobRefcountTriggerTest.SCHEMA)
+        _apply_migration(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _count(self, h):
+        return self.conn.execute(
+            "SELECT reference_count FROM content_blobs WHERE hash_sha256=?",
+            (h,)).fetchone()[0]
+
+    def test_seeding_one_double_counts(self):
+        """The bug, reproduced."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO content_blobs "
+            "(hash_sha256, file_size_bytes, reference_count) VALUES ('x',1,1)")
+        self.conn.execute(
+            "INSERT INTO file_contents (file_id, content_hash) VALUES (1,'x')")
+        self.assertEqual(self._count('x'), 2)   # one referent, count of 2
+
+    def test_seeding_zero_is_correct(self):
+        self.conn.execute(
+            "INSERT OR IGNORE INTO content_blobs "
+            "(hash_sha256, file_size_bytes, reference_count) VALUES ('y',1,0)")
+        self.conn.execute(
+            "INSERT INTO file_contents (file_id, content_hash) VALUES (1,'y')")
+        self.assertEqual(self._count('y'), 1)
+
+    def test_uncommitted_intent_blob_stays_zero(self):
+        """A proposed intent's blob has no file_contents row — and may
+        never get one, if the intent is cancelled. Seeding 1 made it
+        permanently claim a referent it never had."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO content_blobs "
+            "(hash_sha256, file_size_bytes, reference_count) VALUES ('z',1,0)")
+        self.assertEqual(self._count('z'), 0)
+
+    # Shared with test_guard_is_not_vacuous, which runs this over a
+    # tree known to contain the bug. An earlier version of this scan
+    # silently matched nothing — its non-greedy `\)` stopped at the
+    # end of the column list, so it never reached VALUES — and passed
+    # against unfixed source. A guard that cannot fail is worse than
+    # no guard, so the self-test is part of the contract.
+    @staticmethod
+    def seeded_refcount_sites(root: Path):
+        import re
+        offenders = []
+        for path in (root / 'src').rglob('*.py'):
+            text = path.read_text(errors='ignore')
+            for m in re.finditer(
+                    r'INSERT OR IGNORE INTO content_blobs', text):
+                window = text[m.end():m.end() + 500]
+                cols = re.search(r'\((.*?)\)', window, re.S)
+                vals = re.search(r'VALUES\s*\((.*?)\)', window, re.S)
+                if not cols or not vals:
+                    continue
+                if 'reference_count' not in cols.group(1):
+                    continue
+                last = vals.group(1).strip().rstrip(',').split(',')[-1].strip()
+                if last == '1':
+                    offenders.append(str(path.relative_to(root)))
+        return sorted(set(offenders))
+
+    def test_source_has_no_seeded_literals_left(self):
+        """All four sites must be 0. A fifth added later fails here."""
+        offenders = self.seeded_refcount_sites(REPO)
+        self.assertFalse(
+            offenders,
+            "content_blobs must be inserted with reference_count=0 and let "
+            "increment_blob_reference count the file_contents row. Seeding "
+            "1 makes the trigger take a single-referent blob to 2 "
+            "(migration 128):\n  " + "\n  ".join(offenders))
+
+    def test_guard_is_not_vacuous(self):
+        """The scan above must actually detect the pattern it forbids."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'src').mkdir()
+            (root / 'src' / 'bad.py').write_text(
+                'execute("""INSERT OR IGNORE INTO content_blobs\n'
+                '    (hash_sha256, content_text, content_type,\n'
+                '     encoding, file_size_bytes, reference_count)\n'
+                '  VALUES (?, ?, \'text\', \'utf-8\', ?, 1)""", x)\n')
+            (root / 'src' / 'good.py').write_text(
+                'execute("""INSERT OR IGNORE INTO content_blobs\n'
+                '    (hash_sha256, content_text, content_type,\n'
+                '     encoding, file_size_bytes, reference_count)\n'
+                '  VALUES (?, ?, \'text\', \'utf-8\', ?, 0)""", x)\n')
+            self.assertEqual(self.seeded_refcount_sites(root), ['src/bad.py'])
+
+
+class BlobDeletionAuditTest(unittest.TestCase):
+    """Migration 128: a bulk delete must leave a trace.
+
+    The first `gc --apply` removed 8,715 blobs and 378 MB on
+    2026-10-07 and recorded nothing; reconstructing it took
+    arithmetic over before/after counts. Same gap migration 124
+    closed for entities, higher stakes — an entity can be re-derived
+    by re-running ingest, a blob is the only copy of its bytes.
+    """
+
+    MIGRATION_128 = REPO / 'migrations' / '128_blob_deletions_audit.sql'
+
+    def setUp(self):
+        self.conn = sqlite3.connect(':memory:')
+        self.conn.executescript(BlobRefcountTriggerTest.SCHEMA)
+        _apply_migration(self.conn)
+        self.conn.executescript(self.MIGRATION_128.read_text())
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_table_and_indexes_exist(self):
+        cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(blob_deletions)")}
+        self.assertTrue(
+            {'hash_sha256', 'file_size_bytes', 'blob_created_at',
+             'deleted_via', 'reason', 'gc_run_id', 'deleted_at'} <= cols)
+        idx = {r[0] for r in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='blob_deletions'")}
+        self.assertIn('idx_blob_deletions_run', idx)
+
+    def test_same_hash_can_be_collected_twice(self):
+        """Content is addressed by hash, so a hash can be re-added by a
+        later write and collected again. Both events are real, which
+        is why there is no UNIQUE here."""
+        for _ in range(2):
+            self.conn.execute(
+                "INSERT INTO blob_deletions (hash_sha256, file_size_bytes, "
+                "deleted_via, reason) VALUES ('dup', 10, 'blob_gc', 'test')")
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM blob_deletions WHERE hash_sha256='dup'"
+        ).fetchone()[0], 2)
+
+    def test_audit_insert_select_captures_doomed_rows(self):
+        """The shape _audit_pending_deletions uses: INSERT ... SELECT
+        over the same predicate, run before the DELETE."""
+        for h, sz in (('a', 100), ('b', 200)):
+            self.conn.execute(
+                "INSERT INTO content_blobs (hash_sha256, file_size_bytes, "
+                "content_type, created_at) VALUES (?,?, 'text', '2026-01-01')",
+                (h, sz))
+        self.conn.execute(
+            "INSERT INTO file_contents (file_id, content_hash) VALUES (1,'a')")
+        pred = ("NOT EXISTS (SELECT 1 FROM file_contents "
+                "WHERE file_contents.content_hash = cb.hash_sha256)")
+        self.conn.execute(
+            f"""INSERT INTO blob_deletions
+                    (hash_sha256, file_size_bytes, content_type,
+                     blob_created_at, deleted_via, reason, gc_run_id)
+                SELECT cb.hash_sha256, cb.file_size_bytes, cb.content_type,
+                       cb.created_at, 'blob_gc', 'unreferenced', 'run1'
+                  FROM content_blobs cb WHERE {pred}""")
+        self.conn.execute(
+            f"DELETE FROM content_blobs WHERE hash_sha256 IN "
+            f"(SELECT cb.hash_sha256 FROM content_blobs cb WHERE {pred})")
+        audited = self.conn.execute(
+            "SELECT hash_sha256, file_size_bytes FROM blob_deletions "
+            "WHERE gc_run_id='run1'").fetchall()
+        self.assertEqual(audited, [('b', 200)])
+        # 'a' is still referenced and must survive
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM content_blobs").fetchone()[0], 1)
+
+    def test_migration_is_idempotent(self):
+        self.conn.execute(
+            "INSERT INTO blob_deletions (hash_sha256, file_size_bytes, "
+            "deleted_via, reason) VALUES ('keep', 1, 'blob_gc', 'test')")
+        self.conn.executescript(self.MIGRATION_128.read_text())
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM blob_deletions").fetchone()[0], 1)
+
+    def test_128_backfill_repairs_seeded_drift(self):
+        """128's recompute must fix rows 127 left correct and the
+        seeding bug then broke."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO content_blobs "
+            "(hash_sha256, file_size_bytes, reference_count) VALUES ('s',1,1)")
+        self.conn.execute(
+            "INSERT INTO file_contents (file_id, content_hash) VALUES (1,'s')")
+        self.assertEqual(self.conn.execute(
+            "SELECT reference_count FROM content_blobs WHERE hash_sha256='s'"
+        ).fetchone()[0], 2)
+        self.conn.executescript(self.MIGRATION_128.read_text())
+        self.assertEqual(self.conn.execute(
+            "SELECT reference_count FROM content_blobs WHERE hash_sha256='s'"
+        ).fetchone()[0], 1)
+
+
 class ReferentCoverageTest(unittest.TestCase):
     """Every blob-hash column must be classified before gc can be safe.
 
