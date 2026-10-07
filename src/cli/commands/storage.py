@@ -150,3 +150,16 @@ def register(cli):
     migrate_parser.add_argument('--max-size', type=int, help='Maximum size for migration')
     migrate_parser.add_argument('--dry-run', action='store_true', help='Show what would be migrated')
     cli.commands['storage.blob.migrate'] = blob_cmd.migrate
+
+    # storage blob gc — dry-run by default, like `entity prune-orphans`.
+    gc_parser = blob_sub.add_parser(
+        'gc', help='Delete blobs no table references (dry-run by default)')
+    gc_parser.add_argument('--apply', action='store_true',
+                           help='Actually delete (default: report only)')
+    gc_parser.add_argument('--min-age-days', type=int,
+                           help=f'Spare orphans younger than N days '
+                                f'(default: {BlobCommands.GC_MIN_AGE_DAYS})')
+    gc_parser.add_argument('--vacuum', action='store_true',
+                           help='VACUUM after --apply to shrink the file '
+                                '(exclusive lock, needs ~2x free disk)')
+    cli.commands['storage.blob.gc'] = blob_cmd.gc

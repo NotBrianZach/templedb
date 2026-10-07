@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TempleDB schema atlas: table-by-table analysis and project status</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --ok: #7ec77e;
+    --warn: #e8c547;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  h4 { color: #9a9ac0; font-size: 0.92rem; margin: 1.2rem 0 0.35rem;
+       font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.86em; }
+  th, td { border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left;
+           vertical-align: top; }
+  th { background: var(--panel); color: #b0b0d0; font-weight: 600; }
+  td.n { text-align: right; font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .bad { color: var(--accent); }
+  .dim { color: var(--muted); }
+  ul { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin-bottom: 0.35rem; }
+</style>
+</head>
+<body>
+
+<h1>TempleDB schema atlas: table-by-table analysis and project status</h1>
+<p class="lede">
+  A full pass over the live TempleDB database as of 2026-10-06: 165 tables, 47 views,
+  369 indexes, 62 triggers, 776&nbsp;MB on disk. The schema is read here as a stratigraphy —
+  five distinct eras of design intent laid down on top of each other, each with its own
+  theory of what the database is for, and only the top two still load-bearing. The report
+  walks every subsystem table by table, names the semantics the schema actually enforces
+  (as opposed to the semantics the column comments claim), and ends with the four concrete
+  defects this pass turned up — the largest of which is that <strong>54% of the database
+  file is unreachable blob garbage with no collector</strong>.
+</p>
+
+<h2>1. Status at a glance</h2>
+
+<p>
+  The project is in a stable operating regime. The observer/integrator model landed
+  (Phases 0–3, Sep 2026); the checkout-role tranche landed (Phases 0–4, Sep 27 – Oct 3);
+  nine ingest adapters run hourly; 29 doctor invariants run daily. What is left on the
+  declared roadmap is Phase 5 — retire the "authority-over-source" vocabulary — plus a
+  decision on whether SCIP stays.
+</p>
+
+<table>
+<tr><th>Dimension</th><th>Value</th><th>Read</th></tr>
+<tr><td>Database file</td><td class="n">776 MB</td><td>701 MB of allocated pages + 64 MB WAL at probe time</td></tr>
+<tr><td>Tables / views / indexes / triggers</td><td class="n">165 / 47 / 369 / 62</td><td>126 are application tables; 12 are FTS5 shadows, 27 are cr-sqlite machinery</td></tr>
+<tr><td>Schema version</td><td class="n">126</td><td>90 migration files recorded; numbering is sparse by design</td></tr>
+<tr><td>Projects</td><td class="n">30</td><td>9 of them have zero files — test fixtures that were never swept</td></tr>
+<tr><td>Tracked files / current contents</td><td class="n">2,369 / 2,051</td><td>318 file rows have no current blob (deleted or never ingested)</td></tr>
+<tr><td>Content blobs</td><td class="n">12,512 (489 MB)</td><td><span class="bad">8,741 (378 MB) unreachable</span> — see §7.1</td></tr>
+<tr><td>Commits / branches / file-states</td><td class="n">1,118 / 22 / 4,230</td><td>templedb 593, bza 235, system_config 178</td></tr>
+<tr><td>VCS sessions</td><td class="n">709 (2 active)</td><td>age-based reaping at 24h is working</td></tr>
+<tr><td>Checkouts</td><td class="n">72</td><td>8 canonical, 21 edit, 43 scratch; 54 unowned (<code>session_id IS NULL</code>)</td></tr>
+<tr><td>Entity graph</td><td class="n">53,050 / 62,373</td><td>14 entity kinds, 14 relation kinds, 7 authorities</td></tr>
+<tr><td>Edit intents</td><td class="n">978</td><td>every <code>file set</code> since Phase 2 writes one</td></tr>
+<tr><td>Doctor invariants</td><td class="n">29 (4 red)</td><td>3 reds are ingest lag; 1 is the WAL budget</td></tr>
+</table>
+
+<h3>Ingest health</h3>
+
+<p>
+  Nine adapters. Seven run hourly and are green. The cumulative error counts in
+  <code>templedb summary</code> are misleading on their own — the 234 <code>git</code>
+  failures all fall inside a single closed window, <strong>2026-09-06 00:03 through
+  2026-09-24 21:40</strong>, which is the cr-sqlite load outage. Nothing has failed since.
+</p>
+
+<table>
+<tr><th>Adapter</th><th>Runs</th><th>Entities added (cum.)</th><th>Relations added (cum.)</th><th>Last run</th><th>Errors</th></tr>
+<tr><td>git</td><td class="n">556</td><td class="n">3,723</td><td class="n">4,327</td><td>5 min ago</td><td class="n">234 <span class="dim">(all 09-06…09-24)</span></td></tr>
+<tr><td>python</td><td class="n">338</td><td class="n">10,094</td><td class="n">27,064</td><td>5 min ago</td><td class="n">0</td></tr>
+<tr><td>agent</td><td class="n">319</td><td class="n">19,908</td><td class="n">19,580</td><td>5 min ago</td><td class="n">0</td></tr>
+<tr><td>nix</td><td class="n">319</td><td class="n">25,438</td><td class="n">5,582</td><td>5 min ago</td><td class="n">0</td></tr>
+<tr><td>deploy</td><td class="n">314</td><td class="n">571</td><td class="n">60</td><td>5 min ago</td><td class="n">0</td></tr>
+<tr><td>intent</td><td class="n">314</td><td class="n">1,739</td><td class="n">0</td><td>5 min ago</td><td class="n">0</td></tr>
+<tr><td>reports</td><td class="n">312</td><td class="n">70</td><td class="n">0</td><td>5 min ago</td><td class="n">0</td></tr>
+<tr><td>scip</td><td class="n">22</td><td class="n">36,382</td><td class="n">83,160</td><td>6 h ago</td><td class="n">0</td></tr>
+<tr><td>mirrors</td><td class="n">2</td><td class="n">4,677</td><td class="n">2,709</td><td>2 d ago</td><td class="n">1</td></tr>
+</table>
+
+<p>
+  Note the arithmetic: <code>scip</code> has cumulatively inserted 36,382 entities and
+  83,160 relations into a graph that currently holds 53,050 and 62,373 <em>in total</em>.
+  Adapters are idempotent-by-upsert, so cumulative counters over-report; but they also
+  reveal churn. Today at 13:30:53 a bulk operation deleted 8,133 <code>Symbol</code>
+  entities in one transaction, recorded in <code>entity_deletions</code> with
+  <code>deleted_via = 'bulk_sql'</code> — a third value beyond the two the table's own
+  comment documents (<code>graph_forget</code>, <code>prune_orphans</code>).
+</p>
+
+<h2>2. How to read this schema</h2>
+
+<p>
+  The 126 application tables were not designed at once. They are five strata, and the most
+  useful single act of orientation is to learn which stratum a table belongs to, because
+  that predicts whether it is maintained, whether its comments are true, and whether you
+  should write to it.
+</p>
+
+<table>
+<tr><th>Stratum</th><th>Theory of the database</th><th>Representative tables</th><th>Status</th></tr>
+<tr><td><strong>I — Catalogue</strong></td><td>"A database of facts <em>about</em> code"</td><td><code>project_files.purpose/owner/description</code>, <code>file_metadata</code>, <code>file_types</code>, <code>code_clusters</code></td><td><span class="dim">Vestigial. Columns are all-NULL.</span></td></tr>
+<tr><td><strong>II — Code intelligence</strong></td><td>"A symbol graph with embeddings and impact analysis"</td><td><code>code_symbols</code>, <code>code_symbol_dependencies</code>, <code>code_search_index</code>, <code>impact_transitive_cache</code></td><td><span class="bad">Superseded</span> by the entity graph; 12 rows survive</td></tr>
+<tr><td><strong>III — Database-native VCS</strong></td><td>"The DB is authoritative for source; git is an export format"</td><td><code>content_blobs</code>, <code>file_contents</code>, <code>vcs_*</code></td><td><span class="warn">Demoted but load-bearing</span></td></tr>
+<tr><td><strong>IV — Deployment/fleet platform</strong></td><td>"TempleDB deploys to a fleet of machines"</td><td><code>fleet_*</code>, <code>deployment_*</code>, <code>blue_green_state</code>, <code>edge_function_deployments</code></td><td><span class="dim">Mostly empty; the real deploy path is <code>nix_generations</code> + <code>system_deployments</code></span></td></tr>
+<tr><td><strong>V — Observer / entity graph</strong></td><td>"Git is authoritative; TempleDB observes and relates"</td><td><code>entities</code>, <code>relations</code>, <code>ingestion_runs</code>, <code>invariant_checks</code>, <code>claims</code></td><td><span class="ok">Current. Where all new design goes.</span></td></tr>
+</table>
+
+<p>
+  The characteristic signature of stratum V, and the thing that makes this schema
+  genuinely interesting, is that <strong>it writes its own epistemics into the DDL</strong>.
+  Stratum III tables say what a thing <em>is</em>. Stratum V tables say when the thing was
+  <em>last observed</em>, by <em>which authority</em>, and with <em>what warrant</em> —
+  <code>entities.observed_at</code>, <code>entities.source_authority</code>,
+  <code>claims.warrant_kind</code>, <code>claim_evidence.role IN ('supports','undercuts')</code>.
+  That is a deliberate and unusual commitment: the database is designed to be wrong in
+  legible ways rather than right in silent ones.
+</p>
+
+<h2>3. The content spine</h2>
+
+<p>
+  Five tables carry every byte of source TempleDB knows about. Everything else hangs off
+  them.
+</p>
+
+<pre>projects ──1:N──&gt; project_files ──1:1──&gt; file_contents ──N:1──&gt; content_blobs
+                        │                                            ▲
+                        └──N:M (via vcs_file_states) ── vcs_commits ─┘</pre>
+
+<h4>projects <span class="dim">— 30 rows</span></h4>
+<p>
+  The root. <code>slug</code> is the universal external key; nearly every CLI verb takes
+  one. Carries a lot of accreted classification: <code>project_type</code>,
+  <code>project_category</code>, <code>is_nix_project</code>, <code>service_type</code>,
+  <code>flake_check_status</code>, <code>nix_build_status</code>. Four of those six are
+  CHECK-constrained enums added by separate ALTERs, which is why the DDL reads as a run-on
+  sentence. <code>project_type</code> and <code>project_category</code> overlap almost
+  entirely — <code>'service'</code> is a legal value of both — and nothing reconciles them.
+  <strong>Trade-off:</strong> wide denormalised classification on the root table makes
+  <code>WHERE is_nix_project = 1</code> cheap and avoids a join for the most common filter,
+  at the cost of a root table that no longer has a single coherent meaning.
+  <strong>Future:</strong> collapse the two enums, or move classification into
+  <code>entities.attributes_json</code> where the rest of the typed-fact work now lives.
+  Nine of the 30 rows (<code>proj_a</code>, <code>proj_b</code>, <code>proj_sess</code>,
+  <code>proj_ctx</code>, <code>proj_missing</code>, …) are test fixtures with zero files.
+</p>
+
+<h4>project_files <span class="dim">— 2,369 rows</span></h4>
+<p>
+  Path identity, <code>UNIQUE(project_id, file_path)</code>. This is the stable integer
+  handle a path gets, and the thing <code>File</code> entities point at. It is also the
+  clearest fossil of stratum I: of its 18 columns, seven —
+  <code>description</code>, <code>purpose</code>, <code>owner</code>,
+  <code>documentation_url</code>, <code>inline_documentation</code>,
+  <code>complexity_score</code>, <code>edit_mode</code> — are 100% NULL across all 2,369
+  rows and are formally accepted as such in <code>unmaintained_columns_baseline</code>.
+  <strong>Semantics worth knowing:</strong> <code>status = 'active'</code> is a real filter
+  — <code>source_snapshots</code> and the FTS triggers both honour it, so a file whose
+  status drifts silently disappears from search without disappearing from the table.
+  <strong>Future:</strong> the seven dead columns are the cheapest DROP in the schema and
+  the baseline table already licenses it.
+</p>
+
+<h4>content_blobs <span class="dim">— 12,512 rows, 489 MB, 70% of the database</span></h4>
+<p>
+  Content-addressed store keyed on <code>hash_sha256</code>, with
+  <code>content_text</code> for UTF-8 and <code>content_blob</code> for binary (only 105
+  blobs are binary). This is the single best design decision in the schema: dedup is free,
+  identity is content, and <code>--if-match</code> hash-guarded writes are possible because
+  the hash <em>is</em> the primary key.
+</p>
+<p>
+  It is also where the schema's largest live defect lives. Seven of its columns —
+  <code>storage_location</code>, <code>external_path</code>, <code>chunk_count</code>,
+  <code>compression</code>, <code>remote_url</code>, <code>fetch_count</code>,
+  <code>last_fetched_at</code> — describe a tiered-storage design (inline / external /
+  remote, zstd-compressed, chunked) that was never implemented; all blobs are
+  <code>'inline'</code>, and three views (<code>external_blobs_view</code>,
+  <code>migratable_inline_blobs</code>, <code>blob_storage_stats</code>) plus a
+  <code>storage blob migrate</code> subcommand exist to operate a tier system with nothing
+  in it. Meanwhile <code>reference_count</code>, the field that <em>would</em> make
+  collection possible, is maintained by two triggers that fire only on INSERT and DELETE of
+  <code>file_contents</code> — never on UPDATE. Since <code>file_contents</code> holds
+  exactly one row per file and is updated in place, the counter drifts monotonically
+  upward: declared total 4,263 against an actual 2,051, wrong on 2,073 blobs.
+  <strong>Consequence:</strong> §7.1.
+</p>
+
+<h4>file_contents <span class="dim">— 2,051 rows, all <code>is_current = 1</code></span></h4>
+<p>
+  The current-snapshot map: file → blob. Since migration 086 this is explicitly a
+  <em>snapshot</em> table, not an authoritative store — the row records the most recent
+  observation of a file, and git owns the truth. The vocabulary change was the whole point
+  of Phase 1 and it is worth taking literally.
+</p>
+<p>
+  The interesting artefact here is <code>UNIQUE(file_id, is_current)</code>. The intent is
+  "at most one current version per file", and it achieves that. But because SQLite treats
+  <code>0</code> as an ordinary value in a unique index, the same constraint also permits
+  <em>at most one non-current row per file</em> — which makes the <code>version</code>
+  column and the <code>is_current</code> flag structurally unusable as a history mechanism.
+  The table has silently become single-valued, which is in fact the correct Phase-1
+  semantics; the constraint arrived at the right answer for the wrong reason, and
+  <code>is_current</code> is now recorded as a constant in the unmaintained-columns
+  baseline. <strong>Future:</strong> drop <code>is_current</code> and
+  <code>version</code>, make <code>file_id</code> the primary key, and let
+  <code>vcs_file_states</code> own history outright — which is already true in practice.
+</p>
+
+<h4>file_contents_fts <span class="dim">— FTS5, ~97 MB</span></h4>
+<p>
+  Porter-stemmed full-text index over current text contents, kept in sync by five triggers
+  (three on <code>file_contents</code>, two on <code>project_files</code> for path renames
+  and deletes). Migration 110 added the INSERT trigger that had been missing — before that
+  the index silently stopped growing and matched 39 files across a 197k-line corpus, the
+  worst class of bug this schema can have because a search that returns nothing looks
+  identical to code that does not exist.
+</p>
+<p>
+  <strong>Trade-off, unexamined:</strong> this is a <em>contentless-by-default</em> FTS5
+  table, meaning it keeps its own full copy of every indexed document in
+  <code>file_contents_fts_content</code> (37 MB) alongside the inverted index (61 MB). The
+  text already exists in <code>content_blobs</code>. Declaring
+  <code>content='current_file_contents_view'</code> would eliminate the duplicate at the
+  cost of a join per snippet. 37 MB is 5% of the database — not urgent, but it is pure
+  duplication.
+</p>
+
+<h4>file_types <span class="dim">— 66 rows</span></h4>
+<p>
+  A lookup table <code>project_files</code> joins through on every read, with a mandatory
+  non-null FK. Sixty-six rows of <code>('javascript','frontend')</code>-style pairs that
+  could be a derived function of the file extension. <strong>Trade-off:</strong> a
+  normalised type table buys you category rollups (<code>ft.category</code> appears in
+  three views) at the price of a required join on the hottest path in the schema.
+  Defensible, but it is the only hard FK a file row cannot live without.
+</p>
+
+<h2>4. Version control</h2>
+
+<p>
+  Twelve tables implementing a git-shaped VCS inside SQLite. Under the observer model this
+  layer is demoted — git is authoritative for source — but it is not dead: it is how
+  TempleDB records <em>its own</em> write path, and <code>vcs_commits</code> is the join
+  target for provenance queries from deployments, generations, claims and intents.
+</p>
+
+<h4>vcs_commits <span class="dim">— 1,118 rows</span></h4>
+<p>
+  The hub. Note the dual identity introduced by migration 126
+  (<code>126_separate_git_shas_from_commit_ids.sql</code>): <code>commit_hash</code> is now
+  strictly a TempleDB-native identifier, and <code>git_commit_hash</code> holds the
+  imported SHA when there is one. The 262-row <code>commit_hash_migration_126</code> table
+  is the audit trail of that split, recording per-commit whether the old value moved to
+  <code>git_commit_hash</code> (<code>kind='git-sha'</code>) or was merely a case
+  normalisation (<code>kind='case-only'</code>). Keeping the mapping table as a permanent
+  artefact rather than a throwaway is good practice and pays for itself the first time
+  someone finds an old hash in a report.
+</p>
+<p>
+  <strong>Constraint oddity:</strong> <code>commit_hash TEXT NOT NULL UNIQUE</code> and
+  <code>UNIQUE(project_id, commit_hash)</code> are both declared. The second is redundant
+  given the first, and the first is stronger than it should be — it makes commit hashes a
+  global namespace across all 30 projects, which is fine for native IDs but would collide
+  the moment two projects import the same upstream commit. Two indexes are maintained for
+  one guarantee.
+</p>
+<p>
+  Four columns are formally dead: <code>committer</code>, <code>committer_email</code>,
+  <code>git_branch</code>, and — notably — <code>merge_parent_commit_id</code>, because
+  there are no merge commits yet and merges are tracked in
+  <code>vcs_commit_parents</code> anyway. That is two competing representations of
+  parentage (<code>parent_commit_id</code> + <code>merge_parent_commit_id</code> on the
+  row, versus the <code>vcs_commit_parents</code> junction with
+  <code>parent_order</code>), and the junction won. <strong>Future:</strong> drop both
+  scalar parent columns.
+</p>
+
+<h4>vcs_file_states <span class="dim">— 4,230 rows</span></h4>
+<p>
+  The per-commit tree delta: <code>(commit_id, file_id)</code> unique, with
+  <code>change_type</code> CHECK-constrained to the five git verbs. Migration 118
+  normalised this out of an earlier <code>commit_files</code> table, which now survives as
+  a <em>view</em> that reconstructs the old column shape (<code>old_file_path</code> /
+  <code>new_file_path</code> switched on <code>change_type = 'deleted'</code>, with
+  <code>lines_added</code> and <code>lines_removed</code> hardcoded to <code>0</code>).
+  That is a clean way to retire a table without breaking callers, and the hardcoded zeros
+  are an honest signal that the old columns were never populated either.
+</p>
+<p>
+  This table plus <code>file_contents</code> is what <code>source_snapshots</code> unions
+  to give the "read any file at any revision" surface. <code>previous_path</code> is
+  all-NULL — rename detection is declared in the <code>change_type</code> enum but not
+  implemented.
+</p>
+
+<h4>vcs_sessions <span class="dim">— 709 rows, 2 active</span></h4>
+<p>
+  The most consequential small table in the schema. A session is the unit that scopes
+  staging, so that two agents writing to the same project do not sweep each other's work
+  into one commit. Identity is <code>(author, host, name)</code> with a 24-hour expiry;
+  resolution is by <code>TEMPLEDB_SESSION_ID</code> (exact, must be live) or
+  <code>TEMPLEDB_SESSION</code> (name, validated against author+host+active).
+</p>
+<p>
+  <strong>The asymmetry that causes all the trouble:</strong>
+  <code>VCSService.get_current_session()</code> may create a session for an unknown name;
+  <code>CheckoutRepository.current_session_id()</code> deliberately may not, because
+  resolving a path should not have the side effect of opening a session. The consequence is
+  visible in the data: of 72 checkout rows, 54 have <code>session_id IS NULL</code> —
+  including all 8 canonical trees (correctly, they are nobody's) and 3 of 21 edit trees
+  (incorrectly, those are unowned workspaces). Migration 122's partial unique index is
+  supposed to constrain exactly the ambiguous rows, but SQLite treats NULLs as distinct in
+  a unique index, so the constraint does not bind precisely where it is needed. This is the
+  documented open gap in the checkout-role tranche and it is a schema-shaped problem, not a
+  code-shaped one.
+</p>
+<p>
+  <code>expected_lifetime_seconds</code> and <code>reap_policy</code> are all-NULL — a
+  configurable-reaping design that never shipped. Reaping is age-based with a
+  <code>COALESCE</code> default of 86,400s and works correctly.
+</p>
+
+<h4>vcs_working_state <span class="dim">— 1,738 rows</span></h4>
+<p>
+  The staging area: <code>(project, branch, file)</code> → working content, plus
+  <code>staged_by_session_id</code> and <code>intent_id</code>. Note it stores
+  <code>content_text</code>/<code>content_blob</code> <em>inline</em> rather than
+  referencing <code>content_blobs</code> — the one place in the schema that breaks the
+  content-addressed discipline. It also carries <code>content_hash</code>, so the hash is
+  computed but the dedup is not taken. <strong>Future:</strong> point this at
+  <code>content_blobs</code> like everything else; it is the same change that would make
+  blob GC tractable.
+</p>
+<p>
+  Migration 083 dropped the boolean <code>staged</code> column in favour of
+  <code>staged_by_session_id IS NOT NULL</code>, and <code>vcs_current_files_view</code>
+  re-derives the boolean for compatibility. Good: one source of truth, one derived
+  convenience.
+</p>
+
+<h4>vcs_commit_metadata <span class="dim">— 233 rows / 1,118 commits</span></h4>
+<p>
+  Twenty-five columns of optional commit annotation: intent, change_type, breaking-change
+  notes, impact and risk levels, review status, test-coverage delta, and an
+  <code>ai_assisted</code> / <code>ai_tool</code> / <code>confidence_level</code> triple.
+  Five views read it. It is populated on 21% of commits. <strong>Trade-off:</strong> this
+  is a sidecar table rather than columns on <code>vcs_commits</code>, which is the right
+  call — it keeps the hot table narrow and makes the optionality explicit in the join.
+  <strong>But</strong> none of the 25 columns is CHECK-constrained despite every one of
+  them being a small enum in the comments, so <code>impact_level</code> can be anything.
+  Cheap, high-value hardening.
+</p>
+
+<h4>vcs_branches / vcs_commit_parents / vcs_session_heads <span class="dim">— 22 / 857 / 5</span></h4>
+<p>
+  <code>vcs_branches.head_commit_id</code> is advanced by an AFTER INSERT trigger on
+  <code>vcs_commits</code> — the only write-path trigger in the VCS layer, and a nice one:
+  it makes "the branch head" unforgeable from the application side.
+  <code>vcs_session_heads</code> is the per-session view of a branch head
+  (<code>head_commit_id</code> + <code>base_commit_id</code>, the latter NULL when the
+  branch was empty at session start), which is what lets concurrent sessions commit onto
+  the same branch without a lock. Five rows: it is used, lightly.
+</p>
+
+<h4>Empty VCS tables</h4>
+<p>
+  <code>vcs_tags</code> (0), <code>vcs_commit_tags</code> (0),
+  <code>vcs_file_change_metadata</code> (0). Tagging was built twice — once project-scoped
+  with annotated-tag support, once commit-scoped with categories — and neither is used.
+  <code>vcs_file_change_metadata</code> is the per-file analogue of
+  <code>vcs_commit_metadata</code> and has never received a row.
+</p>
+
+<h2>5. Workspaces, intents and the write path</h2>
+
+<p>
+  This is the newest substantial subsystem and the one with the most careful semantics.
+  The problem it solves: when the canonical checkout, several agent edit workspaces, and
+  the DB all disagree about a file's contents, which one is authoritative — and for whom?
+</p>
+
+<h4>checkouts <span class="dim">— 72 rows (8 canonical / 21 edit / 43 scratch)</span></h4>
+<p>
+  The answer is <code>kind</code> plus <code>session_id</code>, both added by migration 113.
+  A <em>role</em> (not a path) determines authority, and <code>resolve(purpose)</code>
+  picks a tree by what the caller intends to do — so a writer never reconciles against the
+  published copy. Migration 122 added partial unique indexes to make roles unambiguous.
+  The design is right; the NULL-session gap in §4 is what keeps
+  <code>checkout_roles_are_unambiguous</code> occasionally red. Note that
+  <code>admin checkout-gc</code> cannot fix it: those trees are live, not stale.
+</p>
+
+<h4>checkout_snapshots <span class="dim">— 36,198 rows, 3.8 MB</span></h4>
+<p>
+  Per-checkout record of which blob each file was at materialise time. This is the blob-age
+  guard's evidence base — the mechanism that stops a stale disk from overwriting a newer
+  blob. It is the second-largest row count in the schema after
+  <code>nix_closure_paths</code>, and it grows as O(checkouts × files): 72 checkouts × ~500
+  files. <code>ON DELETE CASCADE</code> from <code>checkouts</code> keeps it bounded when
+  <code>checkout-gc</code> runs, but that cascade is also what orphans <code>File</code>
+  entities and requires a follow-up <code>entity prune-orphans</code>.
+</p>
+
+<h4>edit_intents <span class="dim">— 978 rows</span></h4>
+<p>
+  Phase 2's core object: a proposed edit as a first-class row, with
+  <code>base_revision</code>, <code>new_content_hash</code>, a lifecycle
+  (<code>proposed → applied | cancelled</code>) and a link to the commit that recorded it.
+  Every <code>file set</code> creates one. This is the schema taking seriously that an edit
+  is a <em>speech act</em> with an author and a basis, not just a mutation.
+</p>
+<p>
+  Two columns undercut it, though one is already half-repaired.
+  <code>base_revision</code> was the literal string <code>'current'</code> on every row
+  until 2026-10-04 — so the intent did not pin what it was computed against, which is
+  precisely the information that would make the <code>--if-match</code> stale-write class
+  of bug structurally detectable rather than opt-in. The write path was fixed that
+  afternoon and the 93 intents created since carry a real base hash or the explicit
+  <code>'new-file'</code> sentinel; the remaining 888 are legacy. The
+  <code>unmaintained_columns_baseline</code> row calling the column
+  <code>constant</code> was recorded the day before the fix and is now stale, which is
+  worth noting as a limitation of the ratchet: it suppresses reporting on a column that
+  has since started being written.
+</p>
+<p>
+  <code>applied_commit_id</code> is the one still entirely unwritten — 100% NULL, so no
+  intent is ever linked to the commit that landed it, even though 978 of them are marked
+  applied. <strong>This is the highest-value repair in the schema:</strong> populating it
+  would turn the intent table from a log into a span, and would let
+  <code>provenance intent</code> answer the question it was built for.
+</p>
+
+<h4>sync_cache <span class="dim">— 1,555 rows</span></h4>
+<p>
+  Despite the prefix, this is <em>not</em> a CRDT table — no cr-sqlite clock. It is the
+  "hash at last sync" record used to detect disk drift. Name collision with the eight real
+  <code>sync_*</code> tables is a genuine readability hazard.
+</p>
+
+<h4>edit_sessions / editor_sessions <span class="dim">— 0 / 0</span></h4>
+<p>
+  Two abandoned designs. <code>edit_sessions</code> has
+  <code>UNIQUE(project_id)</code> — one edit session per project, a global lock — which is
+  exactly the model the checkout-role tranche replaced with per-session trees. Its
+  companion <code>stale_edit_sessions</code> view is likewise dead.
+  <code>editor_sessions</code> would have persisted Emacs buffer layout per host.
+</p>
+
+<h2>6. The entity graph</h2>
+
+<p>
+  Stratum V. Two generic tables plus a ring of telemetry and invariant tables around them.
+  The design doc frames it categorically — entities as objects, relations as morphisms,
+  span tables as first-class arrows with duration, doctor checks as commuting-diagram
+  invariants — and the DDL is unusually faithful to that framing.
+</p>
+
+<h4>entities <span class="dim">— 53,050 rows, 8.8 MB</span></h4>
+<pre>UNIQUE(kind, external_ref)
+kind              TEXT   -- conventional, NOT enforced
+external_ref      TEXT   -- heterogeneous IDs coexist as text
+source_authority  TEXT   -- git | nix | agent-runtime | author | templedb | machine | scip-typescript | python
+observed_at       TEXT   -- freshness per fact
+sync_scope        TEXT CHECK (IN ('fleet','machine-local','none'))</pre>
+<p>
+  <strong>Trade-off, deliberate and correct:</strong> <code>kind</code> is a free-text
+  convention rather than a FK to a kinds table or a CHECK enum. The cost is that a typo
+  creates a new kind silently. The benefit is that an ingest adapter can be added without a
+  migration — and nine adapters have been. Given that the whole point of the graph is to
+  absorb facts from authorities TempleDB does not control, soft-typing the kind is the
+  right call. The invariant layer (<code>entity_counts_match_source_tables</code>,
+  <code>every_commit_has_entity</code>, …) is what buys back the safety a CHECK would have
+  given, and it buys it at observation time rather than write time, which is the only place
+  it can be bought for foreign facts.
+</p>
+<p>
+  <strong>The one real namespace problem:</strong> <code>Symbol</code> entities are
+  produced by two authorities — <code>python</code> (5,095) and
+  <code>scip-typescript</code> (15,821) — into a single
+  <code>UNIQUE(kind, external_ref)</code> namespace. Nothing in the schema prevents a
+  Python symbol ref and a TypeScript symbol ref from colliding; the unique constraint does
+  not include <code>source_authority</code>. Deliberately excluding it is defensible (the
+  same commit observed by two adapters should be one entity, not two) but it means
+  authorities must agree on a ref-encoding discipline that the schema does not enforce.
+  The 8,133-row bulk Symbol deletion earlier today is a symptom of that churn.
+</p>
+
+<h4>relations <span class="dim">— 62,373 rows</span></h4>
+<p>
+  <code>UNIQUE(from, kind, to)</code> with <code>ON DELETE CASCADE</code> both ways. The
+  comment on <code>attributes_json</code> states the governing rule explicitly: <em>"if a
+  relation grows more than 2–3 attributes or a lifecycle, promote it to a span with its own
+  table."</em> That is a schema-evolution policy written into the DDL, and the codebase
+  follows it — <code>edit_intents</code>, <code>tool_calls</code>,
+  <code>report_implementations</code>, <code>ast_builds</code>,
+  <code>deployment_history</code> and <code>nix_generations</code> are all spans that were
+  promoted rather than crammed into JSON. <code>attributes_json</code> is consequently
+  all-NULL, which here is a success signal rather than a dead column.
+</p>
+<p>
+  Relation-kind distribution shows where the graph's mass is:
+  <code>defines</code> 20,894 / <code>uses</code> 17,530 / <code>invoked</code> 11,850 /
+  <code>calls</code> 4,680 / <code>contains</code> 3,091 / <code>built-by</code> 2,355 —
+  i.e. 93% of edges come from two adapters (python/scip and agent). The
+  cross-authority edges that justify the whole design —
+  <code>motivated</code> (2), <code>targets</code> (1), <code>from-commit</code> (29) —
+  are three orders of magnitude rarer. That is the honest state of the graph: an excellent
+  intra-authority index, and a thin cross-authority one.
+</p>
+
+<h4>observations_archive <span class="dim">— 26,275 rows, 4.8 MB</span></h4>
+<p>
+  Append-only history of entity mutations, written by
+  <code>trg_entities_archive_on_update</code>. The trigger is scoped tightly —
+  <code>AFTER UPDATE OF label, source_authority … WHEN OLD IS NOT NEW</code> — so the
+  hourly re-observation that only bumps <code>observed_at</code> does <em>not</em> archive.
+  That scoping is what keeps this table at 26k rows instead of millions. Worth noting
+  because it is easy to get wrong and expensive when you do.
+</p>
+
+<h4>entity_deletions <span class="dim">— 8,133 rows</span></h4>
+<p>
+  Added by migration 124 to answer a specific forensic question. Its comment is the clearest
+  statement of intent in the schema: <em>"A gap in this table next to a drop in entity
+  counts therefore means 'not deleted through the CLI', which is the single most useful
+  thing to know when counts move unexpectedly."</em> It records
+  <code>relations_removed</code> because the cascade leaves no trace of its own. All 8,133
+  current rows are from a single <code>bulk_sql</code> event today.
+</p>
+
+<h4>ingestion_runs / invariant_checks / reconcile_runs / hygiene_snapshots <span class="dim">— 2,496 / 3,250 / 11 / 102</span></h4>
+<p>
+  The telemetry ring. Each records a <em>process</em> rather than a fact, which is what
+  makes "is this number stale?" answerable. Two details worth calling out:
+</p>
+<ul>
+  <li><code>invariant_checks.sample_issues_json</code> stores only the first N issues, with
+      the rationale written in the comment — <em>"Freshness &gt; completeness for a history
+      log."</em> A bounded-growth decision made explicitly rather than discovered later.</li>
+  <li><code>hygiene_snapshots.adapter_version</code> exists so that a step-change in
+      <code>dead_candidates</code> can be attributed to an adapter upgrade rather than to
+      real code change — the comment cites the 1.6→1.7 bump that dropped false positives
+      ~40pp. This is versioned-measurement discipline, and it is rare.</li>
+  <li><code>invariant_checks.ingestion_run_id</code> is all-NULL: the intended link from a
+      violated invariant back to the ingest run that caused the drift was never wired.</li>
+</ul>
+
+<h4>claims / claim_evidence <span class="dim">— 2 / 2 rows</span></h4>
+<p>
+  The most ambitious and least populated part of the schema, added by migration 116. A
+  claim is a proposition scoped to <code>(project, commit, host, inputs)</code> with a
+  <code>warrant_kind</code> naming the <em>inference rule</em> rather than the conclusion,
+  and <code>'asserted'</code> as an explicit value meaning "an agent's say-so, recorded as
+  such so it is distinguishable from a checked claim." Evidence can be attached with
+  <code>role = 'undercuts'</code> so a claim carries its own contrary evidence rather than
+  the author silently omitting it. <code>evidence_hash</code> is captured at assertion time
+  so that evidence moving under a claim fails loudly.
+</p>
+<p>
+  Phase 2 — the actual warrant checkers keyed on <code>warrant_kind</code> — has not
+  landed, so <code>evidence_hash</code> is currently decorative and the table holds two
+  rows. <strong>Assessment:</strong> this is the schema's best idea and its biggest
+  unrealised asset. The epistemics are already correct in the DDL; what is missing is a
+  handful of predicate functions and a <code>test_runs</code> / <code>ast_builds</code>
+  integration that would make every green test run auto-assert a warranted claim. The
+  <code>UNIQUE(project_id, commit_id, statement)</code> constraint already encodes the
+  right semantics — re-running the same work at the same revision is a re-observation, not
+  a second claim.
+</p>
+
+<h4>unmaintained_columns_baseline <span class="dim">— 47 rows</span></h4>
+<p>
+  A meta-table listing columns known to be all-NULL or constant, with the shape recorded
+  (not just the name) <em>so that a column changing shape is still visible</em>. The
+  <code>no_new_unmaintained_columns</code> doctor check uses it as a ratchet. This is an
+  unusually mature answer to schema rot: rather than pretending dead columns do not exist
+  or churning migrations to drop them, it accepts the current set and prevents growth. Of
+  the 47, 24 are honestly labelled <code>"pre-existing at baseline; not triaged"</code>;
+  the rest carry real reasons (<code>"single-user install"</code>,
+  <code>"no merge commits yet"</code>, <code>"blob chunking is not in use"</code>).
+</p>
+
+<h4>tool_calls <span class="dim">— 11,872 rows</span></h4>
+<p>
+  A span extracted from <code>agent_events</code>. Three of its columns —
+  <code>finished_at</code>, <code>args_hash</code>, <code>result_hash</code> — are
+  all-NULL, which means the table currently answers "what was called" but not "how long did
+  it take" or "was this the same call as that one". The <code>args_hash</code> comment
+  states the intended query — <em>"same tool + same args across sessions"</em> — which is
+  the memoisation/dedup question an agent platform most wants answered. Unimplemented.
+</p>
+
+<h2>7. Nix, deployment and configuration</h2>
+
+<p>
+  The largest subsystem by table count (~35) and the most stratified. Two generations of
+  deployment design coexist with a third that actually runs.
+</p>
+
+<h3>7a. The Nix store model <span class="dim">— live</span></h3>
+
+<table>
+<tr><th>Table</th><th>Rows</th><th>Role</th></tr>
+<tr><td><code>nix_store_paths</code></td><td class="n">10,626</td><td>store path ↔ hash ↔ name, nar size, deriver</td></tr>
+<tr><td><code>nix_store_refs</code></td><td class="n">11,881</td><td>reference edges between paths</td></tr>
+<tr><td><code>nix_closures</code></td><td class="n">146</td><td>a closure = hash of a sorted path set</td></tr>
+<tr><td><code>nix_closure_paths</code></td><td class="n">346,650</td><td>closure membership — <strong>the largest table in the DB</strong></td></tr>
+<tr><td><code>nix_closure_diffs</code></td><td class="n">191</td><td>added/removed/changed + size delta between closures</td></tr>
+<tr><td><code>nix_generations</code></td><td class="n">152</td><td>NixOS generation ↔ closure ↔ commit ↔ deployment</td></tr>
+</table>
+
+<p>
+  <code>nix_closure_paths</code> at 347k rows costs 4.6 MB of table plus 13.3 MB across
+  three indexes (its own autoindex plus one per direction) — the indexes are 2.9× the data.
+  With 146 closures averaging 2,374 paths each and heavy overlap between generations, this
+  is a classic candidate for interning: store the <em>diff</em> against a parent closure
+  rather than the full membership set. <code>nix_closure_diffs</code> already computes
+  exactly that information for display; it is not used for storage.
+  <strong>Future direction:</strong> if the fleet grows past a handful of machines, this
+  table is the first thing that will hurt.
+</p>
+<p>
+  <code>nix_generations</code> is the genuinely valuable one: it is the join that makes
+  <code>provenance machine &lt;host&gt;</code> work, carrying FKs to
+  <code>fleet_machines</code>, <code>nix_closures</code>, <code>vcs_commits</code>,
+  <code>projects</code>, <code>fleet_deployments</code>,
+  <code>system_deployments</code> and itself (<code>previous_generation_id</code>) — plus
+  denormalised <code>machine_name</code> and <code>commit_hash</code> that deliberately
+  survive deletion of their referents. All seven FKs are <code>ON DELETE SET NULL</code>:
+  history outlives its subjects. That is the right durability model for an audit table and
+  it is applied consistently.
+</p>
+
+<h3>7b. The config AST <span class="dim">— live, 1,254 nodes</span></h3>
+<p>
+  <code>config_nodes</code> is a Nix AST in a table: a self-referencing tree with a
+  27-value <code>node_type</code> CHECK covering the Nix grammar (<code>AttrSet</code>,
+  <code>LetIn</code>, <code>With</code>, <code>Inherit</code>, <code>HasAttr</code>, …
+  down to <code>RawNix</code> as the escape hatch), an operator CHECK listing every Nix
+  binary and unary operator, and <code>scope ∈ (system, home, flake)</code>.
+  <code>config_roots</code> pins one root per scope; <code>config_hosts</code> is a
+  self-referencing host hierarchy with inheritance; <code>config_node_owners</code> is the
+  project↔node junction.
+</p>
+<p>
+  <strong>Trade-off:</strong> representing a programming language as rows gives you
+  queryable, diffable, host-parameterised configuration — and
+  <code>ast_builds</code> (27 rows, with <code>nix_buildable</code> and
+  <code>nix_build_error</code>) proves the round-trip works. The cost is that
+  <code>RawNix</code> exists, and every construct that falls into it is opaque to exactly
+  the queries the design was for. <code>UNIQUE(parent_id, name, host_id)</code> is the
+  clever bit: the same attribute path can be specialised per host without a separate tree.
+  <code>description</code>, <code>category</code> and <code>enabled</code> are
+  unmaintained — the human-annotation layer on top of the AST never materialised.
+</p>
+
+<h3>7c. Deployment: three generations</h3>
+
+<p>
+  <strong>Generation 1 — <code>deployment_*</code> (8 tables).</strong>
+  <code>deployment_history</code> (290 rows) and <code>deployment_targets</code> (10) are
+  real and feed the <code>deploy</code> ingest adapter.
+  <code>deployment_cache</code> (4) / <code>deployment_cache_stats</code> (12) /
+  <code>deployment_health_checks</code> (3) / <code>deployment_notifications</code> (4) /
+  <code>deployment_triggers</code> (3) are lightly used.
+  <code>deployment_snapshots</code> (0) and <code>deployment_rollbacks</code> (0) are
+  empty — which means the rollback machinery (a three-way FK between from/to/rollback
+  deployments, carefully modelled) has never executed.
+</p>
+<p>
+  <strong>Generation 2 — <code>fleet_*</code> (6 tables).</strong> A nixops4-shaped
+  multi-machine deployment model: networks → machines → deployments →
+  per-machine deployments, plus resources and local services. Five networks, five machines,
+  five local services; <strong>zero</strong> deployments, machine-deployments or resources.
+  Six triggers compute durations and allocate ports for a system that has never run. The
+  <code>summary</code> output confirms it: all five fleet machines are "never deployed via
+  templedb". <strong>Assessment:</strong> this is the clearest candidate for deletion in
+  the schema — six tables, six triggers, four views, zero operational rows, superseded by
+  7a.
+</p>
+<p>
+  <strong>Generation 3 — what actually runs.</strong>
+  <code>system_deployments</code> (251 rows, 2.3 MB — it stores full
+  <code>nixos-rebuild</code> output per row) with an
+  <code>enforce_single_active_deployment</code> trigger, plus
+  <code>nix_generations</code>, plus <code>deploy_stage_runs</code>.
+</p>
+
+<h4>deploy_stage_runs <span class="dim">— 1,077 rows</span></h4>
+<p>
+  The write-path audit: each stage records <code>input_hash → output_hash</code> so the
+  pipeline <code>file_set → vcs_commit → materialize</code> can be verified end to end.
+  626 / 261 / 191 runs respectively, zero failures, zero left open — and
+  <code>deploy_stages_have_no_stale_runs</code> is green, which migration 112 earned by
+  closing the orphans. But <code>prev_stage_run_id</code>, the column that would actually
+  <em>chain</em> the stages into a verifiable sequence, is 100% NULL. So the table records
+  three independent stage logs rather than one provenance chain, and no stage after
+  <code>materialize</code> (push, nix build, switch) is instrumented at all.
+  <strong>Future:</strong> populating the chain pointer and adding a <code>push</code>
+  stage would make "did the bytes I wrote reach the deployed binary?" a single query — the
+  question the <code>deployed_build_matches_db</code> doctor check currently answers by
+  probing the filesystem.
+</p>
+
+<h3>7d. Nix metadata <span class="dim">— mostly empty</span></h3>
+<p>
+  <code>nix_eval_cache</code> (0), <code>nix_cache_entries</code> (0),
+  <code>nix_project_paths</code> (0), <code>nix_env_sessions</code> (0),
+  <code>nix_environments</code> (1), <code>nix_service_metadata</code> (1),
+  <code>nix_flake_metadata</code> (3), <code>nix_configs</code> (2),
+  <code>nix_flake_validation_history</code> (11). Three substantial designs — a
+  binary-cache server (<code>nix_cache_entries</code> stores pre-rendered
+  <code>.narinfo</code>), an evaluation cache keyed on flake+attr+input hash, and
+  per-project dev environments — are built and unused. The eval cache in particular would
+  be valuable given how often this project rebuilds; it has never recorded a hit.
+</p>
+
+<h2>8. Agent runtime</h2>
+
+<p>
+  Twelve tables, and the subsystem with the clearest internal logic. It models a
+  conversation as <code>provider → session → run → event</code>, with
+  <code>UNIQUE(run_id, sequence_number)</code> and
+  <code>UNIQUE(session_id, sequence_number)</code> giving total order inside each scope —
+  so replay is deterministic and gaps are detectable.
+</p>
+
+<table>
+<tr><th>Table</th><th>Rows</th><th>Note</th></tr>
+<tr><td><code>agent_events</code></td><td class="n">13,874</td><td>9 MB; <code>raw_payload_json</code> all-NULL (the unredacted copy was never kept)</td></tr>
+<tr><td><code>agent_messages</code></td><td class="n">1,130</td><td>1.5 MB; org-format by default</td></tr>
+<tr><td><code>agent_runs</code></td><td class="n">553</td><td>carries <code>last_event_sequence</code> as a resume cursor</td></tr>
+<tr><td><code>agent_sessions</code></td><td class="n">313</td><td>UUID + optional external provider session id</td></tr>
+<tr><td><code>agent_work_log</code></td><td class="n">486</td><td>per-turn rollup: tools, files read/modified, cost, tokens, turns</td></tr>
+<tr><td><code>agent_session_sections</code></td><td class="n">688</td><td>the Emacs findings / todo / open-questions panes</td></tr>
+<tr><td><code>agent_pending_events</code></td><td class="n">776</td><td>outbox to Emacs, <code>dispatched_at</code> NULL until forwarded</td></tr>
+<tr><td><code>agent_pending_asks</code></td><td class="n">36</td><td>request/response for interactive prompts</td></tr>
+<tr><td><code>agent_user_edits</code></td><td class="n">10</td><td>when the <em>human</em> edits an agent-written section</td></tr>
+<tr><td><code>agent_notifications</code></td><td class="n">1</td><td>email + decision-point with timeout default</td></tr>
+<tr><td><code>agent_session_notes</code></td><td class="n">43</td><td>goal / notes / scratch, one row per session</td></tr>
+<tr><td><code>agent_providers</code></td><td class="n">2</td><td></td></tr>
+</table>
+
+<p>
+  Two tables deserve specific praise. <strong><code>agent_user_edits</code></strong>
+  captures the human correcting the agent — action, before-snapshot, and
+  <code>consumed_at</code> marking whether the agent has been told yet. It is a feedback
+  channel modelled as data rather than as prompt text, with audit rows retained after
+  consumption. Ten rows, but the right shape.
+  <strong><code>agent_notifications</code></strong> models a decision point with
+  <code>pending_until</code>, <code>decision_default</code> and
+  <code>decision ∈ (approve, deny, timeout)</code> — i.e. a timeout is recorded as a
+  distinct outcome rather than collapsed into the default it resolved to. That distinction
+  is exactly what you want when auditing an autonomous system later.
+</p>
+<p>
+  <code>agent_work_log</code> carries <code>cost_usd</code>, <code>input_tokens</code>,
+  <code>output_tokens</code>, <code>duration_ms</code> and <code>num_turns</code> across
+  486 turns — a spend ledger nobody is currently reading. <code>handoff_notes</code> (18
+  rows) is the cross-session pinboard, with sender/topic/broadcast addressing and
+  read/ack/expiry lifecycle; the addressing rule is documented as convention, not enforced,
+  which is a reasonable choice for a message table.
+</p>
+
+<h2>9. Secrets, variables, and the rest</h2>
+
+<h4>Three generations of environment variables</h4>
+<p>
+  <code>environment_variables</code> (60 rows) is current: scoped
+  <code>global | project | nix_env | tag</code> with <code>value_type ∈ (static,
+  compound, secret_ref)</code> and a <code>template</code> column for interpolation. Three
+  views (<code>env_vars_view</code>, <code>project_env_vars_view</code>,
+  <code>compound_values_view</code>) project the old flat APIs out of it — the same
+  retire-a-table-as-a-view pattern used for <code>commit_files</code>, and it works.
+  <code>env_vars</code> (0) and <code>project_env_vars</code> (0) are the superseded
+  originals, still present with live FKs.
+</p>
+
+<h4>Secrets <span class="dim">— 52 blobs, 5 keys, 53 assignments</span></h4>
+<p>
+  <code>secret_blobs</code> holds age-encrypted bytes; <code>encryption_keys</code>
+  models Yubikey / filesystem / age recipients with PIV slot, physical location, and a
+  revocation lifecycle that is correctly one-way (<code>is_revoked</code> separate from
+  <code>is_active</code>, with <code>revoked_at</code>/<code>revoked_by</code>/reason);
+  <code>secret_key_assignments</code> is the M:N that lets one secret be decryptable by
+  several keys. <code>encryption_key_audit</code> (11 rows) logs every add/remove/test/rotate
+  with a trigger that bumps <code>last_used_at</code>. This subsystem is small, complete,
+  and the only one in the schema with a properly modelled revocation path.
+</p>
+
+<h4>cr-sqlite replication <span class="dim">— 8 CRDT tables + 19 shadow tables</span></h4>
+<p>
+  Eight <code>sync_*</code> tables are cr-sqlite CRDTs with per-column clocks:
+  <code>sync_entities</code> (4,868), <code>sync_relations</code> (5,803),
+  <code>sync_vcs_commits</code> (871), plus branches, projects, system_config,
+  nixos_config, environment_variables. They are <em>projections</em> of the main tables,
+  kept current by seven hand-written triggers on <code>entities</code> and
+  <code>relations</code> (<code>_sync_fleet_ins</code>, <code>_upd</code>,
+  <code>_del</code>, <code>_unfleet</code>), filtered by
+  <code>sync_scope = 'fleet'</code> so machine-local facts never replicate. The CRDT tables
+  are keyed on <code>(kind, external_ref)</code> rather than integer id — correct, since
+  autoincrement ids cannot merge across sites.
+</p>
+<p>
+  <strong>The operational hazard</strong> is the one memorialised in the
+  <code>crsqlite_extension_loads</code> doctor check: if the extension fails to load, every
+  write to a CRDT table raises <code>no such function: crsql_internal_sync_bit</code>, and
+  because the triggers sit on <code>entities</code>, <em>git ingest fails entirely</em>.
+  That is the 234-error window in §1. The check now exists. Replication itself has only
+  ever had one peer; <code>sync_scope</code> is constant across the install.
+</p>
+
+<h4>Stratum-II code intelligence <span class="dim">— effectively dead</span></h4>
+<p>
+  <code>code_symbols</code> (12), <code>code_symbol_dependencies</code> (0),
+  <code>code_search_index</code> (0, with an <code>embedding</code> column for a vector
+  search that was never built), <code>code_search_fts</code> (empty FTS5),
+  <code>impact_transitive_cache</code> (0), <code>code_cluster_members</code> (0),
+  <code>code_cluster_files</code> (0) — but <code>code_clusters</code> itself has
+  <strong>318 rows</strong>, i.e. 318 named clusters with no members. The
+  <code>Symbol</code> entities in the graph (20,916) have entirely replaced this layer.
+  <code>file_dependencies</code> (129) and <code>file_metadata</code> (300) are the two
+  survivors of the era and are still read by views.
+</p>
+
+<h4>Odds and ends</h4>
+<p>
+  <code>audit_log</code> (1,737) — <code>actor</code> constant, single-user install.
+  <code>backup_history</code> (104). <code>graph_query_log</code> (287) — logs
+  <em>which graph queries were run</em>, which is the raw material for learning what the
+  graph should index. <code>prompt_templates</code> (10) / <code>project_prompts</code>
+  (12) with parent-version chains, but <code>prompt_usage_log</code> is empty so the
+  usage-summary view is dead. <code>project_tests</code> (41) is a
+  smoke-test spec (page/post/structure); <code>test_runs</code> has 4 rows and a
+  <code>commit_id</code> FK added by migration 115 that would let a test run warrant a
+  claim — the wiring §6 is waiting on. <code>tags</code>/<code>project_tags</code>:
+  1 tag, 0 assignments. <code>project_domains</code> (2) / <code>dns_records</code> (6).
+  <code>migration_history</code> (21) tracks <em>application</em> SQL migrations per
+  deploy target and is distinct from <code>schema_version</code>, which tracks TempleDB's
+  own 90 applied migration files.
+</p>
+
+<h2>10. Defects found in this pass</h2>
+
+<h3>10.1 — 378 MB of unreachable blobs, no collector <span class="bad">(critical)</span></h3>
+<p>
+  Of 12,512 content blobs totalling 489 MB, <strong>8,741 blobs / 378 MB are referenced by
+  nothing</strong> — not <code>file_contents</code>, not <code>vcs_file_states</code> (new
+  or old hash), not <code>vcs_working_state</code>, not <code>checkout_snapshots</code>,
+  not <code>edit_intents</code>, not <code>sync_cache</code>, not
+  <code>deployment_snapshots</code>. That is 77% of blob bytes and 54% of the entire
+  700 MB database.
+</p>
+<p>
+  The mechanism is clear. <code>file set</code> writes a blob and repoints
+  <code>file_contents</code> <em>in place</em>; the previous blob is only retained if a
+  commit captured it in <code>vcs_file_states</code>. Uncommitted intermediate writes —
+  which, given 978 edit intents against 1,118 commits, are a large fraction of all writes —
+  leave their blobs stranded immediately. <code>content_blobs.reference_count</code> would
+  detect this, except its two triggers fire only on INSERT/DELETE of
+  <code>file_contents</code> and never on UPDATE, so the counter over-reports (4,263
+  declared vs 2,051 actual, wrong on 2,073 blobs) and cannot be used as a GC predicate.
+  There is no <code>storage blob gc</code> subcommand — <code>status</code>,
+  <code>verify</code>, <code>list</code> and <code>migrate</code> only — and no doctor
+  check covers either the orphan count or the refcount drift.
+</p>
+<p>
+  <strong>Fix, in order:</strong> (1) add a <code>blob_refcount_is_accurate</code> doctor
+  check computing the true count from the seven referent tables; (2) add an
+  <code>AFTER UPDATE OF content_hash ON file_contents</code> trigger; (3) add
+  <code>storage blob gc</code> with a retention window (blobs younger than N days are
+  spared, since an orphan today may be committed tomorrow). Step 1 alone converts a silent
+  54% waste into a visible number.
+</p>
+
+<h3>10.2 — <code>edit_intents</code> never records the commit it landed in <span class="warn">(high)</span></h3>
+<p>
+  <code>applied_commit_id</code> is NULL on all 981 rows, including the 980 marked
+  <code>status='applied'</code>, so <code>provenance intent &lt;id&gt;</code> cannot
+  complete the span it was built to traverse. It was never written because nothing could
+  write it at the right time: <code>file set</code> creates the intent and marks it
+  applied immediately (content lands in <code>file_contents</code> without a commit), and
+  the commit that eventually records those bytes happens later, in a different process,
+  through one of seven separate INSERT sites.
+</p>
+<p class="dim">
+  <strong>Correction.</strong> An earlier draft of this section also claimed
+  <code>base_revision</code> was constant on all rows. That was true of the 888 legacy
+  rows but not of the column: the write path was fixed on 2026-10-04 and every intent
+  since carries a real base hash or <code>'new-file'</code>. What survives from that claim
+  is a smaller point — the <code>unmaintained_columns_baseline</code> row for it predates
+  the fix and now suppresses a column that is maintained.
+</p>
+
+<h3>10.3 — <code>related_readmes</code> is a broken view <span class="ok">(fixed, §12)</span></h3>
+<p>
+  Migration 121 (<code>121_drop_readme_index.sql</code>) dropped the readme tables but left
+  the <code>related_readmes</code> view behind. It references <code>readme_topics</code>,
+  which does not exist; any query against it errors. SQLite does not validate view bodies at
+  creation or at schema load, so this sat undetected. <strong>Fix:</strong>
+  <code>DROP VIEW related_readmes</code>, and consider a doctor check that
+  <code>EXPLAIN</code>s every view once per run — cheap, and it catches this whole class.
+</p>
+
+<h3>10.4 — The FTS index stores a second copy of every file <span class="dim">(low)</span></h3>
+<p>
+  <code>file_contents_fts</code> is a default (content-owning) FTS5 table, so
+  <code>file_contents_fts_content</code> holds 37 MB of text that already exists in
+  <code>content_blobs</code>, alongside a 61 MB index. An external-content configuration
+  would recover the 37 MB. Noted rather than urgent.
+</p>
+
+<h2>11. Where this should go next</h2>
+
+<p><strong>Reclaim the file.</strong> <span class="ok">(Tooling done — see §12; the
+reclaim itself is still pending an operator decision.)</span> §10.1 is 54% of the
+database and the only item here with an order-of-magnitude payoff. Doctor check first,
+trigger second, GC third. Do it before the next backup cycle — there is already 1.5 GB of
+stale <code>.backup_*</code> copies in the data directory carrying the same garbage
+forward.</p>
+
+<p><strong>Close the intent span.</strong> <span class="ok">(Done — see §12.)</span>
+§10.2 converts the write
+path from "audited" to "verifiable". Combined with populating
+<code>deploy_stage_runs.prev_stage_run_id</code>, it would make the full chain —
+intent → commit → materialize → generation → deployed binary — a single
+recursive query, which is the thing the observer model has been building toward and has
+not yet reached.</p>
+
+<p><strong>Cash in <code>claims</code>.</strong> The epistemics are already correct in the
+DDL and the table has two rows. A <code>warrant_kind = 'tests_passed_at_revision'</code>
+checker plus the existing <code>test_runs.commit_id</code> FK would start auto-asserting
+warranted claims from work that already happens. This is the highest-leverage
+<em>new</em> capability available, because it is mostly already built.</p>
+
+<p><strong>Delete a stratum.</strong> The <code>fleet_*</code> family (6 tables, 6
+triggers, 4 views, 0 operational rows) and the stratum-II code-intelligence family
+(<code>code_symbols</code>, <code>code_symbol_dependencies</code>,
+<code>code_search_index</code>, <code>code_search_fts</code>,
+<code>impact_transitive_cache</code>, <code>code_cluster_*</code>) are both superseded by
+things that work. Removing them would cut the table count by roughly 10% and remove two
+entire wrong answers to "where do I look for symbols / how do I deploy". The
+<code>unmaintained_columns_baseline</code> ratchet already demonstrates this project can
+retire things deliberately; this is the table-level version of the same move.</p>
+
+<p><strong>Resolve the SCIP question.</strong> 15,821 of 20,916 <code>Symbol</code>
+entities come from <code>scip-typescript</code>, sharing a unique namespace with 5,095
+Python symbols and no authority discriminator in the key. Either make
+<code>source_authority</code> part of the <code>Symbol</code> ref encoding and keep the
+adapter, or retire it. The current state — an adapter that last ran 6 hours ago, owns 75%
+of a shared namespace, and has no phase doc — is the ambiguity the roadmap already flags.</p>
+
+<p><strong>Harden the cheap things.</strong> CHECK constraints on the 25 enum-shaped columns
+of <code>vcs_commit_metadata</code>; drop the seven dead <code>project_files</code>
+annotation columns and the two redundant parent columns on <code>vcs_commits</code>; drop
+the redundant <code>UNIQUE(project_id, commit_hash)</code>; reconcile
+<code>projects.project_type</code> with <code>project_category</code>.</p>
+
+<h2>12. Addendum — what was implemented, 2026-10-06</h2>
+
+<p>
+  The low-risk items from §10 and §11 landed the same day, as migration 127
+  (<code>127_blob_refcount_and_intent_linkage.sql</code>) plus three doctor invariants and
+  one new subcommand. Verified against the live database after applying.
+</p>
+
+<table>
+<tr><th>Change</th><th>Before</th><th>After</th></tr>
+<tr><td><code>update_blob_reference</code> trigger<br><span class="dim">AFTER UPDATE OF content_hash ON file_contents</span></td><td>declared refcounts summed 4,263 vs 2,051 actual; wrong on 2,073 blobs</td><td class="ok">0 wrong; 2,054 = 2,054</td></tr>
+<tr><td><code>link_intent_to_commit</code> trigger<br><span class="dim">AFTER INSERT ON vcs_file_states</span>, hash-matched</td><td>0 of 980 applied intents linked</td><td class="ok">590 linked; the other 394 are intents whose content no commit ever recorded, which is the correct answer for them</td></tr>
+<tr><td><code>DROP VIEW related_readmes</code></td><td>dangling since migration 121</td><td class="ok">gone; <code>views_are_runnable</code> green across 46 views</td></tr>
+<tr><td><code>storage blob gc</code></td><td>no collector existed</td><td class="ok">dry-run by default; reports 8,727 reclaimable blobs / 360 MB</td></tr>
+</table>
+
+<p>
+  Three invariants now police the conditions that went unseen:
+  <code>blob_refcount_is_accurate</code> (green), <code>views_are_runnable</code> (green),
+  and <code>blob_orphans_within_budget</code> — which is <strong>red by design</strong>,
+  reporting <em>"8,741 unreferenced blob(s) holding 378 MB, 49% of the file (budget
+  52 MB)"</em>. The 378 MB has not been deleted: building the collector and running it on
+  a production database are separate decisions, and the second one is the operator's.
+</p>
+
+<p>
+  Deliberately <em>not</em> done, because each needs a table rebuild in SQLite and the
+  risk is not proportionate to the gain: CHECK constraints on
+  <code>vcs_commit_metadata</code>'s 25 enum columns, dropping the seven dead
+  <code>project_files</code> annotation columns, dropping the redundant
+  <code>UNIQUE(project_id, commit_hash)</code>, and the FTS external-content change from
+  §10.4. The <code>fleet_*</code> and stratum-II deletions from §11 are also still open —
+  those are a judgement call about the project's direction, not a repair.
+</p>
+
+<p>
+  One thing the implementation itself turned up: <code>blob.py</code>'s
+  <code>register()</code> is dead code. Nothing imports it —
+  <code>cli/__init__.py</code> never mentions the module, and the subcommands users reach
+  are built by <code>cli/commands/storage.py</code>. A subcommand added to
+  <code>blob.register()</code> alone is unreachable, which is how <code>gc</code> was
+  briefly invisible. Documented in place rather than deleted.
+</p>
+
+<h2>13. Method</h2>
+
+<p>
+  Everything above was read from the live database at
+  <code>~/.local/share/templedb/templedb.sqlite</code> on 2026-10-06, via read-only SQL
+  (<code>sqlite_master</code> for DDL, <code>dbstat</code> for physical sizes, direct
+  counts for row totals) plus <code>templedb summary</code>,
+  <code>templedb reports list</code> and the <code>invariant_checks</code> /
+  <code>ingestion_runs</code> history tables. Orphan-blob figures come from a seven-way
+  anti-join across every table in the schema that holds a content hash; the
+  reference-count discrepancy from comparing <code>content_blobs.reference_count</code>
+  against a live count of <code>file_contents</code> rows per hash. No writes were made to
+  any table.
+</p>
+
+<p class="dim" style="margin-top:2.5rem;font-size:0.85em">
+  Counts drift. <code>templedb summary</code> and <code>templedb doctor entities</code>
+  are authoritative; the numbers here are a snapshot taken at 2026-10-06 23:11 local.
+</p>
+
+</body>
+</html>

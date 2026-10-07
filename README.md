@@ -255,9 +255,24 @@ Reconcile against authorities:
 ```bash
 templedb doctor entities                          # walk graph, ask each authority "still true?"
 templedb doctor entities --host zMothership3      # SSH-probe drift on a specific host
+templedb doctor entities --check <name>           # one invariant
+templedb doctor history --check <name>            # that invariant over time
 ```
 
 Drift is flagged, not silent. This is the reconcile-from-day-one pattern that Terraform (`refresh`), Kubernetes controllers, and every mature metastore learned the hard way to build in early.
+
+The invariants are not limited to the graph — anything that can silently
+stop being true is fair game, because the recurring failure here has
+been a number nobody was looking at. Three were added after the
+[2026-10-06 schema atlas](reports/2026-10-06-1811-templedb-schema-atlas-table-by-table-analysis-and-project-st.html)
+found conditions that had been live for months with nothing reporting
+them:
+
+| Invariant | Catches |
+|---|---|
+| `blob_refcount_is_accurate` | `content_blobs.reference_count` disagreeing with reality — it had no UPDATE trigger, so it over-reported by 2x |
+| `blob_orphans_within_budget` | unreachable blobs accumulating; 378 MB (half the database file) had built up uncollected |
+| `views_are_runnable` | a view whose table was dropped. SQLite validates a view body only at query time, so `related_readmes` sat broken in `sqlite_master` through six migrations |
 
 ---
 
@@ -388,7 +403,15 @@ templedb hygiene dead-imports bza                 # imports with no references
 templedb entity paths --kind Symbol --limit 20    # entity refs by external_ref shape
 ```
 
-Language ingest is currently Python via tree-sitter; SCIP adapters for TypeScript/Rust/Nix are a deferred tranche, not in flight (see [proposed schema map](reports/2026-09-03-0843-proposed-schema-after-observer-integrator-plan.html)).
+Two adapters produce `Symbol` entities: Python via tree-sitter, and
+`scip-typescript`. SCIP is the larger of the two by some distance —
+15,821 of 20,916 Symbols against Python's 5,095 — which is awkward,
+because both write into a single `UNIQUE(kind, external_ref)` namespace
+with no authority discriminator in the key. Nothing in the schema stops
+a Python ref and a TypeScript ref colliding. Resolving that (make
+`source_authority` part of the ref encoding, or retire the adapter) is
+the open question on this subsystem; see the
+[schema atlas](reports/2026-10-06-1811-templedb-schema-atlas-table-by-table-analysis-and-project-st.html).
 
 The graph is bug-productive here: doctor invariants have already caught resolver bugs by asserting things that are *structurally impossible* (e.g., "no `calls` relation has stdlib at `from` and user-CLI at `to`"). See [today's session recap](reports/2026-09-04-1410-session-recap-2-applying-parallel-session-answers.html) for a real bug caught this way.
 
@@ -445,6 +468,28 @@ templedb storage cathedral export bza                # portable project bundle w
 templedb storage cathedral import ./bza.cathedral    # rehydrate on another machine
 ```
 
+Because the DB is the artifact, its size is a real operational
+concern. `file set` writes a content blob and repoints `file_contents`
+in place, so every uncommitted intermediate write strands the blob it
+displaced — by 2026-10-06 that was 8,741 blobs holding 378 MB, 54% of
+the file, with nothing reporting it and nothing collecting it:
+
+```bash
+templedb storage blob status                         # size by storage tier
+templedb storage blob gc                             # what is unreachable (dry run)
+templedb storage blob gc --apply                     # reclaim it
+templedb storage blob gc --apply --vacuum            # ...and shrink the file
+```
+
+`gc` is dry-run by default, like `entity prune-orphans`. It spares
+orphans younger than 7 days, because a blob written minutes ago is
+routinely unreferenced-but-wanted until the commit that records it
+lands. It finds orphans by anti-join across every table that pins a
+hash rather than by trusting `reference_count` — that column only
+counts `file_contents`, and eight other columns hold a blob hash.
+Without `--vacuum`, freed pages stay inside the file: SQLite does not
+return them to the OS, so `ls -l` will not move.
+
 Cross-machine sync via CRSql:
 
 ```bash
@@ -454,7 +499,9 @@ templedb sync serve                                  # start sync server (port 9
 templedb sync sync zMothership2                      # bidirectional
 ```
 
-Merges automatically — last-writer-wins for config, append-only for commits. Today CRSql sync targets specific typed tables (`sync_projects`, `sync_vcs_commits`, etc.); extending it to `entities`/`relations` is a Phase 3 dependency worth naming (see Q5 in the [answers report](reports/2026-09-03-1947-answers-to-open-questions-on-the-observer-integrator-schema.html)).
+Merges automatically — last-writer-wins for config, append-only for commits. CRSql sync covers eight typed tables, `entities` and `relations` among them (that was [Q5](reports/2026-09-03-1947-answers-to-open-questions-on-the-observer-integrator-schema.html) and it has since shipped). The CRDT tables are projections keyed on `(kind, external_ref)` rather than integer id — autoincrement ids cannot merge across sites — and are fed by triggers filtered on `sync_scope = 'fleet'`, so machine-local facts never replicate.
+
+One operational hazard worth knowing: those triggers sit on `entities`, so if the cr-sqlite extension fails to load, every write to the graph raises `no such function: crsql_internal_sync_bit` and **git ingest fails entirely**. That happened for 18 days in September 2026 before anyone noticed. `doctor`'s `crsqlite_extension_loads` invariant exists for exactly that.
 
 ---
 
@@ -497,9 +544,33 @@ Shipped since this list was written:
 - **Cross-session handoff** — `templedb handoff {send,list,pop,ack}` (design in [cross-session handoff semantics](reports/2026-09-03-0826-cross-session-handoff-semantics.html)).
 - **Checkout roles and session-scoped resolution** — phases 0–4 of [the design](reports/2026-09-27-2103-checkout-role-and-session-scoped-resolution-design.html), which is what made multi-workspace writes deterministic.
 
-Deferred:
+- **Blob garbage collection** — `templedb storage blob gc`, plus the
+  `blob_refcount_is_accurate` / `blob_orphans_within_budget` /
+  `views_are_runnable` invariants and migration 127, which fixed the
+  missing `reference_count` UPDATE trigger and closed the
+  `edit_intents` → `applied_commit_id` span. From the
+  [schema atlas](reports/2026-10-06-1811-templedb-schema-atlas-table-by-table-analysis-and-project-st.html).
 
-- **SCIP adapters** (TypeScript, Rust, Nix) — external code-facts ingestion, so language coverage grows with the SCIP ecosystem rather than our parser budget. The adapter exists but has not run since 2026-09-05; Python via tree-sitter covers TempleDB itself, so this has not been the binding constraint.
+Open:
+
+- **SCIP adapters.** No longer deferred in practice — `scip-typescript`
+  runs and owns 75% of all `Symbol` entities — but no phase doc was
+  ever written and TypeScript is the only language wired up (Rust and
+  Nix are not). The decision to make is whether to finish it properly,
+  starting with the shared-namespace problem above, or retire it.
+- **Closing the write-path chain.** `deploy_stage_runs.prev_stage_run_id`
+  is never populated, so the three recorded stages (`file_set`,
+  `vcs_commit`, `materialize`) are independent logs rather than one
+  verifiable sequence, and nothing after `materialize` is instrumented.
+  With `applied_commit_id` now written, chaining those pointers would
+  make intent → commit → materialize → generation → deployed binary a
+  single query.
+- **Warrant checkers for `claims`.** The table models a proposition
+  scoped to `(project, commit, host, inputs)` with a `warrant_kind`
+  naming the inference rule, and evidence attachable as `supports` or
+  `undercuts`. The epistemics are already in the DDL; the predicates
+  are not, so it holds two rows. `test_runs.commit_id` (migration 115)
+  is the hook for making a green test run auto-assert a warranted claim.
 
 ---
 

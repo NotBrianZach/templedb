@@ -321,9 +321,224 @@ class BlobCommands(Command):
         print("   For now, new large files automatically use external storage")
         return 1
 
+    # Every (table, column) in the schema that pins a content_blobs
+    # hash. A referent missing from this list means gc deletes live
+    # content, so the real guard is
+    # tests/test_blob_gc.py::test_every_hash_column_is_classified,
+    # which re-derives every %content_hash% column from the live
+    # schema and fails unless it appears here or in the documented
+    # NOT_BLOB_HASHES exclusions. This list is the fast path; the test
+    # is what makes it safe.
+    #
+    # code_symbols.content_hash is in here despite its comment saying
+    # "hash of symbol content for change detection": all 12 live rows
+    # are in fact real content_blobs hashes. For a destructive
+    # operation, matching the data beats matching the comment.
+    BLOB_REFERENTS: List[Tuple[str, str]] = [
+        ('file_contents',       'content_hash'),
+        ('vcs_file_states',     'content_hash'),
+        ('vcs_file_states',     'old_content_hash'),
+        ('vcs_working_state',   'content_hash'),
+        ('checkout_snapshots',  'content_hash'),
+        ('edit_intents',        'new_content_hash'),
+        ('sync_cache',          'content_hash'),
+        ('deployment_snapshots', 'content_hash'),
+        ('code_symbols',        'content_hash'),
+    ]
+
+    # Columns named like a blob hash that are not one. Each is an
+    # aggregate fingerprint over many files, so it can never equal a
+    # single blob's hash — verified empirically on 2026-10-06 (0 of 16
+    # live values matched content_blobs).
+    NOT_BLOB_HASHES: List[Tuple[str, str]] = [
+        ('deployment_cache',          'content_hash'),
+        ('deployment_cache_stats',    'content_hash'),
+        ('edge_function_deployments', 'content_hash'),
+    ]
+
+    # An orphan younger than this is probably not garbage: `file set`
+    # lands content without a commit, so a blob written minutes ago is
+    # routinely unreferenced-but-wanted until the commit that records
+    # it. A week is long enough that an in-flight edit is safe and
+    # short enough that the steady-state waste stays bounded.
+    GC_MIN_AGE_DAYS = 7
+
+    def _orphan_predicate(self) -> str:
+        """SQL predicate selecting content_blobs rows nothing points at.
+
+        Skips referent tables that do not exist, so this works on a
+        partially-migrated database rather than erroring out — a gc
+        that refuses to run is a gc nobody runs.
+        """
+        present = {r['name'] for r in self.query_all(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        clauses = [
+            f"NOT EXISTS (SELECT 1 FROM {t} WHERE {t}.{c} = cb.hash_sha256)"
+            for t, c in self.BLOB_REFERENTS if t in present
+        ]
+        return " AND ".join(clauses)
+
+    @handle_errors("blob gc")
+    def gc(self, args) -> int:
+        """
+        Delete content blobs that no table references.
+
+        Usage: ./templedb storage blob gc [--apply] [--min-age-days N]
+
+        Why this exists: `file set` writes a blob and repoints
+        file_contents in place. The displaced blob survives only if a
+        commit captured it in vcs_file_states, so every uncommitted
+        intermediate write strands one immediately. On 2026-10-06 that
+        was 8,741 blobs / 378 MB — 54% of the whole database file —
+        with no collector and no check reporting it.
+
+        Dry-run by default, like `entity prune-orphans` and for the
+        same reason: the first run should show, not act.
+        """
+        apply = bool(getattr(args, 'apply', False))
+        min_age = getattr(args, 'min_age_days', None)
+        min_age = self.GC_MIN_AGE_DAYS if min_age is None else min_age
+
+        pred = self._orphan_predicate()
+        age_clause = ("AND cb.created_at < datetime('now', ?)"
+                      if min_age > 0 else "")
+        params = (f'-{min_age} days',) if min_age > 0 else ()
+
+        totals = self.query_one(
+            f"""SELECT COUNT(*) AS n, COALESCE(SUM(cb.file_size_bytes), 0) AS bytes
+                  FROM content_blobs cb
+                 WHERE {pred} {age_clause}""", params) or {}
+        n = totals.get('n', 0)
+        reclaimable = totals.get('bytes', 0)
+
+        # Context: how much garbage exists regardless of the age guard,
+        # so "nothing to do" is distinguishable from "all of it is too
+        # young to touch yet".
+        all_orphans = self.query_one(
+            f"""SELECT COUNT(*) AS n, COALESCE(SUM(cb.file_size_bytes), 0) AS bytes
+                  FROM content_blobs cb WHERE {pred}""") or {}
+
+        print("🧹 Blob Garbage Collection")
+        print("=" * 70)
+        print(f"\nUnreferenced blobs:  {all_orphans.get('n', 0):,} "
+              f"({all_orphans.get('bytes', 0) / 1024 / 1024:.1f} MB)")
+        if min_age > 0:
+            held = all_orphans.get('n', 0) - n
+            print(f"Older than {min_age}d:      {n:,} "
+                  f"({reclaimable / 1024 / 1024:.1f} MB)")
+            if held > 0:
+                print(f"Too young to reclaim: {held:,} "
+                      f"(an uncommitted `file set` looks like garbage "
+                      f"until its commit lands)")
+
+        if n == 0:
+            print("\n✅ Nothing to collect")
+            return 0
+
+        biggest = self.query_all(
+            f"""SELECT cb.hash_sha256, cb.file_size_bytes, cb.content_type,
+                       cb.created_at
+                  FROM content_blobs cb
+                 WHERE {pred} {age_clause}
+                 ORDER BY cb.file_size_bytes DESC
+                 LIMIT 10""", params)
+        print(f"\nLargest:")
+        for b in biggest:
+            print(f"  {b['hash_sha256'][:12]}  "
+                  f"{b['file_size_bytes'] / 1024 / 1024:>8.2f} MB  "
+                  f"{b['content_type']:<7} {b['created_at']}")
+
+        if not apply:
+            print(f"\n{n:,} blob(s), {reclaimable / 1024 / 1024:.1f} MB. "
+                  f"Re-run with --apply to delete.")
+            return 0
+
+        # execute() returns lastrowid, not rowcount, so the count
+        # printed is the one measured above — same predicate, same
+        # transaction-free window. Close enough for a report, and the
+        # re-run shows zero either way.
+        self.execute(
+            f"""DELETE FROM content_blobs
+                 WHERE hash_sha256 IN (
+                     SELECT cb.hash_sha256 FROM content_blobs cb
+                      WHERE {pred} {age_clause})""", params)
+
+        print(f"\n✓ Deleted {n:,} blob(s), freed "
+              f"{reclaimable / 1024 / 1024:.1f} MB of rows")
+
+        if getattr(args, 'vacuum', False):
+            return self._vacuum()
+
+        # SQLite does not return freed pages to the filesystem. Saying
+        # so stops the next reader concluding gc did nothing because
+        # `ls -l` is unchanged. Not the default: VACUUM needs an
+        # exclusive lock and roughly 2x the file size in free space,
+        # which is not a thing to do by surprise to a 776 MB database
+        # with a daemon attached.
+        print("  Pages are free inside the file but not returned to "
+              "the OS.\n  Re-run with --vacuum (exclusive lock, "
+              "needs ~2x free disk) to shrink it.")
+        return 0
+
+    def _vacuum(self) -> int:
+        """VACUUM on a private autocommit connection.
+
+        Two reasons this cannot go through self.execute():
+
+        1. VACUUM is illegal inside a transaction, and the pooled
+           connection is in Python sqlite3's default isolation mode,
+           where the DELETE above leaves one open. It would fail with
+           "cannot VACUUM from within a transaction" every time.
+        2. VACUUM takes an exclusive lock, so it fails outright if any
+           other process holds the DB. On this install that is normal
+           rather than exceptional -- the MCP daemon and any running
+           `ai agent serve` keep connections open -- so the lock error
+           is the expected outcome, not a surprise, and deserves an
+           explanation instead of a traceback.
+
+        Reports the before/after size because a VACUUM that frees
+        nothing looks identical to one that was never run.
+        """
+        import os
+        import sqlite3
+
+        before = os.path.getsize(self.db_path)
+        print(f"  VACUUM: rewriting {before / 1e6:.0f} MB "
+              f"(exclusive lock; this takes a while)...")
+        conn = sqlite3.connect(self.db_path, isolation_level=None, timeout=30)
+        try:
+            conn.execute("VACUUM")
+        except sqlite3.OperationalError as e:
+            print_warning(f"VACUUM declined: {e}")
+            print("  The rows are already deleted — only the file shrink "
+                  "was skipped, so this is safe to retry.")
+            print("  VACUUM needs the database entirely to itself. Find "
+                  "the holders with:")
+            print("    templedb doctor entities --check wal_within_size_budget")
+            print("  then stop them (`templedb ai agent stop-stale`, and the "
+                  "MCP daemon)\n  and re-run `templedb storage blob gc "
+                  "--apply --vacuum`.")
+            return 1
+        finally:
+            conn.close()
+
+        after = os.path.getsize(self.db_path)
+        print(f"  ✓ {before / 1e6:.0f} MB → {after / 1e6:.0f} MB "
+              f"(reclaimed {(before - after) / 1e6:.0f} MB)")
+        return 0
+
 
 def register(cli):
-    """Register blob commands as a single command group"""
+    """Register blob commands as a single command group.
+
+    NOT the live registration path. Nothing imports this module's
+    `register` — `cli/__init__.py` never mentions blob, and the
+    subcommands users actually reach are built by
+    cli/commands/storage.py under `storage blob`. Kept because it is
+    the only standalone `templedb blob ...` wiring that exists, but a
+    subcommand added here alone is unreachable: add it to storage.py.
+    That is why `gc` is registered there and not here.
+    """
     cmd = BlobCommands()
 
     # Main blob command with subcommands

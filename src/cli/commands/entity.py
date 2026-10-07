@@ -3593,6 +3593,12 @@ WantedBy=timers.target
              self._check_ingested_authorities_not_emptied),
             ('commit_hash_is_canonical',
              self._check_commit_hash_is_canonical),
+            ('blob_refcount_is_accurate',
+             self._check_blob_refcount_is_accurate),
+            ('blob_orphans_within_budget',
+             self._check_blob_orphans_within_budget),
+            ('views_are_runnable',
+             self._check_views_are_runnable),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -3677,6 +3683,160 @@ WantedBy=timers.target
             print(f"  {m} #{r['id']:<5} {r['ran_at']}  "
                   f"{r['check_name']:<40} {summary}")
         return 0
+
+    # Budget for _check_blob_orphans_within_budget. Module-level
+    # constant rather than a magic number in the query so that raising
+    # it is a visible edit. 50 MB is roughly 7% of the current file —
+    # big enough to absorb a week of in-flight `file set` churn, small
+    # enough that a real leak crosses it within days.
+    BLOB_ORPHAN_BUDGET_BYTES = 50 * 1024 * 1024
+
+    def _check_blob_refcount_is_accurate(self):
+        """Invariant: content_blobs.reference_count equals the number of
+        file_contents rows pointing at that blob.
+
+        It did not, for the whole life of the column. Two triggers
+        maintain it -- increment on INSERT, decrement on DELETE of
+        file_contents -- and there was no UPDATE trigger, while
+        file_contents holds exactly one row per file and is therefore
+        updated in place on every `file set`. On 2026-10-06 the
+        declared counts summed to 4,263 against 2,051 real rows, wrong
+        on 2,073 of 12,512 blobs.
+
+        That mattered because reference_count is the obvious gate for a
+        blob collector, and a counter that over-reports by 2x makes the
+        collector either useless or dangerous. Migration 127 adds the
+        UPDATE trigger and backfills; this check is what stops the
+        third trigger hole from going unnoticed for another year.
+
+        Reports in aggregate plus a handful of examples: a systematic
+        trigger failure produces thousands of wrong rows, and listing
+        them is noise rather than evidence.
+        """
+        from db_utils import query_all, query_one
+        row = query_one(
+            """SELECT COUNT(*) AS wrong
+                 FROM content_blobs cb
+                WHERE cb.reference_count <> (
+                      SELECT COUNT(*) FROM file_contents fc
+                       WHERE fc.content_hash = cb.hash_sha256)"""
+        ) or {}
+        wrong = row.get('wrong', 0)
+        if not wrong:
+            return []
+        samples = query_all(
+            """SELECT cb.hash_sha256, cb.reference_count AS declared,
+                      (SELECT COUNT(*) FROM file_contents fc
+                        WHERE fc.content_hash = cb.hash_sha256) AS actual
+                 FROM content_blobs cb
+                WHERE cb.reference_count <> (
+                      SELECT COUNT(*) FROM file_contents fc
+                       WHERE fc.content_hash = cb.hash_sha256)
+                LIMIT 5"""
+        )
+        detail = [
+            f"{wrong:,} blob(s) have a reference_count that disagrees with "
+            f"file_contents. A trigger is missing or a write path bypasses "
+            f"them; re-run migration 127's backfill after fixing it"
+        ]
+        detail += [f"  {s['hash_sha256'][:12]} declared={s['declared']} "
+                   f"actual={s['actual']}" for s in samples]
+        return detail
+
+    def _check_blob_orphans_within_budget(self):
+        """Invariant: unreachable content_blobs stay under a size budget.
+
+        `file set` writes a blob and repoints file_contents in place;
+        the displaced blob survives only if a commit captured it in
+        vcs_file_states. Every uncommitted intermediate write therefore
+        strands one immediately, and nothing ever collected them. On
+        2026-10-06 that was 8,741 blobs holding 378 MB -- 77% of all
+        blob bytes and 54% of the entire 700 MB database -- accumulated
+        silently because no counter, view or check reported it. The
+        three blob views that do exist all describe the tiered-storage
+        design that was never implemented, so `storage blob status`
+        showed a healthy single-tier install while half the file was
+        garbage.
+
+        Deliberately recomputed by anti-join rather than read from
+        reference_count: the counter only knows about file_contents,
+        and six other tables pin a hash. Keep this list in step with
+        BlobCommands.BLOB_REFERENTS -- tests/test_blob_gc.py asserts
+        both against the live schema.
+        """
+        from db_utils import query_one, query_all
+        referents = [
+            ('file_contents', 'content_hash'),
+            ('vcs_file_states', 'content_hash'),
+            ('vcs_file_states', 'old_content_hash'),
+            ('vcs_working_state', 'content_hash'),
+            ('checkout_snapshots', 'content_hash'),
+            ('edit_intents', 'new_content_hash'),
+            ('sync_cache', 'content_hash'),
+            ('deployment_snapshots', 'content_hash'),
+            ('code_symbols', 'content_hash'),
+        ]
+        present = {r['name'] for r in query_all(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        clauses = " AND ".join(
+            f"NOT EXISTS (SELECT 1 FROM {t} WHERE {t}.{c} = cb.hash_sha256)"
+            for t, c in referents if t in present)
+        row = query_one(
+            f"""SELECT COUNT(*) AS n,
+                       COALESCE(SUM(cb.file_size_bytes), 0) AS bytes
+                  FROM content_blobs cb WHERE {clauses}""") or {}
+        n, nbytes = row.get('n', 0), row.get('bytes', 0)
+        if nbytes <= self.BLOB_ORPHAN_BUDGET_BYTES:
+            return []
+        try:
+            import os
+            from config import DB_PATH
+            share = f", {nbytes / os.path.getsize(DB_PATH) * 100:.0f}% of the file"
+        except Exception:
+            share = ""
+        return [f"{n:,} unreferenced blob(s) holding "
+                f"{nbytes / 1e6:.0f} MB{share} "
+                f"(budget {self.BLOB_ORPHAN_BUDGET_BYTES / 1e6:.0f} MB). "
+                f"`templedb storage blob gc` to preview, "
+                f"`--apply` to reclaim"]
+
+    def _check_views_are_runnable(self):
+        """Invariant: every view in sqlite_master can actually be queried.
+
+        SQLite validates a view body at query time only -- never at
+        CREATE VIEW, never at schema load, never at integrity_check. A
+        view whose underlying table is dropped stays in sqlite_master
+        looking perfectly healthy and fails only when someone selects
+        from it.
+
+        That is how `related_readmes` survived: migration 121 dropped
+        the readme tables in a cleanup and left the view that reads
+        readme_topics behind, where it sat broken through six further
+        migrations until a manual schema audit tried to query it. With
+        47 views and a habit of retiring tables by replacing them with
+        views over their successors (commit_files, env_vars_view,
+        project_env_vars_view), this is a recurring shape rather than a
+        one-off.
+
+        EXPLAIN rather than SELECT: it resolves every name and compiles
+        the statement without reading a single row, so the check costs
+        microseconds per view and cannot be slow on a big table.
+        """
+        from db_utils import query_all, get_connection
+        views = query_all(
+            "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name")
+        conn = get_connection()
+        issues = []
+        for v in views:
+            name = v['name']
+            try:
+                conn.execute(f'EXPLAIN SELECT * FROM "{name}" LIMIT 0')
+            except Exception as e:
+                issues.append(
+                    f"view {name} does not compile: {e}. Either restore what "
+                    f"it reads or DROP VIEW it — a view that cannot run is "
+                    f"indistinguishable from a working one in sqlite_master")
+        return issues
 
     def _check_intent_applied_valid(self):
         """Invariant: edit_intents.applied_commit_id points at a real

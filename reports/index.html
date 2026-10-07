@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-10-06-1811-templedb-schema-atlas-table-by-table-analysis-and-project-st.html">
+  <div class="row">
+    <span class="date">2026-10-06 18:11</span>
+    <span class="title">TempleDB schema atlas: table-by-table analysis and project status</span>
+  </div>
+  <div class="summary">
+    A full pass over the live TempleDB database as of 2026-10-06: 165 tables, 47 views, 369 indexes, 62 triggers, 776&nbsp;MB on disk. The schema is read here as a stratigraphy — five distinct eras of design intent laid down on top of each other, each with its own theory of what the database is for, and only the top two still load-bearing. The report walks every subsystem table by table, names the semantics the schema actually enforces (as opposed to the semantics the column comments claim), and ends with the four concrete defects this pass turned up — the largest of which is that 54% of the database file is unreachable blob garbage with no collector.
+  </div>
+</a>
+
 <a class="report" href="2026-10-03-2334-multi-resolution-assessment-templedb-from-40000-feet-to-the-.html">
   <div class="row">
     <span class="date">2026-10-03 23:34</span>
