@@ -36,6 +36,14 @@ class FileChange:
 class CommitCommand:
     """Handles commit operations - committing workspace changes to database"""
 
+    # Mass-deletion guard thresholds. A commit that removes most of the
+    # project is a wrong-directory mistake far more often than a real
+    # purge, and the diff is computed against whatever path it was
+    # handed. The floor keeps small or young projects from tripping on a
+    # routine "deleted 2 of 3 files".
+    MASS_DELETE_FRACTION = 0.5
+    MASS_DELETE_FLOOR = 10
+
     def __init__(self):
         super().__init__()
         self.scanner = None
@@ -242,6 +250,39 @@ class CommitCommand:
                     print(f"      - {change.file_path}")
                 if len(changes['deleted']) > 5:
                     print(f"      ... and {len(changes['deleted']) - 5} more")
+
+            # Mass-deletion guard. The diff is taken against whatever
+            # directory was passed, and a path that was never a project
+            # root -- the PARENT of a session workspace, say -- makes
+            # every tracked file look deleted. Nothing downstream
+            # questions that, so a wrong argument silently commits the
+            # project away. Deletions are the worst half to get wrong:
+            # they tombstone paths, and re-adding a tombstoned path
+            # later hits a UNIQUE constraint.
+            tracked = getattr(self, '_tracked_count', 0)
+            n_deleted = len(changes['deleted'])
+            if (tracked and n_deleted >= self.MASS_DELETE_FLOOR
+                    and n_deleted / tracked >= self.MASS_DELETE_FRACTION
+                    and not getattr(args, 'allow_mass_delete', False)):
+                logger.error(
+                    f"Refusing to commit: {n_deleted} of {tracked} tracked "
+                    f"file(s) ({n_deleted * 100 // tracked}%) are missing "
+                    f"from {workspace_dir} and would be committed as "
+                    f"deletions."
+                )
+                logger.info(
+                    "  Edit workspaces are per-session: "
+                    "~/.config/templedb/edit-workspaces/<slug>/<session-name>/"
+                )
+                logger.info(
+                    "  Run `templedb edit <slug>` to print the exact path; "
+                    "its PARENT holds every session's tree and is not "
+                    "itself a workspace."
+                )
+                logger.info(
+                    "  If the deletions are real: --allow-mass-delete"
+                )
+                return 1
 
             # Check for conflicts before committing (unless --force)
             conflicts = []
@@ -502,6 +543,11 @@ class CommitCommand:
 
         # Get current database state
         db_files = self.file_repo.get_files_for_project(project_id, include_content=False)
+
+        # Remembered for the mass-deletion guard in commit(): it compares
+        # deletions against how many files the project tracks, and this
+        # is the only place that set is materialised.
+        self._tracked_count = len(db_files)
 
         # Convert to dict keyed by path with expected structure
         db_by_path = {}

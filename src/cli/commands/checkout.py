@@ -54,41 +54,56 @@ class CheckoutCommand:
                 logger.info(f"  Or import one: templedb project import /path/to/repo --slug {project_slug}")
                 return 1
 
-            # Refuse --force when target_dir encloses OTHER projects'
-            # checkouts. The stray-purge below walks target_dir
+            # Refuse --force when target_dir ENCLOSES another registered
+            # checkout. The stray-purge below walks target_dir
             # recursively and unlinks every scanner-recognized file whose
             # relative path isn't in THIS project's file list -- so
-            # pointing --force at the checkouts parent deletes the
-            # sources of every other project, silently, reporting only a
+            # pointing --force at a parent directory deletes the sources
+            # of every checkout beneath it, silently, reporting only a
             # count. Nothing downstream bounds the purge, so the only
             # place to stop it is before it is honoured.
+            #
+            # Slug is deliberately NOT a filter. Same-project nesting is
+            # the common shape, not the rare one: edit workspaces live at
+            # edit-workspaces/<slug>/<session-name>/, so every session
+            # tree sits directly under edit-workspaces/<slug>/. A file at
+            # <session>/src/foo.py has a relative path that is absent
+            # from the project's file list, which makes every file in
+            # every sibling session workspace a stray. Skipping same-slug
+            # rows (as this guard did until 2026-10-07) left exactly that
+            # case unguarded.
             if args.force:
-                foreign = []
+                enclosed = []
                 for row in self.checkout_repo.get_all():
                     other = row.get('checkout_path')
-                    if not other or row.get('project_slug') == project_slug:
+                    if not other:
                         continue
                     try:
                         other_path = Path(other).resolve()
                     except (OSError, ValueError):
                         continue
-                    if (other_path == target_dir
-                            or target_dir in other_path.parents):
-                        foreign.append(f"{row['project_slug']}: {other_path}")
-                if foreign:
+                    # Refreshing the checkout that IS the target is the
+                    # legitimate use of --force, same slug or not. Only
+                    # strict enclosure is dangerous.
+                    if other_path == target_dir:
+                        continue
+                    if target_dir in other_path.parents:
+                        enclosed.append(f"{row['project_slug']}: {other_path}")
+                if enclosed:
                     logger.error(
                         f"Refusing --force: {target_dir} encloses "
-                        f"{len(foreign)} other project checkout(s), whose "
+                        f"{len(enclosed)} registered checkout(s), whose "
                         f"files would be purged as strays."
                     )
-                    for entry in foreign[:5]:
+                    for entry in enclosed[:5]:
                         logger.error(f"    {entry}")
-                    if len(foreign) > 5:
-                        logger.error(f"    ... and {len(foreign) - 5} more")
+                    if len(enclosed) > 5:
+                        logger.error(f"    ... and {len(enclosed) - 5} more")
                     logger.info(
-                        f"  target_dir is the checkout itself, not its "
-                        f"parent. Did you mean: templedb project checkout "
-                        f"{project_slug} {target_dir / project_slug}"
+                        f"  target_dir must be the checkout itself, not a "
+                        f"directory containing checkouts. Did you mean: "
+                        f"templedb project checkout {project_slug} "
+                        f"{target_dir / project_slug}"
                     )
                     return 1
 

@@ -704,6 +704,13 @@ def register(cli):
              'default: --strategy force alone will refuse these to prevent '
              'silent loss of file_set writes.',
     )
+    commit_parser.add_argument(
+        '--allow-mass-delete', action='store_true',
+        help='Permit a commit in which most tracked files are missing from '
+             'the workspace and would be recorded as deletions. Off by '
+             'default: that pattern almost always means the wrong directory '
+             'was passed (e.g. the PARENT of a session workspace).',
+    )
 
     # Metadata options
     commit_parser.add_argument('--interactive', '-i', action='store_true', help='Interactive mode for rich metadata')

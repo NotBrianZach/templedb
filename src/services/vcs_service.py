@@ -157,8 +157,16 @@ class VCSService(BaseService):
                 raise ValidationError(
                     f"{origin} must be an integer, got {requested_id!r}"
                 )
+            # `ended_at IS NULL` is the point: this lookup used to accept
+            # an ended session, contradicting both the error message
+            # below and CheckoutRepository.current_session_id(), which
+            # has always required liveness. The split let staging adopt a
+            # dead session that checkout-role resolution then refused —
+            # one way "ending a session strands the next publish" shows
+            # up. Fixed 2026-10-07.
             row = self.vcs_repo.query_one(
-                "SELECT * FROM vcs_sessions WHERE id = ?", (sid,)
+                "SELECT * FROM vcs_sessions WHERE id = ? AND ended_at IS NULL",
+                (sid,)
             )
             if not row:
                 raise ResourceNotFoundError(

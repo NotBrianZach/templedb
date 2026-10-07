@@ -38,6 +38,12 @@ templedb edit <slug>                       # prints the exact path — use that
 templedb commit <slug> <that-path> -m "…"
 ```
 
+`commit` refuses when half or more of the tracked files are missing from
+the directory you handed it, since that almost always means a wrong
+path rather than a real purge. Override with `--allow-mass-delete`.
+`project checkout --force` likewise refuses a target that *encloses*
+other checkouts — its stray-purge would delete every file in them.
+
 **3. Staging is session-scoped.** `vcs add` / `vcs commit` only see rows
 staged by the *current* session, and each agent Bash tool call gets a
 fresh shell with a fresh session-leader PID and no inherited env. Stage
