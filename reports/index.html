@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-10-08-1110-what-the-cli-does-when-you-run-it-433-commands-and-a-stalled-migration.html">
+  <div class="row">
+    <span class="date">2026-10-08 11:10</span>
+    <span class="title">What the CLI does when you run it: 433 commands and a stalled migration</span>
+  </div>
+  <div class="summary">
+    A command-by-command pass over all 433 leaf commands, 2026-10-08, plus an attempt to finish the AST config migration. Companion to the morning's surface report, which measured the CLI's shape; this one runs it. Eight commands are broken and every one of them passes --help cleanly, which is the whole argument for executing rather than reading. The migration attempt ends in a verdict rather than a completion, for a reason worth more than the completion would have been: a generated file became the place where declarations were made, so the generator can no longer be run. Detail lives in CLI_COMMAND_AUDIT.md and CLI_SEMANTICS.md; this is the narrative and the verdicts.
+  </div>
+</a>
+
 <a class="report" href="2026-10-08-0854-the-cli-as-a-surface-432-commands-and-who-reads-them.html">
   <div class="row">
     <span class="date">2026-10-08 08:54</span>

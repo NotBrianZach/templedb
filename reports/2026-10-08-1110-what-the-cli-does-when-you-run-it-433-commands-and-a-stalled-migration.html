@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>What the CLI does when you run it: 433 commands and a stalled migration</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --ok: #7ec77e;
+    --warn: #e8c547;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  h4 { color: #9a9ac0; font-size: 0.92rem; margin: 1.2rem 0 0.35rem;
+       font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.86em; }
+  th, td { border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left;
+           vertical-align: top; }
+  th { background: var(--panel); color: #b0b0d0; font-weight: 600; }
+  td.n { text-align: right; font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .bad { color: var(--accent); }
+  .dim { color: var(--muted); }
+  ul { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin-bottom: 0.35rem; }
+</style>
+</head>
+<body>
+
+<h1>What the CLI does when you run it</h1>
+<p class="lede">
+  A command-by-command pass over all 433 leaf commands, 2026-10-08, plus an attempt to
+  finish the AST config migration. Companion to the morning's
+  <a href="2026-10-08-0854-the-cli-as-a-surface-432-commands-and-who-reads-them.html">surface
+  report</a>, which measured the CLI's shape; this one runs it. Eight commands are broken
+  and every one of them passes <code>--help</code> cleanly, which is the whole argument for
+  executing rather than reading. The migration attempt ends in a verdict rather than a
+  completion, for a reason worth more than the completion would have been: a generated
+  file became the place where declarations were made, so the generator can no longer be
+  run. Detail lives in
+  <a href="../docs/CLI_COMMAND_AUDIT.md">CLI_COMMAND_AUDIT.md</a> and
+  <a href="../docs/CLI_SEMANTICS.md">CLI_SEMANTICS.md</a>; this is the narrative and the
+  verdicts.
+</p>
+
+<h2>1. Status at a glance</h2>
+
+<table>
+<tr><th>Finding</th><th>Detail</th><th>State</th></tr>
+<tr><td>Broken commands</td><td>8, from 5 root causes — all pass <code>--help</code></td><td class="bad">open</td></tr>
+<tr><td>Commands executed</td><td>137 of 433; <code>deploy</code> (73) at zero</td><td class="warn">partial by necessity</td></tr>
+<tr><td>Slow enough to read as hung</td><td><code>graph overview</code> 42s, <code>sync status</code> 31s</td><td class="warn">open</td></tr>
+<tr><td>Which config model is live</td><td><code>nixos config</code> — the reverse of what was published that morning</td><td class="ok">corrected</td></tr>
+<tr><td>AST migration</td><td>cannot complete as conceived; nothing promoted</td><td class="warn">verdict delivered</td></tr>
+<tr><td>Dead code</td><td><code>env.py:175-345</code>, ~170 lines, registered nowhere</td><td class="warn">open</td></tr>
+<tr><td>Semantics + strategy</td><td>433 commands classified; 125 core, 25 merge, 11 fix, 7 move, 5 retire?, 3 gate</td><td class="ok">documented</td></tr>
+</table>
+
+<h2>2. Why execution, not documentation</h2>
+
+<p>
+  <code>--help</code> proves a command is <em>registered</em>. It says nothing about whether
+  the handler works. Every finding in section 3 renders a clean help string and then fails
+  on invocation, so a documentation pass — however careful — would have found none of them.
+</p>
+
+<p>
+  Each safely-runnable command was therefore executed against the <strong>deployed</strong>
+  binary with dev mode unset, and its exit code and stderr recorded. 130 commands were
+  skipped for carrying a destructive verb (<code>deploy</code>, <code>rm</code>,
+  <code>gc</code>, <code>switch</code>, <code>push</code>); 166 need an argument that is not
+  a project slug.
+</p>
+
+<div class="callout">
+  <strong>The 296 unexecuted commands are not cleared.</strong> A command absent from the
+  broken list has either passed or not been tried. This is the honest limit of the pass and
+  the reason section 6 argues for a smoke-test suite rather than another audit.
+</div>
+
+<h2>3. Eight broken commands, five root causes</h2>
+
+<h3>NameError <code>ts_info</code> — 3 commands</h3>
+
+<p>
+  <code>network.py</code> reads <code>ts_info</code> at lines 95, 138 and 178 and
+  <strong>never assigns it</strong>: four uses, zero assignments. The name is a copy-paste
+  remnant from <code>sync.py:88</code>, where <code>ts_info =
+  probe_peer(peer["ip"])</code> does exist.
+</p>
+
+<table>
+<tr><th>command</th><th>fails when</th></tr>
+<tr><td><code>sync network status</code></td><td>≥1 online peer — prints its header, then raises</td></tr>
+<tr><td><code>sync network setup</code></td><td>≥1 online peer, inside the <code>if online &gt; 0</code> branch</td></tr>
+<tr><td><code>sync network sync-all</code></td><td><strong>immediately</strong>, on the first peer</td></tr>
+</table>
+
+<p>
+  <code>sync-all</code> is the one that matters: <code>for peer in peers: if not
+  ts_info:</code> raises before any sync is attempted, so the command whose entire purpose
+  is syncing peers <strong>has never been able to do it</strong>. Only
+  <code>sync network connect</code> escapes.
+</p>
+
+<h3>Stale table names — 2 commands and one silent lie</h3>
+
+<p>Two code paths query tables that do not exist, and the columns differ too, so this is
+not a rename a search-and-replace could fix:</p>
+
+<table>
+<tr><th>queried</th><th>actual table</th><th>column drift</th></tr>
+<tr><td><code>nixos_packages</code></td><td><code>nixos_managed_packages</code></td><td><code>project_slug</code>→<code>project_id</code>, <code>name</code>→<code>package_name</code>, <code>scope</code>→<code>install_scope</code></td></tr>
+<tr><td><code>nix_services</code></td><td><code>nix_service_metadata</code></td><td><code>opens_port</code>→<code>opens_ports</code></td></tr>
+</table>
+
+<p>
+  <code>nixos packages list</code> and its alias fail outright. The worse case is
+  <strong><code>templedb validate</code>, which reports <code>PASS</code> and exits 0 while
+  logging <code>no such table: nix_services</code> to stderr</strong>. A validator passing
+  while one of its own checks errored is worse than a crash: the crash would have been
+  noticed in August.
+</p>
+
+<h3>Two AttributeErrors</h3>
+
+<ul>
+  <li><code>nixos system status</code> and its alias —
+      <code>'SystemService' object has no attribute 'get_system_status'</code>. Python
+      prints the fix in the error: <em>Did you mean <code>get_system_config</code>?</em></li>
+  <li><code>admin cache list</code> —
+      <code>'DeploymentCacheService' object has no attribute 'db_utils'</code>: a module
+      reached for as an instance attribute.</li>
+</ul>
+
+<h3>Slow, not broken</h3>
+
+<p>
+  <code>graph overview</code> (42s) and <code>sync status</code> (31s) both exit 0. Both
+  exceed the ~20s an agent tool call allows, so they present as hangs.
+  <code>graph overview</code> is pure local query work, which makes it a performance defect
+  rather than an unavoidable cost.
+</p>
+
+<h2>4. The biggest blind spot is <code>deploy</code></h2>
+
+<p>
+  73 commands — the largest noun — with <strong>zero executed coverage</strong>, because
+  every leaf mutates or needs live infrastructure. It is also where this session found the
+  bug that made <em>successful</em> deploys report failure:
+  <code>RelatedCommands.AFTER_DEPLOY_RUN</code> ran after a completed deploy, the enclosing
+  <code>except Exception</code> logged <code>Deployment failed: …</code> and returned
+  <strong>1</strong>, so anything gating on exit status saw every deploy as broken.
+</p>
+
+<p>
+  That combination — largest noun, zero coverage, a latent exit-code lie — is the CLI's
+  main risk concentration. The fix is structural: <strong>if every <code>deploy</code> leaf
+  honoured <code>--dry-run</code> as a guaranteed no-side-effect path, the sweep above would
+  extend to it.</strong> Four of the nine sub-domains already have one.
+</p>
+
+<h2>5. The config models, and a correction</h2>
+
+<p>
+  The morning's semantics pass claimed <code>config-ast</code> was the successor to
+  <code>nixos config</code>, reasoning from the existence of <strong><code>config-ast
+  seed</code></strong> ("Seed config_nodes from existing system_config keys"). Measuring
+  inverted it:
+</p>
+
+<table>
+<tr><th></th><th>rows</th><th>last write</th><th>status</th></tr>
+<tr><td><code>system_config</code> (<code>nixos config *</code>)</td><td class="n">208</td><td>2026-10-04</td><td class="ok">production</td></tr>
+<tr><td><code>config_nodes</code> (<code>config-ast *</code>)</td><td class="n">1254</td><td>2026-08-05</td><td class="bad">dormant</td></tr>
+<tr><td><code>ast_builds</code></td><td class="n">27</td><td>2026-08-05</td><td class="bad">2 ever promoted</td></tr>
+</table>
+
+<p>
+  <code>nixos status</code> reads <code>system_config</code> and reports the live rebuild.
+  <code>seed</code> is the bridge that was <em>built</em>, not evidence the migration
+  <em>completed</em> — and the timestamps show it did not. Published before checking, which
+  would have led a reader to deprecate the live system.
+</p>
+
+<p>
+  The practical hazard is sharper than "two models": <strong>21 commands are presented as
+  current while writing to a dormant store.</strong> <code>config-ast set</code> succeeds,
+  changes <code>config_nodes</code>, and has no effect on the machine. Both groups now
+  carry <code>INCOMPLETE MIGRATION</code> in their help.
+</p>
+
+<h2>6. The migration cannot complete as conceived</h2>
+
+<p>Attempted, and the failure is instructive.</p>
+
+<p>
+  Two AST builds <strong>were</strong> promoted, 2026-08-02 and 08-04 — which is why
+  <code>configuration.nix:2</code> reads <code># Generated by TempleDB configuration
+  compiler</code>. Since then <strong>162 lines were hand-added to that generated
+  file</strong>, and <code>config_nodes</code> was never updated.
+</p>
+
+<div class="callout">
+  <strong>A derived file became the place where declarations were made.</strong> That is
+  the same boundary error as <code>file set</code> reverting work, a stale workspace reading
+  as committable, and a home-manager profile evicted at boot — here applied to the
+  project's own config pipeline, and it is why the generator can no longer be run.
+</div>
+
+<p>Measured rather than assumed:</p>
+
+<ul>
+  <li><code>ast build --host zMothership2</code> reproduces August's hash
+      <code>330c53e69c4e</code> byte-for-byte and still passes <code>nix build</code></li>
+  <li><code>ast diff</code> against live: <strong>687 lines</strong> across all three files</li>
+  <li>promoting it would <strong>delete 316 lines of live config</strong></li>
+  <li>the 162 hand-added lines are <strong>86 comments + 76 config</strong></li>
+</ul>
+
+<h3>Blocker 1 — comments are unrepresentable</h3>
+
+<p>
+  The emitter knows 20 node types (<code>AttrSet</code>, <code>FnCall</code>,
+  <code>With</code>, <code>LetIn</code>, <code>MultilineString</code>,
+  <code>Interpolation</code>, …) and <strong>none is a comment</strong>. There is no comment
+  emission anywhere in <code>config_compiler.py</code>, and
+  <code>config_nodes.description</code> is populated on <strong>0 of 1254 rows</strong>. So
+  86 lines of rationale — including a 20-line explanation of why
+  <code>kernel.sysrq</code> is <code>1</code> and not <code>244</code> — cannot be carried.
+  In a codebase whose comments are its institutional memory, that is not a rounding error.
+</p>
+
+<h3>Blocker 2 — some of it is authored code</h3>
+
+<p>
+  Among the 76 config lines is <code>voiceAIEnvRenderer</code>: a 15-line shell script
+  embedded via <code>pkgs.writeShellScript</code>, with Nix interpolation, a
+  <code>makeBinPath</code> call and error handling. Representable in principle
+  (<code>MultilineString</code> + <code>Interpolation</code> + <code>FnCall</code>);
+  maintaining it as a node tree would be strictly worse than maintaining it as Nix.
+</p>
+
+<h3>And re-seeding does not help</h3>
+
+<p>
+  <code>config-ast seed --dry-run</code> would rewrite all 158 <code>nixos.*</code> keys and
+  close <strong>none</strong> of the gap. <code>kernel.sysrq</code>,
+  <code>lib.mkDefault</code> and <code>brightnessctl</code> are keys in <em>neither</em>
+  model — the hand-edits exist only in the derived file.
+  <code>AST_MERGE_SEMANTICS.md</code> does not cover it either: it merges multiple AST
+  <em>inputs</em> by host-chain priority, not AST output into an edited file.
+</p>
+
+<h3>Three ways forward</h3>
+
+<table>
+<tr><th>#</th><th>option</th><th>cost</th></tr>
+<tr><td class="n">1</td><td>Add a <code>Comment</code> node type and emission, re-encode 76 config lines as nodes and 86 as comments</td><td>completion, at the price of making Nix authorship hostile</td></tr>
+<tr><td class="n">2</td><td><strong>Scope boundary</strong> — AST owns structured settings, authored Nix stays in files, <code>generate</code> <em>merges</em> rather than replaces</td><td>a design project; the merge it needs does not exist</td></tr>
+<tr><td class="n">3</td><td>Retire the AST path</td><td>discards a working, nix-verified build pipeline</td></tr>
+</table>
+
+<p>
+  <strong>Recommended: 2.</strong> The model is genuinely good at structured settings and
+  genuinely unable to hold prose or embedded scripts. A generator that replaces its own
+  output will always lose to the first person who edits the output — which is exactly what
+  happened in August.
+</p>
+
+<p>
+  Whichever is chosen, <strong>the invariant worth adding first</strong> would have caught
+  this the week it happened: <em>a generated file must not diverge from what its generator
+  produces.</em> Same shape as <code>checkout_matches_db</code>, pointed at
+  <code>config-ast</code>.
+</p>
+
+<p class="dim">Nothing was promoted. The destructive step was available and declined.</p>
+
+<h2>7. Smaller findings worth keeping</h2>
+
+<ul>
+  <li><strong>~170 lines of dead code.</strong> <code>env.py:175-345</code> holds its own
+      <code>var_set</code> / <code>var_get</code> / <code>var_list</code> /
+      <code>var_delete</code> / <code>var_export</code>, registered nowhere and called
+      nowhere — superseded when <code>var.py</code> took over. Anyone reading
+      <code>env.py</code> to understand <code>env var set</code> reads the wrong code.</li>
+  <li><strong><code>env var *</code> and <code>var *</code> are one implementation</strong>,
+      deliberately exposed under two nouns via a <code>prefix</code> parameter in
+      <code>var.py</code>. Not accidental duplication — worth knowing before someone
+      "fixes" it.</li>
+  <li><strong>Three nouns begin with "config"</strong> and mean three different things:
+      <code>config</code> (file links), <code>nixos config</code> (system values),
+      <code>config-ast</code> (AST nodes).</li>
+  <li><strong>Some concepts have no owning noun.</strong> <code>checkout</code> lives under
+      <code>project</code> (6), <code>admin</code> (3) and top-level <code>edit</code> —
+      which is precisely why the deregister gap survived until this week: no single
+      <code>--help</code> listing could show the hole.</li>
+  <li><strong>Under-advertised commands that answer real questions:</strong>
+      <code>file where</code> (which derived copies disagree with the declaration),
+      <code>entity observations</code> (the graph's own audit trail),
+      <code>vcs export</code> (the only bridge from the DB commit log to git).</li>
+  <li><strong>Patterns worth copying:</strong> <code>storage blob gc</code> is dry-run by
+      default <em>and</em> paired with <code>blob deletions</code> as a standing record of
+      what it collected; <code>env key revoke</code> requires multi-key quorum on an
+      irreversible act; <code>intent create</code>/<code>apply</code> makes writes
+      two-phase; <code>report confirm</code>/<code>reject</code> records the negative when
+      a human overrules inference.</li>
+</ul>
+
+<h2>8. Method: four wrong measurements</h2>
+
+<p>
+  Worth recording, because the pattern cost more time than any single bug and every instance
+  had the same shape — <em>measuring with an instrument that cannot see the thing</em>.
+</p>
+
+<table>
+<tr><th>claim</th><th>why it was wrong</th><th>right instrument</th></tr>
+<tr><td><code>publish</code> silently skips the push</td><td>the refusal goes to stderr (unbuffered) while stdout is block-buffered through a pipe, so <code>2&gt;&amp;1 | tail -6</code> put it above the visible lines</td><td>full output, no <code>tail</code></td></tr>
+<tr><td>"34 redundant command names"</td><td><code>grep</code> over <code>cli.commands</code> cannot establish handler identity: <code>cmd</code> is reused in every module, and <code>id()</code> on a bound method is meaningless because attribute access mints a fresh object</td><td>introspect the live parser tree, group on <code>(__func__, __self__)</code></td></tr>
+<tr><td><code>vcs log</code> and <code>validate</code> crash</td><td>crash-grep matched the commands' own <em>output</em> — <code>vcs log</code> printed a commit message containing the word <code>AttributeError</code></td><td>exception classes on stderr only</td></tr>
+<tr><td><code>config-ast</code> is the successor</td><td>inferred from the existence of a migration bridge, which proves it was <em>built</em>, not that it was <em>crossed</em></td><td>row-level write recency on both tables</td></tr>
+</table>
+
+<p>
+  A fifth, from earlier the same day: <code>nixos.py:287</code> was named as the EOF trap on
+  the strength of a note written a week prior, without reading the enclosing block — which
+  shows the site handles both <code>--yes</code> and <code>EOFError</code> correctly. Each
+  correction is recorded in the affected document with the faulty reasoning left visible
+  rather than overwritten.
+</p>
+
+<h2>9. What to do next</h2>
+
+<table>
+<tr><th>#</th><th>action</th><th>why first</th></tr>
+<tr><td class="n">1</td><td>Fix the five root causes</td><td>three are one-line (<code>ts_info</code>, <code>get_system_status</code>, <code>db_utils</code>); the table drift needs a column mapping and a decision about the write paths</td></tr>
+<tr><td class="n">2</td><td>Make <code>validate</code> fail loudly</td><td>a check that cannot run must not report <code>PASS</code></td></tr>
+<tr><td class="n">3</td><td>Smoke-test suite over the CLI</td><td>every finding here is reachable by running the command and reading stderr; as a test it is seconds per command and would have caught <code>ts_info</code> the day it landed</td></tr>
+<tr><td class="n">4</td><td><code>--dry-run</code> contract for <code>deploy</code> leaves</td><td>73 commands with no safe execution path is why their bugs survive</td></tr>
+<tr><td class="n">5</td><td>Generated-file divergence invariant</td><td>would have caught the AST stall in August</td></tr>
+<tr><td class="n">6</td><td>Delete <code>env.py:175-345</code></td><td>dead code that misleads readers of a live command</td></tr>
+</table>
+
+</body>
+</html>
