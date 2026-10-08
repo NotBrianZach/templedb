@@ -162,23 +162,51 @@ nixos system-rollback  &  nixos system rollback
 nixos rebuild  &  nixos system-rebuild  &  nixos system rebuild   (3 names)
 ```
 
-### Why these cannot simply become aliases
+### They cannot become argparse aliases
 
 The two spellings sit at **different subparser depths** — `nixos
 config-get` is a child of `nixos`, `nixos config get` is a grandchild
-under a `config` group. argparse `aliases=` only applies within a single
-subparser, so there is no way to express "these two are one command."
-Collapsing means *removing* a spelling, which is a user-facing break.
+under a `config` group. `aliases=` applies only within a single
+subparser, so there is no way to declare them one command. Collapsing
+would mean *removing* a spelling.
 
-And neither spelling is dead: both forms appear in this repo's own docs
-(`nixos config-get` 6 hits, `nixos config get` 2; `nixos system-rebuild`
-3, `nixos system rebuild` 3). CLAUDE.md and the operational memory use
-the flat form (`home-rebuild`, `system-switch`), which is the weak
-argument for flat being canonical.
+### …and the decision is already made
 
-**Open decision, deliberately not taken here:** pick one spelling per
-pair, deprecate the other in its help text for a release, then remove.
-25 names is too much user-facing surface to change on an analysis pass.
+**Nested is canonical. Flat is a supported alias, and says so.** All 19
+flat spellings already carry it in their help text:
+
+```
+$ templedb nixos --help
+  system-switch   Switch to system configuration (alias for `nixos system switch`)
+  config-get      Get system configuration value (alias for `nixos config get`)
+  dotfiles-add    Add dotfile mapping (alias for `nixos dotfiles add`)
+```
+
+That matches what the rest of the CLI does, independently measured:
+
+| | |
+|---|---|
+| leaf commands 3+ tokens deep (nested groups) | **193 of 428** (45%) |
+| top-level nouns with sub-groups | **11** — `vcs session`, `deploy hooks`, `admin db`, `domain dns`, `env var tag`, `storage blob`, … |
+| leaf tokens containing a hyphen | 66 of 428 (15%) |
+
+Nested noun grouping is the house convention; the flat hyphenated
+compound is the minority form. `nixos` already carries all five
+sub-groups (`config`, `dotfiles`, `host`, `packages`, `system`), so the
+nested structure is load-bearing there and the flat names are a
+convenience layer over it.
+
+**So there is nothing to fix, and nothing to break.** The earlier
+recommendation to "collapse the redundant names" was wrong three times
+over: 15 were already proper aliases, the other 19 cannot be aliased,
+and those 19 are already annotated as aliases pointing at the canonical
+spelling. Flat forms stay supported — they are shorter, they are what
+this project's own history and operational notes use, and removing them
+would buy consistency nobody is short of.
+
+**Convention for new commands:** register under the nested group only.
+The alias layer exists for commands that predate the groups; growing it
+re-creates the ambiguity for no gain.
 
 ## Short-flag collisions
 
@@ -273,9 +301,11 @@ directory cannot be retired by any command.
 5. **Emit short aliases** in `admin schema` so collisions are at least
    visible to tooling.
 6. **Add `admin checkout-forget <path>`** for the deregister gap.
-7. **Decide the flat-vs-nested spelling** for the 19 duplicated `nixos`
-   handlers (25 names), then deprecate and remove the loser. Cannot be
-   done with `aliases=` — see above.
+7. ~~**Decide the flat-vs-nested spelling.**~~ **Already decided in the
+   code**: nested is canonical, all 19 flat spellings declare
+   `(alias for ...)` in their help, and that matches the 45%-nested
+   house convention. No change made; flat stays supported. New commands
+   go under the nested group only.
 8. ~~**Make empty help a doctor invariant.**~~ **Landed 2026-10-08** as
    `cli_help_is_populated`. Verified to catch a stripped `help=` and name
    the offending command. Scoped to commands, not params: the 115

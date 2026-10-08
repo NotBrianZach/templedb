@@ -216,18 +216,42 @@ nixos rebuild  &amp;  nixos system-rebuild  &amp;  nixos system rebuild   (3 nam
   <em>removing</em> a spelling — a user-facing break, not a refactor.
 </p>
 
-<p>
-  Nor is either spelling dead. Both appear in this repository's own documentation
-  (<code>nixos config-get</code> 6 hits against <code>nixos config get</code> 2;
-  <code>nixos system-rebuild</code> 3 against <code>nixos system rebuild</code> 3), and
-  CLAUDE.md plus the operational memory use the flat form — a weak argument for flat as
-  canonical, and the only argument available.
-</p>
+<h3>…and the decision was already made in the code</h3>
 
 <p>
-  So this pass stops at measurement. Choosing a spelling and retiring 25 names is a
-  product decision about an interface people have muscle memory for, and nothing in the
-  analysis settles it.
+  <strong>Nested is canonical; flat is a supported alias and says so.</strong> All 19 flat
+  spellings already declare it in their help text:
+</p>
+
+<pre>$ templedb nixos --help
+  system-switch   Switch to system configuration (alias for `nixos system switch`)
+  config-get      Get system configuration value (alias for `nixos config get`)
+  dotfiles-add    Add dotfile mapping (alias for `nixos dotfiles add`)</pre>
+
+<p>
+  Which agrees with what the rest of the CLI does, measured independently of the help
+  text: <strong>193 of 428 leaf commands are three or more tokens deep</strong>, eleven
+  top-level nouns carry sub-groups (<code>vcs session</code>, <code>deploy hooks</code>,
+  <code>admin db</code>, <code>domain dns</code>, <code>env var tag</code>,
+  <code>storage blob</code>, …), and only 66 of 428 leaf tokens contain a hyphen. Nested
+  noun grouping is the house convention and the hyphenated compound is the minority form.
+  <code>nixos</code> already carries all five sub-groups, so the nested structure is
+  load-bearing there and the flat names are a convenience layer over it.
+</p>
+
+<div class="callout">
+  So the original recommendation — "collapse the 34 redundant names into aliases" — was
+  wrong three times over: 15 were <em>already</em> proper aliases, the other 19
+  <em>cannot</em> be aliased, and those 19 are <em>already annotated</em> as aliases
+  naming the canonical spelling. Nothing to fix and nothing to break. Flat forms stay:
+  they are shorter, they are what this project's own notes use, and removing them would
+  buy a consistency nobody is short of.
+</div>
+
+<p>
+  <strong>Convention for new commands:</strong> register under the nested group only. The
+  alias layer exists for commands that predate the groups; growing it re-creates the
+  ambiguity for no gain.
 </p>
 
 <h2>5. Naming collisions the schema used to hide</h2>
@@ -355,7 +379,7 @@ nixos rebuild  &amp;  nixos system-rebuild  &amp;  nixos system rebuild   (3 nam
 <tr><td class="n">0</td><td><code>admin checkout-forget</code></td><td class="ok">landed</td></tr>
 <tr><td class="n">0</td><td><code>cli_help_is_populated</code> doctor invariant</td><td class="ok">landed</td></tr>
 <tr><td class="n">0</td><td><code>file set --session</code>; <code>reports reindex</code> forwards it</td><td class="ok">landed</td></tr>
-<tr><td class="n">1</td><td>Decide flat-vs-nested for the 19 duplicated <code>nixos</code> handlers, deprecate the loser, then remove</td><td class="warn">blocked on a decision</td></tr>
+<tr><td class="n">—</td><td>Flat-vs-nested <code>nixos</code> spelling</td><td class="ok">already decided in code: nested canonical, flat a declared alias. No change.</td></tr>
 <tr><td class="n">1</td><td>Fill the 115 param help strings</td><td class="warn">proposed</td></tr>
 <tr><td class="n">2</td><td>Retire <code>vcs log --session</code>, a documented no-op that now collides with a real flag of the same name</td><td class="warn">proposed</td></tr>
 <tr><td class="n">2</td><td>Give the remaining reachable prompts an explicit non-interactive answer</td><td class="warn">proposed</td></tr>
