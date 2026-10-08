@@ -31,6 +31,33 @@ REPORT_PROJECT = "templedb"
 REPORT_DIR = "reports"
 EXTRACT_DIR = Path(tempfile.gettempdir()) / "templedb-reports"
 
+def _file_set_argv(rel_path: str) -> list:
+    """argv for writing a report through `templedb file set`.
+
+    Two things this gets right that a bare `["templedb", ...]` did not.
+
+    It goes through templedb_command(), which resolves the installed
+    wrapper deliberately rather than relying on whatever `templedb` PATH
+    lookup finds — the rest of the codebase already does this.
+
+    And it forwards the session. `file set` auto-stages, so this
+    subprocess stages somewhere; without --session it resolves its own
+    identity, which for a child process need not be the session the
+    caller is committing from. On 2026-10-08 that left reports/index.html
+    staged in an implicit session twice, and each time the next
+    `publish run` found nothing staged in its own session, failed its
+    commit step, and correctly refused to push.
+    """
+    from cli.core import templedb_command
+
+    argv = templedb_command("file", "set", REPORT_PROJECT, rel_path, "--verify")
+    sid = (os.environ.get("TEMPLEDB_SESSION_ID")
+           or os.environ.get("TEMPLEDB_SESSION") or "").strip()
+    if sid:
+        argv += ["--session", sid]
+    return argv
+
+
 # Kebab-case slug allowed characters in filenames
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _TITLE_RE = re.compile(r"<title>([^<]+)</title>", re.IGNORECASE)
@@ -374,7 +401,7 @@ class ReportsCommands(Command):
         tmp = Path(tempfile.mkdtemp()) / filename
         tmp.write_text(content)
         r = subprocess.run(
-            ["templedb", "file", "set", REPORT_PROJECT, rel_path, "--verify"],
+            _file_set_argv(rel_path),
             stdin=open(tmp), capture_output=True, text=True,
         )
         if r.returncode != 0:
@@ -392,8 +419,7 @@ class ReportsCommands(Command):
         tmp = Path(tempfile.mkdtemp()) / "index.html"
         tmp.write_text(content)
         r = subprocess.run(
-            ["templedb", "file", "set", REPORT_PROJECT,
-             f"{REPORT_DIR}/index.html", "--verify"],
+            _file_set_argv(f"{REPORT_DIR}/index.html"),
             stdin=open(tmp), capture_output=True, text=True,
         )
         if r.returncode != 0:

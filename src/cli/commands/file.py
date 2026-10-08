@@ -33,6 +33,35 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
+def _apply_session_override(value) -> None:
+    """Pin session identity for this process from `--session <id|name>`.
+
+    `file set` auto-stages, so it is session-scoped whether or not the
+    caller thinks about sessions — and it had no way to say which one.
+    That bites subprocess callers hardest: `templedb reports reindex`
+    shells out to `templedb file set`, which resolves its own session, so
+    the stage can land somewhere the parent is not looking and the
+    parent's next `vcs commit` finds nothing. Observed twice on
+    2026-10-08, each time blocking a publish.
+
+    Exports TEMPLEDB_SESSION_ID rather than threading an argument,
+    because identity is read independently by VCSService (staging), the
+    intent recorder, and CheckoutRepository (checkout roles). Setting the
+    env var once is what makes all three agree. Process-local.
+    """
+    import os
+
+    value = (value or "").strip()
+    if not value:
+        return
+    from services.context import ServiceContext
+
+    svc = ServiceContext().get_vcs_service()
+    svc.set_session_override(value)
+    os.environ['TEMPLEDB_SESSION_ID'] = str(svc.get_current_session()['id'])
+    os.environ.pop('TEMPLEDB_SESSION', None)
+
+
 class FileCommands(Command):
     """File command handlers — all reads/writes go through the DB, not the filesystem."""
 
@@ -171,6 +200,7 @@ class FileCommands(Command):
     def set(self, args) -> int:
         """Set file content directly in the database"""
         try:
+            _apply_session_override(getattr(args, 'session', None))
             project = fuzzy_match_project(args.project, show_matched=False)
             if not project:
                 logger.error(f"Project '{args.project}' not found")
@@ -1080,6 +1110,16 @@ def register(cli):
     set_parser.add_argument('file_path', help='Path to file within project')
     set_parser.add_argument('-c', '--content', help='Content to write (otherwise reads from stdin)')
     set_parser.add_argument('-s', '--stage', action='store_true', help='Stage file after writing')
+    # No `-s` short form: that is already --stage here. See
+    # docs/CLI_SURFACE.md on short-flag collisions.
+    set_parser.add_argument('--session', metavar='ID|NAME',
+                            help='Stage into this session (numeric id, or a '
+                                 'declared name, created if absent). '
+                                 'Outranks TEMPLEDB_SESSION_ID and '
+                                 'TEMPLEDB_SESSION. file set auto-stages, so '
+                                 'without this the stage lands in whichever '
+                                 'session this process resolves — which for a '
+                                 'subprocess may not be the caller\'s.')
     set_parser.add_argument('--if-match', metavar='HASH', dest='if_match',
                             help='Refuse the write unless the file currently '
                                  'hashes to HASH (full sha256 or a prefix of '
