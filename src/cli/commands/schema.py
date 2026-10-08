@@ -24,6 +24,13 @@ def _action_to_param(action: argparse.Action) -> dict:
         long = next((s for s in action.option_strings if s.startswith('--')), action.option_strings[0])
         param['name'] = long
         param['flag'] = True
+        # Also publish short aliases. Dropping them meant a consumer
+        # could not learn that `-p` is `--project`, and made short-flag
+        # collisions invisible to tooling — e.g. `-a` is `--all` on
+        # `vcs add` but `--author` on `vcs commit`.
+        aliases = [s for s in action.option_strings if s != long]
+        if aliases:
+            param['aliases'] = aliases
         param['required'] = action.required if hasattr(action, 'required') else False
     else:
         param['name'] = action.dest
@@ -56,11 +63,45 @@ def _action_to_param(action: argparse.Action) -> dict:
     return param
 
 
-def _parser_to_schema(parser: argparse.ArgumentParser, name: str) -> dict:
-    """Recursively convert a parser to a command schema dict."""
+def _subparser_help(action: argparse._SubParsersAction) -> dict:
+    """Map subcommand name → the `help=` given to add_parser().
+
+    argparse keeps that string on the PARENT's `_choices_actions` (a list
+    of `_ChoicesPseudoAction`), never on the subparser itself — the
+    subparser's own `.description` is populated only when `description=`
+    is also passed. Almost every command here is registered with `help=`
+    alone, so reading `parser.description` returned '' for 422 of 432
+    commands and `admin schema`, whose entire purpose is agent capability
+    discovery, described nothing. Fixed 2026-10-08.
+    """
+    by_name = {}
+    for pseudo in getattr(action, '_choices_actions', []):
+        if pseudo.help and pseudo.help != argparse.SUPPRESS:
+            by_name[pseudo.dest] = pseudo.help
+
+    # `add_parser('list', aliases=['ls'])` puts BOTH names in .choices
+    # pointing at one parser, but records a single pseudo-action whose
+    # dest is the canonical name. Keying only by name therefore left
+    # every alias (ls / rm / gen) help-less, so map parser identity too
+    # and let aliases inherit from their canonical command.
+    by_parser = {}
+    for sub_name, sub_parser in action.choices.items():
+        if sub_name in by_name:
+            by_parser[id(sub_parser)] = by_name[sub_name]
+    return by_name, by_parser
+
+
+def _parser_to_schema(parser: argparse.ArgumentParser, name: str,
+                      inherited_help: str = '') -> dict:
+    """Recursively convert a parser to a command schema dict.
+
+    inherited_help is the `help=` the parent recorded for this
+    subcommand; it is the fallback when the subparser carries no
+    `description=` of its own.
+    """
     schema = {
         'command': name,
-        'help': parser.description or '',
+        'help': parser.description or inherited_help or '',
         'params': [],
         'subcommands': [],
     }
@@ -70,9 +111,13 @@ def _parser_to_schema(parser: argparse.ArgumentParser, name: str) -> dict:
         if isinstance(action, (argparse._HelpAction, argparse._VersionAction)):
             continue
         if isinstance(action, argparse._SubParsersAction):
+            by_name, by_parser = _subparser_help(action)
             for sub_name, sub_parser in action.choices.items():
+                sub_help = (by_name.get(sub_name)
+                            or by_parser.get(id(sub_parser), ''))
                 schema['subcommands'].append(
-                    _parser_to_schema(sub_parser, f"{name} {sub_name}")
+                    _parser_to_schema(sub_parser, f"{name} {sub_name}",
+                                      sub_help)
                 )
             continue
         schema['params'].append(_action_to_param(action))

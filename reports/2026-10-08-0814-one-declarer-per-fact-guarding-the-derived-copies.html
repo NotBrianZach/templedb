@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>One declarer per fact: guarding the derived copies</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --ok: #7ec77e;
+    --warn: #e8c547;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  h4 { color: #9a9ac0; font-size: 0.92rem; margin: 1.2rem 0 0.35rem;
+       font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.86em; }
+  th, td { border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left;
+           vertical-align: top; }
+  th { background: var(--panel); color: #b0b0d0; font-weight: 600; }
+  td.n { text-align: right; font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .bad { color: var(--accent); }
+  .dim { color: var(--muted); }
+  ul { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin-bottom: 0.35rem; }
+</style>
+</head>
+<body>
+
+<h1>One declarer per fact: guarding the derived copies</h1>
+<p class="lede">
+  A session that began as a complaint about an undiscoverable environment variable and
+  ended as an audit of the boundary the whole codebase rests on: exactly one place
+  <em>declares</em> each fact, and every copy downstream is derived and must prove its
+  standing before it may overwrite anything. Seven of this project's sharpest edges turn
+  out to be a single confusion about that boundary wearing different costumes — and the
+  session's own worst moment, <strong>committing 818 deletions against the live
+  project</strong>, was that same confusion committed by the author of the guard meant to
+  prevent it. Ships a <code>--session</code> flag, three default-on guards, two analysis
+  documents, and a 607&nbsp;&rarr;&nbsp;336 line rewrite of CLAUDE.md.
+</p>
+
+<h2>1. Status at a glance</h2>
+
+<table>
+<tr><th>Item</th><th>State</th><th>Commit</th></tr>
+<tr><td><code>--session &lt;id|name&gt;</code> on <code>vcs add/reset/commit/status</code></td><td class="ok">shipped</td><td><code>a42325d1</code></td></tr>
+<tr><td>CLAUDE.md rewrite, 607 &rarr; 336 lines</td><td class="ok">shipped</td><td><code>a42325d1</code></td></tr>
+<tr><td><code>project checkout --force</code> enclosure guard</td><td class="ok">shipped</td><td><code>7c35cc8e</code></td></tr>
+<tr><td><code>commit</code> mass-deletion guard</td><td class="ok">shipped</td><td><code>7c35cc8e</code></td></tr>
+<tr><td>Session liveness (<code>ended_at IS NULL</code>)</td><td class="ok">shipped</td><td><code>7c35cc8e</code></td></tr>
+<tr><td>818-file deletion incident + recovery</td><td class="warn">resolved</td><td><code>ed5de8b0</code> / <code>7b162dfc</code></td></tr>
+<tr><td><code>docs/INGEST_ADAPTERS.md</code></td><td class="ok">shipped</td><td><code>4fcced9b</code></td></tr>
+<tr><td><code>docs/CLI_SURFACE.md</code></td><td class="ok">shipped</td><td><code>9917c46c</code></td></tr>
+<tr><td>Guards live in deployed build (system gen 329)</td><td class="ok">verified</td><td><code>b39ad29</code> pin</td></tr>
+<tr><td>Six CLI repairs from the surface analysis</td><td class="warn">in progress</td><td>&mdash;</td></tr>
+</table>
+
+<p>
+  Workspace hygiene as a side effect: 16 retired edit trees deleted (188&nbsp;MB), 21
+  stale <code>checkouts</code> rows reaped, 9 orphaned <code>File</code> entities pruned.
+  Three live edit checkouts remain, each owned by a live session.
+</p>
+
+<h2>2. The boundary</h2>
+
+<p>
+  TempleDB's stance is already written down — <em>observer of source, owner of the
+  graph</em> — but the operational rule underneath it was not. State it plainly:
+</p>
+
+<div class="callout">
+  Exactly one place declares each fact. Every copy downstream is derived, is recomputed
+  from the declaration, and is never trusted on its own. A derived copy that wants to
+  overwrite a declaration must first prove it is still current.
+</div>
+
+<p>
+  git declares source bytes; <code>file_contents</code> is a snapshot whose
+  <code>is_current=1</code> row is the most recent <em>observation</em>, not the truth of
+  the file. nix declares store paths. The entity graph is derived from the relational
+  tables, which are themselves derived from — or authoritative for — their authority.
+  NixOS makes the identical move with the system closure, which is why a home-manager
+  profile is re-derived at boot and anything activated out of band simply vanishes: it
+  left no mark on the thing that generates reality.
+</p>
+
+<p>
+  The reason to name it is that it is <em>generative of the bug list</em>. Each of these
+  was previously filed as its own footgun:
+</p>
+
+<table>
+<tr><th>Symptom</th><th>Which side of the boundary was confused</th></tr>
+<tr><td><code>file set</code> silently reverting work</td><td>A fetched copy was treated as able to declare the whole file</td></tr>
+<tr><td><code>--if-match</code> existing at all</td><td>The fix: make the copy prove currency before declaring</td></tr>
+<tr><td>A September edit workspace still looking committable</td><td>A stale derived tree retained declaring power</td></tr>
+<tr><td>Dev mode running stale code</td><td>Two derived sources, wrong one preferred silently</td></tr>
+<tr><td>The deployed nix build lagging the DB</td><td>A derived artifact behind its declaration</td></tr>
+<tr><td>&ldquo;Modified&rdquo; meaning <em>differs from HEAD</em>, not from <code>file_contents</code></td><td>Two derived views disagreeing, with no stated precedence</td></tr>
+<tr><td>Home-manager activation evicted at boot</td><td>Derived profile vs. system closure</td></tr>
+</table>
+
+<p>
+  Seven places where the tooling lets you forget which side you are standing on. Every
+  guard this session adds is the same shape: make the derived copy prove its standing.
+</p>
+
+<h2>3. The incident: 818 deletions, self-inflicted</h2>
+
+<p>
+  Worth recording in full, because the failure mode is instructive and the guard that
+  would have caught it was written minutes earlier by the same hand.
+</p>
+
+<p>
+  Having implemented and tested the mass-deletion guard under
+  <code>TEMPLEDB_DEV_MODE=1</code>, the next question was whether the <em>deployed</em>
+  binary carried it. The method chosen was to run the guarded command against the real
+  project with dev mode unset:
+</p>
+
+<pre>env -u TEMPLEDB_DEV_MODE templedb commit templedb /tmp/frozen-probe -m "x"</pre>
+
+<p>
+  The deployed build predated the fix, so there was no guard. Instead of being refused,
+  the probe committed <strong>818 deletions</strong> as <code>ed5de8b0</code> and
+  tombstoned every file in the project. <code>templedb file ls templedb</code> returned
+  &ldquo;No files found&rdquo;.
+</p>
+
+<p>
+  Nothing was lost. Content survived in the canonical checkout, 19 edit workspaces, the
+  git object store and the GitHub mirror, and <code>ed5de8b0</code> was never published —
+  the mirror went from <code>f4ae0cd</code> straight to <code>b39ad29</code> and never saw
+  the deletion. Recovery was a full-tree re-commit from the session workspace
+  (<code>7b162dfc</code>), verified exact: 818 paths restored, zero missing, zero extra,
+  against the pre-incident git tree. The old <code>UNIQUE</code> failure on re-adding
+  <code>status='deleted'</code> rows did not reappear.
+</p>
+
+<div class="callout">
+  <strong>The lesson is narrow and worth obeying.</strong> A guard exists only in the tree
+  you just edited. Testing &ldquo;is the guard deployed?&rdquo; by invoking the dangerous
+  command is a coin flip whose tails destroys the project — and since the deployed build
+  routinely lags the DB until a rebuild, tails is the <em>likely</em> branch. Verify guard
+  presence by reading the deployed code:
+  <pre>SP=$(templedb admin which | awk '/importing from/{print $3}')
+grep -c MARKER "$SP/cli/commands/commit.py"</pre>
+  If a destructive path must be exercised, point it at a throwaway slug. <code>-p
+  templedb</code> on a probe is the mistake.
+</div>
+
+<h2>4. What shipped</h2>
+
+<h3>4.1 <code>--session &lt;id|name&gt;</code></h3>
+
+<p>
+  Staging is session-scoped, and each agent tool call gets a fresh shell with a fresh
+  session-leader PID and no inherited environment. Session identity was steerable only by
+  <code>TEMPLEDB_SESSION</code> / <code>TEMPLEDB_SESSION_ID</code> — and neither
+  <code>vcs add --help</code> nor <code>vcs commit --help</code> mentioned sessions at
+  all, so <code>No changes staged for commit in this session</code> was unreachable from
+  the CLI.
+</p>
+
+<p>
+  The flag outranks both environment variables and carries no persistent state, unlike the
+  <code>session.pin</code> file removed in #907. Two details that emerged from testing and
+  changed the design:
+</p>
+
+<ul>
+  <li><strong>The override had to reach checkout-role resolution.</strong>
+      <code>vcs status --session claude-agent</code> resolved staging correctly while still
+      warning that no edit tree belonged to it, because
+      <code>CheckoutRepository.current_session_id()</code> reads environment variables
+      only. Six files read those variables independently, so rather than thread an
+      override through all of them the flag resolves once and exports
+      <code>TEMPLEDB_SESSION_ID</code> into the process environment.</li>
+  <li><strong>Read-only commands must not create sessions.</strong> The first version
+      opened a session from a misspelled probe name, violating the invariant that asking
+      where a tree lives must not open one. Write commands now create a named session;
+      <code>vcs status</code> resolves strictly and errors on a typo.</li>
+</ul>
+
+<h3>4.2 Three default-on guards</h3>
+
+<p>
+  <code>project checkout --force</code> runs a stray-purge that walks the target
+  recursively and unlinks every scanner-recognized file whose relative path is absent from
+  the project's file list. A refusal guard existed, but skipped same-slug rows — and
+  same-project nesting is the <em>common</em> shape, since edit workspaces live at
+  <code>edit-workspaces/&lt;slug&gt;/&lt;session&gt;/</code>. Pointing
+  <code>--force</code> at <code>edit-workspaces/templedb</code> would therefore have
+  purged all 19 nested session trees, 11 of them live. Now refuses on strict enclosure
+  regardless of slug, while still permitting the checkout that <em>is</em> the target.
+</p>
+
+<p>
+  <code>commit</code> computed its diff against whatever directory it was handed and marked
+  every absent tracked path as deleted, with no threshold. Now refuses at &ge;50% of
+  tracked files missing (floor of 10 so small projects do not trip), overridable with
+  <code>--allow-mass-delete</code>. Deletions are the worst half to get wrong: they
+  tombstone paths, and re-adding a tombstoned path later hits a <code>UNIQUE</code>
+  constraint.
+</p>
+
+<p>
+  <code>get_current_session()</code> accepted an <em>ended</em> session, contradicting both
+  its own error message and <code>CheckoutRepository.current_session_id()</code>, which has
+  always required <code>ended_at IS NULL</code>. The split let staging adopt a dead session
+  that checkout-role resolution then refused.
+</p>
+
+<h3>4.3 CLAUDE.md, 607 &rarr; 336 lines</h3>
+
+<p>
+  Roughly 110 lines were archaeology — tranche status, fixed-bug history, and sixteen lines
+  explaining a feature that had been <em>removed</em>. Six verified defects were corrected,
+  the worst being that the most-recommended write command named the <em>parent</em> of the
+  session workspaces: a stale 2026-09-20 flat tree with 16,470 files beneath it against the
+  project's 818. All 53 commands and 22 flags in the rewrite were executed against
+  <code>--help</code> before shipping; four of the six defects would have been caught by a
+  single such pass.
+</p>
+
+<h2>5. Ingest: two layers, not one</h2>
+
+<p>
+  Full detail in <a href="../docs/INGEST_ADAPTERS.md">docs/INGEST_ADAPTERS.md</a>. The
+  finding that matters:
+</p>
+
+<div class="callout">
+  <code>templedb ingest git</code> does not run git. It projects
+  <code>vcs_commits</code> rows that an earlier observation step wrote. A green ingest
+  history means <em>the graph matches the relational tables</em>, not that it matches git.
+</div>
+
+<p>
+  Seven of nine adapters are such projections; only <code>nix</code> (probes
+  <code>nix-store</code>) and <code>scip</code> (reads <code>.scip</code> files) touch a
+  foreign authority. The observation for git is <code>GitHistoryImporter</code>, invoked by
+  <code>vcs import-history</code> — not by <code>ingest</code>. Only
+  <code>doctor entities</code> and <code>reconcile</code> interrogate an authority.
+</p>
+
+<p>
+  A second asymmetry: <code>agent</code> and <code>intent</code> are <em>originators</em>,
+  reading <code>agent_sessions</code> and <code>edit_intents</code>, for which no upstream
+  authority exists. For those the DB <em>is</em> the declaration, and loss is not
+  recoverable by re-ingest. That is a backup-policy distinction, not a philosophical one.
+</p>
+
+<p>
+  Two README claims were corrected as measured: adapters are not all under 500 LOC
+  (<code>python</code> is 1005) and not file-isolated — all nine share a 6597-line
+  <code>entity.py</code>, the same file two <code>file set</code> writes clobbered on
+  2026-10-04. Also recorded: <code>git</code>'s 234 error runs are a <em>closed</em>
+  outage, every one between 2026-09-06 and 2026-09-24, the cr-sqlite window.
+  <code>ingestion_runs</code> counts are cumulative; bound them by date before calling an
+  adapter broken.
+</p>
+
+<h2>6. CLI: 432 commands, and the agent-facing surface is empty</h2>
+
+<p>
+  Full detail in <a href="../docs/CLI_SURFACE.md">docs/CLI_SURFACE.md</a>. 432 commands,
+  1153 parameters, ~44k LOC under <code>src/cli/commands/</code>.
+</p>
+
+<p>
+  <code>admin schema</code> exists specifically &ldquo;for agent/scripting use&rdquo; and
+  serialises <code>help: ""</code> for <strong>422 of 432 commands</strong>. The help is
+  not missing from the CLI — <code>vcs add</code> is registered
+  <code>add_parser('add', help='Stage files for commit')</code> and <code>--help</code>
+  renders it. But <code>schema.py:63</code> reads <code>parser.description</code>, and
+  argparse keeps the <code>help=</code> from <code>add_parser()</code> on the
+  <em>parent's</em> <code>_choices_actions</code>, never on the subparser. Only the ten
+  commands that also pass <code>description=</code> survive.
+</p>
+
+<p>
+  <code>--examples</code>, which <code>CLI_DISCOVERABILITY_IMPROVEMENTS.md</code> marks
+  &ldquo;Implemented&nbsp;&#10003;&rdquo;, raises <code>AttributeError</code> on every
+  invocation: <code>CommandHelp</code> defines only <code>__init__</code> and
+  <code>print</code>, while three call sites still invoke the removed
+  <code>show_examples</code>. Reproduced on the deployed build, so it is a live regression.
+</p>
+
+<p>
+  Also found: <code>-a</code> means <code>--all</code> on <code>vcs add</code> but
+  <code>--author</code> on <code>vcs commit</code>, and since <code>vcs commit</code> has
+  no <code>--all</code> the mistake is silent rather than an error. 53
+  <code>input()</code> prompts exist of which only 3 handle
+  <code>EOFError</code>, so under automation the rest produce an uncaught traceback.
+</p>
+
+<div class="callout">
+  <strong>Correction, same day.</strong> An earlier revision of this report named
+  <code>nixos.py:287</code> as the EOF trap and claimed <code>--yes</code> did not cover
+  it. Reading the enclosing block rather than the single line shows the opposite:
+  <code>nixos.py:279-295</code> short-circuits on <code>--yes</code> <em>and</em> catches
+  <code>EOFError</code> with a message naming the flag that resolves it. It is one of the
+  three sites that get this right, and is the model the others should copy. The claim came
+  from a note written 2026-10-01 and was repeated without checking — the same failure as
+  the home-manager documentation claim elsewhere in this session.
+</div>
+
+<h2>7. The work this report authorises</h2>
+
+<p>Ranked, and being executed in this order:</p>
+
+<table>
+<tr><th>#</th><th>Change</th><th>Rationale</th></tr>
+<tr><td class="n">1</td><td>Carry <code>help</code> from the parent's <code>_choices_actions</code> in <code>schema.py</code></td><td>Turns the agent-facing surface from empty to complete for 422 commands</td></tr>
+<tr><td class="n">2</td><td><em>Remove</em> <code>--examples</code> — not repair</td><td><code>help_utils.py</code> is a stub in all recorded history, so the example data never existed either; five dead references, not three</td></tr>
+<tr><td class="n">3</td><td>Explicit EOF answers at prompts reachable on a default invocation</td><td>Follow <code>nixos.py:279-295</code>, which already does this correctly</td></tr>
+<tr><td class="n">4</td><td>Drop the <code>-a</code> short form from <code>vcs commit --author</code></td><td>Makes the <code>add</code>/<code>commit</code> divergence fail loudly instead of silently</td></tr>
+<tr><td class="n">5</td><td>Emit short aliases in <code>admin schema</code></td><td>Collisions are currently invisible to tooling</td></tr>
+<tr><td class="n">6</td><td><code>admin checkout-forget &lt;path&gt;</code></td><td>No command can deregister a checkout whose directory still exists</td></tr>
+</table>
+
+<p>
+  Item 4 is a deliberate, if small, compatibility break: any script using
+  <code>vcs commit -a "Name"</code> will start erroring with
+  <em>unrecognized argument</em>. That is the point — failing loudly beats setting an
+  author when the user meant &ldquo;all&rdquo;.
+</p>
+
+<p>
+  Item 3 is scoped to the helper plus the known-bad site, not all 50. Converting the rest
+  needs a per-call-site decision about what the non-interactive answer <em>should</em> be,
+  which is not a mechanical sweep.
+</p>
+
+<h2>8. Open, not addressed here</h2>
+
+<ul>
+  <li><strong><code>checkout-gc</code> never reclaims directories.</strong>
+      <code>checkout.py:620</code> states it outright — retiring a row leaves the tree,
+      deliberately, since a tree may hold work the DB never saw. Nothing completes the job,
+      so trees accumulate; 16 were removed by hand this session. A
+      <code>--prune-dirs</code> that re-verifies <code>classify_edit_tree</code> at delete
+      time would finish it.</li>
+  <li><strong>The flat <code>edit-workspaces/templedb</code> row (#251) is unreachable.</strong>
+      <code>is_active=0</code>, <code>session_id NULL</code>, directory still present —
+      so <code>checkout-gc</code> cannot see it and no command can deregister it. Item 6
+      addresses this.</li>
+  <li><strong><code>scip</code> has 22 runs and <code>mirrors</code> has 2, ever.</strong>
+      Neither is on the hourly timer. A dormant adapter still publishes entities under its
+      <code>source_authority</code>, so its stale rows look as trustworthy as fresh ones;
+      only <code>observed_at</code> distinguishes them. Drive them or retire them.</li>
+  <li><strong>The two commits of the deletion/restore pair remain in the DB log.</strong>
+      No tooling rewrites DB-native history, and it is cosmetic: publish materialises
+      current state, so git never recorded the pair at all.</li>
+</ul>
+
+<h2>9. Addendum — what was implemented, 2026-10-08</h2>
+
+<p>All six items from section 7 landed, plus one root-cause fix the work surfaced.</p>
+
+<table>
+<tr><th>#</th><th>Done</th><th>Evidence</th></tr>
+<tr><td class="n">1</td><td><code>schema.py</code> carries <code>help</code> from the parent's <code>_choices_actions</code></td><td>empty help <strong>422 &rarr; 0</strong> of 432</td></tr>
+<tr><td class="n">1b</td><td>Aliases inherit their canonical command's help by parser identity</td><td>cleared the residual 15 (<code>ls</code>/<code>rm</code>/<code>gen</code>, all <code>aliases=[…]</code> registrations)</td></tr>
+<tr><td class="n">2</td><td>Five dead references and the <code>--examples</code> flag removed</td><td><code>--examples</code> now a plain argparse rejection, not <code>AttributeError</code></td></tr>
+<tr><td class="n">3</td><td>Both <code>checkout-gc</code> prompts handle EOF, naming <code>--force</code>/<code>--dry-run</code></td><td>deployed binary: <code>EOFError</code> + traceback; fixed: one-line message, exit 0</td></tr>
+<tr><td class="n">4</td><td><code>-a</code> dropped from <code>vcs commit --author</code></td><td><code>unrecognized arguments: -a</code>; <code>-a</code> still <code>--all</code> on add/reset</td></tr>
+<tr><td class="n">5</td><td><code>admin schema</code> emits short aliases</td><td>120 params gained <code>aliases</code>; the <code>-a</code> collision is now machine-visible</td></tr>
+<tr><td class="n">6</td><td><code>admin checkout-forget &lt;path&gt;</code></td><td>row <strong>#251</strong> deregistered; directory untouched; <code>checkout_roles_are_unambiguous</code> now <span class="ok">OK</span></td></tr>
+</table>
+
+<h3>The root cause item 6 exposed</h3>
+
+<p>
+  <code>checkout-forget</code> initially refused row #251, reporting that the tree held
+  content the DB had never stored. That was a false positive of the same kind as the
+  <code>project checkout --force</code> bug fixed earlier in the session:
+  <code>classify_edit_tree</code> walked the tree without excluding <em>nested registered
+  checkouts</em>, so the three live session workspaces beneath the flat parent were counted
+  as its untracked work. Any parent-of-workspaces path was therefore permanently
+  unprunable and permanently unforgettable.
+</p>
+
+<p>
+  Fixed in <code>checkout_repository.py</code>: <code>classify_edit_tree</code> now
+  collects strictly-enclosed checkout paths and <code>_untracked_in_tree</code> prunes
+  those subtrees during the walk, reporting them as <code>nested_checkouts</code>. The
+  lesson generalises — <strong>any code that walks a checkout recursively has to know that
+  other checkouts live inside it</strong>, which is now true of the purge guard, the
+  prune, and forget.
+</p>
+
+<p>
+  With that fixed, #251 was still refused, and correctly: the flat tree holds 12 genuinely
+  untracked files. None was work — <code>flake.lock</code> (transient, gitignored), the
+  duplicate <code>migrations/106_project_files_edit_mode.sql</code> superseded by
+  migration 120, <code>src/cli/commands/nixops4.py</code> (deleted on purpose in
+  <code>fcbabea</code>, content recoverable from <code>7776c31</code>), three
+  <code>_reprotest_*.py</code> scratch files, and six test artifacts. Forgotten with
+  <code>--force</code> on that evidence; the files remain on disk.
+</p>
+
+<h3>Verification</h3>
+
+<ul>
+  <li><code>tests/unit/services/</code> + <code>tests/vcs/</code>: <strong>18 failed /
+      229 passed</strong>, matching the pre-existing baseline exactly.</li>
+  <li><code>doctor entities</code>: <code>checkout_roles_are_unambiguous</code>
+      <span class="ok">OK</span>, <code>deployed_build_matches_db</code>
+      <span class="ok">OK</span>, <code>crsqlite_extension_loads</code>
+      <span class="ok">OK</span>. The remaining
+      <code>checkout_matches_db</code> issues are 12 <code>templedb-rust</code> rows
+      belonging to another agent's workspace.</li>
+  <li>All eight touched commands still parse under <code>--help</code>.</li>
+</ul>
+
+<p class="dim">
+  Two pre-existing conditions this session did not address: the WAL is 0.36&nbsp;GB
+  against a 105&nbsp;MB budget with five processes holding the DB open, and
+  <code>agent_work_log</code> has five columns that are NULL across all 530 rows.
+</p>
+
+</body>
+</html>

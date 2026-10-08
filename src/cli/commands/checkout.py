@@ -424,7 +424,17 @@ class CheckoutCommand:
                 else:
                     # Confirm deletion unless --force
                     if not (hasattr(args, 'force') and args.force):
-                        response = input(f"\nRemove {len(stale_checkouts)} stale checkout(s)? (yes/no): ")
+                        try:
+                            response = input(f"\nRemove {len(stale_checkouts)} stale checkout(s)? (yes/no): ")
+                        except (EOFError, KeyboardInterrupt):
+                            # No tty and no --force. Decline, and name the
+                            # flags that resolve it rather than dying with
+                            # a traceback -- this is reachable on a plain
+                            # `admin checkout-gc` from any agent tool call.
+                            print("\nCancelled: no terminal to prompt on. "
+                                  "Pass --force to remove them, or "
+                                  "--dry-run to preview.", file=sys.stderr)
+                            return 0
                         if response.lower() != 'yes':
                             print("Cancelled")
                             return 0
@@ -538,6 +548,84 @@ class CheckoutCommand:
         except Exception:
             pass
 
+    def forget_checkout(self, args) -> int:
+        """Deregister a checkout row whose directory still exists.
+
+        The gap this fills: `checkout-gc` only removes rows whose
+        directory is GONE, and `_prune_retired_edit_checkouts` only
+        deactivates rows whose session has ended. A row that is inactive
+        but whose directory is still present — the common shape for the
+        parent of a per-session workspace tree — is therefore reachable
+        by no command at all, while `resolve()` still counts it among
+        the candidate trees.
+
+        Deliberately does not delete anything on disk. Forgetting the
+        row and removing the bytes are separate decisions, and conflating
+        them is how `project checkout --force` became able to purge live
+        sibling workspaces.
+        """
+        from pathlib import Path
+
+        target = Path(args.checkout_path).expanduser()
+        try:
+            target = target.resolve()
+        except (OSError, ValueError):
+            pass
+
+        row = self.checkout_repo.query_one(
+            """SELECT c.id, c.project_id, c.checkout_path, c.is_active,
+                      c.kind, c.session_id, p.slug AS project_slug,
+                      s.ended_at
+                 FROM checkouts c
+                 JOIN projects p ON p.id = c.project_id
+            LEFT JOIN vcs_sessions s ON s.id = c.session_id
+                WHERE c.checkout_path = ?""",
+            (str(target),))
+        if not row:
+            logger.error(f"No checkout row registered at {target}")
+            logger.info("  List them with: templedb project checkout-list")
+            return 1
+
+        live_session = row['session_id'] is not None and row['ended_at'] is None
+        if (row['is_active'] or live_session) and not getattr(args, 'force', False):
+            why = []
+            if row['is_active']:
+                why.append("is_active=1")
+            if live_session:
+                why.append(f"owned by live session #{row['session_id']}")
+            logger.error(
+                f"Refusing to forget {target}: {' and '.join(why)}. "
+                f"This looks like a checkout still in use.")
+            logger.info("  End the session first, or pass --force if you "
+                        "are certain.")
+            return 1
+
+        if (target.exists() and row['kind'] == 'edit'
+                and not getattr(args, 'force', False)):
+            verdict = self.checkout_repo.classify_edit_tree(
+                row['project_id'], str(target))
+            if verdict.get('verdict') == self.checkout_repo.TREE_HAS_WORK:
+                logger.error(
+                    f"Refusing to forget {target}: the tree holds content "
+                    f"the DB has never stored.")
+                logger.info("  Commit it first, or pass --force to forget "
+                            "the row anyway (the files stay on disk).")
+                return 1
+
+        if getattr(args, 'dry_run', False):
+            print(f"   --dry-run: would forget checkout row #{row['id']} "
+                  f"({row['project_slug']}) at {target}")
+            print(f"   The directory is not touched.")
+            return 0
+
+        self.checkout_repo.execute(
+            "DELETE FROM checkouts WHERE id = ?", (row['id'],))
+        print(f"✓ Forgot checkout row #{row['id']} ({row['project_slug']}) "
+              f"at {target}")
+        if target.exists():
+            print(f"   The directory still exists and was not touched.")
+        return 0
+
     def _prune_retired_edit_checkouts(self, args) -> None:
         """Deactivate edit rows whose session ended and whose tree holds
         no content the DB has never seen.
@@ -620,9 +708,15 @@ class CheckoutCommand:
                   f"checkout row(s). The directories are not touched.")
             return
         if not getattr(args, 'force', False):
-            response = input(
-                f"\nRetire {len(prunable)} edit checkout row(s)? The "
-                f"directories stay on disk. (yes/no): ")
+            try:
+                response = input(
+                    f"\nRetire {len(prunable)} edit checkout row(s)? The "
+                    f"directories stay on disk. (yes/no): ")
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled: no terminal to prompt on. Pass "
+                      "--force to retire them, or --dry-run to preview.",
+                      file=sys.stderr)
+                return
             if response.lower() != 'yes':
                 print("Cancelled")
                 return

@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-10-08-0814-one-declarer-per-fact-guarding-the-derived-copies.html">
+  <div class="row">
+    <span class="date">2026-10-08 08:14</span>
+    <span class="title">One declarer per fact: guarding the derived copies</span>
+  </div>
+  <div class="summary">
+    A session that began as a complaint about an undiscoverable environment variable and ended as an audit of the boundary the whole codebase rests on: exactly one place declares each fact, and every copy downstream is derived and must prove its standing before it may overwrite anything. Seven of this project's sharpest edges turn out to be a single confusion about that boundary wearing different costumes — and the session's own worst moment, committing 818 deletions against the live project, was that same confusion committed by the author of the guard meant to prevent it. Ships a --session flag, three default-on guards, two analysis documents, and a 607&nbsp;&rarr;&nbsp;336 line rewrite of CLAUDE.md.
+  </div>
+</a>
+
 <a class="report" href="2026-10-06-1811-templedb-schema-atlas-table-by-table-analysis-and-project-st.html">
   <div class="row">
     <span class="date">2026-10-06 18:11</span>

@@ -162,17 +162,11 @@ The script remains registered and can be re-enabled later.
 
     def register_script(self, args):
         """Register a deployment script"""
-        # Handle --examples flag
-        if hasattr(args, 'examples') and args.examples:
-            from cli.help_utils import CommandHelp, CommandExamples
-            CommandHelp.show_examples('deploy hooks register', CommandExamples.DEPLOY_HOOKS)
-            return 0
-
         # Check if required arguments provided
         if not args.project_slug or not args.script_path:
             print("❌ Error: Project slug and script path are required", file=sys.stderr)
             print("\nUsage: ./templedb deploy hooks register <project> <script_path>", file=sys.stderr)
-            print("       ./templedb deploy hooks register --examples  # Show examples", file=sys.stderr)
+            print("       ./templedb deploy hooks register --help  # Show options", file=sys.stderr)
             return 1
 
         project_slug = args.project_slug
@@ -238,12 +232,6 @@ The script remains registered and can be re-enabled later.
             print(f"   Description: {description}")
         if documentation:
             print(f"   Documentation: {len(documentation)} characters")
-
-        # Show related commands
-        from cli.help_utils import CommandHelp, RelatedCommands
-        related = [(cmd.replace('<project>', project_slug), desc)
-                   for cmd, desc in RelatedCommands.AFTER_HOOK_REGISTER]
-        CommandHelp.show_related_commands(related)
 
         return 0
 
@@ -473,7 +461,6 @@ can wrap the standard deployment or completely replace it.
     register_parser.add_argument('script_path', nargs='?', help='Path to executable deployment script')
     register_parser.add_argument('--description', help='Human-readable description of what this hook does', default='')
     register_parser.add_argument('--docs', help='Path to markdown file with deployment documentation', default=None)
-    register_parser.add_argument('--examples', action='store_true', help='Show usage examples')
 
     # List hooks
     list_parser = hooks_subparsers.add_parser(

@@ -2396,7 +2396,12 @@ def register(cli):
     commit_parser.add_argument('-m', '--message', required=True, help='Commit message')
     commit_parser.add_argument('-p', '--project', required=True, help='Project name or pattern (fuzzy matching enabled)')
     commit_parser.add_argument('-b', '--branch', help='Branch name')
-    commit_parser.add_argument('-a', '--author', help='Author name')
+    # No `-a` short form here, deliberately. `-a` is --all on `vcs add`
+    # and `vcs reset`, and `vcs commit` has no --all -- so someone who
+    # learned `-a` from `add` silently set an author string instead of
+    # getting an error. Dropping the alias makes that mistake fail loudly
+    # with "unrecognized arguments: -a". Removed 2026-10-08.
+    commit_parser.add_argument('--author', help='Author name')
     commit_parser.add_argument('--session', metavar='ID|NAME', help=session_help)
     cli.commands['vcs.commit'] = cmd.commit
 

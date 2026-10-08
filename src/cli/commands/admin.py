@@ -151,6 +151,26 @@ def register(cli):
                       help='List what would be removed and exit')
     cli.commands['admin.checkout-gc'] = checkout_cmd.cleanup_checkouts
 
+    # --- admin checkout-forget ---
+    # checkout-gc removes rows whose directory is GONE; the retire pass
+    # only deactivates rows whose session ended. A row that is inactive
+    # while its directory still exists was therefore reachable by no
+    # command, yet still counted among resolve()'s candidate trees --
+    # exactly the shape of the flat edit-workspaces/<slug> parent.
+    forget_p = subparsers.add_parser(
+        'checkout-forget',
+        help='Deregister a checkout row by path, leaving its directory '
+             'on disk (for rows checkout-gc cannot see)')
+    forget_p.add_argument('checkout_path',
+                          help='Exact checkout path to deregister')
+    forget_p.add_argument('--force', '-f', action='store_true',
+                          help='Forget even if the row is active, owned by '
+                               'a live session, or its tree holds content '
+                               'the DB has never stored')
+    forget_p.add_argument('--dry-run', action='store_true',
+                          help='Report what would be forgotten and exit')
+    cli.commands['admin.checkout-forget'] = checkout_cmd.forget_checkout
+
     # lock_checkout() existed as a service method called after
     # generate-all, with no way to invoke it. So when a canonical tree
     # ended up writable there was no supported way to put it back, and

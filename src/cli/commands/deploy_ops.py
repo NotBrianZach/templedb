@@ -429,11 +429,6 @@ class DeployOpsMixin:
 
     def exec_command(self, args) -> int:
         """Execute a command in the deployment environment"""
-        if hasattr(args, 'examples') and args.examples:
-            from cli.help_utils import CommandHelp, CommandExamples
-            CommandHelp.show_examples('deploy exec', CommandExamples.DEPLOY_EXEC)
-            return 0
-
         if not args.slug or not args.exec_command:
             print("Error: Project slug and command are required", file=sys.stderr)
             print("  Usage: templedb deploy exec <project> '<command>'", file=sys.stderr)

@@ -159,17 +159,11 @@ class DeployCommands(DeployOpsMixin, Command):
         from error_handler import ResourceNotFoundError, DeploymentError
         import os
 
-        # Handle --examples flag
-        if hasattr(args, 'examples') and args.examples:
-            from cli.help_utils import CommandHelp, CommandExamples
-            CommandHelp.show_examples('deploy run', CommandExamples.DEPLOY_RUN)
-            return 0
-
         # Check if slug was provided
         if not args.slug:
             print("❌ Error: Project slug is required", file=sys.stderr)
             print("\nUsage: ./templedb deploy run <project> [options]", file=sys.stderr)
-            print("       ./templedb deploy run --examples  # Show examples", file=sys.stderr)
+            print("       ./templedb deploy run --help  # Show options", file=sys.stderr)
             return 1
 
         try:
@@ -416,13 +410,6 @@ class DeployCommands(DeployOpsMixin, Command):
                             print(f"   💡 Deploy with --use-fhs for FHS environment")
                     else:
                         print(f"\n📁 Deployed to: {result.work_dir}")
-
-                    # Show related commands
-                    if not dry_run:
-                        from cli.help_utils import CommandHelp, RelatedCommands
-                        related = [(cmd.replace('<project>', project_slug), desc)
-                                   for cmd, desc in RelatedCommands.AFTER_DEPLOY_RUN]
-                        CommandHelp.show_related_commands(related)
 
                 return 0
             else:
@@ -762,7 +749,6 @@ def register(cli):
     run_parser.add_argument('--all-targets', action='store_true',
                            help='Deploy to all configured targets for this project')
     run_parser.add_argument('--targets', help='Comma-separated list of targets to deploy to')
-    run_parser.add_argument('--examples', action='store_true', help='Show usage examples')
     cli.commands['deploy.run'] = deploy_handler.deploy
 
     # deploy status command
@@ -859,7 +845,6 @@ def register(cli):
     exec_parser = subparsers.add_parser('exec', help='Execute command in deployment environment')
     exec_parser.add_argument('slug', nargs='?', help='Project slug')
     exec_parser.add_argument('exec_command', nargs='?', metavar='command', help='Command to execute (quote if multiple words)')
-    exec_parser.add_argument('--examples', action='store_true', help='Show usage examples')
     cli.commands['deploy.exec'] = deploy_handler.exec_command
 
     # === Nested deployment backend commands ===

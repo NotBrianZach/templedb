@@ -609,7 +609,26 @@ class CheckoutRepository(BaseRepository):
                     'db_blob_created': r['db_blob_created'],
                 })
 
-        result['untracked'] = self._untracked_in_tree(root, tracked)
+        # Exclude subtrees that are themselves registered checkouts. Edit
+        # workspaces nest — edit-workspaces/<slug>/<session-name>/ — so
+        # walking a parent otherwise reports every sibling session's files
+        # as untracked work, making any parent row permanently unprunable
+        # and permanently unforgettable. This is the same blind spot the
+        # `project checkout --force` guard had: code that walks a tree
+        # recursively has to know that other checkouts live inside it.
+        nested = set()
+        for other in self.query_all("SELECT checkout_path FROM checkouts"):
+            raw = other.get('checkout_path')
+            if not raw:
+                continue
+            try:
+                op = Path(raw).resolve()
+            except (OSError, ValueError):
+                continue
+            if op != root and root in op.parents:
+                nested.add(op)
+        result['nested_checkouts'] = sorted(str(p) for p in nested)
+        result['untracked'] = self._untracked_in_tree(root, tracked, nested)
 
         if result['has_work'] or result['untracked']:
             result['verdict'] = self.TREE_HAS_WORK
@@ -618,7 +637,8 @@ class CheckoutRepository(BaseRepository):
         return result
 
     @staticmethod
-    def _untracked_in_tree(root, tracked: set) -> List[str]:
+    def _untracked_in_tree(root, tracked: set,
+                           nested_roots: set = None) -> List[str]:
         """Files in the tree the importer would track but the DB has no
         row for.
 
@@ -648,10 +668,21 @@ class CheckoutRepository(BaseRepository):
                 root)
             return ['<scanner unavailable>']
 
+        nested_roots = nested_roots or set()
         scanner = FileScanner(str(root))
         untracked = []
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            keep = []
+            for d in dirnames:
+                if d in SKIP_DIRS:
+                    continue
+                try:
+                    if (Path(dirpath) / d).resolve() in nested_roots:
+                        continue    # another checkout's tree, not ours
+                except (OSError, ValueError):
+                    pass
+                keep.append(d)
+            dirnames[:] = keep
             for name in filenames:
                 p = Path(dirpath) / name
                 if not p.exists():          # broken symlink

@@ -77,14 +77,33 @@ $ templedb deploy run --examples
 Error: type object 'CommandHelp' has no attribute 'show_examples'
 ```
 
-`CommandHelp` (`src/cli/help_utils.py:24`) now defines only `__init__`
-and `print`. Three call sites still invoke the removed method —
-`deploy.py:165`, `deploy_ops.py:434`, `deploy_script.py:168` — so every
-`--examples` invocation is an `AttributeError`. Reproduced on both the
-dev tree and the deployed nix build, so it is not a staleness artifact.
+`src/cli/help_utils.py` is a *stub* — its own header says so — and has
+been in every recorded commit. `CommandHelp` and `CommandExamples`
+define only `__init__` and `print`, so neither the method nor the
+example data ever existed in this tree. "Repairing" the feature would
+have meant authoring example content from scratch, so it was removed
+instead.
 
-Only 3 commands ever exposed the flag, against a doc that implies
-"major commands".
+There were **five** dead attribute references, not three, and the last
+two were the serious ones:
+
+| site | reference | reachable when |
+|---|---|---|
+| `deploy.py` | `CommandExamples.DEPLOY_RUN` | `--examples` |
+| `deploy_ops.py` | `CommandExamples.DEPLOY_EXEC` | `--examples` |
+| `deploy_script.py` | `CommandExamples.DEPLOY_HOOKS` | `--examples` |
+| `deploy.py` | `RelatedCommands.AFTER_DEPLOY_RUN` | **every successful non-dry-run `deploy run`** |
+| `deploy_script.py` | `RelatedCommands.AFTER_HOOK_REGISTER` | every successful `deploy hooks register` |
+
+`AFTER_DEPLOY_RUN` ran *after* the deployment had already succeeded. The
+enclosing `except Exception` then logged
+`Deployment failed: type object 'RelatedCommands' has no attribute
+'AFTER_DEPLOY_RUN'` and returned **1** — so a successful deploy reported
+failure and exited non-zero, and anything gating on exit status saw
+every deploy as broken. The error message was actively false.
+
+All five references and the `--examples` flag removed 2026-10-08;
+`--examples` now gets a plain argparse rejection.
 
 ## Discoverability: semantics that live outside `--help`
 
@@ -130,28 +149,43 @@ Real, and invisible in `admin schema` because short forms are dropped.
 | `input()` prompts in CLI modules | **53** |
 | of those, wrapped against `EOFError` | **3** |
 
-**The EOF trap.** 50 of 53 prompts are bare `input()`. Under a
-non-interactive invocation (any agent tool call) EOF raises, and what
-happens next is per-call-site rather than uniform. The known-bad one:
+**EOF handling is per-site, not uniform.** 50 of 53 prompts lack
+explicit `EOFError` handling, so under a non-interactive invocation (any
+agent tool call) what happens is whatever that call site happens to do —
+in most cases an uncaught traceback.
+
+The practical exposure is narrower than 50, because most of those sites
+are unreachable without opting in: `commit.py`'s eleven prompts fire only
+under `--interactive`, and `checkout.py`'s gc confirmations are skipped
+by `--force` or `--dry-run`. The risk is concentrated in prompts
+reachable on a default invocation.
+
+The model to copy is `nixos.py:279-295`, which is one of the three sites
+that gets this right and does two distinct things:
 
 ```python
-# src/cli/commands/nixos.py:287
-answer = input("Generate now? [Y/n] ").strip().lower()
+if assume_yes:                      # --yes short-circuits, says what it skipped
+    ...
+    return True
+try:
+    answer = input("Generate now? [Y/n] ").strip().lower()
+except (EOFError, KeyboardInterrupt):
+    print("\nCancelled: no terminal to prompt on. Pass --yes to "
+          f"proceed without generating, or run "
+          f"`templedb nixos generate {slug}` first.", file=sys.stderr)
+    return False
 ```
 
-`--yes` does **not** cover this prompt — that flag only answers
-"activate configuration?". EOF here cancels the whole rebuild. The
-working incantation is to pipe the answer:
+It names the flag that resolves the situation instead of dying with
+`Cancelled.` or a traceback. `templedb commit` takes the same stance
+from the other direction — its `--strategy` help states that "no-TTY
+invocations auto-abort by default".
 
-```bash
-echo n | templedb nixos system-switch system_config --yes
-```
-
-By contrast `templedb commit` handles no-TTY deliberately: its
-`--strategy` help states that "no-TTY invocations auto-abort by
-default". That is the pattern the other 50 should follow — decide the
-non-interactive answer explicitly rather than inheriting whatever
-`EOFError` does.
+> Earlier revisions of this document claimed `nixos.py:287` was the
+> known-bad case and that `--yes` did not cover it. That was carried over
+> from a note written 2026-10-01 and is **wrong** as of this measurement:
+> the site handles both `--yes` and `EOFError`. Corrected 2026-10-08
+> after reading the enclosing block rather than the single line.
 
 **Guards added 2026-10-07/08**, both default-on:
 
@@ -175,11 +209,14 @@ directory cannot be retired by any command.
 1. **Fix `schema.py:63`** — carry `help` from the parent's
    `_choices_actions`. One-line class of change; turns the agent-facing
    surface from empty to complete for 422 commands.
-2. **Either repair or remove `--examples`.** Three call sites currently
-   guarantee an `AttributeError`, and a doc advertises them.
-3. **Make non-interactive answers explicit** at the 50 bare `input()`
-   sites, starting with `nixos.py:287`. Follow `commit`'s auto-abort
-   precedent.
+2. **Remove `--examples`.** Not repair: `help_utils.py` is a stub in all
+   recorded history, so `CommandExamples.DEPLOY_RUN` and friends never
+   existed either — "repairing" would mean authoring example content
+   from scratch. Four dead attribute references, not three; see below.
+3. **Give EOF an explicit answer** at prompts reachable on a default
+   invocation, following `nixos.py:279-295`. Not a mechanical sweep of
+   all 50 — each needs a decision about what the non-interactive answer
+   *should* be.
 4. **Resolve `-a`** in the `vcs` group — the `add`/`commit` split is the
    one that silently does the wrong thing.
 5. **Emit short aliases** in `admin schema` so collisions are at least
