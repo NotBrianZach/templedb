@@ -697,22 +697,50 @@ delete 316 lines of live config.
 | comments carrying engineering rationale | **86** |
 | actual configuration | 76 |
 
-**Blocker 1 — the emitter cannot represent comments.** It knows 20 node
-types (`AttrSet`, `FnCall`, `With`, `LetIn`, `MultilineString`,
+**The only real blocker — comments.** The emitter knows 20 node types
+(`AttrSet`, `FnCall`, `With`, `LetIn`, `MultilineString`,
 `Interpolation`, …) and **none is a comment**; there is no comment
-emission anywhere in `config_compiler.py`. `config_nodes.description`
-exists and is populated on **0 of 1254 rows**. So 86 lines of
-rationale — including a 20-line explanation of why Magic SysRq is set
-to 1 rather than 244 — are structurally unrepresentable. In a codebase
-whose comments are its institutional memory, that is not a rounding
-error.
+emission anywhere in `config_compiler.py`, and
+`config_nodes.description` is populated on **0 of 1254 rows**. So 86
+lines of rationale — including a 20-line explanation of why Magic SysRq
+is set to 1 rather than 244 — are dropped.
 
-**Blocker 2 — some of it is authored code, not configuration.** Among
-the 76 config lines is `voiceAIEnvRenderer`, a 15-line shell script
-embedded via `pkgs.writeShellScript` with Nix interpolation, a
-`makeBinPath` call and error handling. Representable in principle
-(`MultilineString` + `Interpolation` + `FnCall`); maintaining it as a
-node tree would be strictly worse than maintaining it as Nix.
+But *capture* is nearly free: the parser is tree-sitter-based,
+tree-sitter already emits `comment` nodes, and `nix_ast_parser.py`
+**deliberately discards them** at `:197`, `:351`, `:375`
+(`pass  # skip comments`) and `:581`. The expensive part is anchoring —
+one field per node cannot express a block explaining a group of
+settings, paragraph breaks, trailing inline comments, or a file header.
+
+### Measured: the structure round-trips at 98.8%
+
+An in-memory round trip of the live 593-line `configuration.nix`
+(parse → `ConfigNode` → `emit_nix`, no DB writes):
+
+| | |
+|---|---|
+| nodes parsed | **451** |
+| `RawNix` fallbacks (unparsed fragments) | **0** |
+| line similarity vs comment-stripped original | **98.8%** |
+
+Both remaining differences are semantically neutral: lambda headers
+joined onto one line, and `kernel.sysctl."kernel.sysrq" = 1;` expanded
+into nested attrsets — which in Nix is the same thing written
+differently.
+
+That includes `voiceAIEnvRenderer`, the 15-line shell script embedded
+via `pkgs.writeShellScript`, which parses into `MultilineString` +
+`Interpolation` + `FnCall` with no fallback. An earlier revision called
+it a second blocker; it is not one for *representation*. It remains an
+argument about where it is pleasant to *edit*.
+
+**So the 687-line diff measured the wrong thing** — live against the
+*August* AST state, not against what a fresh import would produce.
+
+**Re-seeding still does not help**, for the same reason as before:
+`seed` only reads `nixos.*` keys, and `kernel.sysrq`, `lib.mkDefault`
+and `brightnessctl` are keys in neither model. The path is
+`config-ast import`, not `seed`.
 
 **Re-seeding does not help.** `config-ast seed --dry-run` would rewrite
 all 158 `nixos.*` keys and close **none** of the gap: `kernel.sysrq`,
@@ -725,23 +753,34 @@ output into an edited file.
 
 ## The three ways forward
 
-1. **Add a `Comment` node type and emission**, then re-encode 76 config
-   lines as nodes and 86 as comments. Unblocks completion; still leaves
-   a shell script maintained as a node tree.
+1. **Capture comments, then re-import.** Stop discarding `comment`
+   nodes at the four parser sites, add a `Comment` node type carrying an
+   anchor, then `config-ast import --replace` the live file over the
+   stale August nodes. The structure already works.
 2. **Draw a scope boundary** — the AST owns structured settings,
    authored Nix stays in files, and `generate` *merges* rather than
-   replaces. Respects both halves, but is a design project, and the
-   merge it needs does not exist yet.
-3. **Retire the AST path.** Honest if nobody will do 1 or 2; the
-   `INCOMPLETE MIGRATION` label already says this much.
+   replaces. A design project, and the merge it needs does not exist.
+3. **Retire the AST path.** Honest if nobody will do 1 or 2.
 
-**Recommendation: (2).** The AST model is genuinely good at structured
-settings and genuinely unable to hold authored prose and embedded
-scripts. A generator that replaces its own output will always lose to
-the first person who edits the output — which is exactly what happened
-here, in August. Option 1 buys completion at the cost of making Nix
-authorship hostile; option 3 discards a working, nix-verified build
-pipeline.
+**Recommendation: (1)** — reversing what this document first said. With
+the structure round-tripping at 98.8% and zero unparsed fragments,
+comments are the single gap and tree-sitter already hands them over.
+Option 1 is a bounded change to one parser and one emitter; option 2 is
+open-ended.
+
+This also dissolves the "hostile authorship" objection the first
+revision raised: **if import round-trips, authorship never moves into
+the database.** You keep editing `configuration.nix` as Nix, re-import,
+and the AST mirrors it — a lossless index over the file rather than a
+replacement for it. The hostility was a property of a DB-as-author
+implementation, not of the migration.
+
+The residual judgement call is formatting: the emitter normalises
+(joining lambda headers, expanding dotted paths), so a round trip is
+semantically faithful but not byte-identical. Either it learns to
+preserve those choices, or the project accepts canonical formatting for
+generated output — a smaller question than it looks, and `nixfmt`
+already implies an answer.
 
 Whichever is chosen, **the invariant worth adding first** is one that
 would have caught this in August: *a generated file must not diverge

@@ -247,7 +247,7 @@ not a rename a search-and-replace could fix:</p>
   <li>the 162 hand-added lines are <strong>86 comments + 76 config</strong></li>
 </ul>
 
-<h3>Blocker 1 — comments are unrepresentable</h3>
+<h3>The only real blocker — comments</h3>
 
 <p>
   The emitter knows 20 node types (<code>AttrSet</code>, <code>FnCall</code>,
@@ -256,18 +256,48 @@ not a rename a search-and-replace could fix:</p>
   emission anywhere in <code>config_compiler.py</code>, and
   <code>config_nodes.description</code> is populated on <strong>0 of 1254 rows</strong>. So
   86 lines of rationale — including a 20-line explanation of why
-  <code>kernel.sysrq</code> is <code>1</code> and not <code>244</code> — cannot be carried.
+  <code>kernel.sysrq</code> is <code>1</code> and not <code>244</code> — are dropped.
   In a codebase whose comments are its institutional memory, that is not a rounding error.
 </p>
 
-<h3>Blocker 2 — some of it is authored code</h3>
+<p>
+  But <strong>capture is nearly free</strong>. The parser is tree-sitter-based and
+  tree-sitter already emits <code>comment</code> nodes;
+  <code>nix_ast_parser.py</code> <em>deliberately discards them</em> at four sites
+  (<code>:197</code>, <code>:351</code>, <code>:375</code> —
+  <code>pass  # skip comments</code> — and <code>:581</code>). The expensive part is
+  anchoring, not acquisition: one field per node cannot express a block that explains a
+  group of settings, paragraph breaks, trailing inline comments, or a file header. That
+  needs trivia-with-anchors.
+</p>
+
+<div class="callout">
+  <strong>Measured addendum, same day — the structure round-trips at 98.8%.</strong>
+  An in-memory round trip of the live 593-line <code>configuration.nix</code>
+  (parse → <code>ConfigNode</code> → <code>emit_nix</code>, no DB writes) gives:
+  <strong>451 nodes, zero <code>RawNix</code> fallbacks</strong> — the parser understood
+  every construct, including the embedded shell script — and <strong>98.8%</strong>
+  line similarity against the comment-stripped original. The only two differences are
+  semantically neutral: lambda headers joined onto one line, and
+  <code>kernel.sysctl."kernel.sysrq" = 1;</code> expanded into nested attrsets, which in
+  Nix is the same thing written differently.
+</div>
 
 <p>
-  Among the 76 config lines is <code>voiceAIEnvRenderer</code>: a 15-line shell script
-  embedded via <code>pkgs.writeShellScript</code>, with Nix interpolation, a
-  <code>makeBinPath</code> call and error handling. Representable in principle
-  (<code>MultilineString</code> + <code>Interpolation</code> + <code>FnCall</code>);
-  maintaining it as a node tree would be strictly worse than maintaining it as Nix.
+  So the AST represents the entire live config faithfully, <em>including</em> the
+  <code>voiceAIEnvRenderer</code> block — a 15-line shell script embedded via
+  <code>pkgs.writeShellScript</code> with interpolation and a <code>makeBinPath</code>
+  call, which parses into <code>MultilineString</code> + <code>Interpolation</code> +
+  <code>FnCall</code> with no fallback. Earlier revisions of this report treated that block
+  as a second blocker. It is not one for <em>representation</em>; it remains an argument
+  about where it is pleasant to <em>edit</em>.
+</p>
+
+<p>
+  <strong>Which means the 687-line diff was measuring the wrong thing.</strong> It compared
+  live against the <em>August</em> AST state — two months of stale
+  <code>config_nodes</code> — not against what a fresh import would produce. Re-import the
+  live file and the AST holds current config faithfully, minus comments.
 </p>
 
 <h3>And re-seeding does not help</h3>
@@ -285,16 +315,33 @@ not a rename a search-and-replace could fix:</p>
 
 <table>
 <tr><th>#</th><th>option</th><th>cost</th></tr>
-<tr><td class="n">1</td><td>Add a <code>Comment</code> node type and emission, re-encode 76 config lines as nodes and 86 as comments</td><td>completion, at the price of making Nix authorship hostile</td></tr>
-<tr><td class="n">2</td><td><strong>Scope boundary</strong> — AST owns structured settings, authored Nix stays in files, <code>generate</code> <em>merges</em> rather than replaces</td><td>a design project; the merge it needs does not exist</td></tr>
+<tr><td class="n">1</td><td><strong>Capture comments and re-import</strong>: stop discarding <code>comment</code> nodes at the four parser sites, add a <code>Comment</code> node type with an anchor, then re-import the live file over the stale August nodes</td><td>anchoring + whitespace fidelity; the structure already works</td></tr>
+<tr><td class="n">2</td><td>Scope boundary — AST owns structured settings, authored Nix stays in files, <code>generate</code> <em>merges</em> rather than replaces</td><td>a design project; the merge it needs does not exist</td></tr>
 <tr><td class="n">3</td><td>Retire the AST path</td><td>discards a working, nix-verified build pipeline</td></tr>
 </table>
 
 <p>
-  <strong>Recommended: 2.</strong> The model is genuinely good at structured settings and
-  genuinely unable to hold prose or embedded scripts. A generator that replaces its own
-  output will always lose to the first person who edits the output — which is exactly what
-  happened in August.
+  <strong>Recommended: 1 — reversing the recommendation this report first carried.</strong>
+  With the structure round-tripping at 98.8% and zero unparsed fragments, comments are the
+  single gap, and tree-sitter already hands them over. Option 1 is a bounded change to one
+  parser and one emitter; option 2 is an open-ended design project whose merge semantics do
+  not exist yet.
+</p>
+
+<p>
+  Note what this does to the "hostile authorship" objection the earlier draft raised: if
+  import round-trips, <strong>authorship never has to move into the database.</strong> You
+  keep editing <code>configuration.nix</code> as Nix, re-import, and the AST mirrors it —
+  the model becomes a lossless index over the file rather than a replacement for it. The
+  hostility was a property of a DB-as-author implementation, not of the migration.
+</p>
+
+<p>
+  The residual judgement call is formatting. The emitter normalises — joining lambda
+  headers, expanding dotted attribute paths — so a round trip is semantically faithful but
+  not byte-identical. Either the emitter learns to preserve those choices, or the project
+  accepts that generated output is canonically formatted and stops hand-formatting it.
+  That is a smaller question than it looks, and `nixfmt` already implies an answer.
 </p>
 
 <p>
