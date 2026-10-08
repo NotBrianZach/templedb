@@ -159,6 +159,13 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
                 inh = _convert_inherit(child, source)
                 if inh:
                     node.add(inh)
+            elif child.type == 'comment':
+                # A comment before the first binding is a child of
+                # attrset_expression, a SIBLING of binding_set, not a child
+                # of it -- so patching _convert_binding_set alone missed
+                # these. Iterating in source order keeps the position:
+                # anything appearing before binding_set is added first.
+                node.add(ASTNode('Comment', value=_text(child, source)))
         return node
 
     if t == 'rec_attrset_expression':
@@ -166,6 +173,8 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
         for child in ts_node.children:
             if child.type == 'binding_set':
                 _convert_binding_set(child, source, node)
+            elif child.type == 'comment':
+                node.add(ASTNode('Comment', value=_text(child, source)))
         return node
 
     if t == 'list_expression':
@@ -194,7 +203,9 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
                         binding = _convert_binding(bc, source)
                         if binding:
                             node.add(binding)
-            elif child.type in ('let', 'in', 'comment'):
+            elif child.type == 'comment':
+                node.add(ASTNode('Comment', value=_text(child, source)))
+            elif child.type in ('let', 'in'):
                 continue
             else:
                 body = _convert(child, source)
@@ -348,7 +359,10 @@ def _convert(ts_node, source: bytes) -> Optional[ASTNode]:
 
     # ── Fallback: store as RawNix ─────────────────────────────────────
 
-    if t in ('comment', '{', '}', '[', ']', '(', ')', ';', '=', ',',
+    if t == 'comment':
+        return ASTNode('Comment', value=_text(ts_node, source))
+
+    if t in ('{', '}', '[', ']', '(', ')', ';', '=', ',',
              'let', 'in', 'if', 'then', 'else', 'with', 'assert',
              'rec', ':', 'ellipses', '...', '@'):
         return None  # skip punctuation/keywords
@@ -372,7 +386,19 @@ def _convert_binding_set(ts_node, source: bytes, parent: ASTNode):
             if inh:
                 parent.add(inh)
         elif child.type == 'comment':
-            pass  # skip comments
+            # Capture, don't discard. Comments inside an attrset are where
+            # this codebase keeps its reasoning -- the 20-line note on why
+            # kernel.sysrq is 1 and not 244 lives here -- and dropping them
+            # is what made `config-ast generate` unable to reproduce a
+            # hand-edited configuration.nix, which is what stalled the AST
+            # migration in August 2026.
+            #
+            # Anchored by position: tree-sitter yields comments in source
+            # order, so keeping them as siblings puts each one back above
+            # the binding it describes. Paragraph breaks survive because
+            # this codebase writes them as bare `#` lines, which are
+            # themselves comment nodes.
+            parent.add(ASTNode('Comment', value=_text(child, source)))
 
 
 def _convert_binding_as_attr(ts_node, source: bytes) -> Optional[ASTNode]:

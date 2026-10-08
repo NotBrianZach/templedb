@@ -598,15 +598,31 @@ class ConfigCompilerService(BaseService):
         ind1 = "  " * (indent_level + 1)
 
         match node.node_type:
+            case 'Comment':
+                # Emitted verbatim, including its leading '#'. No trailing
+                # semicolon: a comment is not a binding.
+                return node.value or ''
+
             case 'AttrSet':
                 if not node.children:
                     return '{ }'
                 # Collapse: if an AttrSet has a single unnamed List child,
                 # emit the list directly (e.g. packages = [ ... ] not packages = { [ ... ] })
-                if (len(node.children) == 1
-                        and node.children[0].name is None
-                        and node.children[0].node_type in ('List', 'With')):
-                    return self.emit_nix(node.children[0], indent_level)
+                #
+                # Comments are excluded from the count, not just ignored: a
+                # comment above a package list would otherwise make this
+                # len() == 2, defeat the collapse, and emit an attrset
+                # wrapping a bare list -- which is not valid Nix.
+                _sig = [c for c in node.children if c.node_type != 'Comment']
+                if (len(_sig) == 1
+                        and _sig[0].name is None
+                        and _sig[0].node_type in ('List', 'With')):
+                    _lead = [c for c in node.children if c.node_type == 'Comment']
+                    _body = self.emit_nix(_sig[0], indent_level)
+                    if not _lead:
+                        return _body
+                    return '\n'.join(
+                        [f"{ind1}{c.value or ''}" for c in _lead] + [_body])
                 lines = []
                 for c in node.children:
                     val = self.emit_nix(c, indent_level + 1)
@@ -897,7 +913,11 @@ class ConfigCompilerService(BaseService):
     def _emit_attr_child(self, child: ConfigNode, lines: List[str], indent: int):
         """Emit a named child as an attribute assignment line."""
         ind = "  " * indent
-        if child.name:
+        if child.node_type == 'Comment':
+            # Before the name check: a Comment carries no name and must not
+            # pick up the `= value;` framing, nor the bare `;` below.
+            lines.append(f"{ind}{child.value or ''}")
+        elif child.name:
             val = self.emit_nix(child, indent)
             lines.append(f"{ind}{child.name} = {val};")
         elif child.node_type == 'Inherit':
