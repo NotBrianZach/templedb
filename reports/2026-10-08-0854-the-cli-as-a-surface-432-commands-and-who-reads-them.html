@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The CLI as a surface: 432 commands and who reads them</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --ok: #7ec77e;
+    --warn: #e8c547;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 900px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  h4 { color: #9a9ac0; font-size: 0.92rem; margin: 1.2rem 0 0.35rem;
+       font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.86em; }
+  th, td { border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left;
+           vertical-align: top; }
+  th { background: var(--panel); color: #b0b0d0; font-weight: 600; }
+  td.n { text-align: right; font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .bad { color: var(--accent); }
+  .dim { color: var(--muted); }
+  ul { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin-bottom: 0.35rem; }
+</style>
+</head>
+<body>
+
+<h1>The CLI as a surface: 432 commands and who reads them</h1>
+<p class="lede">
+  An audit of TempleDB's command-line surface, measured 2026-10-08 from
+  <code>templedb admin schema</code> and the argparse registrations themselves. 432
+  commands, 1153 parameters, ~44k lines. The headline is not the size: it is that the
+  interface built specifically so agents could discover the CLI
+  <strong>described nothing</strong> — 422 of 432 commands serialised an empty help
+  string — while a dead reference on the main deploy path made every successful
+  deployment report failure. Both now fixed. What remains is a shape problem:
+  <strong>34 of those 432 names are aliases of other commands</strong>, and the surface
+  has no mechanism that would have told anyone.
+  Reference companion: <a href="../docs/CLI_SURFACE.md">docs/CLI_SURFACE.md</a>.
+</p>
+
+<h2>1. Status at a glance</h2>
+
+<table>
+<tr><th>Measure</th><th>Value</th><th>State</th></tr>
+<tr><td>Commands (incl. subcommands)</td><td class="n">432</td><td class="dim">—</td></tr>
+<tr><td>Parameters</td><td class="n">1153</td><td class="dim">—</td></tr>
+<tr><td>LOC under <code>src/cli/commands/</code></td><td class="n">43,742</td><td class="dim">—</td></tr>
+<tr><td>Commands with empty help in <code>admin schema</code></td><td class="n">422 &rarr; 0</td><td class="ok">fixed</td></tr>
+<tr><td>Dead <code>help_utils</code> references</td><td class="n">5 &rarr; 0</td><td class="ok">fixed</td></tr>
+<tr><td>Params exposing short aliases</td><td class="n">0 &rarr; 120</td><td class="ok">fixed</td></tr>
+<tr><td>Short-flag collisions inside one noun</td><td class="n">1 &rarr; 0</td><td class="ok">fixed</td></tr>
+<tr><td>Destructive prompts dying on EOF (reachable)</td><td class="n">2 &rarr; 0</td><td class="ok">fixed</td></tr>
+<tr><td>Handlers reachable under &gt;1 command name</td><td class="n">33</td><td class="warn">open</td></tr>
+<tr><td>Redundant command names</td><td class="n">34</td><td class="warn">open</td></tr>
+<tr><td>Params with no help text at all</td><td class="n">115</td><td class="warn">open</td></tr>
+</table>
+
+<h2>2. Two audiences, two channels</h2>
+
+<p>
+  The surface is read through two independent channels, and until today only one of them
+  worked:
+</p>
+
+<table>
+<tr><th></th><th>Human channel</th><th>Agent channel</th></tr>
+<tr><td>Mechanism</td><td><code>--help</code>, rendered by argparse</td><td><code>admin schema</code>, JSON</td></tr>
+<tr><td>Source of command help</td><td>parent's <code>_choices_actions</code></td><td><em>was</em> <code>parser.description</code></td></tr>
+<tr><td>Coverage before</td><td class="ok">complete</td><td class="bad">10 of 432</td></tr>
+<tr><td>Short aliases</td><td class="ok">shown</td><td class="bad">discarded by design</td></tr>
+</table>
+
+<p>
+  That divergence is the report's organising fact. <code>vcs add</code> has always been
+  registered <code>add_parser('add', help='Stage files for commit')</code> and
+  <code>templedb vcs --help</code> has always rendered it. But argparse stores the
+  <code>help=</code> given to <code>add_parser()</code> on the <em>parent's</em>
+  <code>_choices_actions</code> list, never on the subparser object; a subparser's own
+  <code>.description</code> is populated only when <code>description=</code> is also
+  passed. Ten commands do that — the <code>deploy hooks</code> family. The other 422
+  serialised <code>help: ""</code>.
+</p>
+
+<div class="callout">
+  An agent pointed at <code>admin schema</code> for capability discovery received 270&nbsp;KB
+  of JSON describing 432 commands and explaining none of them. The command's own help
+  text says it exists "for agent/scripting use."
+</div>
+
+<p>
+  Fixed by carrying the parent's recorded help down the recursion. A second pass handles
+  <code>aliases=[…]</code> registrations, which put both names in <code>.choices</code>
+  pointing at one parser while recording a single pseudo-action under the canonical name —
+  those 15 (<code>ls</code>, <code>rm</code>, <code>gen</code>) now inherit by parser
+  identity. Empty help went 422 &rarr; 15 &rarr; <strong>0</strong>.
+</p>
+
+<h2>3. The deploy path was reporting false failures</h2>
+
+<p>
+  <code>src/cli/help_utils.py</code> is a stub — its header says so — and has been in
+  every recorded commit. <code>CommandHelp</code> and <code>CommandExamples</code> define
+  only <code>__init__</code> and <code>print</code>. Five call sites referenced attributes
+  that therefore never existed:
+</p>
+
+<table>
+<tr><th>Site</th><th>Reference</th><th>Reachable when</th></tr>
+<tr><td><code>deploy.py</code></td><td><code>CommandExamples.DEPLOY_RUN</code></td><td><code>--examples</code></td></tr>
+<tr><td><code>deploy_ops.py</code></td><td><code>CommandExamples.DEPLOY_EXEC</code></td><td><code>--examples</code></td></tr>
+<tr><td><code>deploy_script.py</code></td><td><code>CommandExamples.DEPLOY_HOOKS</code></td><td><code>--examples</code></td></tr>
+<tr><td><code>deploy.py</code></td><td><code>RelatedCommands.AFTER_DEPLOY_RUN</code></td><td class="bad">every successful non-dry-run <code>deploy run</code></td></tr>
+<tr><td><code>deploy_script.py</code></td><td><code>RelatedCommands.AFTER_HOOK_REGISTER</code></td><td class="bad">every successful <code>deploy hooks register</code></td></tr>
+</table>
+
+<p>
+  The fourth is the one that mattered. It ran <em>after</em> the deployment had already
+  succeeded, inside a <code>try</code> whose <code>except Exception</code> logged
+  <code>Deployment failed: type object 'RelatedCommands' has no attribute
+  'AFTER_DEPLOY_RUN'</code> and returned <strong>1</strong>. So a successful deploy
+  printed a failure message and exited non-zero, and anything gating on exit status — CI,
+  a wrapper script, a scheduled job — saw every deployment as broken. The error text was
+  not merely unhelpful, it was false.
+</p>
+
+<p>
+  Removed rather than repaired: with no example data anywhere in history, "repair" would
+  have meant authoring content for three deploy commands, which is a writing task and not
+  this pass's business. <code>--examples</code> now gets a plain argparse rejection.
+</p>
+
+<h2>4. 34 of the 432 are aliases</h2>
+
+<p>
+  Measured per module, so that handler identity is real rather than an artifact of the
+  generic <code>cmd</code> variable name: <strong>33 handlers are bound to more than one
+  command name</strong>, for 34 redundant names. Every pair checked is independently
+  reachable with its own <code>--help</code>.
+</p>
+
+<p>The dominant pattern is a flat hyphenated name alongside a nested noun form:</p>
+
+<pre>nixos config-get       &amp;  nixos config get
+nixos dotfiles-add     &amp;  nixos dotfiles add
+nixos packages.add     &amp;  nixos add-package
+nixos rebuild          &amp;  nixos system-rebuild   &amp;  nixos system rebuild   (3 names)
+domain list            &amp;  domain ls
+admin checkout-gc      &amp;  project checkout-cleanup                          (two different nouns)</pre>
+
+<p>
+  <code>nixos</code> carries 54 commands and is the worst affected; the
+  <code>rebuild</code> handler answers to three names. The <code>checkout-gc</code> case
+  is the most confusing, because the two names sit under <em>different top-level nouns</em>,
+  so nothing suggests they are one function.
+</p>
+
+<p>
+  This is not harmful in the way a crash is harmful. It is harmful in the way an
+  overstated count is: "432 commands" describes a surface roughly 8% of which is the same
+  surface twice, and a reader of <code>--help</code> sees two ways to do one thing with no
+  indication they are the same. Collapsing them is cheap — keep one canonical name,
+  register the rest via argparse <code>aliases=[…]</code> so they inherit help and read as
+  aliases instead of as peers.
+</p>
+
+<h2>5. Naming collisions the schema used to hide</h2>
+
+<p>
+  <code>admin schema</code> deliberately dropped short option forms, preferring the long
+  name. One consequence is that a consumer cannot learn <code>-p</code> means
+  <code>--project</code>. The sharper consequence is that collisions were invisible to
+  tooling:
+</p>
+
+<table>
+<tr><th>Flag</th><th>Meanings</th><th>Severity</th></tr>
+<tr><td><code>-a</code></td><td><code>--all</code> on <code>vcs add</code>/<code>vcs reset</code>; <code>--author</code> on <code>vcs commit</code></td><td class="bad">silent wrong behaviour</td></tr>
+<tr><td><code>-s</code></td><td><code>--session</code>, <code>--stage</code>, <code>--status</code></td><td class="warn">cross-noun, low</td></tr>
+</table>
+
+<p>
+  <code>-a</code> was the dangerous one: <code>vcs commit</code> has no <code>--all</code>,
+  so someone who learned <code>-a</code> from <code>vcs add</code> set an author string
+  instead of getting an error. Removed, so it now fails with
+  <code>unrecognized arguments: -a</code>. A deliberate compatibility break — failing
+  loudly beats silently recording the wrong author.
+</p>
+
+<p>
+  <code>admin schema</code> now emits an <code>aliases</code> array (120 params gained
+  one), so the next collision is detectable without reading argparse calls.
+</p>
+
+<h2>6. Destructive posture</h2>
+
+<table>
+<tr><th>Measure</th><th>Count</th></tr>
+<tr><td>Commands offering <code>--dry-run</code></td><td class="n">31</td></tr>
+<tr><td>Commands offering <code>--force</code></td><td class="n">30</td></tr>
+<tr><td><code>input()</code> prompts in CLI modules</td><td class="n">53</td></tr>
+<tr><td>&hellip; with explicit <code>EOFError</code> handling</td><td class="n">3 &rarr; 5</td></tr>
+</table>
+
+<p>
+  The raw 50-of-53 figure overstates the exposure. Most unguarded prompts are unreachable
+  without opting in: <code>commit.py</code>'s eleven fire only under
+  <code>--interactive</code>. The risk concentrates in prompts reachable on a default
+  invocation, and <code>admin checkout-gc</code> had two of them — a plain
+  <code>templedb admin checkout-gc</code> from any agent tool call died with
+  <code>EOFError: EOF when reading a line</code> and a traceback. Both now decline and
+  name the flag that resolves it.
+</p>
+
+<p>
+  The model to copy is <code>nixos.py:279-295</code>, which short-circuits on
+  <code>--yes</code> <em>and</em> catches <code>EOFError</code> with an actionable message.
+  <code>templedb commit</code> states the same stance in its <code>--strategy</code> help:
+  "no-TTY invocations auto-abort by default."
+</p>
+
+<div class="callout">
+  <strong>A correction this pass had to make about itself.</strong> The first draft of the
+  companion document named <code>nixos.py:287</code> as the known-bad EOF case and claimed
+  <code>--yes</code> did not cover it. That came from a note written 2026-10-01 and was
+  repeated without reading the enclosing block — which shows the opposite. The site is one
+  of the three that already handled this correctly. Verifying the line and trusting a
+  memory for the behaviour around it is the same error as citing documentation from
+  recollection, and it happened twice in one session.
+</div>
+
+<h2>7. Guards added, and why they belong in a CLI report</h2>
+
+<p>
+  Three guards landed earlier the same day. They are CLI-surface facts, not just
+  library-internal ones, because each converts a silent catastrophe into a refusal with a
+  message:
+</p>
+
+<ul>
+  <li><strong><code>commit</code></strong> refuses when &ge;50% of tracked files are
+      missing from the given workspace (floor 10), overridable with
+      <code>--allow-mass-delete</code>. The diff is taken against whatever path is handed
+      in, and a wrong one used to commit the project away as deletions.</li>
+  <li><strong><code>project checkout --force</code></strong> refuses a target that strictly
+      encloses any registered checkout. Its stray-purge walks recursively and unlinks
+      anything absent from the project's file list; the previous guard skipped same-slug
+      rows, which is the common shape.</li>
+  <li><strong><code>admin checkout-forget &lt;path&gt;</code></strong> is new, and closes a
+      gap rather than adding a guard: no command could deregister a checkout row whose
+      directory still existed. It refuses active rows, rows owned by a live session, and
+      trees holding unstored content, and never touches the filesystem.</li>
+</ul>
+
+<h2>8. The discoverability class</h2>
+
+<p>
+  The <code>--session</code> flag added earlier today fixed one instance of a general
+  pattern: <strong>behaviour that decides whether your command does anything at all,
+  documented nowhere in <code>--help</code></strong>. Staging is session-scoped; identity
+  was steerable only by environment variables; neither <code>vcs add --help</code> nor
+  <code>vcs commit --help</code> mentioned sessions. <code>No changes staged for commit in
+  this session</code> was unreachable from the CLI.
+</p>
+
+<table>
+<tr><th>Load-bearing fact</th><th>In <code>--help</code>?</th></tr>
+<tr><td>Staging is session-scoped</td><td class="ok">yes, since <code>--session</code></td></tr>
+<tr><td>"modified" means <em>differs from HEAD</em>, not from <code>file_contents</code></td><td class="bad">no</td></tr>
+<tr><td><code>ingest &lt;adapter&gt;</code> projects DB tables, not the authority</td><td class="bad">no</td></tr>
+<tr><td><code>file set</code> replaces the whole file; <code>--verify</code> won't catch a stale base</td><td class="warn">partly — <code>--if-match</code> exists, nothing says why</td></tr>
+<tr><td><code>templedb edit</code> returns immediately; <code>--editor</code> blocks</td><td class="ok">yes</td></tr>
+</table>
+
+<p>
+  The test for membership: <em>if a user gets a surprising no-op or a silent revert, could
+  <code>--help</code> alone have told them why?</em>
+</p>
+
+<h2>9. Rollout</h2>
+
+<table>
+<tr><th>Phase</th><th>Change</th><th>State</th></tr>
+<tr><td class="n">0</td><td><code>schema.py</code> carries parent help; aliases inherit by parser identity</td><td class="ok">landed</td></tr>
+<tr><td class="n">0</td><td><code>admin schema</code> emits short aliases</td><td class="ok">landed</td></tr>
+<tr><td class="n">0</td><td>Five dead <code>help_utils</code> references and <code>--examples</code> removed</td><td class="ok">landed</td></tr>
+<tr><td class="n">0</td><td><code>checkout-gc</code> prompts handle EOF</td><td class="ok">landed</td></tr>
+<tr><td class="n">0</td><td><code>-a</code> dropped from <code>vcs commit --author</code></td><td class="ok">landed</td></tr>
+<tr><td class="n">0</td><td><code>admin checkout-forget</code></td><td class="ok">landed</td></tr>
+<tr><td class="n">1</td><td>Collapse the 34 redundant names into argparse <code>aliases=[…]</code></td><td class="warn">proposed</td></tr>
+<tr><td class="n">1</td><td>Fill the 115 param help strings; make empty help a doctor invariant</td><td class="warn">proposed</td></tr>
+<tr><td class="n">2</td><td>Retire <code>vcs log --session</code>, a documented no-op that now collides with a real flag of the same name</td><td class="warn">proposed</td></tr>
+<tr><td class="n">2</td><td>Give the remaining reachable prompts an explicit non-interactive answer</td><td class="warn">proposed</td></tr>
+<tr><td class="n">3</td><td>Split <code>entity.py</code> (6597 lines, nine ingest adapters) into per-adapter modules</td><td class="dim">deferred</td></tr>
+</table>
+
+<h3>Why phase 1 is worth doing before anything else</h3>
+
+<p>
+  A doctor invariant asserting "no command serialises empty help" would have caught the
+  422-command gap the day it appeared, and would keep catching it. The same check
+  generalises to parameters. The 115 undocumented params are the next tranche of the same
+  defect, and they are genuine absence rather than an extraction bug — nothing can be
+  inferred for them automatically.
+</p>
+
+<h2>10. The question this audit does not settle</h2>
+
+<p>
+  Is 432 the right number? Minus aliases it is ~398 distinct operations across 42
+  top-level nouns, with <code>deploy</code> at 73 and <code>nixos</code> at 54. Nothing in
+  this pass establishes whether that is an honest reflection of the problem domain — a
+  tool that really does own version control, nix config generation, fleet deploy, secrets,
+  domains and an agent runtime — or accumulated surface that nobody has had reason to
+  remove.
+</p>
+
+<p>
+  Two observations that bear on it without resolving it. First, the duplicate names are
+  evidence of growth by accretion rather than design: nobody adds
+  <code>nixos rebuild</code>, <code>nixos system-rebuild</code> <em>and</em>
+  <code>nixos system rebuild</code> deliberately. Second, the noun boundaries leak —
+  <code>checkout</code> operations live under <code>project</code>, under
+  <code>admin</code>, and as the top-level <code>edit</code>, which is why the gap that
+  <code>checkout-forget</code> fills went unnoticed: no single noun owns the concept, so no
+  single <code>--help</code> listing shows the hole.
+</p>
+
+<p class="dim">
+  Companion reference, kept current: <a href="../docs/CLI_SURFACE.md">docs/CLI_SURFACE.md</a>.
+  Session context and the declared-vs-derived framing these findings sit inside:
+  <a href="2026-10-08-0814-one-declarer-per-fact-guarding-the-derived-copies.html">one declarer per fact</a>.
+</p>
+
+</body>
+</html>

@@ -129,6 +129,36 @@ Known remaining members of this class:
 The test for this class: *if a user gets a surprising no-op or a silent
 revert, could `--help` alone have told them why?*
 
+## 34 of the 432 names are aliases
+
+Measured per module, so handler identity is real rather than an artifact
+of the generic `cmd` variable name reused across files: **33 handlers are
+bound to more than one command name**, giving 34 redundant names. Every
+pair spot-checked is independently reachable with its own `--help`.
+
+The dominant pattern is a flat hyphenated name beside a nested noun form:
+
+```
+nixos config-get      &  nixos config get
+nixos dotfiles-add    &  nixos dotfiles add
+nixos add-package     &  nixos packages add
+nixos rebuild         &  nixos system-rebuild  &  nixos system rebuild   (3)
+domain list           &  domain ls
+admin checkout-gc     &  project checkout-cleanup        (different nouns!)
+```
+
+`nixos` (54 commands) is worst affected, and its `rebuild` handler
+answers to three names. The `checkout-gc` case is the most confusing
+because the two names live under *different top-level nouns*, so nothing
+hints they are one function.
+
+Not harmful like a crash — harmful like an overstated count. "432
+commands" describes a surface ~8% of which is itself twice over, and a
+reader of `--help` sees two ways to do one thing with no signal they are
+the same. The cheap fix is to keep one canonical name and register the
+rest via argparse `aliases=[...]`, so they inherit help and read as
+aliases rather than peers.
+
 ## Short-flag collisions
 
 Real, and invisible in `admin schema` because short forms are dropped.
@@ -222,3 +252,12 @@ directory cannot be retired by any command.
 5. **Emit short aliases** in `admin schema` so collisions are at least
    visible to tooling.
 6. **Add `admin checkout-forget <path>`** for the deregister gap.
+7. **Collapse the 34 redundant names** into argparse `aliases=[...]` so
+   they inherit help and stop reading as independent commands.
+8. **Make empty help a doctor invariant.** A check asserting "no command
+   serialises an empty help string" would have caught the 422-command gap
+   the day it appeared, and generalises to the 115 param gaps.
+
+Items 1-6 landed 2026-10-08; see
+[`reports/2026-10-08-0854`](../reports/2026-10-08-0854-the-cli-as-a-surface-432-commands-and-who-reads-them.html)
+for the rollout table and the open questions about surface shape.

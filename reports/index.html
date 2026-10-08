@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-10-08-0854-the-cli-as-a-surface-432-commands-and-who-reads-them.html">
+  <div class="row">
+    <span class="date">2026-10-08 08:54</span>
+    <span class="title">The CLI as a surface: 432 commands and who reads them</span>
+  </div>
+  <div class="summary">
+    An audit of TempleDB's command-line surface, measured 2026-10-08 from templedb admin schema and the argparse registrations themselves. 432 commands, 1153 parameters, ~44k lines. The headline is not the size: it is that the interface built specifically so agents could discover the CLI described nothing — 422 of 432 commands serialised an empty help string — while a dead reference on the main deploy path made every successful deployment report failure. Both now fixed. What remains is a shape problem: 34 of those 432 names are aliases of other commands, and the surface has no mechanism that would have told anyone. Reference companion: docs/CLI_SURFACE.md.
+  </div>
+</a>
+
 <a class="report" href="2026-10-08-0814-one-declarer-per-fact-guarding-the-derived-copies.html">
   <div class="row">
     <span class="date">2026-10-08 08:14</span>
