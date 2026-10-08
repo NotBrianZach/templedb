@@ -3745,6 +3745,8 @@ WantedBy=timers.target
              self._check_ingested_authorities_not_emptied),
             ('commit_hash_is_canonical',
              self._check_commit_hash_is_canonical),
+            ('cli_help_is_populated',
+             self._check_cli_help_is_populated),
             ('blob_refcount_is_accurate',
              self._check_blob_refcount_is_accurate),
             ('blob_orphans_within_budget',
@@ -4873,6 +4875,54 @@ WantedBy=timers.target
                 f"`templedb entity forget` so this reads as intentional."
             )
         return issues
+
+    def _check_cli_help_is_populated(self):
+        """Invariant: every CLI command exposes help to `admin schema`.
+
+        `admin schema` exists for agent capability discovery, and on
+        2026-10-08 it serialised help="" for 422 of 432 commands.
+        argparse keeps the `help=` passed to add_parser() on the
+        PARENT's _choices_actions and never on the subparser, so reading
+        parser.description saw only the ten commands that also pass
+        description=. Nothing noticed for as long as it lasted because
+        --help renders those same strings correctly: the human channel
+        worked while the agent channel described nothing.
+
+        That asymmetry is the reason this deserves a slot. A missing
+        help string is not visible from the interface most people use,
+        so only an invariant closes the loop -- it fails the moment a
+        command is added without help, or the extraction regresses.
+
+        Scoped to commands, not parameters. 115 params also carry no
+        help, but that is genuine absence rather than an extraction bug
+        and cannot be fixed by code; failing on it would leave this
+        check permanently red, which teaches people to ignore doctor.
+        Tracked separately in docs/CLI_SURFACE.md.
+        """
+        try:
+            from cli.core import cli as _cli
+            from cli.commands.schema import _parser_to_schema, _flatten
+        except Exception as e:
+            return [f"could not import the CLI parser tree: {e}"]
+
+        try:
+            flat = _flatten(_parser_to_schema(_cli.parser, 'templedb'))
+        except Exception as e:
+            return [f"CLI schema build failed: {e}"]
+
+        missing = [c['command'] for c in flat
+                   if not (c.get('help') or '').strip()]
+        if not missing:
+            return []
+
+        shown = ', '.join(missing[:5])
+        more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ''
+        return [
+            f"{len(missing)} of {len(flat)} CLI command(s) expose no help to "
+            f"`admin schema`: {shown}{more}. A subcommand needs either "
+            f"add_parser(help=...) -- which the parent records -- or its own "
+            f"description=. See docs/CLI_SURFACE.md."
+        ]
 
     def _check_commit_hash_is_canonical(self):
         """Invariant: commit_hash holds native ids, git SHAs go in

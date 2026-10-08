@@ -129,35 +129,56 @@ Known remaining members of this class:
 The test for this class: *if a user gets a surprising no-op or a silent
 revert, could `--help` alone have told them why?*
 
-## 34 of the 432 names are aliases
+## Duplicate names: 15 proper aliases, 19 duplicated handlers
 
-Measured per module, so handler identity is real rather than an artifact
-of the generic `cmd` variable name reused across files: **33 handlers are
-bound to more than one command name**, giving 34 redundant names. Every
-pair spot-checked is independently reachable with its own `--help`.
-
-The dominant pattern is a flat hyphenated name beside a nested noun form:
+Measured by introspecting the live parser tree, grouping bound methods
+by `(__func__, __self__)` — a `grep` over `cli.commands` assignments
+cannot do this, because the generic `cmd` variable name is reused in
+every module, and `id()` on a bound method is useless since attribute
+access creates a fresh object each time. Two earlier estimates in this
+document were wrong for exactly those reasons.
 
 ```
-nixos config-get      &  nixos config get
-nixos dotfiles-add    &  nixos dotfiles add
-nixos add-package     &  nixos packages add
-nixos rebuild         &  nixos system-rebuild  &  nixos system rebuild   (3)
-domain list           &  domain ls
-admin checkout-gc     &  project checkout-cleanup        (different nouns!)
+cli.commands entries                            420
+leaf command names                              428
+distinct leaf parsers                           413
+handlers with >1 dispatch key                    34
+  ├─ sharing ONE parser (proper argparse alias)  15   ← correct, keep
+  └─ via DISTINCT parsers (duplicate surface)    19   → 25 redundant names
 ```
 
-`nixos` (54 commands) is worst affected, and its `rebuild` handler
-answers to three names. The `checkout-gc` case is the most confusing
-because the two names live under *different top-level nouns*, so nothing
-hints they are one function.
+**The 15 are fine.** `config list`/`config ls`, `domain remove`/`domain rm`
+and friends are registered with `add_parser(..., aliases=['ls'])`, so one
+parser answers to both names. Their duplicate `cli.commands` keys are
+*required* for dispatch, not redundant.
 
-Not harmful like a crash — harmful like an overstated count. "432
-commands" describes a surface ~8% of which is itself twice over, and a
-reader of `--help` sees two ways to do one thing with no signal they are
-the same. The cheap fix is to keep one canonical name and register the
-rest via argparse `aliases=[...]`, so they inherit help and read as
-aliases rather than peers.
+**The 19 are real duplication**, and almost all `nixos`:
+
+```
+nixos config-get       &  nixos config get
+nixos dotfiles-add     &  nixos dotfiles add
+nixos add-package      &  nixos packages add
+nixos system-rollback  &  nixos system rollback
+nixos rebuild  &  nixos system-rebuild  &  nixos system rebuild   (3 names)
+```
+
+### Why these cannot simply become aliases
+
+The two spellings sit at **different subparser depths** — `nixos
+config-get` is a child of `nixos`, `nixos config get` is a grandchild
+under a `config` group. argparse `aliases=` only applies within a single
+subparser, so there is no way to express "these two are one command."
+Collapsing means *removing* a spelling, which is a user-facing break.
+
+And neither spelling is dead: both forms appear in this repo's own docs
+(`nixos config-get` 6 hits, `nixos config get` 2; `nixos system-rebuild`
+3, `nixos system rebuild` 3). CLAUDE.md and the operational memory use
+the flat form (`home-rebuild`, `system-switch`), which is the weak
+argument for flat being canonical.
+
+**Open decision, deliberately not taken here:** pick one spelling per
+pair, deprecate the other in its help text for a release, then remove.
+25 names is too much user-facing surface to change on an analysis pass.
 
 ## Short-flag collisions
 
@@ -252,12 +273,15 @@ directory cannot be retired by any command.
 5. **Emit short aliases** in `admin schema` so collisions are at least
    visible to tooling.
 6. **Add `admin checkout-forget <path>`** for the deregister gap.
-7. **Collapse the 34 redundant names** into argparse `aliases=[...]` so
-   they inherit help and stop reading as independent commands.
-8. **Make empty help a doctor invariant.** A check asserting "no command
-   serialises an empty help string" would have caught the 422-command gap
-   the day it appeared, and generalises to the 115 param gaps.
+7. **Decide the flat-vs-nested spelling** for the 19 duplicated `nixos`
+   handlers (25 names), then deprecate and remove the loser. Cannot be
+   done with `aliases=` — see above.
+8. ~~**Make empty help a doctor invariant.**~~ **Landed 2026-10-08** as
+   `cli_help_is_populated`. Verified to catch a stripped `help=` and name
+   the offending command. Scoped to commands, not params: the 115
+   undocumented params are genuine absence, and failing on them would
+   leave the check permanently red.
 
-Items 1-6 landed 2026-10-08; see
+Items 1-6 and 8 landed 2026-10-08; see
 [`reports/2026-10-08-0854`](../reports/2026-10-08-0854-the-cli-as-a-surface-432-commands-and-who-reads-them.html)
 for the rollout table and the open questions about surface shape.

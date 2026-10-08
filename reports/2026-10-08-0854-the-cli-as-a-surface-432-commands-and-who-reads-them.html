@@ -82,9 +82,12 @@
 <tr><td>Params exposing short aliases</td><td class="n">0 &rarr; 120</td><td class="ok">fixed</td></tr>
 <tr><td>Short-flag collisions inside one noun</td><td class="n">1 &rarr; 0</td><td class="ok">fixed</td></tr>
 <tr><td>Destructive prompts dying on EOF (reachable)</td><td class="n">2 &rarr; 0</td><td class="ok">fixed</td></tr>
-<tr><td>Handlers reachable under &gt;1 command name</td><td class="n">33</td><td class="warn">open</td></tr>
-<tr><td>Redundant command names</td><td class="n">34</td><td class="warn">open</td></tr>
+<tr><td>Handlers duplicated across distinct parsers</td><td class="n">19</td><td class="warn">open — needs a spelling decision</td></tr>
+<tr><td>Redundant command names from those</td><td class="n">25</td><td class="warn">open</td></tr>
+<tr><td>Handlers sharing one parser (proper aliases)</td><td class="n">15</td><td class="ok">correct as-is</td></tr>
 <tr><td>Params with no help text at all</td><td class="n">115</td><td class="warn">open</td></tr>
+<tr><td><code>cli_help_is_populated</code> doctor invariant</td><td class="n">new</td><td class="ok">landed</td></tr>
+<tr><td><code>file set --session</code> (auto-stages, had no way to say where)</td><td class="n">new</td><td class="ok">landed</td></tr>
 </table>
 
 <h2>2. Two audiences, two channels</h2>
@@ -161,38 +164,70 @@
   this pass's business. <code>--examples</code> now gets a plain argparse rejection.
 </p>
 
-<h2>4. 34 of the 432 are aliases</h2>
+<h2>4. Duplicate names: 15 are proper aliases, 19 are real duplication</h2>
+
+<div class="callout">
+  <strong>Corrected.</strong> An earlier revision of this report claimed "34 redundant
+  names" and recommended collapsing them with argparse <code>aliases=</code>. Both halves
+  were wrong. 15 of those names are <em>already</em> proper aliases, and the remaining
+  duplicates cannot be expressed as aliases at all. The figure came from a
+  <code>grep</code> over <code>cli.commands</code> assignments, which cannot establish
+  handler identity: the variable name <code>cmd</code> is reused in every module, so
+  unrelated functions look shared, and <code>id()</code> on a bound method is meaningless
+  because attribute access mints a fresh object each time. Re-measured by introspecting
+  the live parser tree and grouping on
+  <code>(__func__, __self__)</code>.
+</div>
+
+<pre>cli.commands entries                            420
+leaf command names                              428
+distinct leaf parsers                           413
+handlers with &gt;1 dispatch key                    34
+  ├─ sharing ONE parser (proper argparse alias)  15   &lt;- correct, keep
+  └─ via DISTINCT parsers (duplicate surface)    19   -&gt; 25 redundant names</pre>
 
 <p>
-  Measured per module, so that handler identity is real rather than an artifact of the
-  generic <code>cmd</code> variable name: <strong>33 handlers are bound to more than one
-  command name</strong>, for 34 redundant names. Every pair checked is independently
-  reachable with its own <code>--help</code>.
+  <strong>The 15 are not a problem.</strong> <code>config list</code>/<code>config ls</code>,
+  <code>domain remove</code>/<code>domain rm</code> and the rest are registered with
+  <code>add_parser(…, aliases=['ls'])</code>: one parser, two names. Their duplicate
+  <code>cli.commands</code> keys are <em>required</em> for dispatch, so what looked like
+  redundancy is the mechanism working.
 </p>
 
-<p>The dominant pattern is a flat hyphenated name alongside a nested noun form:</p>
+<p>
+  <strong>The 19 are real</strong>, and almost entirely <code>nixos</code> — a flat
+  hyphenated spelling beside a nested noun form:
+</p>
 
 <pre>nixos config-get       &amp;  nixos config get
 nixos dotfiles-add     &amp;  nixos dotfiles add
-nixos packages.add     &amp;  nixos add-package
-nixos rebuild          &amp;  nixos system-rebuild   &amp;  nixos system rebuild   (3 names)
-domain list            &amp;  domain ls
-admin checkout-gc      &amp;  project checkout-cleanup                          (two different nouns)</pre>
+nixos add-package      &amp;  nixos packages add
+nixos system-rollback  &amp;  nixos system rollback
+nixos rebuild  &amp;  nixos system-rebuild  &amp;  nixos system rebuild   (3 names)</pre>
+
+<h3>Why they cannot become aliases</h3>
 
 <p>
-  <code>nixos</code> carries 54 commands and is the worst affected; the
-  <code>rebuild</code> handler answers to three names. The <code>checkout-gc</code> case
-  is the most confusing, because the two names sit under <em>different top-level nouns</em>,
-  so nothing suggests they are one function.
+  The two spellings sit at <em>different subparser depths</em>:
+  <code>nixos config-get</code> is a child of <code>nixos</code>, while
+  <code>nixos config get</code> is a grandchild under a <code>config</code> group.
+  argparse's <code>aliases=</code> applies only within one subparser, so there is no way
+  to declare that these two names are one command. Collapsing them means
+  <em>removing</em> a spelling — a user-facing break, not a refactor.
 </p>
 
 <p>
-  This is not harmful in the way a crash is harmful. It is harmful in the way an
-  overstated count is: "432 commands" describes a surface roughly 8% of which is the same
-  surface twice, and a reader of <code>--help</code> sees two ways to do one thing with no
-  indication they are the same. Collapsing them is cheap — keep one canonical name,
-  register the rest via argparse <code>aliases=[…]</code> so they inherit help and read as
-  aliases instead of as peers.
+  Nor is either spelling dead. Both appear in this repository's own documentation
+  (<code>nixos config-get</code> 6 hits against <code>nixos config get</code> 2;
+  <code>nixos system-rebuild</code> 3 against <code>nixos system rebuild</code> 3), and
+  CLAUDE.md plus the operational memory use the flat form — a weak argument for flat as
+  canonical, and the only argument available.
+</p>
+
+<p>
+  So this pass stops at measurement. Choosing a spelling and retiring 25 names is a
+  product decision about an interface people have muscle memory for, and nothing in the
+  analysis settles it.
 </p>
 
 <h2>5. Naming collisions the schema used to hide</h2>
@@ -318,8 +353,10 @@ admin checkout-gc      &amp;  project checkout-cleanup                          
 <tr><td class="n">0</td><td><code>checkout-gc</code> prompts handle EOF</td><td class="ok">landed</td></tr>
 <tr><td class="n">0</td><td><code>-a</code> dropped from <code>vcs commit --author</code></td><td class="ok">landed</td></tr>
 <tr><td class="n">0</td><td><code>admin checkout-forget</code></td><td class="ok">landed</td></tr>
-<tr><td class="n">1</td><td>Collapse the 34 redundant names into argparse <code>aliases=[…]</code></td><td class="warn">proposed</td></tr>
-<tr><td class="n">1</td><td>Fill the 115 param help strings; make empty help a doctor invariant</td><td class="warn">proposed</td></tr>
+<tr><td class="n">0</td><td><code>cli_help_is_populated</code> doctor invariant</td><td class="ok">landed</td></tr>
+<tr><td class="n">0</td><td><code>file set --session</code>; <code>reports reindex</code> forwards it</td><td class="ok">landed</td></tr>
+<tr><td class="n">1</td><td>Decide flat-vs-nested for the 19 duplicated <code>nixos</code> handlers, deprecate the loser, then remove</td><td class="warn">blocked on a decision</td></tr>
+<tr><td class="n">1</td><td>Fill the 115 param help strings</td><td class="warn">proposed</td></tr>
 <tr><td class="n">2</td><td>Retire <code>vcs log --session</code>, a documented no-op that now collides with a real flag of the same name</td><td class="warn">proposed</td></tr>
 <tr><td class="n">2</td><td>Give the remaining reachable prompts an explicit non-interactive answer</td><td class="warn">proposed</td></tr>
 <tr><td class="n">3</td><td>Split <code>entity.py</code> (6597 lines, nine ingest adapters) into per-adapter modules</td><td class="dim">deferred</td></tr>
