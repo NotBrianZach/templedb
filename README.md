@@ -108,6 +108,15 @@ share one ~6600-line `src/cli/commands/entity.py`. Full per-adapter
 analysis — sizes, cadence, freshness, and how to read the error
 counts — in [`docs/INGEST_ADAPTERS.md`](docs/INGEST_ADAPTERS.md).
 
+The CLI that drives all this is large: **432 commands across ~44k LOC**,
+with `deploy` (73) and `nixos` (54) the biggest groups.
+[`docs/CLI_SURFACE.md`](docs/CLI_SURFACE.md) maps it, and is candid
+about the rough edges — `admin schema` currently serialises empty help
+for 422 of the 432 commands, so use `--help` rather than the JSON
+schema; 50 of 53 interactive prompts are bare `input()` whose EOF
+behaviour under automation is per-call-site; and which destructive
+commands are safe-by-default versus not.
+
 You interact with the graph through several surfaces:
 
 ```

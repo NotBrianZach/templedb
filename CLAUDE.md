@@ -264,7 +264,10 @@ behaviour — the frozen package wins.
 
 A typed graph unifying facts across git, nix, agent-runtime, deployment
 and author authorities. Framing in `docs/ENTITY_GRAPH_DESIGN.md`;
-per-adapter analysis in `docs/INGEST_ADAPTERS.md`.
+per-adapter analysis in `docs/INGEST_ADAPTERS.md`. CLI surface analysis
+(432 commands, discoverability gaps, destructive-command posture) in
+`docs/CLI_SURFACE.md` — note `admin schema` currently reports empty help
+for 422 of them, so prefer `--help` over the JSON schema for now.
 
 `ingest <adapter>` mostly projects TempleDB's own relational tables into
 the graph — it does **not** re-read the authority. `ingest git` reads
