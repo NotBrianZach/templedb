@@ -21,6 +21,30 @@ It started as an ambitious "database as single source of truth" project. Over 20
 
 What that means concretely:
 
+- **Declared state vs. derived state, enforced.** The rule the rest of
+  the design falls out of: exactly one place *declares* each fact, and
+  every copy downstream is derived and recomputed, never trusted on its
+  own. git declares source bytes; `file_contents` is a snapshot whose
+  `is_current=1` row is "the most recent observation", not the truth of
+  the file. nix declares store paths. The entity graph is derived from
+  the relational tables, which are themselves derived from (or
+  authoritative for) their authority — see
+  [`docs/INGEST_ADAPTERS.md`](docs/INGEST_ADAPTERS.md) for which is
+  which per adapter.
+
+  This is the same move NixOS makes with the system closure, and it is
+  worth stating because **nearly every sharp edge in this codebase is
+  one confusion about it**: `file set --if-match` exists so a copy you
+  fetched earlier must prove it is still current before it may
+  overwrite; "modified" in `vcs status` means *differs from HEAD*, not
+  *differs from `file_contents`*, because those are two derived views
+  that can disagree; a stale edit workspace stays committable-looking
+  long after the DB has moved; the deployed nix build lags the DB until
+  a rebuild; a home-manager profile is re-derived at boot from the
+  system closure, discarding anything activated out of band. Each guard
+  in the codebase makes a derived copy prove its standing before it is
+  allowed to declare.
+
 - **Gluing algebras rather than owning bytes.** Think of each authority as a local coordinate chart on your dev world: git parametrizes commit-space, nix parametrizes store-path- and derivation-space, agent runtimes parametrize session- and intent-space, human authors parametrize decision-space. Each chart is locally the right coordinate system for its domain and says nothing about the others. TempleDB's job is to hold the **transition maps** — the typed relations (`built-from`, `installs`, `motivated`, `applied-to`) that translate between charts — plus `source_authority` and `observed_at` tags that keep the atlas honest. The entity graph is the atlas; adapters are the coordinate readouts; `doctor entities` is the consistency check that every transition-map commutes.
 - **Entities and relations as the substrate.** ~12,000 entities across 13 kinds (Commit, File, Symbol, StorePath, Deployment, Machine, Report, AgentSession, ...) and ~11,000 typed relations (`defines`, `calls`, `built-by`, `contains`, `installed`, `motivated`, ...) form a queryable graph across every project on every machine.
 - **Cross-cutting queries.** The five-hop provenance query — *which store path is running on this machine, from which deployment, from which commit, from which agent-session-and-intent-chain, motivated by which report?* — is one traversal.
@@ -52,16 +76,37 @@ Everything TempleDB does either writes to the entity graph, reads from it, or sy
 TempleDB is a single SQLite database plus a set of **ingestion adapters** that observe authoritative systems and project their state into the typed entity/relation graph:
 
 ```
-authority           adapter                    facts published
-git                 commit walker              Commit, FileSnapshot, contains, parent-of
-nix                 nix-store queries          Derivation, StorePath, built-by, produces
-NixOS (per host)    SSH probe                  Generation, running-on, deployed-at
-agent runtime       direct DB write            AgentSession, ToolCall, EditIntent, proposed
-tree-sitter / SCIP  language ingest            Symbol, defines, calls, references
-human               reports/decision markup    Report, Decision, motivated, implemented-in
+adapter   reads                              facts published
+git       vcs_commits, project_files (L2)    Commit, FileSnapshot, contains, parent-of
+nix       nix-store probe          (L1)      Derivation, StorePath, built-by, produces
+deploy    deployment_history       (L2)      Deployment, Generation, running-on
+agent     agent_sessions           (L2)      AgentSession, ToolCall, owns
+intent    edit_intents             (L2)      EditIntent, proposed, applied-to
+python    project_files            (L2)      Symbol, defines, calls, imports
+scip      .scip index files        (L1)      Symbol, references (cross-language)
+reports   project_files            (L2)      Report, Decision, motivated, implemented-in
+mirrors   entities, project_files  (L2)      mirror/publication relations
 ```
 
-Each adapter is small (<500 LOC), isolated (schema changes hurt one adapter at a time), and version-tagged (`adapter_version` on every `ingestion_runs` row so drift between machines is visible).
+**`L1` vs `L2` is the distinction to absorb.** Ingest is two layers, and
+only the two `L1` adapters talk to a foreign authority. `templedb ingest
+git` does *not* run git — it projects `vcs_commits` rows that an earlier
+observation step wrote (`GitHistoryImporter`, via `vcs import-history`).
+So a green ingest history means "the graph matches the relational
+tables", not "the graph matches git." Only `doctor entities` and
+`reconcile` interrogate the authority itself.
+
+A second asymmetry: `agent` and `intent` are **originators** — no
+upstream authority holds those facts, so the DB *is* the declaration for
+them. Every other adapter's output is re-derivable from git, nix, or the
+filesystem.
+
+Every adapter is version-tagged (`adapter_version` on each
+`ingestion_runs` row, so fleet drift is visible). They are *not*
+uniformly small or file-isolated: `python` is ~1000 LOC and all nine
+share one ~6600-line `src/cli/commands/entity.py`. Full per-adapter
+analysis — sizes, cadence, freshness, and how to read the error
+counts — in [`docs/INGEST_ADAPTERS.md`](docs/INGEST_ADAPTERS.md).
 
 You interact with the graph through several surfaces:
 

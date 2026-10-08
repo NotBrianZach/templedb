@@ -263,7 +263,15 @@ behaviour — the frozen package wins.
 ## Entity graph
 
 A typed graph unifying facts across git, nix, agent-runtime, deployment
-and author authorities. Framing in `docs/ENTITY_GRAPH_DESIGN.md`.
+and author authorities. Framing in `docs/ENTITY_GRAPH_DESIGN.md`;
+per-adapter analysis in `docs/INGEST_ADAPTERS.md`.
+
+`ingest <adapter>` mostly projects TempleDB's own relational tables into
+the graph — it does **not** re-read the authority. `ingest git` reads
+`vcs_commits`, not git. So a fresh ingest history means "graph matches
+tables", not "graph matches git"; only `doctor entities` and `reconcile`
+check the authority. Exceptions: `nix` probes `nix-store`, `scip` reads
+`.scip` files.
 
 Tables: `entities (kind, external_ref, source_authority, label,
 observed_at)`, `relations (from, kind, to, source_authority,
