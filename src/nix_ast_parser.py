@@ -609,6 +609,38 @@ def parse_nix_string(source: str) -> Optional[ASTNode]:
     return None
 
 
+def ast_signature(node) -> tuple:
+    """A formatting-blind structural signature of an AST node tree.
+
+    Two Nix files with the same signature mean the same thing, however
+    they are spelled. That is the comparison the generated-vs-generator
+    invariant wants, and it is strictly better than a text diff here for
+    two measured reasons.
+
+    First, the emitter normalises: it joins lambda headers onto one line
+    and expands `a.b = 1;` into nested attrsets. Both are cosmetic, and a
+    text diff reports them as differences forever.
+
+    Second, the PARSER normalises the same way — `_convert_binding_as_attr`
+    turns a dotted attrpath into nested AttrSets — so the two spellings
+    collapse to one tree before comparison. Verified 2026-10-08 on the
+    live 593-line configuration.nix: parse(live) equals
+    parse(emit(parse(live))), and emit is a fixed point.
+
+    Comments ARE included. They carry the reasoning this codebase keeps
+    its decisions in, so a hand-added comment is real divergence and the
+    invariant should say so rather than shrug.
+    """
+    return (
+        node.node_type,
+        node.name,
+        node.value,
+        node.callee,
+        node.operator,
+        tuple(ast_signature(c) for c in node.children),
+    )
+
+
 def parse_nix_file(path: str) -> Optional[ASTNode]:
     """Parse a .nix file into an ASTNode tree."""
     source = Path(path).read_text()
