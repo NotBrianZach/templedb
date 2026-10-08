@@ -11,8 +11,18 @@ from services.ast_build_service import AstBuildService
 
 
 def register(cli):
+    # Builds from config_nodes, which `config-ast` populates and which
+    # has been dormant since 2026-08-05 -- only 2 of 27 builds here were
+    # ever promoted, the last on 2026-08-04. The live config path is
+    # `nixos config` over system_config. Flagged rather than removed:
+    # the pipeline itself is sound (content-addressed builds, `ast diff`
+    # before `ast promote`) and lost its upstream, not its design.
+    # See docs/CLI_SEMANTICS.md.
     parser = cli.register_command(
-        'ast', handle, help_text='AST-based NixOS config builds')
+        'ast', handle,
+        help_text='AST-based NixOS config builds (INCOMPLETE MIGRATION: '
+                  'builds from config_nodes, dormant since 2026-08 — '
+                  '`nixos system` is the live path)')
     sub = parser.add_subparsers(dest='ast_command')
 
     p = sub.add_parser('build', help='Emit AST → .nix, hash, write content-addressed build dir')

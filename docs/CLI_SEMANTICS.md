@@ -625,29 +625,52 @@ with no collector. `blob gc` is the answer to that, and it is recent.
 
 ## The strategic finding
 
-**There are two config systems, and the CLI presents both as current.**
+**Two config models exist. Only one is alive. The CLI presents both as
+current.**
 
-| | `nixos config *` | `config-ast *` |
+| | `nixos config *` | `config-ast *` + `ast *` |
 |---|---|---|
 | model | flat key → value, host-scoped | typed AST nodes in `config_nodes` |
-| generate | `nixos generate` / `generate-all` | `config-ast generate`, then `ast build` |
-| hosts | `nixos host *` (6 cmds) | `config-ast host add` / `list` |
-| query | `nixos config list` | `config-ast query` / `tree` / `stats` |
+| rows | 208 | 1254 |
+| **last write** | **2026-10-04** | **2026-08-05** |
+| generate | `nixos generate` / `generate-all` | `config-ast generate` → `ast build` |
+| hosts | `nixos host *` (6 cmds) | `config-ast host add` / `list` (5 rows) |
+| builds promoted | n/a | **2 of 27**, last 2026-08-04 |
+| **status** | **production** | **abandoned migration** |
 
-The tell is **`config-ast seed` — "Seed config_nodes from existing
-system_config keys."** That is a one-way migration bridge from the old
-system to the new one. Its existence says `config-ast` is the successor;
-nothing in either noun's help says the other is legacy.
+Measured 2026-10-08. `nixos status` — the live pipeline command — reads
+`system_config`, reports `Last rebuild: 2026-10-08`, `Live system: UP TO
+DATE`, and tracks pending key changes. `config_nodes` and `ast_builds`
+have not been written since early August, and only 2 of 27 AST builds
+were ever promoted.
 
-Consequences a user cannot see from the surface: there are **three**
-ways to turn DB state into `.nix` (`nixos generate`,
-`config-ast generate`, `ast build`), **two** host registries, and no
-statement of which is authoritative. For a project whose entire thesis
-is "exactly one place declares each fact," two live config models is the
-sharpest irony in the codebase.
+**So `nixos config` is authoritative and `config-ast`/`ast` is a
+migration that was started and never finished.**
 
-`ast` is the build/promote/deploy pipeline over the AST model and is
-internally clean — content-addressed builds, inspect before promote.
+> **Correction.** The first revision of this document claimed the
+> opposite — that `config-ast` was the successor and `nixos config` the
+> legacy model — reasoning from the existence of **`config-ast seed`**
+> ("Seed config_nodes from existing system_config keys"). That inference
+> was wrong. `seed` is the bridge that was *built*, not evidence the
+> migration *completed*; the row timestamps show it did not. Published
+> before checking, which would have led a reader to deprecate the live
+> system. Corrected after measuring write recency on both tables.
+
+The real cost is not two live models — it is **21 commands presented as
+current that write to a dormant store**. A user who follows
+`config-ast set` will successfully edit `config_nodes` and see no effect
+on their machine, because nothing generates from it any more. That is
+worse than a missing feature: it is a surface that silently does
+nothing.
+
+`ast` is internally clean — content-addressed builds, `ast diff` before
+`ast promote` — which makes it a good design that lost its upstream.
+
+**Recommended resolution:** mark `config-ast` and `ast` as an incomplete
+migration in their group help, so the surface stops implying they are
+the current path. Do not delete them: 1254 nodes and a working build
+pipeline represent real work, and the migration may still be worth
+finishing. But a user should have to opt into an experiment knowingly.
 
 ## `config-ast` commands
 
@@ -655,7 +678,7 @@ internally clean — content-addressed builds, inspect before promote.
 |---|---|---|---|
 | `config-ast import` | parse a `.nix` file into `config_nodes` | `W·nix` | core |
 | `config-ast import-all` | import `configuration.nix` + `home.nix` + `flake.nix` | `W·nix` | core |
-| `config-ast seed` | populate nodes from old-style `system_config` keys | `W·derive` | **core — and the proof the old model is legacy** |
+| `config-ast seed` | populate nodes from old-style `system_config` keys | `W·derive` | keep — the migration bridge, built but never crossed |
 | `config-ast set` / `unset` | write / remove a node | `W·db` | core |
 | `config-ast enable` / `disable` | toggle a node without removing it | `W·db` | keep |
 | `config-ast query` | query nodes | `R·db` | core |
@@ -979,14 +1002,19 @@ Deliberate dual exposure, one implementation.
 
 Ranked by what they cost a user.
 
-### 1. Two live config models
+### 1. 21 commands write to a dormant store
 
-`nixos config *` (flat keys) and `config-ast *` (typed nodes), bridged
-one-way by `config-ast seed`, with three paths from DB state to `.nix`
-and two host registries. Nothing marks either as legacy. **Pick one,
-mark the other deprecated in help, and say which `generate` is
-authoritative.** For a project whose thesis is "one declarer per fact,"
-this is the sharpest inconsistency in the codebase.
+`config-ast *` (15) and `ast *` (6) operate on `config_nodes`, last
+written **2026-08-05**, from which nothing now generates — while
+`nixos config *` (production, last written 2026-10-04) is what
+`nixos status` and the rebuild path actually read. `config-ast set`
+succeeds, changes `config_nodes`, and has no effect on the machine.
+
+A surface that silently does nothing is worse than a missing one.
+**Mark `config-ast` and `ast` as an incomplete migration in their group
+help.** Do not delete: 1254 nodes and a working content-addressed build
+pipeline are real work, and finishing the migration may still be right.
+The ask is only that the CLI stop implying it is the current path.
 
 ### 2. `deploy` is eight products in one noun
 

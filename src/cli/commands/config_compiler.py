@@ -12,7 +12,20 @@ from services.config_compiler import ConfigCompilerService
 
 def register(cli):
     """Register config-ast subcommands."""
-    parser = cli.register_command('config-ast', handle, help_text='Configuration compiler (AST-based system config)')
+    # INCOMPLETE MIGRATION -- say so in --help. config_nodes was last
+    # written 2026-08-05 and nothing generates from it any more; the
+    # production path is `nixos config *` over system_config, which
+    # `nixos status` and the rebuild path read (last write 2026-10-04,
+    # only 2 of 27 ast_builds were ever promoted). `config-ast set`
+    # succeeds, changes config_nodes, and has no effect on the machine,
+    # so the surface has to stop implying otherwise. Not deprecated:
+    # 1254 nodes and a working build pipeline are real work and the
+    # migration may still be worth finishing. See docs/CLI_SEMANTICS.md.
+    parser = cli.register_command(
+        'config-ast', handle,
+        help_text='Configuration compiler, AST-based (INCOMPLETE MIGRATION: '
+                  'writes config_nodes, which nothing generates from — '
+                  '`nixos config` is the live path)')
     sub = parser.add_subparsers(dest='config_ast_command')
 
     # tree
