@@ -1005,12 +1005,36 @@ class VarCommands(Command):
             apply_rows_target(p_rows)
 
         # Secrets
+        #
+        # Secrets use the same `target:NAME` storage convention as env vars,
+        # but were merged under their raw stored name. Two silent failures
+        # came out of that:
+        #
+        #   1. `staging:FOO` reached the formatter verbatim, so --format shell
+        #      emitted `export staging:FOO=...`. Bash rejects that with "not
+        #      a valid identifier", so every consumer that eval'd the output
+        #      lost those secrets and reported nothing. sync-poincare.sh and
+        #      deploy.sh in woofs_projects both do exactly that, and had been
+        #      silently missing four staging secrets.
+        #   2. No target filtering, so a secret scoped to one target was
+        #      handed out for every target.
+        #
+        # Resolve them the way env vars are resolved: default scope first,
+        # then let the requested target override it.
         if getattr(args, 'secrets', False):
             try:
-                for k, v in self._secrets_export(project['id'], profile).items():
-                    merged[k] = v
+                secrets = self._secrets_export(project['id'], profile)
             except SystemExit:
-                pass
+                secrets = {}
+            for stored_name, value in secrets.items():
+                t, name = _parse_var_key(stored_name)
+                if t == 'default':
+                    merged[name] = value
+            if target != 'default':
+                for stored_name, value in secrets.items():
+                    t, name = _parse_var_key(stored_name)
+                    if t == target:
+                        merged[name] = value
 
         if fmt == 'shell':
             for key, value in sorted(merged.items()):
