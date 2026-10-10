@@ -45,6 +45,16 @@ NEW = '2026-09-24 15:43:56'   # when the DB first saw the verified content
 _UNSET = object()
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _isolated_db(module_db):
+    """This module hand-builds a partial schema; keep it out of the shared DB.
+
+    Without this it created a 3-column `projects` into the one bootstrap
+    DB via db_utils, which broke tests/conftest.py's bootstrap_schema for
+    every other module. See module_db in tests/conftest.py.
+    """
+
+
 @pytest.fixture
 def case(tmp_path):
     """Set up one project, one file, one working-state row, and a checkout.

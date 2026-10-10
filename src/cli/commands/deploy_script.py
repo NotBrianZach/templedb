@@ -2,6 +2,7 @@
 Deployment script management commands
 """
 import os
+import sys
 import db_utils
 from cli.core import Command
 
@@ -329,7 +330,7 @@ The script remains registered and can be re-enabled later.
 
     def enable_script(self, args):
         """Enable a deployment script"""
-        result = db_utils.execute(
+        result = db_utils.execute_rowcount(
             "UPDATE deployment_scripts SET enabled = 1 WHERE project_slug = ?",
             (args.project_slug,)
         )
@@ -343,7 +344,7 @@ The script remains registered and can be re-enabled later.
 
     def disable_script(self, args):
         """Disable a deployment script"""
-        result = db_utils.execute(
+        result = db_utils.execute_rowcount(
             "UPDATE deployment_scripts SET enabled = 0 WHERE project_slug = ?",
             (args.project_slug,)
         )

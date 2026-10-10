@@ -867,6 +867,6 @@ class NixDeployBackend(BaseService):
                     machine_name=result.machine.machine_name,
                     switch_action="switch",
                 )
-                logger.info(f"Recorded nix generation for fleet deploy: {result.machine.machine_name}")
+                self.logger.info(f"Recorded nix generation for fleet deploy: {result.machine.machine_name}")
             except Exception as e:
-                logger.warning(f"Failed to record nix generation for {result.machine.machine_name}: {e}")
+                self.logger.warning(f"Failed to record nix generation for {result.machine.machine_name}: {e}")

@@ -1057,37 +1057,11 @@ class MCPServer:
             logger.error(f"Error creating commit: {e}")
             return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
 
-    def tool_deploy(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Deploy project"""
-        try:
-            project_name = args["project"]
-            target = args.get("target", "default")
-            dry_run = args.get("dry_run", False)
-            only = args.get("only", None)
-
-            import subprocess
-            cmd = ["./templedb", "deploy", "run", project_name]
-            if target:
-                cmd.extend(["--target", target])
-            if dry_run:
-                cmd.append("--dry-run")
-            if only:
-                cmd.extend(["--only", only])
-
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.templedb_root))
-
-            if result.returncode != 0:
-                return {
-                    "content": [{"type": "text", "text": f"Deployment failed: {result.stderr}"}],
-                    "isError": True
-                }
-
-            return {
-                "content": [{"type": "text", "text": result.stdout or "Deployment completed successfully"}]
-            }
-        except Exception as e:
-            logger.error(f"Error deploying project: {e}")
-            return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+    # tool_deploy lives further down, with the action-dispatch signature the
+    # templedb_deploy inputSchema actually declares (required: ["action"]).
+    # An earlier project/target/dry_run/only version used to sit here; being
+    # the first of two defs in the class body, it was always overwritten and
+    # never reachable, so it is gone rather than left to look like live code.
 
     def tool_config_get(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Get system config value (simple key-value store)"""

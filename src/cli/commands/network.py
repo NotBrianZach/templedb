@@ -91,8 +91,9 @@ class NetworkCommands(Command):
         # Step 6: Probe peers for TempleDB
         if online > 0:
             print(f"\n  Probing {online} online peer(s) for TempleDB sync...")
-            for peer in ts_peers:
-                if ts_info:
+            from sync_engine import discover_tailscale_peers, probe_peer
+            for peer in discover_tailscale_peers():
+                if probe_peer(peer["ip"]):
                     print(f"    {peer['hostname']:20s} {peer['ip']:18s} TempleDB sync READY")
                 else:
                     print(f"    {peer['hostname']:20s} {peer['ip']:18s} (no sync server)")
@@ -129,12 +130,13 @@ class NetworkCommands(Command):
         if not online_peers:
             print("    No online peers")
         else:
+            from sync_engine import probe_peer
             for node_id, peer in online_peers.items():
                 hostname = peer.get("HostName", "?")
                 peer_ips = peer.get("TailscaleIPs", [])
                 ip = peer_ips[0] if peer_ips else "?"
 
-                sync_status = ""
+                ts_info = probe_peer(ip) if peer_ips else None
                 if ts_info:
                     sync_status = f"TempleDB v{ts_info.get('db_version', '?')}"
                 else:
@@ -160,42 +162,55 @@ class NetworkCommands(Command):
 
     def sync_all(self, args) -> int:
         """Sync with all online Tailscale peers that have TempleDB."""
+        from sync_engine import (
+            SyncEngine, SyncClient, discover_tailscale_peers, probe_peer,
+            DEFAULT_SYNC_PORT,
+        )
 
+        engine = SyncEngine()
         try:
-            engine.initialize()
-        except Exception as e:
-            print(f"Sync not initialized: {e}")
-            print("  Run: templedb sync init")
-            return 1
-
-        if not peers:
-            print("No Tailscale peers found.")
-            return 0
-
-        synced = 0
-
-        for peer in peers:
-            if not ts_info:
-                continue
-
-            print(f"Syncing with {peer['hostname']} ({peer['ip']})...")
             try:
-                result = client.sync(peer["ip"], 9420)
-                if result:
-                    print(f"  Applied: {result.get('local_applied', 0)} local, "
-                          f"{result.get('applied', 0)} remote")
-                    synced += 1
+                engine.initialize()
             except Exception as e:
-                print(f"  Failed: {e}")
+                # initialize() connects before it can fail, so this path has
+                # a connection to release too — close() is hasattr-guarded
+                # and safe on a half-initialized engine.
+                print(f"Sync not initialized: {e}")
+                print("  Run: templedb sync init")
+                return 1
 
-        if synced:
-            engine.reconcile_to_main()
-            print(f"\nSynced with {synced} peer(s)")
-        else:
-            print("No peers available for sync")
+            peers = discover_tailscale_peers()
+            if not peers:
+                print("No Tailscale peers found.")
+                return 0
 
-        engine.close()
-        return 0
+            client = SyncClient(engine)
+            synced = 0
+
+            for peer in peers:
+                if not probe_peer(peer["ip"]):
+                    continue
+
+                print(f"Syncing with {peer['hostname']} ({peer['ip']})...")
+                try:
+                    result = client.sync(peer["ip"], DEFAULT_SYNC_PORT)
+                    if result:
+                        print(f"  Applied: {result.get('local_applied', 0)} local, "
+                              f"{result.get('applied', 0)} remote")
+                        synced += 1
+                except Exception as e:
+                    print(f"  Failed: {e}")
+
+            if synced:
+                engine.reconcile_to_main()
+                print(f"\nSynced with {synced} peer(s)")
+            else:
+                print("No peers available for sync")
+            return 0
+        finally:
+            # The early `return 0` on no-peers used to leak the engine
+            # connection; close on every path out.
+            engine.close()
 
     def _find_tailscale(self):
         import shutil

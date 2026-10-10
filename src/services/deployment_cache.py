@@ -420,7 +420,7 @@ class DeploymentCacheService(BaseService):
 
     def invalidate_project_cache(self, project_id: int, reason: str = "Manual invalidation"):
         """Invalidate all cache entries for a project"""
-        count = db_utils.execute("""
+        count = db_utils.execute_rowcount("""
             UPDATE deployment_cache
             SET is_valid = 0, invalidated_at = datetime('now'), invalidation_reason = ?
             WHERE project_id = ? AND is_valid = 1
@@ -452,7 +452,7 @@ class DeploymentCacheService(BaseService):
             where_clause += " AND project_id = ?"
             params.append(project_id)
 
-        deleted = db_utils.execute(f"""
+        deleted = db_utils.execute_rowcount(f"""
             DELETE FROM deployment_cache
             WHERE {where_clause}
         """, tuple(params))
@@ -485,7 +485,7 @@ class DeploymentCacheService(BaseService):
         if rows:
             ids_to_delete = [row['id'] for row in rows]
             placeholders = ','.join('?' * len(ids_to_delete))
-            deleted = db_utils.execute(f"""
+            deleted = db_utils.execute_rowcount(f"""
                 DELETE FROM deployment_cache WHERE id IN ({placeholders})
             """, tuple(ids_to_delete))
 

@@ -384,6 +384,53 @@ def execute(sql: str, params: tuple = (), commit: bool = True) -> int:
         raise
 
 
+def execute_rowcount(sql: str, params: tuple = (), commit: bool = True) -> int:
+    """Execute statement and return the number of rows it changed.
+
+    Use this for UPDATE/DELETE. execute() returns cursor.lastrowid, which is
+    only meaningful after an INSERT — for an UPDATE or DELETE it reports a
+    leftover rowid from the connection, so `n = execute("DELETE ...")` yields
+    a number unrelated to how many rows went away.
+
+    Args:
+        sql: SQL statement to execute
+        params: Parameters for the statement
+        commit: Whether to auto-commit (default True)
+                Set to False when using transaction() context manager
+
+    Returns:
+        Rows modified by the statement (cursor.rowcount)
+    """
+    try:
+        conn = get_connection()
+        with _pooled_cursor(conn) as cursor:
+            cursor.execute(sql, params)
+            # Read rowcount before any commit — see execute() for why the
+            # commit is conditional on not being inside transaction().
+            affected = cursor.rowcount
+            if commit and not _in_explicit_transaction():
+                conn.commit()
+            return affected
+    except sqlite3.IntegrityError as e:
+        logger.error(f"Database constraint violation: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        logger.debug(f"Params: {params}")
+        raise
+    except sqlite3.ProgrammingError as e:
+        logger.error(f"SQL syntax error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        logger.debug(f"Params: {params}")
+        raise
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database operational error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
+    except sqlite3.DatabaseError as e:
+        logger.error(f"Database error: {e}")
+        logger.debug(f"SQL: {sql[:500]}")
+        raise
+
+
 def executemany(sql: str, params_list: List[tuple], commit: bool = True) -> None:
     """Execute statement with multiple parameter sets
 

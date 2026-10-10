@@ -625,6 +625,28 @@ class CommitCommand:
                         content=content
                     ))
                 continue
+
+            # A tracked row with no current content is a path-only record:
+            # project_files has it, but there is no is_current file_contents
+            # row behind it. The materializer cannot write such a file —
+            # get_files_for_project(include_content=True) INNER JOINs
+            # file_contents and content_blobs, so these paths are silently
+            # absent from every workspace it produces, while this scanner
+            # reaches them because the include_content=False query LEFT
+            # JOINs. That asymmetry is the whole bug: the file was never
+            # materialized, so its absence from disk says nothing about
+            # intent, and recording a deletion here destroys the DB row.
+            # Observed on woofs_projects 2026-10-07, which lost 8 files
+            # this way. Skip it; `doctor entities`
+            # (file_states_have_recoverable_content) is what reports these.
+            if file_info['content_hash'] is None:
+                logger.warning(
+                    f"Skipping {path}: tracked but has no current content in "
+                    "the DB, so it was never materialized — not treating its "
+                    "absence as a deletion"
+                )
+                continue
+
             changes['deleted'].append(FileChange(
                 change_type='deleted',
                 file_path=path,

@@ -2,6 +2,7 @@
 import html
 import json
 import os
+import re
 import subprocess
 from collections import defaultdict
 from pathlib import Path

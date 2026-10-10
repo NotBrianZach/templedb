@@ -8,6 +8,7 @@ Supports hierarchical configuration with scope precedence:
 """
 
 import re
+import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
 from db_utils import query_one, query_all

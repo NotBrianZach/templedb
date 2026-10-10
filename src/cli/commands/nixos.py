@@ -1042,15 +1042,35 @@ class NixOSCommand(Command):
     def add_package(self, args) -> int:
         """Add CLI tool to managed packages"""
         try:
-            from db_utils import execute
+            from db_utils import execute, query_one
+            proj = query_one("SELECT id FROM projects WHERE slug = ?", (args.slug,))
+            if not proj:
+                logger.error(f"No such project: {args.slug}")
+                return 1
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            # install_scope is what generation branches on; package_type is
+            # descriptive (a GUI badge). User-scope packages are installed via
+            # home-manager, which is how the existing rows spell it, so keep
+            # 'user' -> 'home' rather than echoing the scope verbatim.
+            package_type = 'home' if args.scope == 'user' else args.scope
+            # UNIQUE(project_id, install_scope) — re-adding a project at the
+            # same scope updates the pin rather than silently doing nothing,
+            # so `add-package --version` is the way to bump a version.
             execute(
-                "INSERT INTO nixos_packages (project_slug, name, scope, flake_uri, version, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (args.slug, args.name or args.slug, args.scope,
-                 args.flake_uri, args.version, now),
+                "INSERT INTO nixos_managed_packages "
+                "(project_id, package_type, install_scope, flake_uri, package_name, "
+                " version, added_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(project_id, install_scope) DO UPDATE SET "
+                "  package_type = excluded.package_type, "
+                "  flake_uri    = excluded.flake_uri, "
+                "  package_name = excluded.package_name, "
+                "  version      = excluded.version, "
+                "  updated_at   = excluded.updated_at",
+                (proj['id'], package_type, args.scope, args.flake_uri,
+                 args.name or args.slug, args.version, now, now),
             )
-            print(f"✓ Added package {args.name or args.slug}")
+            print(f"✓ Added package {args.name or args.slug} ({args.scope})")
             return 0
         except Exception as e:
             logger.error(f"Failed to add package: {e}", exc_info=True)
@@ -1059,8 +1079,24 @@ class NixOSCommand(Command):
     def remove_package(self, args) -> int:
         """Remove CLI tool from managed packages"""
         try:
-            from db_utils import execute
-            execute("DELETE FROM nixos_packages WHERE project_slug = ?", (args.slug,))
+            from db_utils import execute, query_one
+            proj = query_one("SELECT id FROM projects WHERE slug = ?", (args.slug,))
+            if not proj:
+                logger.error(f"No such project: {args.slug}")
+                return 1
+            # execute() returns lastrowid, not a row count, so check first
+            # rather than inferring whether anything was actually removed.
+            existing = query_one(
+                "SELECT 1 FROM nixos_managed_packages WHERE project_id = ?",
+                (proj['id'],),
+            )
+            if not existing:
+                print(f"No managed package for {args.slug}")
+                return 0
+            execute(
+                "DELETE FROM nixos_managed_packages WHERE project_id = ?",
+                (proj['id'],),
+            )
             print(f"✓ Removed package for {args.slug}")
             return 0
         except Exception as e:
@@ -1071,20 +1107,26 @@ class NixOSCommand(Command):
         """List all managed packages"""
         conn = _get_conn()
         scope = getattr(args, 'scope', None)
+        query = (
+            "SELECT p.slug, COALESCE(nmp.package_name, p.slug), nmp.install_scope, "
+            "       nmp.version, nmp.enabled "
+            "FROM nixos_managed_packages nmp "
+            "JOIN projects p ON nmp.project_id = p.id"
+        )
         if scope:
             rows = conn.execute(
-                "SELECT project_slug, name, scope FROM nixos_packages WHERE scope = ? ORDER BY name",
+                query + " WHERE nmp.install_scope = ? ORDER BY nmp.package_name",
                 (scope,)
             ).fetchall()
         else:
-            rows = conn.execute(
-                "SELECT project_slug, name, scope FROM nixos_packages ORDER BY name"
-            ).fetchall()
+            rows = conn.execute(query + " ORDER BY nmp.package_name").fetchall()
         if not rows:
             print("No packages found.")
             return 0
         for row in rows:
-            print(f"  {row[1]}  ({row[2]})  [{row[0]}]")
+            version = f"  {row[3]}" if row[3] else ""
+            disabled = "" if row[4] else "  (disabled)"
+            print(f"  {row[1]}  ({row[2]}){version}  [{row[0]}]{disabled}")
         return 0
 
     def nixos_status(self, args) -> int:
@@ -1921,8 +1963,10 @@ class NixOSCommand(Command):
 
     def init_config(self, args) -> int:
         """Scaffold a minimal system_config project with TempleDB integration."""
+        import os
         import socket
         import platform
+        import subprocess
 
         username = args.username or os.environ.get("USER", "nixos")
         hostname = args.hostname or socket.gethostname()

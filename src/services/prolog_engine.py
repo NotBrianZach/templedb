@@ -13,6 +13,28 @@ import tempfile
 from pathlib import Path
 from typing import List, Dict, Set, Any
 
+from logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def _json_list_fact(raw: Any) -> str:
+    """'true'/'false' for a column holding a JSON array.
+
+    nix_service_metadata stores requires_databases / opens_ports as JSON
+    arrays, while the Prolog service/6 fact wants a boolean atom. A column
+    that is NULL, empty, or an empty/invalid array is false.
+    """
+    if not raw:
+        return 'false'
+    if isinstance(raw, (list, tuple)):
+        return 'true' if raw else 'false'
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return 'false'
+    return 'true' if parsed else 'false'
+
 
 def _find_swipl() -> str:
     """Find swipl binary — check PATH, then nix store glob."""
@@ -227,20 +249,29 @@ class NixosLogic:
             self.engine.assert_fact('host', m['name'], m['target_host'],
                                     m.get('flake_attr') or m['name'])
 
-        # Load services from nix_services if table exists
+        # Load services from nix_service_metadata. requires_databases and
+        # opens_ports are JSON arrays there, not booleans, so a non-empty
+        # array is what makes the requires_db / opens_port facts true.
         try:
             services = db_utils.query_all(
-                "SELECT project_slug, service_name, systemd_unit, requires_db, "
-                "opens_port, dynamic_user FROM nix_services"
+                "SELECT p.slug AS project_slug, nsm.service_name, "
+                "       nsm.systemd_service_name, nsm.requires_databases, "
+                "       nsm.opens_ports, nsm.dynamic_user "
+                "FROM nix_service_metadata nsm "
+                "JOIN projects p ON nsm.project_id = p.id"
             )
             for s in services:
                 self.engine.assert_fact('service', s['project_slug'],
-                    s['service_name'], s['systemd_unit'],
-                    s.get('requires_db') or 'false',
-                    s.get('opens_port') or 'false',
-                    s.get('dynamic_user') or 'false')
-        except Exception:
-            pass  # Table may not exist
+                    s['service_name'],
+                    s['systemd_service_name'] or f"{s['service_name']}.service",
+                    _json_list_fact(s.get('requires_databases')),
+                    _json_list_fact(s.get('opens_ports')),
+                    'true' if s.get('dynamic_user') else 'false')
+        except Exception as e:
+            # Deliberately non-fatal: service facts are supplementary to the
+            # host facts above, and validate should still report on hosts.
+            # Logged rather than swallowed so a schema drift is visible.
+            logger.warning(f"Could not load service facts: {e}")
 
     def validate_host(self, host: str) -> Dict[str, Any]:
         return self.engine.run_json(f"validate_host_json('{host}')") or {

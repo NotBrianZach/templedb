@@ -151,6 +151,12 @@ def _register_top_level_aliases():
 
         print(f"Validating {slug}...\n")
         issues = 0
+        # A check that raises has NOT passed — it has told us nothing. Counted
+        # separately from issues so the verdict can distinguish "your config is
+        # wrong" from "this validator is broken", but either one fails the run.
+        # Reporting these as "skipped" and still exiting 0 is what let the
+        # nix_services/nixos_packages schema drift hide for weeks.
+        errored = 0
 
         # Env validation
         try:
@@ -163,7 +169,8 @@ def _register_top_level_aliases():
             else:
                 print(f"  ENV: OK")
         except Exception as e:
-            print(f"  ENV: skipped ({e})")
+            print(f"  ENV: ERROR — check could not run: {e}")
+            errored += 1
 
         # NixOS validation (fleet-level)
         try:
@@ -177,7 +184,8 @@ def _register_top_level_aliases():
             else:
                 print(f"  NIXOS: OK ({len(result.get('hosts', []))} hosts)")
         except Exception as e:
-            print(f"  NIXOS: skipped ({e})")
+            print(f"  NIXOS: ERROR — check could not run: {e}")
+            errored += 1
 
         # Deploy validation
         try:
@@ -195,10 +203,19 @@ def _register_top_level_aliases():
             else:
                 print(f"  DEPLOY: OK (deps: {result.get('deps', [])})")
         except Exception as e:
-            print(f"  DEPLOY: skipped ({e})")
+            print(f"  DEPLOY: ERROR — check could not run: {e}")
+            errored += 1
 
-        print(f"\n{'PASS' if issues == 0 else f'FAIL ({issues} issues)'}")
-        return 0 if issues == 0 else 1
+        if issues == 0 and errored == 0:
+            print("\nPASS")
+            return 0
+        verdict = []
+        if issues:
+            verdict.append(f"{issues} issue{'s' if issues != 1 else ''}")
+        if errored:
+            verdict.append(f"{errored} check{'s' if errored != 1 else ''} errored")
+        print(f"\nFAIL ({', '.join(verdict)})")
+        return 1
 
     validate_parser = cli.register_command(
         'validate', validate_cmd,

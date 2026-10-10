@@ -117,7 +117,42 @@ def pytest_runtest_setup(item):
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from db_utils import query_one, query_all, execute, get_connection, close_connection
+# Resolved through sys.modules on every call rather than bound once.
+#
+# Several test modules do `del sys.modules['db_utils']` to force a
+# re-import after re-pointing TEMPLEDB_PATH (tests/vcs/test_sessions.py,
+# tests/vcs/test_session_stage_orphans.py, and formerly
+# test_gui_reports_scoping.py). The next import builds a SECOND db_utils
+# module object with its own DB_PATH and its own connection pool. With
+# `from db_utils import execute` these helpers stayed bound to the first
+# object forever, so a fixture that re-pointed "db_utils" updated one
+# instance while conftest wrote through the other — producing
+# "no such table: projects" from a fixture that had just migrated a full
+# schema. Looking the module up per call means these always use whichever
+# instance is currently live, whatever a test module did to sys.modules.
+def _du():
+    import db_utils
+    return db_utils
+
+
+def query_one(*a, **kw):
+    return _du().query_one(*a, **kw)
+
+
+def query_all(*a, **kw):
+    return _du().query_all(*a, **kw)
+
+
+def execute(*a, **kw):
+    return _du().execute(*a, **kw)
+
+
+def get_connection(*a, **kw):
+    return _du().get_connection(*a, **kw)
+
+
+def close_connection(*a, **kw):
+    return _du().close_connection(*a, **kw)
 
 
 # ============================================================================
@@ -204,30 +239,93 @@ def temp_workspace() -> Generator[Path, None, None]:
     shutil.rmtree(workspace, ignore_errors=True)
 
 
-@pytest.fixture(scope="session")
-def bootstrap_schema() -> str:
-    """Apply the full schema to the bootstrap DB that db_utils is bound to.
+@pytest.fixture(scope="module")
+def module_db(request) -> Generator[str, None, None]:
+    """Give the requesting MODULE a database of its own.
 
-    Distinct from `db_path`, and the distinction is the whole point.
-    `db_path` migrates its OWN throwaway file, but `db_utils` captured
-    DB_PATH at import time from the TEMPLEDB_PATH set at the top of this
-    module — so anything going through db_utils's execute/query_one talks
-    to the bootstrap DB instead, and that one starts schema-less by design
-    so individual groups can build only the tables they need.
+    For modules that hand-build a partial schema. Several of them create
+    `CREATE TABLE IF NOT EXISTS projects (id, name, slug)` through
+    db_utils.execute(), i.e. into the one shared bootstrap DB. Whichever
+    module ran first then decided whether `projects` was complete, and a
+    partial winner silently broke `bootstrap_schema` for everyone else:
+    schema.sql's own CREATE TABLE IF NOT EXISTS is a no-op against an
+    existing table, so columns added by later migrations (nix_build_status,
+    git_branch) never appeared and a view referencing them aborted the
+    script. Six files' worth of tests — 105 of them — were erroring at
+    setup despite passing 100% when run alone.
 
-    `test_project` goes through db_utils. It therefore needs real tables,
-    and without them every consumer died on "no such table: projects".
-    That was invisible for a while because the seven modules involved were
-    also failing at collection (see pytest.ini's pythonpath note), so the
-    fixture rot sat behind an import error.
+    Isolating the builder is the fix rather than making schema.sql
+    defensive: the partial tables are legitimate (these tests only need
+    three columns), what is illegitimate is writing them somewhere shared.
 
-    Idempotent and additive: schema.sql is IF NOT EXISTS throughout, so
-    groups that build their own tables into the bootstrap DB keep whatever
-    they had.
+    Depend on this from a module-scoped autouse fixture, so it is in place
+    before any per-test fixture calls execute():
+
+        @pytest.fixture(scope="module", autouse=True)
+        def _isolated_db(module_db):
+            pass
     """
-    db = os.environ["TEMPLEDB_PATH"]
+    name = request.module.__name__.rsplit(".", 1)[-1]
+    fd, path = tempfile.mkstemp(suffix=".sqlite", prefix=f"templedb-{name}-")
+    os.close(fd)
+
+    prev_env = os.environ.get("TEMPLEDB_PATH")
+    os.environ["TEMPLEDB_PATH"] = path
+    try:
+        import db_utils
+    except ImportError:
+        db_utils = None
+        prev_db_path = None
+    else:
+        prev_db_path = getattr(db_utils, "DB_PATH", None)
+        db_utils.close_connection()
+        db_utils.DB_PATH = path
+
+    try:
+        yield path
+    finally:
+        # Restore before unlinking: pytest_runtest_setup's production
+        # guard runs before the next test, and a dangling DB_PATH that
+        # points at a deleted file produces a far less obvious failure
+        # than a restored one.
+        if db_utils is not None:
+            db_utils.close_connection()
+            if prev_db_path is not None:
+                db_utils.DB_PATH = prev_db_path
+        if prev_env is not None:
+            os.environ["TEMPLEDB_PATH"] = prev_env
+        else:
+            os.environ.pop("TEMPLEDB_PATH", None)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+@pytest.fixture(scope="session")
+def _schema_db() -> Generator[str, None, None]:
+    """A dedicated database with the FULL schema, built once per session.
+
+    Deliberately its own file rather than the shared bootstrap DB.
+    schema.sql is `CREATE TABLE IF NOT EXISTS` throughout, which makes it
+    additive in the happy case but powerless against a table that already
+    exists in a narrower form: several modules hand-build three-column
+    `projects` / partial `content_blobs` for their own use, and against
+    those the matching CREATE is a silent no-op, so columns introduced by
+    later migrations (nix_build_status, git_branch, external_path) never
+    appear. The first view or index referring to one then aborts the whole
+    script, and because this was session-scoped the failure was cached and
+    re-raised for every later consumer — which is how 32 tests in three
+    files ended up erroring at setup while passing 100% in isolation.
+
+    Applying to a pristine file makes that unreachable by construction:
+    no module has had a chance to touch it, so schema.sql always lands on
+    an empty database, which is the one case it is guaranteed to handle.
+    """
+    fd, path = tempfile.mkstemp(suffix=".sqlite", prefix="templedb-schema-")
+    os.close(fd)
     root = Path(__file__).parent.parent
-    conn = sqlite3.connect(db)
+    conn = sqlite3.connect(path)
     try:
         conn.executescript((root / "migrations" / "schema.sql").read_text())
         # file_types must be non-empty: project_files carries an FK to it.
@@ -241,7 +339,48 @@ def bootstrap_schema() -> str:
         conn.commit()
     finally:
         conn.close()
-    return db
+    try:
+        yield path
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+@pytest.fixture
+def bootstrap_schema(_schema_db: str) -> Generator[str, None, None]:
+    """Point db_utils at the fully-migrated schema DB for this test.
+
+    `test_project` and friends reach the database through db_utils, so the
+    pointing has to happen per test rather than once: module_db and
+    tests/agent's _agent_db swap TEMPLEDB_PATH while they are active, and
+    a single session-scoped swap would either fight them or be undone by
+    them depending on collection order.
+    """
+    prev_env = os.environ.get("TEMPLEDB_PATH")
+    os.environ["TEMPLEDB_PATH"] = _schema_db
+    try:
+        import db_utils
+    except ImportError:
+        db_utils = None
+        prev_db_path = None
+    else:
+        prev_db_path = getattr(db_utils, "DB_PATH", None)
+        db_utils.close_connection()
+        db_utils.DB_PATH = _schema_db
+
+    try:
+        yield _schema_db
+    finally:
+        if db_utils is not None:
+            db_utils.close_connection()
+            if prev_db_path is not None:
+                db_utils.DB_PATH = prev_db_path
+        if prev_env is not None:
+            os.environ["TEMPLEDB_PATH"] = prev_env
+        else:
+            os.environ.pop("TEMPLEDB_PATH", None)
 
 
 @pytest.fixture

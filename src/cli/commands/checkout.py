@@ -20,6 +20,49 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
+def _write_db_file(file_path: Path, row) -> None:
+    """Write one DB file row to disk, preferring whichever content exists.
+
+    Do not branch on content_type alone: content_type says what the file IS,
+    not which column actually holds it. A row can be content_type='binary'
+    with a NULL content_blob but usable content_text (and vice versa), and
+    content_blobs is LEFT-joined, so both columns can be NULL for a
+    path-only record.
+
+    The old `if text: write_text(content_text) else: write_bytes(content_blob)`
+    passed None straight to write_bytes, raising "a bytes-like object is
+    required, not 'NoneType'". In the checkout path that exception was
+    swallowed by a broad except and logged as a warning, so the file was
+    simply absent from the materialized tree — and a later `templedb commit`
+    then recorded it as a DELETION. Observed on woofs_projects 2026-10-07:
+    deploy.sh and flake.nix warned, 8 binaries vanished silently.
+
+    Mirrors the fallback order already used by system_service.materialize_from_db
+    and git_export, so all three materializers agree.
+    """
+    if row['content_text'] is not None:
+        file_path.write_text(row['content_text'],
+                             encoding=_row_encoding(row) or 'utf-8')
+    elif row['content_blob'] is not None:
+        file_path.write_bytes(bytes(row['content_blob']))
+    else:
+        # Path-only record: no content in either column. Write an empty file
+        # so the path exists rather than letting commit see it as deleted.
+        logger.warning(
+            f"{file_path.name}: no content_text or content_blob in DB; "
+            "materializing as empty"
+        )
+        file_path.write_bytes(b"")
+
+
+def _row_encoding(row) -> str | None:
+    """encoding column if this row has one, else None (sqlite3.Row has no .get)."""
+    try:
+        return row['encoding']
+    except (IndexError, KeyError):
+        return None
+
+
 class CheckoutCommand:
     """Handles checkout operations - extracting projects from DB to filesystem"""
 
@@ -179,13 +222,10 @@ class CheckoutCommand:
 
                 # Write content
                 try:
-                    if file['content_type'] == 'text':
-                        file_path.write_text(file['content_text'], encoding=file['encoding'] or 'utf-8')
-                    else:
-                        file_path.write_bytes(file['content_blob'])
+                    _write_db_file(file_path, file)
 
                     files_written += 1
-                    total_bytes += file['file_size_bytes']
+                    total_bytes += file['file_size_bytes'] or 0
 
                 except Exception as e:
                     logger.warning(f"Failed to write {file['file_path']}: {e}")
@@ -938,10 +978,7 @@ class CheckoutCommand:
                         # Add file
                         file_path.parent.mkdir(parents=True, exist_ok=True)
 
-                        if db_file['content_type'] == 'text':
-                            file_path.write_text(db_file['content_text'])
-                        else:
-                            file_path.write_bytes(db_file['content_blob'])
+                        _write_db_file(file_path, db_file)
 
                         print(f"   + Added: {db_file['file_path']}")
                         updated_count += 1
@@ -962,10 +999,7 @@ class CheckoutCommand:
                         conflict_count += 1
                     else:
                         # Only changed in database - safe to update
-                        if db_file['content_type'] == 'text':
-                            file_path.write_text(db_file['content_text'])
-                        else:
-                            file_path.write_bytes(db_file['content_blob'])
+                        _write_db_file(file_path, db_file)
 
                         print(f"   ~ Updated: {db_file['file_path']}")
                         updated_count += 1

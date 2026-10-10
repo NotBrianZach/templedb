@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import db_utils
 from cli.core import Command
 from services.deployment_cache import DeploymentCacheService
 from repositories import ProjectRepository
@@ -73,7 +74,7 @@ class CacheCommands(Command):
             params = [project['id']]
 
         # Query active cache entries
-        entries = self.cache_service.db_utils.query_all(f"""
+        entries = db_utils.query_all(f"""
             SELECT
                 p.slug AS project_slug,
                 dc.target,
@@ -135,7 +136,7 @@ class CacheCommands(Command):
             print(f"✓ Cleared cache for project")
         else:
             # Clear all
-            projects = self.cache_service.db_utils.query_all(
+            projects = db_utils.query_all(
                 "SELECT DISTINCT project_id FROM deployment_cache WHERE is_valid = 1"
             )
             for row in projects:

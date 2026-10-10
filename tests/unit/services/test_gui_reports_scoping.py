@@ -112,11 +112,33 @@ def seeded(tmp_path, monkeypatch):
     conn.close()
 
     monkeypatch.setenv("TEMPLEDB_PATH", str(db))
+
+    # Re-point db_utils rather than evicting it from sys.modules.
+    #
+    # Dropping db_utils made the next `import db_utils` build a SECOND
+    # module object with its own DB_PATH and its own connection pool,
+    # while tests/conftest.py's module-level `from db_utils import
+    # execute, query_one` stayed bound to the first one. Fixtures that
+    # re-point "db_utils" then updated whichever instance they happened to
+    # import, and conftest's helpers kept talking to the other — which is
+    # how bootstrap_schema could migrate a fully-formed schema and
+    # test_project still fail with "table projects has no column named
+    # repo_url" against this fixture's three-column stand-in.
+    #
+    # Only gui_pages needs evicting: its modules read db_utils at import
+    # time, and re-importing them is the point of the fixture. db_utils
+    # itself resolves DB_PATH per connection, so assigning it is enough.
+    # setattr via monkeypatch so the previous value is restored for us.
+    import db_utils
+    db_utils.close_connection()
+    monkeypatch.setattr(db_utils, "DB_PATH", str(db))
+
     for mod in list(sys.modules):
-        if mod.startswith("db_utils") or mod.startswith("gui_pages"):
+        if mod.startswith("gui_pages"):
             del sys.modules[mod]
     import gui_pages.reports as reports
-    return reports
+    yield reports
+    db_utils.close_connection()
 
 
 # --- listing ---------------------------------------------------------
@@ -210,8 +232,16 @@ def test_duplicate_filename_across_projects_is_reported_not_guessed(
     conn.close()
 
     monkeypatch.setenv("TEMPLEDB_PATH", str(db))
+
+    # Re-point rather than evict — see the `seeded` fixture for why
+    # dropping db_utils from sys.modules splits it into two module
+    # objects and breaks conftest's own helpers.
+    import db_utils
+    db_utils.close_connection()
+    monkeypatch.setattr(db_utils, "DB_PATH", str(db))
+
     for mod in list(sys.modules):
-        if mod.startswith("db_utils") or mod.startswith("gui_pages"):
+        if mod.startswith("gui_pages"):
             del sys.modules[mod]
     import gui_pages.reports as reports
 

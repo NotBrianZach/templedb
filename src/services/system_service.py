@@ -922,6 +922,35 @@ class SystemService:
             LIMIT 1
         """)
 
+    def get_system_status(self) -> Dict[str, Any]:
+        """Summarise the live system for `nixos system status`.
+
+        Generation and last-switch come from the active system_deployments
+        row — what TempleDB believes it deployed. nixos_version is read from
+        the running system instead, so a mismatch between the two is
+        visible rather than papered over by reporting DB state as truth.
+        """
+        active = self.get_active_deployment() or {}
+
+        nixos_version = 'unknown'
+        try:
+            result = subprocess.run(
+                ['nixos-version'],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                nixos_version = result.stdout.strip()
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.debug(f"Could not read nixos-version: {e}")
+
+        return {
+            'current_generation': active.get('nixos_generation') or 'unknown',
+            'last_switch': active.get('deployed_at') or 'unknown',
+            'nixos_version': nixos_version,
+            'project_slug': active.get('project_slug'),
+            'config_path': active.get('config_path'),
+        }
+
     def get_deployment_history(
         self,
         project_slug: Optional[str] = None,

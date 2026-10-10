@@ -37,13 +37,23 @@ from repositories.base import BaseRepository
 
 
 @pytest.fixture(scope="module")
-def isolated_db():
-    """Apply the full templedb schema (plus file_types seed) to whatever
-    DB the conftest set up in TEMPLEDB_PATH. Applying to the bootstrap
-    DB (rather than a new temp file) matters because db_utils captured
-    DB_PATH at import time — subsequent env var mutations don't
-    retarget the module."""
-    db_path = os.environ["TEMPLEDB_PATH"]
+def isolated_db(module_db):
+    """Apply the full templedb schema (plus file_types seed) to a DB of
+    this module's own, supplied by conftest's `module_db`.
+
+    It used to apply to the shared bootstrap DB, on the grounds that
+    db_utils captured DB_PATH at import time and env mutations could not
+    retarget it. That is not so: db_utils resolves its module-level
+    DB_PATH when it opens a connection, so assigning DB_PATH and calling
+    close_connection() does retarget it — which is exactly what
+    module_db (and conftest's own restore_test_db_path) do.
+
+    Sharing mattered because schema.sql is `CREATE TABLE IF NOT EXISTS`
+    throughout, so applying it on top of another module's partial
+    `projects` left migration-added columns missing and aborted on the
+    first view that referenced one — 9 errors here, every run.
+    """
+    db_path = module_db
     schema_sql = (Path(__file__).parent.parent / "migrations" /
                   "schema.sql").read_text()
     file_tracking_sql = (Path(__file__).parent.parent / "migrations" /

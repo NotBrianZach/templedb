@@ -24,6 +24,16 @@ import pytest
 from db_utils import execute, query_one
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _isolated_db(module_db):
+    """This module hand-builds a partial schema; keep it out of the shared DB.
+
+    Without this it created a 3-column `projects` into the one bootstrap
+    DB via db_utils, which broke tests/conftest.py's bootstrap_schema for
+    every other module. See module_db in tests/conftest.py.
+    """
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     """Build a project's checkout rows and return (resolver, mkdir helper)."""
