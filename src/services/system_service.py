@@ -5,6 +5,7 @@ Manages NixOS system configuration deployments
 """
 
 import os
+import re
 import sys
 import subprocess
 import logging
@@ -788,26 +789,62 @@ class SystemService:
             'exit_code': result['exit_code'],
             'stdout': out,
             'stderr': err,
-            'nixos_generation': self._extract_generation_number(out + err),
+            'nixos_generation': self._generation_after(command,
+                                                       result['exit_code']),
             'success': result['exit_code'] == 0,
         }
 
-    def _extract_generation_number(self, output: str) -> Optional[int]:
-        """Extract NixOS generation number from rebuild output"""
-        import re
-        # Look for patterns like "building generation 123" or "activating configuration 123"
-        patterns = [
-            r'building generation (\d+)',
-            r'activating configuration (\d+)',
-            r'generation (\d+)',
-        ]
+    SYSTEM_PROFILE = "/nix/var/nix/profiles/system"
 
-        for pattern in patterns:
-            match = re.search(pattern, output, re.IGNORECASE)
-            if match:
-                return int(match.group(1))
+    def _generation_after(self, command: str, exit_code: int) -> Optional[int]:
+        """The NixOS generation this rebuild produced, or None.
 
-        return None
+        Only `switch` and `boot` move the system profile. `test` activates
+        without creating a generation and `build`/`dry-*` do not activate at
+        all, so for those the profile still names the PREVIOUS generation and
+        returning it would attribute someone else's number to this row. Note
+        dry_run has already rewritten command to dry-activate/dry-build by
+        the time we get here, so those fall out of the check naturally.
+
+        A failed rebuild gets None for the same reason: the profile did not
+        move, so whatever it points at is not this deployment's.
+        """
+        if exit_code != 0 or command not in ("switch", "boot"):
+            return None
+        return self._system_profile_generation()
+
+    def _system_profile_generation(self) -> Optional[int]:
+        """Read the live generation number from the system profile symlink.
+
+        /nix/var/nix/profiles/system -> system-<N>-link is what `nix-env
+        --list-generations -p` reads and what the bootloader entries are
+        built from, so it is the authority on which generation exists.
+
+        This replaces scraping the number out of nixos-rebuild's output,
+        which never worked: modern nixos-rebuild does not print a generation
+        number at all (it ends at "Done. The new configuration is
+        /nix/store/..."), so every successful switch recorded NULL and
+        `nixos system status` reported "unknown". The old patterns were also
+        a mis-attribution hazard — a bare `generation (\\d+)` would happily
+        match home-manager's own generation counter when a home-manager
+        derivation appeared in the system build log, writing an unrelated
+        number into a column named nixos_generation. record_deployment
+        already warns against exactly that conflation.
+        """
+        try:
+            target = os.readlink(self.SYSTEM_PROFILE)
+        except OSError as e:
+            logger.debug(f"Could not read {self.SYSTEM_PROFILE}: {e}")
+            return None
+
+        match = re.search(r"system-(\d+)-link", os.path.basename(target))
+        if not match:
+            logger.debug(
+                f"{self.SYSTEM_PROFILE} points at {target!r}, which does not "
+                "look like system-<N>-link"
+            )
+            return None
+        return int(match.group(1))
 
     def record_deployment(
         self,
@@ -925,12 +962,22 @@ class SystemService:
     def get_system_status(self) -> Dict[str, Any]:
         """Summarise the live system for `nixos system status`.
 
-        Generation and last-switch come from the active system_deployments
-        row — what TempleDB believes it deployed. nixos_version is read from
-        the running system instead, so a mismatch between the two is
+        last_switch comes from the active system_deployments row — what
+        TempleDB believes it deployed. nixos_version and the generation are
+        read from the running system, so a mismatch between the two is
         visible rather than papered over by reporting DB state as truth.
+
+        The generation prefers the recorded value but falls back to the live
+        system profile, because every row written before the extraction fix
+        has nixos_generation NULL (nixos-rebuild never printed the number
+        the old parser looked for). Without the fallback this command would
+        keep answering "unknown" for the running system until the next
+        switch happened to record one. generation_source says which it was,
+        so a caller can tell a recorded number from an observed one.
         """
         active = self.get_active_deployment() or {}
+        recorded_generation = active.get('nixos_generation')
+        live_generation = self._system_profile_generation()
 
         nixos_version = 'unknown'
         try:
@@ -943,8 +990,14 @@ class SystemService:
         except (OSError, subprocess.SubprocessError) as e:
             logger.debug(f"Could not read nixos-version: {e}")
 
+        generation = recorded_generation or live_generation
         return {
-            'current_generation': active.get('nixos_generation') or 'unknown',
+            'current_generation': generation if generation is not None else 'unknown',
+            'generation_source': (
+                'recorded' if recorded_generation is not None
+                else 'live system profile' if live_generation is not None
+                else 'unavailable'
+            ),
             'last_switch': active.get('deployed_at') or 'unknown',
             'nixos_version': nixos_version,
             'project_slug': active.get('project_slug'),

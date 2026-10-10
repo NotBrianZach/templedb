@@ -906,8 +906,14 @@ class NixOSCommand(Command):
             from services.system_service import SystemService
             service = SystemService()
             status = service.get_system_status()
+            # Flag a generation that came from the live profile rather than
+            # a system_deployments row: rows written before the generation
+            # fix are NULL, so the number is real but not something
+            # TempleDB recorded, and system-history will not show it.
+            source = status.get('generation_source')
+            note = "" if source in (None, 'recorded') else f"  (from {source})"
             print(f"\n🖥️  System Status")
-            print(f"   Current generation: {status.get('current_generation', 'unknown')}")
+            print(f"   Current generation: {status.get('current_generation', 'unknown')}{note}")
             print(f"   Last switch: {status.get('last_switch', 'unknown')}")
             print(f"   NixOS version: {status.get('nixos_version', 'unknown')}")
             return 0
