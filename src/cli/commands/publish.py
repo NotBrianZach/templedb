@@ -100,6 +100,24 @@ class PublishCommands(Command):
                         rc = vcs_cmd.commit(commit_args)
                     if rc == 0:
                         print(f"  Committed: {message}")
+                    elif getattr(vcs_cmd, 'last_outcome',
+                                 None) == 'nothing-to-commit':
+                        # Staged rows existed but matched HEAD, so there was
+                        # nothing new to record. That is NOT the failure the
+                        # branch below guards against: nothing shipped
+                        # unrecorded, because nothing changed. Gating the
+                        # push on it stranded a correct publish on
+                        # 2026-10-11 -- system_config's pin was already
+                        # committed as 1230, the redundant second commit
+                        # returned 1, and publish withheld the push while
+                        # reporting "no vcs_commits row exists" about a
+                        # change that had one. The workaround was
+                        # --push-anyway, which is the flag for shipping
+                        # genuinely unrecorded content; reaching for it
+                        # routinely is how that eventually happens by
+                        # accident.
+                        print(f"  Nothing new to commit (staged rows already "
+                              f"match HEAD); content is recorded")
                     else:
                         # Materialize still runs: it reads the DB, which
                         # holds the right content whether or not a

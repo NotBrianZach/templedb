@@ -459,7 +459,20 @@ class VCSCommands(Command):
             return 1
 
     def commit(self, args) -> int:
-        """Create VCS commit"""
+        """Create VCS commit.
+
+        Exit code follows git: non-zero when nothing was committed,
+        including when there was simply nothing to commit. In-process
+        callers that need to tell those apart read `last_outcome`
+        afterwards — 'committed', 'nothing-to-commit', or 'error'.
+        publish needs that distinction because it gates the mirror push
+        on this result, and a no-op commit is not a reason to withhold a
+        push: nothing went unrecorded.
+        """
+        # Reset first: publish calls this twice (it retries after
+        # provisioning an edit workspace), and a stale value from the
+        # first attempt would misreport the second.
+        self.last_outcome = 'error'
         self._apply_session_override(args)
         # Fuzzy match project
         project = fuzzy_match_project(args.project, show_matched=False)
@@ -571,6 +584,10 @@ class VCSCommands(Command):
             _stage_end(_stage_run_id, output_hash=_stage_parent_hash,
                        outcome="noop",
                        extra_metadata={"reason": "no_changes_staged"})
+            # Already recorded as a noop in the stage run above; say so to
+            # the caller too. The exit code stays 1 to match git, but
+            # publish must not read it as "the commit broke".
+            self.last_outcome = 'nothing-to-commit'
             return 1
 
         # Get author
@@ -807,6 +824,7 @@ class VCSCommands(Command):
             "readonly_updated": readonly_updated,
             "auto_deploys": deploy_results,
         }
+        self.last_outcome = 'committed'
         return emit(args, result, human_fn=lambda d: (
             print(f"Created commit {d['hash']}"),
             print(f"  Project: {d['project']}"),
