@@ -27,6 +27,20 @@ from conftest import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _migrated_db(bootstrap_schema):
+    """Point db_utils at the fully-migrated schema DB for every test here.
+
+    This module reaches the database through db_utils.get_connection()
+    from plain helper functions rather than fixtures, and never asked any
+    fixture for a schema — so it depended on some other module having
+    created the tables in the shared session DB first. That is why it
+    failed both in the full run and alone, with "no such table:
+    project_files" / "file_types" and friends. bootstrap_schema provides
+    the real schema and restores the previous target afterwards.
+    """
+
+
 @pytest.mark.concurrent
 @pytest.mark.integration
 def test_non_conflicting_concurrent_edits(temp_workspace: Path):

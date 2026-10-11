@@ -16,6 +16,7 @@ from services.symbol_extraction_service import SymbolExtractionService
 from services.dependency_graph_builder import DependencyGraphBuilder
 from services.impact_analysis_engine import ImpactAnalysisEngine, calculate_impact_for_project, get_blast_radius
 from db_utils import get_connection
+import pytest
 
 
 def setup_test_project():
@@ -98,6 +99,20 @@ def root_function():
     conn.commit()
 
     return project_id
+
+
+@pytest.fixture(autouse=True)
+def _migrated_db(bootstrap_schema):
+    """Point db_utils at the fully-migrated schema DB for every test here.
+
+    This module reaches the database through db_utils.get_connection()
+    from plain helper functions rather than fixtures, and never asked any
+    fixture for a schema — so it depended on some other module having
+    created the tables in the shared session DB first. That is why it
+    failed both in the full run and alone, with "no such table:
+    project_files" / "file_types" and friends. bootstrap_schema provides
+    the real schema and restores the previous target afterwards.
+    """
 
 
 def test_transitive_dependency_calculation():

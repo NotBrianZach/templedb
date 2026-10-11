@@ -563,6 +563,19 @@ def _convert_interpolation(ts_node, source: bytes) -> ASTNode:
                         node.add(converted)
         elif child.type == 'indented_string_fragment':
             node.add(ASTNode('String', value=_text(child, source)))
+        elif child.type == 'dollar_escape':
+            # `''$` — Nix's escape for a literal `${` inside an indented
+            # string, which is how an embedded shell script writes its own
+            # parameter expansions. tree-sitter reports it as its own node
+            # ("''") followed by a string_fragment ("$"), and without this
+            # branch it fell through to _convert(), came back as RawNix,
+            # and the Interpolation emitter wrapped every non-String child
+            # in ${...} — turning `''${1:-mount}` into `${''}${1:-mount}`,
+            # which Nix then reads as a real interpolation of `1:-mount`.
+            # home.nix's snapshot-sync script round-tripped into a file
+            # that would not parse. Carried as a String so the emitter
+            # reproduces the two quotes verbatim.
+            node.add(ASTNode('String', value=_text(child, source)))
         else:
             converted = _convert(child, source)
             if converted:

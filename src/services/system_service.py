@@ -279,6 +279,27 @@ class SystemService:
                 logger.warning(f"No files to materialize for {project_slug}")
                 return None
 
+            # Paths templedb has explicitly deleted. These must be removed from
+            # the checkout even when .gitignore matches them, which the sweep
+            # below would otherwise preserve.
+            #
+            # The gitignore rule ("not templedb's business") is right for files
+            # templedb has no opinion about, and --no-index deliberately keeps
+            # tracked-but-ignored files like .authinfo.gpg. But a status='deleted'
+            # row IS an opinion, and deleting a file in the same commit that adds
+            # an ignore pattern for it then left it on disk AND in the git index,
+            # so it survived publish and stayed at the mirror tip. That is how
+            # woofs_projects shipped TEST_ADMIN_PASSWORD in
+            # shopUI/test-results/.../error-context.md and a live CLAUDE_API_KEY
+            # in .env.yaml after both were supposedly removed (2026-10-10).
+            deleted_rows = conn.execute("""
+                SELECT file_path FROM project_files
+                WHERE project_id = ? AND status = 'deleted'
+            """, (proj["id"],)).fetchall()
+            db_deleted_paths = {
+                (checkout_dir / r["file_path"]).resolve() for r in deleted_rows
+            }
+
             checkout_dir.mkdir(parents=True, exist_ok=True)
 
             written = 0
@@ -425,6 +446,16 @@ class SystemService:
                 if any(part in _SKIP_DIRS for part in path.relative_to(checkout_dir).parts):
                     continue
                 if path.resolve() in db_paths:
+                    continue
+                # Checked before ignored_paths on purpose: an explicit
+                # status='deleted' row outranks a .gitignore match.
+                if path.resolve() in db_deleted_paths:
+                    try:
+                        _ensure_writable(path)
+                        path.unlink()
+                        deleted += 1
+                    except OSError as e:
+                        logger.warning(f"Could not unlink DB-deleted {path}: {e}")
                     continue
                 if path.resolve() in ignored_paths:
                     preserved_ignored += 1

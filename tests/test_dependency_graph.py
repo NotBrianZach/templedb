@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 from services.symbol_extraction_service import SymbolExtractionService
 from services.dependency_graph_builder import DependencyGraphBuilder
 from db_utils import get_connection
+import pytest
 
 
 def setup_test_project():
@@ -47,6 +48,20 @@ def setup_test_project():
         raise RuntimeError("Failed to create python file type")
 
     return project_id, file_type_id
+
+
+@pytest.fixture(autouse=True)
+def _migrated_db(bootstrap_schema):
+    """Point db_utils at the fully-migrated schema DB for every test here.
+
+    This module reaches the database through db_utils.get_connection()
+    from plain helper functions rather than fixtures, and never asked any
+    fixture for a schema — so it depended on some other module having
+    created the tables in the shared session DB first. That is why it
+    failed both in the full run and alone, with "no such table:
+    project_files" / "file_types" and friends. bootstrap_schema provides
+    the real schema and restores the previous target afterwards.
+    """
 
 
 def test_basic_dependency_extraction():

@@ -81,9 +81,16 @@ def populated_env(temp_env):
     }
     for path, content in files.items():
         content_hash = hashlib.sha256(content.encode()).hexdigest()
+        # reference_count is deliberately NOT set: the
+        # increment_blob_reference trigger raises it on the file_contents
+        # insert below. Seeding it as 1 here meant the trigger took it to
+        # 2 against a single referencing row, which made
+        # blob_refcount_is_accurate report three blobs as declared=2
+        # actual=1 — a fixture artifact that read exactly like the real
+        # "a write path bypasses the triggers" defect it exists to catch.
         conn.execute(
-            "INSERT OR IGNORE INTO content_blobs (hash_sha256, content_text, content_type, encoding, file_size_bytes, reference_count) "
-            "VALUES (?, ?, 'text', 'utf-8', ?, 1)",
+            "INSERT OR IGNORE INTO content_blobs (hash_sha256, content_text, content_type, encoding, file_size_bytes) "
+            "VALUES (?, ?, 'text', 'utf-8', ?)",
             (content_hash, content, len(content))
         )
         file_name = path.rsplit("/", 1)[-1]
@@ -860,8 +867,22 @@ class TestReconcile:
 
     def test_doctor_reconcile_freshness_never_run(self, populated_env,
                                                     capsys):
-        """A fleet_machine that's never been reconciled should trigger
-        the freshness invariant."""
+        """A DEPLOYED fleet_machine that's never been reconciled should
+        trigger the freshness invariant.
+
+        The machine must carry last_deployed_at. The invariant is scoped
+        to deployed machines on purpose — its docstring records that on
+        2026-10-03 all five issues it raised were never-deployed rows
+        (two localhost placeholders, one a LAN address with an empty
+        machine_config), and that following the advice would have meant
+        SSHing five hosts to re-measure nothing: "a never-deployed
+        machine is a plan, not drift."
+
+        This test seeded a machine with no last_deployed_at, so it was
+        asserting the behaviour that scoping deliberately removed. The
+        case it meant to cover — deployed, never probed — is the one the
+        invariant calls the case that matters, so seed that instead.
+        """
         from cli.commands.entity import EntityCommands
         import argparse
         # Seed a fleet_machine but NO reconcile_runs for it
@@ -880,9 +901,9 @@ class TestReconcile:
         conn.execute(
             """INSERT INTO fleet_machines
                    (network_id, machine_name, machine_uuid,
-                    target_host, target_user)
+                    target_host, target_user, last_deployed_at)
                  VALUES (?, 'staleHost', 'uuid-stale',
-                         '10.0.0.99', 'root')""",
+                         '10.0.0.99', 'root', datetime('now', '-30 days'))""",
             (nid,),
         )
         conn.commit()
@@ -1643,7 +1664,17 @@ class TestPythonIngest:
                                                               populated_env,
                                                               capsys):
         """Two files that import each other should trigger the
-        no_python_import_cycles doctor invariant."""
+        no_import_cycles doctor invariant.
+
+        Named no_python_import_cycles here until 2026-10-10, three days
+        after the invariant was renamed (it is language-agnostic and
+        found a real TypeScript cycle once scip emitted File imports
+        edges; migration 125 carried its history across the rename).
+        Worth noting the shape: the stale name made doctor_entities exit
+        1 with "Unknown check", which satisfied this test's `rc == 1`
+        for entirely the wrong reason, and only the output assertion
+        caught it.
+        """
         import argparse
         from cli.commands.entity import EntityCommands
         self._seed_python_file(
@@ -1661,7 +1692,7 @@ class TestPythonIngest:
         capsys.readouterr()
         cmd = EntityCommands()
         rc = cmd.doctor_entities(argparse.Namespace(
-            check='no_python_import_cycles'
+            check='no_import_cycles'
         ))
         assert rc == 1
         out = capsys.readouterr().out

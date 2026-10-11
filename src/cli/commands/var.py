@@ -25,6 +25,13 @@ script that relied on that (calling unset idempotently) needs `|| true`.
 Usage examples:
   templedb env var set woofs_projects SUPABASE_URL https://... --target staging
   templedb env var set woofs_projects SECRET_KEY abc123 --secret --keys templedb-primary
+
+  # Keep secrets out of shell history (atuin syncs history off-machine, and
+  # argv is readable via /proc). One trailing newline is stripped.
+  printf '%s' "$TOKEN" | templedb env var set woofs_projects API_TOKEN \
+      --value-stdin --secret --keys age-key
+  templedb env var set woofs_projects API_TOKEN --value-file ./token.txt \
+      --secret --keys age-key
   templedb env var set NODE_ENV production --global
   templedb env var set DEBUG true --tag backend
   templedb env var get woofs_projects SUPABASE_URL --target staging
@@ -232,6 +239,70 @@ def _parse_var_key(stored_name):
         target, name = stored_name.split(':', 1)
         return target, name
     return 'default', stored_name
+
+
+def _add_set_value_args(p):
+    """Add the three mutually exclusive ways to supply a value to `set`.
+
+    Shared by both parser registrations (`templedb var set` and
+    `templedb env var set`) because the three sources have to agree on
+    `value` being optional and on which combinations are rejected. Those
+    two blocks are otherwise copy-pasted and have already drifted once.
+    """
+    p.add_argument('value', nargs='?', default=None,
+                   help='Variable value (omit with --value-stdin/--value-file)')
+    p.add_argument('--value-stdin', action='store_true',
+                   help='Read the value from stdin instead of argv')
+    p.add_argument('--value-file', default=None, metavar='PATH',
+                   help='Read the value from a file instead of argv')
+
+
+def _resolve_set_value(args):
+    """Return the value for `set`, or None after printing why it cannot.
+
+    Values passed on the command line end up in shell history. atuin, which
+    is what runs here, syncs that history to api.atuin.sh — so a secret in
+    argv leaves the machine. Three credentials reached it that way before
+    these flags existed (a Cloudflare token, a Supabase access token and an
+    OpenAI key), each from a plain `env set`/`secret set` with the value
+    inline. argv is also world-readable via /proc while the process runs.
+
+    A single trailing newline is stripped, because the obvious invocations
+    (`printf '%s\\n' "$v" | ...`, `--value-file` on a file created by an
+    editor) would otherwise store a value that no API accepts. Nothing else
+    is touched: leading whitespace and interior newlines are preserved, so a
+    PEM block survives --value-file intact.
+    """
+    sources = [
+        args.value is not None,
+        getattr(args, 'value_stdin', False),
+        getattr(args, 'value_file', None) is not None,
+    ]
+    if sum(1 for s in sources if s) > 1:
+        print("error: give the value once — positionally, "
+              "--value-stdin, or --value-file", file=sys.stderr)
+        return None
+    if not any(sources):
+        print("error: no value given (use a positional value, "
+              "--value-stdin, or --value-file)", file=sys.stderr)
+        return None
+
+    if getattr(args, 'value_stdin', False):
+        raw = sys.stdin.read()
+    elif getattr(args, 'value_file', None) is not None:
+        try:
+            with open(args.value_file, 'r', encoding='utf-8') as fh:
+                raw = fh.read()
+        except OSError as e:
+            print(f"error: could not read --value-file {args.value_file}: {e}",
+                  file=sys.stderr)
+            return None
+    else:
+        return args.value
+
+    if raw.endswith('\n'):
+        raw = raw[:-1]
+    return raw
 
 
 def _get_age_recipient(key_name: str) -> tuple:
@@ -530,7 +601,9 @@ class VarCommands(Command):
 
     def var_set(self, args) -> int:
         key = args.key
-        value = args.value
+        value = _resolve_set_value(args)
+        if value is None:
+            return 1
         target = args.target or 'default'
         profile = getattr(args, 'profile', 'default') or 'default'
 
@@ -1307,7 +1380,7 @@ def register_subcommands(parent_subparsers, cli, prefix='env'):
     p = subparsers.add_parser('set', help='Set a variable')
     p.add_argument('project', nargs='?', help='Project slug (omit with --global or --tag)')
     p.add_argument('key', help='Variable name')
-    p.add_argument('value', help='Variable value')
+    _add_set_value_args(p)
     p.add_argument('--target', '-t', default=None, help='Deployment target (staging, production, ...)')
     p.add_argument('--secret', action='store_true', help='Store as age-encrypted secret')
     p.add_argument('--keys', default=None, help='Comma-separated encryption key names (required with --secret)')
@@ -1396,7 +1469,7 @@ def register(cli):
     p = subparsers.add_parser('set', help='Set a variable')
     p.add_argument('project', nargs='?', help='Project slug (omit with --global or --tag)')
     p.add_argument('key', help='Variable name')
-    p.add_argument('value', help='Variable value')
+    _add_set_value_args(p)
     p.add_argument('--target', '-t', default=None, help='Deployment target (staging, production, …)')
     p.add_argument('--secret', action='store_true', help='Store as age-encrypted secret')
     p.add_argument('--keys', default=None, help='Comma-separated encryption key names (required with --secret)')

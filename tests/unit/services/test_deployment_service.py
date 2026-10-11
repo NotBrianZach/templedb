@@ -11,6 +11,38 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'src'))
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _migrated_db(bootstrap_schema):
+    """Real schema for the collaborators this module does not mock.
+
+    The deploy() tests patch _export_project, _reconstruct_project and
+    _execute_deployment, but two collaborators reach SQLite directly and
+    were missed: DeploymentTrackingService.start_deployment writes
+    deployment_history (dry_run=False path) and the cache lookup at
+    deployment_service.py:177 reads deployment_cache (dry_run=True path).
+    Both surfaced only as "DeploymentError: Deployment failed", because
+    deploy() wraps everything — which is why this looked like a product
+    failure rather than a missing table.
+
+    Mocking those two as well would leave the tests asserting almost
+    nothing, so they get a real schema instead; the expensive steps stay
+    patched.
+
+    The project row exists because the mocked project_repo reports
+    id=1 and deployment_history carries a real FK to projects — without
+    it the insert fails the constraint rather than the lookup. Removed
+    afterwards: the schema DB is shared across the session.
+    """
+    from db_utils import execute
+    execute("INSERT OR IGNORE INTO projects (id, slug, name) "
+            "VALUES (1, 'test-project', 'Deployment Service Test')")
+    try:
+        yield
+    finally:
+        execute("DELETE FROM deployment_history WHERE project_id = 1")
+        execute("DELETE FROM projects WHERE id = 1 AND slug = 'test-project'")
+
+
 @pytest.fixture
 def mock_deployment_context():
     """Create mock context for deployment service"""

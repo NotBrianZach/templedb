@@ -502,7 +502,15 @@ CREATE TABLE IF NOT EXISTS "config_nodes" (
                     'FnCall', 'FnDef', 'LetIn', 'Binding', 'With',
                     'Import', 'Interpolation', 'Conditional', 'Assert',
                     'BinOp', 'UnaryOp', 'Select', 'HasAttr', 'Inherit',
-                    'RawNix'
+                    'RawNix',
+                    -- Carries its own leading '#' in `value`; unnamed, and
+                    -- emitted without a trailing semicolon. Added by
+                    -- migration 135, and required here too: a fresh install
+                    -- applies schema.sql and marks the numbered migrations
+                    -- via-schema.sql WITHOUT running them, so omitting it
+                    -- here would give new databases a config_nodes that
+                    -- rejects Comment while reporting 135 as applied.
+                    'Comment'
                 )),
 
     value       TEXT,
@@ -3021,17 +3029,14 @@ SELECT
 FROM prompt_usage_log
 GROUP BY prompt_type, prompt_id;
 
-CREATE VIEW IF NOT EXISTS related_readmes AS
-SELECT
-    rt1.readme_id as readme_id,
-    rt2.readme_id as related_readme_id,
-    COUNT(*) as shared_topics,
-    AVG(rt1.relevance * rt2.relevance) as relevance_score
-FROM readme_topics rt1
-JOIN readme_topics rt2 ON rt1.topic = rt2.topic AND rt1.readme_id < rt2.readme_id
-GROUP BY rt1.readme_id, rt2.readme_id
-HAVING shared_topics >= 2
-ORDER BY shared_topics DESC, relevance_score DESC;
+-- related_readmes removed 2026-10-10. It selected from readme_topics,
+-- which migration 121 dropped; schema.sql kept creating the view anyway,
+-- so every fresh install got a view that cannot be queried. SQLite
+-- validates a view body only at query time, which is why this applied
+-- cleanly for six migrations and is the exact case the
+-- views_are_runnable invariant was written after. The live database no
+-- longer has either object, so nothing needs a DROP migration — only
+-- fresh installs were still resurrecting it.
 
 CREATE VIEW IF NOT EXISTS secrets_with_keys_view AS
 SELECT

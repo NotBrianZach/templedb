@@ -377,9 +377,29 @@ class Migrator:
                             )
                         skipped_count += 1
 
+                # The non-versioned fragments are subsumed by schema.sql
+                # exactly as the numbered migrations are, so record them
+                # the same way. Without this they stayed absent from
+                # schema_version while status() listed every BASE_FILES
+                # entry, so a correctly-migrated fresh install reported 6
+                # pending migrations permanently — and no code path ever
+                # applies them (the fresh branch handles schema.sql plus
+                # numbered; the existing-DB branch loops numbered only),
+                # so the count could never go down. A status that cannot
+                # reach zero is one people learn to ignore.
+                for filename in BASE_FILES[1:]:
+                    if filename not in applied:
+                        if not dry_run:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO schema_version (version, filename, file_hash, applied_at) "
+                                "VALUES (0, ?, 'via-schema.sql', datetime('now'))",
+                                (filename,),
+                            )
+                        skipped_count += 1
+
                 if not dry_run:
                     conn.commit()
-                    print(f"  Marked {skipped_count} numbered migrations as applied (schema.sql superset)")
+                    print(f"  Marked {skipped_count} migrations as applied (schema.sql superset)")
                     self._verify_critical_tables(conn)
         else:
             # Existing DB — apply only missing numbered migrations
@@ -476,6 +496,22 @@ class Migrator:
                     "INSERT OR IGNORE INTO schema_version (version, filename, file_hash, applied_at) "
                     "VALUES (?, ?, 'pre-existing', datetime('now'))",
                     (version, filename),
+                )
+                stamped += 1
+
+        # Stamp the non-versioned base fragments too. status() reports
+        # every BASE_FILES entry, so leaving these out meant a freshly
+        # stamped legacy DB still showed 6 pending — and the next
+        # `migrate` would then apply pre-migration-framework fragments
+        # (file_tracking_schema.sql, views.sql, ...) on top of a database
+        # that by definition already has their effects. Version 0 like
+        # schema.sql: these carry no version of their own.
+        for filename in BASE_FILES[1:]:
+            if filename not in applied:
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_version (version, filename, file_hash, applied_at) "
+                    "VALUES (0, ?, 'pre-existing', datetime('now'))",
+                    (filename,),
                 )
                 stamped += 1
 

@@ -110,7 +110,8 @@ def _schema():
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                name TEXT, slug TEXT UNIQUE)""",
         """CREATE TABLE IF NOT EXISTS file_types (
-               id INTEGER PRIMARY KEY AUTOINCREMENT, type_name TEXT)""",
+               id INTEGER PRIMARY KEY AUTOINCREMENT, type_name TEXT,
+               category TEXT)""",
         # UNIQUE(project_id, file_path) matches production and must match
         # the other test modules' DDL exactly. conftest gives the whole
         # pytest session ONE database, so these CREATE TABLE IF NOT
@@ -147,16 +148,38 @@ def _schema():
                project_id INTEGER, branch_id INTEGER, file_id INTEGER,
                content_hash TEXT, state TEXT,
                staged_by_session_id INTEGER)""",
+        # Must carry every column CheckoutRepository.resolve() selects —
+        # branch_name, last_sync_at, kind, session_id — not just the ones
+        # this module reads. It used to stop at checkout_at and still
+        # passed, because the shared session database meant some other
+        # module's fuller CREATE TABLE won the race and this one silently
+        # no-opped. Once each module got its own DB the shortfall showed up
+        # as "no such column: branch_name" in all 8 tests. Kept identical
+        # to test_checkout_resolve.py's DDL, per the note above.
         """CREATE TABLE IF NOT EXISTS checkouts (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
-               project_id INTEGER, checkout_path TEXT,
-               is_active INTEGER DEFAULT 1,
-               checkout_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
+               project_id INTEGER NOT NULL, checkout_path TEXT NOT NULL,
+               branch_name TEXT DEFAULT 'main',
+               checkout_at TEXT NOT NULL DEFAULT (datetime('now')),
+               last_sync_at TEXT, is_active BOOLEAN DEFAULT 1,
+               kind TEXT NOT NULL DEFAULT 'scratch',
+               session_id INTEGER,
+               UNIQUE(project_id, checkout_path))""",
+        # resolve() defaults session_id to the caller's session, which
+        # current_session_id() reads from here; started_at matters because
+        # it orders them to break a reused name.
+        """CREATE TABLE IF NOT EXISTS vcs_sessions (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT,
+               author TEXT, ended_at TEXT,
+               started_at TEXT NOT NULL DEFAULT (datetime('now')))""",
     ]
     for stmt in ddl:
         execute(stmt)
     if not query_one("SELECT id FROM file_types LIMIT 1"):
-        execute("INSERT INTO file_types (type_name) VALUES ('python')")
+        # category is NOT NULL in production; seed it rather than relying
+        # on this module's own narrower file_types DDL accepting a NULL.
+        execute("INSERT INTO file_types (type_name, category) "
+                "VALUES ('python', 'backend')")
 
 
 def _reset():

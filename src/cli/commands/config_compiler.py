@@ -100,7 +100,15 @@ def register(cli):
     p.add_argument('--scope', required=True, choices=['system', 'home', 'flake'],
                    help='Which scope to import into')
     p.add_argument('--replace', action='store_true',
-                   help='Replace existing nodes in this scope (default: error if non-empty)')
+                   help='Replace existing nodes in this scope (default: error if non-empty). '
+                        'DESTRUCTIVE: deletes every child of the scope root, and parent_id '
+                        'cascades, so host overlays nested under them go too. Use '
+                        '--replace-shared to refresh shared config and keep the overlays.')
+    p.add_argument('--replace-shared', action='store_true',
+                   help='Replace only the shared (host_id IS NULL) config in this scope, '
+                        'carrying host overlays across to the equivalent path in the new '
+                        'tree. Reports any overlay whose path the imported config no longer '
+                        'contains instead of dropping it.')
     p.add_argument('--project', help='Assign all leaf nodes to this project')
     p.add_argument('--host', help='Import as an overlay for a specific host. '
                                   'Deep-merges into existing shared (host_id=NULL) AttrSets, '
@@ -387,8 +395,14 @@ def _handle_stats(svc):
     return 0
 
 
-def _import_nix_file(svc, filepath, scope, project_slug=None, host_id=None):
+def _import_nix_file(svc, filepath, scope, project_slug=None, host_id=None,
+                     root_id=None):
     """Parse a .nix file and insert into config_nodes for the given scope.
+
+    root_id overrides where the parsed tree is attached; it defaults to the
+    scope's registered root. --replace-shared uses it to build the new tree
+    off to one side before anything is deleted, so a failed parse or import
+    leaves the live tree untouched.
 
     Returns (node_count, error_message).
     Handles structural unwrapping: configuration.nix has two FnDef wrappers,
@@ -415,20 +429,42 @@ def _import_nix_file(svc, filepath, scope, project_slug=None, host_id=None):
             for c in node.children:
                 merge_attrsets(c)
             return
+        # Document order has to survive this merge. The previous form was
+        #     node.children = list(merged.values()) + non_named
+        # which put every named child first and every unnamed one after,
+        # then numbered sort_order from that. Harmless while unnamed
+        # children were rare, but a Comment is unnamed by definition, so
+        # it moved every comment to the end of its parent: the five lines
+        # explaining why grub.enable uses mkDefault ended up below the
+        # attrset they describe, grouped with the twenty-odd SysRq lines.
+        # The nodes survived and the text was still valid Nix; it just no
+        # longer said what it meant, which is worse than losing it.
+        #
+        # So append in encounter order and let a repeated name update the
+        # entry already standing in the list. That also preserves the old
+        # semantics for duplicate plain bindings — last value wins, at the
+        # position of the first occurrence — because a dict reassignment
+        # kept the original insertion slot too.
         merged = {}
-        non_named = []
+        ordered = []
         for c in node.children:
             if c.name and c.node_type in ('AttrSet', 'RecAttrSet'):
                 if c.name in merged:
                     for gc in c.children:
                         merged[c.name].add(gc)
+                    continue
+                merged[c.name] = c
+                ordered.append(c)
+            elif c.name:
+                if c.name in merged:
+                    ordered[ordered.index(merged[c.name])] = c
+                    merged[c.name] = c
                 else:
                     merged[c.name] = c
-            elif c.name:
-                merged[c.name] = c
+                    ordered.append(c)
             else:
-                non_named.append(c)
-        node.children = list(merged.values()) + non_named
+                ordered.append(c)
+        node.children = ordered
         for i, c in enumerate(node.children):
             c.sort_order = i
         for c in node.children:
@@ -464,7 +500,8 @@ def _import_nix_file(svc, filepath, scope, project_slug=None, host_id=None):
 
     # Insert into DB
     from db_utils import execute, query_one
-    root_id = svc.get_root(scope)
+    if root_id is None:
+        root_id = svc.get_root(scope)
 
     def insert_ast(node, parent_db_id):
         # Host-overlay path: reuse existing shared AttrSets under the same name
@@ -514,6 +551,179 @@ def _import_nix_file(svc, filepath, scope, project_slug=None, host_id=None):
     return total, None
 
 
+def _host_subtree_roots(root_id):
+    """Host-tagged nodes whose parent is shared, i.e. overlay attachment points.
+
+    These are the nodes a shared-tree replacement has to carry across. Their
+    descendants travel with them and are not listed: of 409 host-tagged nodes
+    in system scope, 91 are attachment points and the other 318 hang below
+    one.
+
+    Returns [(id, host_id, parent_path, sort_order, name)], where parent_path
+    is the list of names from the scope root down to the node's parent
+    (empty for a direct child of the root).
+    """
+    from db_utils import query_all, query_one
+
+    rows = query_all(
+        """SELECT c.id, c.host_id, c.name, c.sort_order
+             FROM config_nodes c
+             JOIN config_nodes p ON p.id = c.parent_id
+            WHERE c.host_id IS NOT NULL
+              AND p.host_id IS NULL""")
+
+    out = []
+    for r in rows:
+        # Walk up to the root, collecting the names of the parent chain.
+        # The root's own name is excluded: it is the anchor, not a path step.
+        parts, cur = [], query_one(
+            "SELECT parent_id FROM config_nodes WHERE id = ?", (r['id'],))
+        pid = cur['parent_id'] if cur else None
+        reached_root = False
+        while pid is not None:
+            row = query_one(
+                "SELECT id, parent_id, name FROM config_nodes WHERE id = ?",
+                (pid,))
+            if row is None:
+                break
+            if row['id'] == root_id:
+                reached_root = True
+                break
+            parts.append(row['name'])
+            pid = row['parent_id']
+        if not reached_root:
+            # Belongs to a different scope's tree; not ours to move.
+            continue
+        out.append((r['id'], r['host_id'], list(reversed(parts)),
+                    r['sort_order'], r['name']))
+    return out
+
+
+def _ensure_shared_path(svc, anchor_id, parts):
+    """Find (or create) the chain of shared AttrSets named by parts.
+
+    Returns (node_id, created_names). A non-empty created_names means the
+    newly imported config no longer contains that path, so the overlay
+    hanging off it is describing something the shared config dropped — worth
+    reporting rather than silently rebuilding.
+    """
+    from db_utils import query_one
+
+    cur, created = anchor_id, []
+    for name in parts:
+        row = query_one(
+            """SELECT id FROM config_nodes
+                WHERE parent_id = ? AND name = ? AND host_id IS NULL""",
+            (cur, name))
+        if row:
+            cur = row['id']
+        else:
+            cur = svc.add_node(parent_id=cur, name=name, node_type='AttrSet')
+            created.append(name)
+    return cur, created
+
+
+def _handle_replace_shared(svc, args):
+    """Replace a scope's shared tree, carrying host overlays across.
+
+    The gap this fills: --replace deletes every child of the scope root, and
+    parent_id cascades, so the 409 host-tagged nodes under those children go
+    with it — four of the five hosts have never been test-booted from the AST.
+    --host is the opposite operation: it adds an overlay, it cannot refresh
+    the shared config underneath one.
+
+    Order matters, and it is chosen so that nothing is destroyed until the
+    replacement exists:
+
+      1. record every host-overlay attachment point and its path
+      2. build the new tree under a detached temp root (a parse error or a
+         failed import stops here, with the live tree untouched)
+      3. move each overlay from the old tree to its path in the new one
+      4. only now delete the old shared tree
+      5. promote the temp root's children onto the real root
+
+    Overlays are moved to their real new parent rather than parked under a
+    shared holding node, because several attachment points share a name:
+    host 4 alone has eight named `enable`, and
+    UNIQUE(parent_id, name, host_id) would reject the second one.
+    """
+    from db_utils import execute, query_all, query_one
+
+    root_id = svc.get_root(args.scope)
+    if not root_id:
+        print(f"No root for scope '{args.scope}'", file=sys.stderr)
+        return 1
+
+    preserved = _host_subtree_roots(root_id)
+    host_total = query_one(
+        "SELECT COUNT(*) n FROM config_nodes WHERE host_id IS NOT NULL")['n']
+    print(f"Preserving {len(preserved)} host overlay attachment point(s) "
+          f"({host_total} host-tagged nodes in total)")
+
+    # 2. Build the replacement off to one side.
+    temp_id = execute(
+        "INSERT INTO config_nodes (parent_id, name, node_type, scope) "
+        "VALUES (NULL, NULL, 'AttrSet', NULL)")
+    count, err = _import_nix_file(svc, args.file, args.scope, args.project,
+                                  root_id=temp_id)
+    if err:
+        execute("DELETE FROM config_nodes WHERE id = ?", (temp_id,))
+        print(f"Error: {err}", file=sys.stderr)
+        print("Nothing was changed.", file=sys.stderr)
+        return 1
+    print(f"Built replacement tree: {count} nodes")
+
+    # 3. Move overlays across before anything is deleted.
+    moved, rebuilt = 0, []
+    for node_id, host_id, parts, sort_order, name in preserved:
+        new_parent, created = _ensure_shared_path(svc, temp_id, parts)
+        if created:
+            rebuilt.append(('.'.join(parts + [name]), host_id))
+        execute("UPDATE config_nodes SET parent_id = ? WHERE id = ?",
+                (new_parent, node_id))
+        moved += 1
+    print(f"Re-attached {moved} overlay subtree(s)")
+
+    if rebuilt:
+        print()
+        print(f"  {len(rebuilt)} overlay path(s) no longer exist in the "
+              f"imported config and were recreated as empty attrsets:")
+        for path, hid in rebuilt[:10]:
+            h = query_one("SELECT name FROM config_hosts WHERE id = ?", (hid,))
+            print(f"    {path}  (host {h['name'] if h else hid})")
+        if len(rebuilt) > 10:
+            print(f"    ... and {len(rebuilt) - 10} more")
+        print("  Those overlays now override a setting the shared config "
+              "dropped. Check whether they are still wanted.")
+        print()
+
+    # 4. The old tree is now shared-only; dropping its children is safe.
+    old_children = query_all(
+        "SELECT id FROM config_nodes WHERE parent_id = ?", (root_id,))
+    for c in old_children:
+        execute("DELETE FROM config_nodes WHERE id = ?", (c['id'],))
+    print(f"Removed {len(old_children)} old shared child subtree(s)")
+
+    # 5. Promote the replacement onto the real root.
+    for c in query_all("SELECT id FROM config_nodes WHERE parent_id = ?",
+                       (temp_id,)):
+        execute("UPDATE config_nodes SET parent_id = ? WHERE id = ?",
+                (root_id, c['id']))
+    execute("DELETE FROM config_nodes WHERE id = ?", (temp_id,))
+
+    after = query_one(
+        "SELECT COUNT(*) n FROM config_nodes WHERE host_id IS NOT NULL")['n']
+    print(f"Host-tagged nodes: {host_total} before, {after} after")
+    if after != host_total:
+        print("  WARNING: that count should not have changed.",
+              file=sys.stderr)
+        return 1
+
+    s = svc.stats()
+    print(f"Total: {s['total_nodes']} nodes, {s['raw_nix_count']} RawNix")
+    return 0
+
+
 def _handle_import(svc, args):
     """Import a single .nix file."""
     from db_utils import execute, query_all
@@ -522,6 +732,16 @@ def _handle_import(svc, args):
     if not os.path.exists(args.file):
         print(f"File not found: {args.file}", file=sys.stderr)
         return 1
+
+    if getattr(args, 'replace_shared', False):
+        # Mutually exclusive with the other two: --replace would delete the
+        # overlays this mode exists to keep, and --host means "add one
+        # overlay", which is the opposite operation.
+        if getattr(args, 'replace', False) or getattr(args, 'host', None):
+            print("--replace-shared cannot be combined with --replace or "
+                  "--host.", file=sys.stderr)
+            return 1
+        return _handle_replace_shared(svc, args)
 
     host_id = _host_id(svc, args.host) if getattr(args, 'host', None) else None
 

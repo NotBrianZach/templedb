@@ -3126,10 +3126,16 @@ WantedBy=timers.target
         return rows, truncated
 
     def graph_forget(self, args) -> int:
-        """Delete an entity + its relations + observations_archive.
+        """Delete an entity and its relations, KEEPING its archive rows.
 
-        Cascades via FK on relations. observations_archive rows for
-        this entity are also removed (no FK, so manual).
+        Relations cascade via FK. observations_archive rows are left
+        alone and the removal is recorded in entity_deletions instead —
+        see migration 124, which reversed the old behaviour after 12,428
+        scip Symbols vanished on 2026-10-02 and the surviving archive
+        rows were the only thing that made the loss identifiable. The
+        code below has always done this (it counts the rows and reports
+        "archive row(s) kept"); this docstring described the pre-124
+        behaviour until 2026-10-10, which is worth not restoring.
 
         Safety guards:
           - Refuses without --force for kinds that are source-of-truth
@@ -3767,6 +3773,8 @@ WantedBy=timers.target
              self._check_machines_with_generations_are_registered),
             ('generation_log_covers_profile_links',
              self._check_generation_log_covers_profile_links),
+            ('no_undefined_names',
+             self._check_no_undefined_names),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -4426,6 +4434,124 @@ WantedBy=timers.target
                     f"indistinguishable from a working one in sqlite_master")
         return issues
 
+    # Names the interpreter supplies that symtable still reports as free.
+    _IMPLICIT_NAMES = frozenset({
+        "__file__", "__name__", "__doc__", "__package__", "__spec__",
+        "__loader__", "__builtins__", "__debug__",
+        # bound by the compiler in any method that uses zero-arg super()
+        "__class__",
+        # injected into class bodies
+        "__module__", "__qualname__",
+    })
+
+    def _undefined_names_in(self, path: str, source: str):
+        """(name, scope, lineno) for every name referenced but never bound.
+
+        Uses stdlib symtable rather than hand-rolling scope analysis: it
+        is the compiler's own view of what binds where, including
+        comprehensions, globals/nonlocals and closures. Validated against
+        pyflakes over this repo's src/ — exact agreement on 16/16 findings
+        in the pre-fix tree and 1/1 after, with no divergence either way.
+        """
+        import builtins
+        import symtable
+
+        try:
+            top = symtable.symtable(source, path, "exec")
+        except (SyntaxError, ValueError):
+            # A file that will not even parse is a different problem, and
+            # python_syntax is not this check's job to report.
+            return []
+
+        known = set(dir(builtins)) | self._IMPLICIT_NAMES
+        found = []
+
+        def bound_in(table):
+            return {s.get_name() for s in table.get_symbols()
+                    if s.is_assigned() or s.is_imported() or s.is_parameter()}
+
+        def walk(table, visible):
+            bound = bound_in(table)
+            for sym in table.get_symbols():
+                name = sym.get_name()
+                if not sym.is_referenced():
+                    continue
+                if name in bound or name in known or name in visible:
+                    continue
+                found.append((name, table.get_name(), table.get_lineno()))
+            # A class body contributes nothing to the scopes nested in it:
+            # a method cannot see its siblings or class-level assignments
+            # without self/cls. Propagating them here hid real findings
+            # (workitem.py's `metrics` resolved to the method of the same
+            # name), so class scopes pass `visible` through unchanged.
+            inherit = visible if table.get_type() == "class" else visible | bound
+            for child in table.get_children():
+                walk(child, inherit)
+
+        walk(top, set())
+        return found
+
+    def _check_no_undefined_names(self):
+        """Invariant: templedb's own Python has no unbound name references.
+
+        This is the defect class that produced the 2026-10-08 CLI audit.
+        Every one of the eight broken commands it found passed `--help`
+        cleanly, because an undefined name is only an error when the line
+        executes — argparse wiring lives at module level and never touches
+        it. `templedb validate` reported PASS while logging "no such
+        table" to stderr for the same reason: nothing proves a code path
+        runs until it runs.
+
+        A tree-wide scan on 2026-10-09 found 28 such names across 10
+        files, against 5 the hand audit had identified. The arithmetic is
+        the argument for a mechanical check: a reviewer reading for this
+        found under a fifth of it.
+
+        Reads source from the DB rather than disk so it describes what
+        TempleDB holds, which is what `publish` will ship — a working
+        tree can be mid-edit or stale and neither is the claim being made.
+
+        Scoped to templedb's own files on purpose. Other tracked projects
+        have their own quality bars and would park this invariant
+        permanently red, which would make it furniture; `templedb entity
+        dead-imports --slug <slug>` is the per-project surface.
+        """
+        from db_utils import query_all
+
+        rows = query_all(
+            """SELECT pf.file_path, cb.content_text
+                 FROM project_files pf
+                 JOIN projects p ON p.id = pf.project_id
+                 JOIN file_contents fc
+                      ON fc.file_id = pf.id AND fc.is_current = 1
+                 JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
+                WHERE p.slug = 'templedb'
+                  AND pf.status = 'active'
+                  AND pf.file_path LIKE '%.py'
+                  AND cb.content_text IS NOT NULL
+                ORDER BY pf.file_path"""
+        )
+
+        issues = []
+        for row in rows:
+            for name, scope, lineno in self._undefined_names_in(
+                    row['file_path'], row['content_text']):
+                # fleet.py keeps three `*_retired_impl` bodies that its own
+                # docstrings call unreachable, deliberately preserved for
+                # reference "until the module is cut" (migration 130 retired
+                # the feature). Their dangling names cannot raise, and
+                # flagging them would leave this invariant permanently red —
+                # a red invariant nobody can clear is one nobody reads.
+                # Un-retiring means renaming, which restores coverage.
+                if scope.endswith('_retired_impl'):
+                    continue
+                where = f"{row['file_path']}:{lineno}"
+                issues.append(
+                    f"{where}: undefined name '{name}' in {scope}() — "
+                    f"referenced but never bound, so this raises NameError "
+                    f"when the line runs (and --help will not catch it)")
+        return issues
+
     def _check_intent_applied_valid(self):
         """Invariant: edit_intents.applied_commit_id points at a real
         vcs_commits row when non-null."""
@@ -4896,6 +5022,21 @@ WantedBy=timers.target
         way, so the two spellings collapse before comparison -- measured
         2026-10-08: parse(live) == parse(emit(parse(live))).
 
+        Compares the SHARED render, not a host-merged one. configuration.nix
+        and home.nix are the modules every host gets through mkHost; each
+        host's own settings live in hosts/<name>.nix. So the shared tree is
+        what these two files correspond to, and merging the local host's
+        overlays in before comparing adds settings the file is not supposed
+        to contain -- 52 extra lines for zMothership2, which made the check
+        report drift that no edit could ever resolve.
+
+        The check used to do exactly that while its own remedy said to
+        import with `--replace`, which creates shared (host_id IS NULL)
+        nodes. Comparison and remedy disagreed about what the file is. It
+        only looked consistent in August 2026, when one host's overlays
+        were inlined into configuration.nix and the shared and merged
+        renders happened to coincide; un-inlining them exposed it.
+
         Skips rather than fails when tree-sitter is unavailable: absence of
         a parser is not evidence of drift, and `_import_nix_file` already
         treats it as an environment problem.
@@ -4907,7 +5048,6 @@ WantedBy=timers.target
         except Exception:
             return []          # no parser -> no verdict
 
-        import socket
         from pathlib import Path
 
         live = (Path.home() / ".config" / "templedb" / "checkouts"
@@ -4915,7 +5055,6 @@ WantedBy=timers.target
         if not live.is_dir():
             return []
 
-        host = socket.gethostname()
         issues = []
         try:
             svc = ConfigCompilerService()
@@ -4928,9 +5067,25 @@ WantedBy=timers.target
             if not path.exists():
                 continue
             try:
-                generated = svc.generate_file(scope, host_name=host)
+                # host_name=None: the shared render. See the docstring --
+                # these two files are the shared modules, and merging the
+                # local host's overlays in made the comparison unsatisfiable.
+                generated = svc.generate_file(scope, host_name=None)
                 on_disk = parse_nix_file(str(path))
                 from_db = parse_nix_string(generated)
+            except ValueError as e:
+                # "No root for scope '<scope>'" means config_nodes holds
+                # nothing for this scope, so there is no generator output
+                # to compare against. That is the check being
+                # inapplicable, not the file disagreeing — reporting it as
+                # an issue made the invariant red on any database without
+                # AST config (every test fixture, and any install that
+                # never adopted config-ast), which is a false positive in
+                # the one place this check is supposed to be precise.
+                if 'no root for scope' in str(e).lower():
+                    continue
+                issues.append(f"{fname}: could not compare ({type(e).__name__}: {e})")
+                continue
             except Exception as e:
                 issues.append(f"{fname}: could not compare ({type(e).__name__}: {e})")
                 continue
@@ -4939,13 +5094,13 @@ WantedBy=timers.target
                 continue
             if ast_signature(on_disk) != ast_signature(from_db):
                 issues.append(
-                    f"{fname} has diverged from config_nodes for host "
-                    f"{host}: the file on disk is not what `config-ast "
+                    f"{fname} has diverged from the shared config_nodes "
+                    f"tree: the file on disk is not what `config-ast "
                     f"generate` would produce, so regenerating or "
                     f"`ast promote` would silently discard the difference. "
                     f"Inspect with `templedb ast diff <build> live`; adopt "
-                    f"the file with `templedb config-ast import --replace "
-                    f"--scope {scope} {path}`."
+                    f"the file with `templedb config-ast import "
+                    f"--replace-shared --scope {scope} {path}`."
                 )
         return issues
 

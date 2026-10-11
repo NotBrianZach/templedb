@@ -64,14 +64,30 @@ def _schema():
         """CREATE TABLE IF NOT EXISTS project_files (
                id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER,
                file_path TEXT, file_name TEXT, status TEXT DEFAULT 'active')""",
+        # source_authority / observed_at are selected by the prune and
+        # doctor queries, and UNIQUE(kind, external_ref) is what production
+        # relies on, so all three belong here. NOT NULL is kept to match
+        # production, with a default so the inserts below need not spell it
+        # out; without the column at all every query died on
+        # "no such column: e.source_authority".
         """CREATE TABLE IF NOT EXISTS entities (
-               id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT,
-               external_ref TEXT, label TEXT)""",
+               id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
+               external_ref TEXT,
+               source_authority TEXT NOT NULL DEFAULT 'templedb',
+               label TEXT,
+               observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+               created_at TEXT NOT NULL DEFAULT (datetime('now')),
+               attributes_json TEXT,
+               UNIQUE(kind, external_ref))""",
         """CREATE TABLE IF NOT EXISTS relations (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
-               from_entity_id INTEGER REFERENCES entities(id) ON DELETE CASCADE,
-               to_entity_id INTEGER REFERENCES entities(id) ON DELETE CASCADE,
-               kind TEXT)""",
+               from_entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+               kind TEXT NOT NULL,
+               to_entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+               source_authority TEXT NOT NULL DEFAULT 'templedb',
+               observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+               attributes_json TEXT,
+               UNIQUE(from_entity_id, kind, to_entity_id))""",
         """CREATE TABLE IF NOT EXISTS observations_archive (
                id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id INTEGER)""",
         # The count invariant walks every dual-write pair, not just File,
@@ -84,6 +100,40 @@ def _schema():
         """CREATE TABLE IF NOT EXISTS tool_calls (id INTEGER PRIMARY KEY)""",
         """CREATE TABLE IF NOT EXISTS deployment_history (id INTEGER PRIMARY KEY)""",
         """CREATE TABLE IF NOT EXISTS ast_builds (id INTEGER PRIMARY KEY)""",
+        # checkouts and vcs_sessions are reached through the resolver on the
+        # way to the entity tables, so they have to exist even though no
+        # assertion here looks at them. Absent entirely until the suite got
+        # per-module databases — before that another module had already
+        # created them in the shared one, which is also why omitting them
+        # went unnoticed. DDL kept identical to test_checkout_resolve.py.
+        """CREATE TABLE IF NOT EXISTS checkouts (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               project_id INTEGER NOT NULL, checkout_path TEXT NOT NULL,
+               branch_name TEXT DEFAULT 'main',
+               checkout_at TEXT NOT NULL DEFAULT (datetime('now')),
+               last_sync_at TEXT, is_active BOOLEAN DEFAULT 1,
+               kind TEXT NOT NULL DEFAULT 'scratch',
+               session_id INTEGER,
+               UNIQUE(project_id, checkout_path))""",
+        """CREATE TABLE IF NOT EXISTS vcs_sessions (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT,
+               author TEXT, ended_at TEXT,
+               started_at TEXT NOT NULL DEFAULT (datetime('now')))""",
+        # prune_orphans writes an audit row here for every entity it
+        # removes, so the table is part of the behaviour under test, not
+        # incidental. Mirrors production, including relations_removed —
+        # the count of rows lost to FK CASCADE, which leave no other trace.
+        """CREATE TABLE IF NOT EXISTS entity_deletions (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               entity_id INTEGER NOT NULL,
+               entity_kind TEXT NOT NULL,
+               entity_ref TEXT NOT NULL,
+               label TEXT,
+               source_authority TEXT NOT NULL DEFAULT 'templedb',
+               deleted_via TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               relations_removed INTEGER NOT NULL DEFAULT 0,
+               deleted_at TEXT NOT NULL DEFAULT (datetime('now')))""",
     ):
         execute(stmt)
 
@@ -168,8 +218,26 @@ def test_unknown_kind_is_refused(graph, capsys):
 
 # --- cleaning up after them -------------------------------------------
 
-def test_relations_and_archive_rows_go_too(graph):
-    """Leaving either behind would trade one kind of orphan for another."""
+def test_relations_go_but_archive_rows_are_kept(graph):
+    """Relations would be orphans; the archive row is the point.
+
+    This asserted `observations_archive == 0` until 2026-10-10, which is
+    the behaviour migration 124 deliberately REVERSED. Its header is
+    explicit: both delete paths used to remove the matching archive rows
+    and "that is exactly backwards -- the archive is the only durable
+    trace of an entity having existed, so deleting it alongside the
+    entity destroys the evidence at precisely the moment it becomes the
+    sole record." That was written after 12,428 scip Symbols vanished on
+    2026-10-02 and the 2,141 surviving archive rows were the only reason
+    the loss could be identified at all.
+
+    It passed anyway because the suite shared one database and some other
+    module's observations_archive DDL carried an ON DELETE CASCADE that
+    production does not have (production comments entity_id "FK-ish
+    (entity may have been deleted)"). Per-module databases removed the
+    borrowed FK and the assertion inverted — a test encoding the exact
+    bug 124 fixed.
+    """
     live = graph.entity('File', 'p/src/live.py')
     graph.file('src/live.py')
     dead = graph.entity('File', 'p/src/gone.py')
@@ -178,9 +246,15 @@ def test_relations_and_archive_rows_go_too(graph):
     execute("INSERT INTO observations_archive (entity_id) VALUES (?)", (dead,))
     execute("PRAGMA foreign_keys = ON")
     graph.cmd.graph_prune_orphans(_args(dry_run=False))
-    assert query_one("SELECT COUNT(*) c FROM observations_archive")['c'] == 0
+    # Kept on purpose: append-only trace of the entity having existed.
+    assert query_one("SELECT COUNT(*) c FROM observations_archive")['c'] == 1
+    # Relations genuinely cascade — leaving them would orphan them.
     assert query_one("SELECT COUNT(*) c FROM relations")['c'] == 0
     assert _n_entities() == 1
+    # And the removal is accountable, which is what 124 added.
+    assert query_one(
+        "SELECT COUNT(*) c FROM entity_deletions WHERE entity_id=?", (dead,)
+    )['c'] == 1
 
 
 # --- the advice that was wrong ----------------------------------------
