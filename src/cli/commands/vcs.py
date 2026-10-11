@@ -2259,6 +2259,54 @@ class VCSCommands(Command):
             print(f"  Ended:  {session['ended_at']} ({session.get('ended_reason')})")
         return 0
 
+    def session_reconcile(self, args) -> int:
+        """Re-base this session's private HEAD onto the current shared HEAD.
+
+        What publish tells you to do when it refuses with "shared HEAD
+        moved from X to Y". Before this existed the instruction named no
+        command, and a session that lost the race had no way back —
+        session #1060 kept 6 commits that could never be published.
+        """
+        project = fuzzy_match_project(args.project, show_matched=False)
+        if not project:
+            _project_not_found(args.project)
+            return 1
+        branch = self.service.get_default_branch(project['id'])
+        if not branch:
+            print(f"No default branch for {args.project}", file=sys.stderr)
+            return 1
+
+        session_id = self.service.get_current_session()['id']
+        r = self.service.reconcile_session_head(
+            branch_id=branch['id'], session_id=session_id,
+            dry_run=getattr(args, 'dry_run', False))
+
+        if r['action'] == 'no-op':
+            print(f"Nothing to reconcile: {r.get('reason')}")
+            return 0
+        if not r['ok']:
+            print(f"Could not reconcile: {r.get('reason')}", file=sys.stderr)
+            return 1
+
+        label = "Would re-base" if r['action'] == 'dry-run' else "Re-based"
+        print(f"{label} session #{session_id} on branch {branch['branch_name']}")
+        print(f"  commits in this session: {r['session_commits']}")
+        print(f"  base: {r['old_base']} -> {r['new_base']} (shared HEAD)")
+        print(f"  head: {r['old_head']} -> {r['new_head']}")
+        if r['would_regress']:
+            # The case that makes a naive base bump wrong: this session's
+            # newest commit is OLDER than someone else's already-published
+            # one, because commit ids interleave across sessions. Holding
+            # the head at the shared value is what stops publish's
+            # compare-and-swap from moving the branch backwards and
+            # dropping their commit.
+            print(f"  (kept head at the shared HEAD: this session's tip "
+                  f"is older, so advancing to it would drop commit "
+                  f"{r['shared_head']})")
+        if r['action'] != 'dry-run':
+            print(f"\nNow run: templedb publish run {args.project}")
+        return 0
+
     def session_show(self, args) -> int:
         try:
             sid = int(args.id)
@@ -2437,6 +2485,16 @@ def register(cli):
     ss_show = session_sub.add_parser('show', help='Show details of a session and its staged files')
     ss_show.add_argument('id', help='Session ID to show')
     cli.commands['vcs.session.show'] = cmd.session_show
+
+    ss_rec = session_sub.add_parser(
+        'reconcile',
+        help='Re-base this session onto the shared branch HEAD so publish '
+             'can fast-forward (what publish tells you to do when it '
+             'refuses with "shared HEAD moved")')
+    ss_rec.add_argument('-p', '--project', required=True, help='Project slug')
+    ss_rec.add_argument('--dry-run', action='store_true',
+                        help='Show what would change without writing')
+    cli.commands['vcs.session.reconcile'] = cmd.session_reconcile
 
     ss_prune = session_sub.add_parser('prune', help='Delete old ended sessions with no lingering staged rows')
     ss_prune.add_argument('--older-than', type=int, default=30,

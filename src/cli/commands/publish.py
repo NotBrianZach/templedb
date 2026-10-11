@@ -155,8 +155,9 @@ class PublishCommands(Command):
                         f"  Session tip: {result['to_commit_id']}\n"
                         f"  Shared HEAD: {result['shared_head']}\n"
                         f"  Session base: {result['session_base']}\n"
-                        f"  Reconcile: rebase this session's commits onto "
-                        f"the current shared HEAD before publish.",
+                        f"  Fix: templedb vcs session reconcile -p "
+                        f"{args.project} (add --dry-run to see what it "
+                        f"would change), then publish again.",
                         file=sys.stderr,
                     )
                     return 1

@@ -696,6 +696,113 @@ class VCSService(BaseService):
             'count': len(results),
         }
 
+    def reconcile_session_head(
+        self,
+        branch_id: int,
+        session_id: Optional[int] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Re-base a session's private HEAD onto the current shared HEAD.
+
+        publish_session_head refuses when another session has advanced the
+        shared HEAD past this session's fork point, and tells the caller to
+        "rebase this session's commits onto the current shared HEAD". Until
+        2026-10-11 there was no command that did that: `vcs` had no rebase
+        or reconcile, publish's --force is a deprecated no-op, and
+        --push-anyway ships content with no commit rows. So a session that
+        lost the race had no way back and its commits stayed unpublishable
+        — session #1060 sat with 6 stranded commits for that reason.
+
+        What makes the obvious fix wrong: commit ids are global and
+        interleave across sessions. With six sessions committing at once,
+        session 1064 held base=1209 head=1227 while the shared HEAD was
+        1228 (another session's commit). Simply moving base to 1228 would
+        let publish's CAS set the shared HEAD to 1227 — backwards, dropping
+        1228 from the branch. So the new head is max(shared, session tip):
+        never behind what someone else already published, and still ahead
+        when this session genuinely has the newest commit.
+
+        That is sound because a templedb commit is a content snapshot
+        rather than a diff, and materialize reads current file_contents
+        rather than replaying commits. Interleaved commits from different
+        sessions do not have to be ordered against each other to be
+        correct; the branch head only has to name the latest one.
+
+        Itself a compare-and-swap, for the same reason publish is: the
+        shared HEAD is read and then written, and a third session
+        publishing in between would otherwise be silently overwritten.
+        """
+        if session_id is None:
+            session_id = self.get_current_session()['id']
+
+        session_head = self.vcs_repo.query_one(
+            "SELECT id, head_commit_id, base_commit_id FROM vcs_session_heads "
+            "WHERE session_id = ? AND branch_id = ?",
+            (session_id, branch_id),
+        )
+        if not session_head:
+            return {'ok': True, 'action': 'no-op', 'reason':
+                    'no vcs_session_heads row for (session, branch)'}
+
+        shared = self.vcs_repo.query_one(
+            "SELECT head_commit_id FROM vcs_branches WHERE id = ?",
+            (branch_id,))
+        shared_head = shared['head_commit_id'] if shared else None
+
+        if shared_head == session_head['base_commit_id']:
+            return {'ok': True, 'action': 'no-op',
+                    'shared_head': shared_head,
+                    'session_base': session_head['base_commit_id'],
+                    'reason': 'already based on the shared HEAD; '
+                              'publish will fast-forward as-is'}
+
+        # The session's own commits, which are what publish will mark
+        # published. Max rather than the recorded head_commit_id: the
+        # recorded value is the tip as of the last commit, and this is the
+        # value the CAS will write.
+        own = self.vcs_repo.query_one(
+            "SELECT MAX(id) AS tip, COUNT(*) AS n FROM vcs_commits "
+            "WHERE session_id = ? AND branch_id = ?",
+            (session_id, branch_id))
+        own_tip = own['tip'] if own else None
+        own_n = int(own['n']) if own and own['n'] else 0
+
+        candidates = [c for c in (shared_head, own_tip) if c is not None]
+        new_head = max(candidates) if candidates else None
+
+        result = {
+            'ok': True,
+            'action': 'reconciled',
+            'session_commits': own_n,
+            'old_base': session_head['base_commit_id'],
+            'new_base': shared_head,
+            'old_head': session_head['head_commit_id'],
+            'new_head': new_head,
+            'shared_head': shared_head,
+            'would_regress': bool(
+                shared_head is not None and own_tip is not None
+                and own_tip < shared_head),
+        }
+        if dry_run:
+            result['action'] = 'dry-run'
+            return result
+
+        from db_utils import execute_rowcount
+        # `IS` not `=` so a session that forked from an empty branch
+        # (base_commit_id IS NULL) matches, the same reason publish uses it.
+        changed = execute_rowcount(
+            "UPDATE vcs_session_heads SET base_commit_id = ?, "
+            "head_commit_id = ? WHERE id = ? AND base_commit_id IS ?",
+            (shared_head, new_head, session_head['id'],
+             session_head['base_commit_id']))
+        if not changed:
+            result['ok'] = False
+            result['action'] = 'raced'
+            result['reason'] = (
+                'the session head row changed while reconciling; '
+                'another publish or commit landed. Re-run.')
+        return result
+
     def publish_session_head(
         self,
         project_id: int,
