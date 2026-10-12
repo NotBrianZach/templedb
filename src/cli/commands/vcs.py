@@ -2360,6 +2360,19 @@ class VCSCommands(Command):
             print(f"No default branch for {args.project}", file=sys.stderr)
             return 1
 
+        # Strict, like `vcs status`: reconciling is a repair on a session
+        # that already exists and is stuck, so a name that resolves to
+        # nothing must error rather than open a fresh session and report
+        # "nothing to reconcile" about it.
+        #
+        # The flag is the point of the command, not a convenience. The
+        # stranded session is by definition one you are NOT in — it lost
+        # the race and its shell is usually long gone (953, 1057, 1060
+        # were stuck for days across three different agent runs). Reading
+        # only get_current_session() made the repair reachable just from
+        # inside the broken session, which is the one place you cannot
+        # stand.
+        self._apply_session_override(args, allow_create=False)
         session_id = self.service.get_current_session()['id']
         r = self.service.reconcile_session_head(
             branch_id=branch['id'], session_id=session_id,
@@ -2572,10 +2585,11 @@ def register(cli):
 
     ss_rec = session_sub.add_parser(
         'reconcile',
-        help='Re-base this session onto the shared branch HEAD so publish '
+        help='Re-base a session onto the shared branch HEAD so publish '
              'can fast-forward (what publish tells you to do when it '
              'refuses with "shared HEAD moved")')
     ss_rec.add_argument('-p', '--project', required=True, help='Project slug')
+    ss_rec.add_argument('--session', metavar='ID|NAME', help=session_help)
     ss_rec.add_argument('--dry-run', action='store_true',
                         help='Show what would change without writing')
     cli.commands['vcs.session.reconcile'] = cmd.session_reconcile
