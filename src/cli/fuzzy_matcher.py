@@ -181,21 +181,60 @@ class ProjectFuzzyMatcher:
         candidates = {}
         for project in projects:
             candidates[project['slug']] = project
-            # Also index by name if different
-            if project['name'] != project['slug']:
+            # Also index by name if different. The name must exist: this
+            # was an unguarded f-string, so a project with a NULL name got
+            # indexed as the literal "None (slug)" and
+            # `source revisions None flake.nix` resolved to
+            # templedb-backup-service, the one project whose name is NULL.
+            if project['name'] and project['name'] != project['slug']:
                 candidates[f"{project['name']} ({project['slug']})"] = project
 
-        # Fuzzy match (only show "Matched:" for fuzzy matches)
-        matched_key = FuzzyMatcher.match_one(
-            pattern,
-            list(candidates.keys()),
-            entity_name="project",
-            show_matched=show_matched
-        )
+        # Match, then collapse by project before judging ambiguity.
+        #
+        # Two KEYS per project means a pattern matching both of them used
+        # to be reported as "Multiple projects match" — a project held
+        # ambiguous against itself:
+        #
+        #   $ templedb source revisions qa-run README.md
+        #   ERROR Multiple projects match 'qa-run':
+        #   ERROR   ● qa-runner
+        #   ERROR   ○ QA Runner (qa-runner)
+        #
+        # 'qa-run' identifies exactly one project. 11 of 30 projects have a
+        # name that differs from the slug (or a NULL one) and were
+        # therefore reachable only by typing the slug exactly — the single
+        # case fuzzy matching was not needed for. Genuine ambiguity between
+        # two DISTINCT projects must still report, which is why this
+        # collapses on identity rather than loosening the check:
+        # 'trig-nav' legitimately matches trig-navigator and
+        # trig-navigator-godot.
+        matches = FuzzyMatcher.match(pattern, list(candidates.keys()))
 
-        if matched_key:
-            return candidates[matched_key]
+        by_project = {}
+        for m in matches:
+            project = candidates[m.value]
+            # Keep the best-scoring key per project for the display line.
+            prev = by_project.get(project['id'])
+            if prev is None or m.score > prev.score:
+                by_project[project['id']] = m
 
+        if not by_project:
+            logger.error(f"No project matches '{pattern}'")
+            logger.info("  Run 'templedb project list' to see available projects")
+            logger.info("  Or import one: templedb project import /path/to/repo")
+            return None
+
+        if len(by_project) == 1:
+            only = next(iter(by_project.values()))
+            if show_matched:
+                logger.info(f"Matched project: {only.display}")
+            return candidates[only.value]
+
+        logger.error(f"Multiple projects match '{pattern}':")
+        for m in sorted(by_project.values(), key=lambda x: -x.score):
+            score_indicator = "●" if m.score > 0.8 else "○"
+            logger.error(f"  {score_indicator} {m.display}")
+        logger.error("Please specify exact project name")
         return None
 
 

@@ -230,8 +230,14 @@ class ProjectCommands(Command):
             stats = self.service.get_statistics(project['id'])
 
             if stats:
+                # total_lines is SUM(lines_of_code), and SUM over no
+                # non-NULL values is NULL — format(None, ',') raises, so
+                # the command printed six of its eight lines and exited 1
+                # on 10 of 30 projects. prediction_dashboards has 32 files,
+                # 8 file types, a branch and a commit, none of which was
+                # ever shown because it died on the line before.
                 print(f"\nFiles: {stats['file_count']}")
-                print(f"Lines of code: {stats['total_lines']:,}")
+                print(f"Lines of code: {stats['total_lines'] or 0:,}")
                 print(f"File types: {stats['file_types']}")
 
             # Get VCS info

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from repositories import ProjectRepository, VCSRepository
 from cli.core import Command
 from cli.fuzzy_matcher import fuzzy_match_project, fuzzy_match_file
+from db_utils import like_escape
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -1298,10 +1299,10 @@ class VCSCommands(Command):
         # Determine versions to compare
         if args.commit1 and args.commit2:
             # Compare specific commits
-            content1, label1 = self._get_content_at_commit(
+            content1, label1, _ = self._get_content_at_commit(
                 file_row['id'], args.commit1, project['id']
             )
-            content2, label2 = self._get_content_at_commit(
+            content2, label2, _ = self._get_content_at_commit(
                 file_row['id'], args.commit2, project['id']
             )
         elif args.commit1:
@@ -1309,7 +1310,7 @@ class VCSCommands(Command):
             # Often "No differences" when <commit> is the tip and the file
             # hasn't changed since. If that's confusing, `vcs show <commit>`
             # shows the commit vs its parent (what actually landed).
-            content1, label1 = self._get_content_at_commit(
+            content1, label1, _ = self._get_content_at_commit(
                 file_row['id'], args.commit1, project['id']
             )
             content2, label2 = self._get_current_content(file_row['id'])
@@ -1366,17 +1367,34 @@ class VCSCommands(Command):
     def _get_content_by_hash(self, content_hash: str) -> Tuple[Optional[str], Optional[str]]:
         """Get content from content_blobs by hash"""
         blob = self.vcs_repo.query_one("""
-            SELECT content_text, content_type FROM content_blobs
+            SELECT content_text, content_blob, content_type FROM content_blobs
             WHERE hash_sha256 = ?
         """, (content_hash,))
 
         if not blob:
             return None, None
 
-        if blob['content_type'] != 'text':
+        # Decide on the data, not the label. content_type is not a
+        # two-valued column: alongside 'text' and 'binary' it holds
+        # 'text/plain' (9 blobs), 'text/x-shellscript' (5) and
+        # 'binary_asset' (2). An exact `!= 'text'` test called those 14
+        # text blobs binary, and `vcs show` then diffed empty against
+        # empty and printed "No differences" directly under
+        # "✨ added src/services/env_logic.pl (125 lines)" — 22
+        # vcs_file_states rows across 15 commits. 'binary_asset' only
+        # came out right by falling into the same else.
+        #
+        # Same mistake as checkout.py's materialiser had: content_type
+        # says what the file IS, not which column holds it.
+        if blob['content_text'] is not None:
+            return blob['content_text'], "text"
+        if blob['content_blob'] is not None:
             return None, "binary"
 
-        return blob['content_text'], "text"
+        # Neither column populated: the blob row exists but carries no
+        # content. Distinct from "identical", which is what the caller
+        # would otherwise render it as.
+        return None, "missing"
 
     def _get_current_content(self, file_id: int) -> Tuple[Optional[str], str]:
         """Get current file content"""
@@ -1394,18 +1412,35 @@ class VCSCommands(Command):
 
     def _get_content_at_commit(
         self, file_id: int, commit_ref: str, project_id: int
-    ) -> Tuple[Optional[str], str]:
-        """Get file content at a specific commit"""
-        # Find commit by hash prefix or full hash
+    ) -> Tuple[Optional[str], str, str]:
+        """Get file content at a specific commit.
+
+        Returns (content, label, kind). The label is for display; the
+        kind is one of 'text', 'binary', 'missing', 'not-found' or
+        'deleted' so callers can tell "no diff because identical" from
+        "no diff because there is nothing to diff".
+        """
+        # Find commit by hash prefix or full hash.
+        #
+        # The prefix is escaped and the clause carries ESCAPE: this used to
+        # interpolate the caller's string straight into the pattern, so a
+        # single '%' or '_' was a wildcard. `vcs show templedb '%'`
+        # returned an arbitrary commit presented as the one asked for.
+        # Reachable here from `vcs diff`, which passes what the user typed.
+        #
+        # ORDER BY because there was none: among several commits sharing a
+        # prefix the answer was whichever row the planner happened to
+        # return first.
         commit = self.vcs_repo.query_one("""
             SELECT id, commit_hash FROM vcs_commits
             WHERE project_id = ? AND (
-                commit_hash = ? OR commit_hash LIKE ?
+                commit_hash = ? OR commit_hash LIKE ? ESCAPE '\\'
             )
-        """, (project_id, commit_ref, f"{commit_ref}%"))
+            ORDER BY commit_hash
+        """, (project_id, commit_ref, f"{like_escape(commit_ref)}%"))
 
         if not commit:
-            return None, f"commit {commit_ref} not found"
+            return None, f"commit {commit_ref} not found", "not-found"
 
         # Get file state at that commit
         file_state = self.vcs_repo.query_one("""
@@ -1414,16 +1449,19 @@ class VCSCommands(Command):
         """, (commit['id'], file_id))
 
         if not file_state:
-            return None, f"file not in commit {commit['commit_hash'][:8]}"
+            return (None, f"file not in commit {commit['commit_hash'][:8]}",
+                    "not-found")
 
         if file_state['change_type'] == 'deleted':
-            return "", f"deleted in {commit['commit_hash'][:8]}"
+            return "", f"deleted in {commit['commit_hash'][:8]}", "deleted"
 
         if not file_state['content_hash']:
-            return None, f"content unavailable at {commit['commit_hash'][:8]}"
+            return (None,
+                    f"content unavailable at {commit['commit_hash'][:8]}",
+                    "missing")
 
-        content, _ = self._get_content_by_hash(file_state['content_hash'])
-        return content, commit['commit_hash'][:8]
+        content, kind = self._get_content_by_hash(file_state['content_hash'])
+        return content, commit['commit_hash'][:8], kind or "missing"
 
     def _display_diff(
         self, old_content: str, new_content: str,
@@ -1704,9 +1742,11 @@ class VCSCommands(Command):
             FROM vcs_commits c
             JOIN vcs_branches b ON c.branch_id = b.id
             WHERE c.project_id = ? AND (
-                c.commit_hash = ? OR c.commit_hash LIKE ?
+                c.commit_hash = ? OR c.commit_hash LIKE ? ESCAPE '\\'
             )
-        """, (project['id'], args.commit, f"{args.commit}%"))
+            ORDER BY c.commit_hash
+        """, (project['id'], args.commit,
+              f"{like_escape(args.commit)}%"))
 
         if not commit:
             logger.error(f"Commit not found: {args.commit}")
@@ -1761,7 +1801,15 @@ class VCSCommands(Command):
                   FROM vcs_commit_parents p
                   JOIN vcs_commits c ON c.id = p.parent_commit_id
                  WHERE p.commit_id = ?
-                 ORDER BY p.parent_order LIMIT 1
+                 -- parent_commit_id breaks the tie: parent_order is not
+                 -- declared unique, so a merge with two parents recorded
+                 -- at the same order left the choice to the planner, and
+                 -- which parent is picked decides the entire diff.
+                 -- Latent today (all 718 vcs_commit_parents rows are
+                 -- parent_order = 0, which migration 123 already records
+                 -- as a known-constant column, because no merge has been
+                 -- committed yet) and reachable the moment one is.
+                 ORDER BY p.parent_order, p.parent_commit_id LIMIT 1
             """, (commit['id'],))
             parent_hash = parent['commit_hash'] if parent else None
 
@@ -1773,15 +1821,33 @@ class VCSCommands(Command):
                 if not file_row:
                     continue
 
-                new_content, _ = self._get_content_at_commit(
+                new_content, _, new_kind = self._get_content_at_commit(
                     file_row['id'], commit['commit_hash'], project['id'],
                 )
                 if parent_hash:
-                    old_content, _ = self._get_content_at_commit(
+                    old_content, _, old_kind = self._get_content_at_commit(
                         file_row['id'], parent_hash, project['id'],
                     )
                 else:
-                    old_content = ""  # initial commit — no parent
+                    old_content, old_kind = "", "text"  # initial commit
+
+                # Say why there is no diff rather than printing "No
+                # differences", which is what both sides-coerced-to-""
+                # produced: identical output for "unchanged", "binary" and
+                # "the content is gone". Three different facts, and the
+                # first one was a lie for any file whose blob was simply
+                # not text-classified.
+                if "binary" in (old_kind, new_kind):
+                    print()
+                    print(f"  {fs['file_path']}: binary file, no textual diff")
+                    continue
+                if "missing" in (old_kind, new_kind) or (
+                        new_content is None and old_content is None):
+                    print()
+                    print(f"  {fs['file_path']}: content not stored for this "
+                          f"revision (hash present, blob absent) — cannot diff")
+                    continue
+
                 if old_content is None:
                     old_content = ""
                 if new_content is None:

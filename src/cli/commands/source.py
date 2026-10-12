@@ -118,6 +118,24 @@ class SourceCommands(Command):
             sys.stdout.write(row['content_text'] or '')
         elif row['content_blob'] is not None:
             sys.stdout.buffer.write(bytes(row['content_blob']))
+        else:
+            # Neither column has content. The historical half of the
+            # source_snapshots view LEFT JOINs content_blobs, so a file
+            # state can name a content_hash with no blob behind it — 523
+            # vcs_file_states rows do right now. Both branches above are
+            # then false and this used to `return 0` having written
+            # nothing, which to anything consuming stdout (sha256sum, a
+            # patch, a diff) is indistinguishable from a genuinely empty
+            # file. Say so and fail, because a caller piping this cannot
+            # tell the difference any other way.
+            logger.error(
+                f"No content stored for {args.file_path} at revision "
+                f"{matched_rev}: content_hash {row['content_hash']} has no "
+                f"row in content_blobs. The snapshot records that the file "
+                f"had content and the content is gone; nothing was written "
+                f"to stdout."
+            )
+            return 1
         return 0
 
     def revisions(self, args) -> int:
@@ -159,10 +177,19 @@ class SourceCommands(Command):
                 # historical data has mixed case from an old templedb
                 # VCS format. Truncate to 12 chars either way.
                 rev = rev.lower()[:12]
+            # content_hash, file_size_bytes and line_count are all NULL on
+            # a change_type='deleted' row (29 such rows live). Slicing the
+            # hash unconditionally raised TypeError on the first deletion
+            # — after every row above it had already printed, so the output
+            # was a truncated success followed by a failure, and a file
+            # with 12 revisions showed 8.
+            h = r['content_hash']
+            size = r['file_size_bytes']
+            lines = r['line_count']
             print(f"  {rev:<14} {r['observed_at']}  "
-                  f"{r['content_hash'][:12]}  "
-                  f"{r['file_size_bytes']} bytes, "
-                  f"{r['line_count']} lines")
+                  f"{h[:12] if h else '(deleted)  '}  "
+                  f"{size if size is not None else '-'} bytes, "
+                  f"{lines if lines is not None else '-'} lines")
         return 0
 
 
