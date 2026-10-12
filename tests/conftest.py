@@ -233,9 +233,24 @@ def temp_project_dir() -> Generator[Path, None, None]:
 
 @pytest.fixture
 def temp_workspace() -> Generator[Path, None, None]:
-    """Create a temporary workspace directory"""
+    """Create a temporary workspace directory.
+
+    Restores write permission before deleting. `project checkout` ends by
+    locking the tree to 0444 (lock_checkout, so people edit through
+    `templedb edit` rather than the generated output), and
+    shutil.rmtree(ignore_errors=True) then silently fails on every file —
+    leaving the directory behind and saying nothing, because the errors
+    are ignored. Any test that checks out into here leaked its workspace.
+    """
     workspace = tempfile.mkdtemp(prefix='templedb_workspace_')
     yield Path(workspace)
+    for root, dirs, files in os.walk(workspace):
+        for name in dirs + files:
+            try:
+                p = os.path.join(root, name)
+                os.chmod(p, os.stat(p).st_mode | 0o200)
+            except OSError:
+                pass
     shutil.rmtree(workspace, ignore_errors=True)
 
 
@@ -381,6 +396,110 @@ def bootstrap_schema(_schema_db: str) -> Generator[str, None, None]:
             os.environ["TEMPLEDB_PATH"] = prev_env
         else:
             os.environ.pop("TEMPLEDB_PATH", None)
+
+
+@pytest.fixture
+def seeded_project(bootstrap_schema: str) -> Generator[str, None, None]:
+    """A project that really exists in the test DB, with files to check out.
+
+    For the tests that drive `templedb project checkout` as a subprocess.
+    They used to hardcode `project_slug = "templedb"  # Use existing
+    project` — the developer's production database, 827 files and all. Run
+    against the suite's own DB the subprocess failed with "no such table:
+    projects", and run against the real one it wrote a few hundred
+    read-only files into /tmp and registered a checkout row. Neither is a
+    test.
+
+    The subprocess inherits TEMPLEDB_PATH from os.environ (run_templedb_cmd
+    passes no env=), and bootstrap_schema points that at the migrated
+    schema DB — so the child process sees these rows.
+
+    Twelve files, and the count is load-bearing rather than arbitrary.
+    test_commit_empty_workspace_fails expects a commit from an empty
+    workspace to fail, and what actually makes it fail is commit's
+    mass-deletion guard: MASS_DELETE_FLOOR = 10 files AND
+    MASS_DELETE_FRACTION = 0.5 missing. Below ten files an empty workspace
+    is just a legitimate commit that deletes everything, and the test
+    failed with "assert 0 != 0" against a two-file project. It had been
+    passing only because it ran against the 827-file production project.
+
+    test-workflow-deleteme.md is here for the same class of reason:
+    test_checkout_edit_commit_workflow deletes it and expects the commit to
+    carry an add or a modify too. If the file is absent the test creates
+    and commits it first, and that intermediate commit consumes the add and
+    the modify, leaving the final commit holding only a deletion. Against
+    the real database the file already existed as litter from earlier runs,
+    so the branch was skipped and the test passed. Providing it keeps the
+    sequence honest instead of depending on debris.
+
+    Rows are removed afterwards because the schema DB is shared across the
+    session. Note this is also why the fixture does not reuse a fixed slug:
+    five projects named proj_a/proj_b/proj_ctx/proj_sess/proj_missing are
+    sitting in the production database from a test run on 2026-08-29 that
+    wrote to it, which is what the pytest_runtest_setup guard now prevents.
+    """
+    slug = f"ckout-probe-{os.getpid()}"
+
+    execute("INSERT OR IGNORE INTO file_types (type_name, category) "
+            "VALUES ('python', 'backend')")
+    ft = query_one("SELECT id FROM file_types WHERE type_name = 'python'")
+
+    execute("INSERT INTO projects (slug, name, repo_url, git_branch) "
+            "VALUES (?, ?, '', 'main')", (slug, slug))
+    project = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
+    pid = project['id']
+
+    # A branch, because the checkout→edit→commit tests commit afterwards.
+    execute("INSERT INTO vcs_branches (project_id, branch_name, is_default) "
+            "VALUES (?, 'main', 1)", (pid,))
+
+    import hashlib
+    files = [
+        ("README.md", "# probe\n"),
+        ("src/main.py", "def main():\n    return 1\n"),
+        # Deleted by test_checkout_edit_commit_workflow; see the docstring.
+        ("test-workflow-deleteme.md", "# file to delete\n"),
+    ]
+    # Filler up to twelve, to clear MASS_DELETE_FLOOR.
+    files += [(f"src/mod_{i:02d}.py", f"VALUE = {i}\n") for i in range(1, 10)]
+
+    for path, text in files:
+        h = hashlib.sha256(text.encode()).hexdigest()
+        # reference_count is left to the increment_blob_reference trigger;
+        # presetting it is what made blob_refcount_is_accurate report
+        # phantom drift in another fixture.
+        execute("INSERT OR IGNORE INTO content_blobs "
+                "(hash_sha256, content_text, content_type, encoding, "
+                " file_size_bytes) VALUES (?, ?, 'text', 'utf-8', ?)",
+                (h, text, len(text)))
+        execute("INSERT INTO project_files "
+                "(project_id, file_type_id, file_path, file_name, status) "
+                "VALUES (?, ?, ?, ?, 'active')",
+                (pid, ft['id'] if ft else None, path, path.rsplit('/', 1)[-1]))
+        fid = query_one("SELECT id FROM project_files WHERE project_id = ? "
+                        "AND file_path = ?", (pid, path))['id']
+        execute("INSERT INTO file_contents "
+                "(file_id, content_hash, file_size_bytes, is_current) "
+                "VALUES (?, ?, ?, 1)", (fid, h, len(text)))
+
+    try:
+        yield slug
+    finally:
+        # vcs_session_heads must go first and by hand. Its session_id and
+        # branch_id cascade, but head_commit_id references vcs_commits with
+        # no ON DELETE CASCADE and is NOT NULL — so when deleting the
+        # project cascades branches and commits in an unspecified order,
+        # that column can be left pointing at a row already gone and the
+        # whole teardown fails with "FOREIGN KEY constraint failed". These
+        # tests commit, and their commits are session-scoped, so the row
+        # exists whenever a test got as far as committing.
+        execute("DELETE FROM vcs_session_heads WHERE branch_id IN "
+                "(SELECT id FROM vcs_branches WHERE project_id = ?)", (pid,))
+        # Everything else hangs off the project by cascade: branches ->
+        # commits -> file states, files -> contents and snapshots,
+        # checkouts. content_blobs are left alone (file_contents references
+        # them ON DELETE RESTRICT, and they are shared by hash anyway).
+        execute("DELETE FROM projects WHERE id = ?", (pid,))
 
 
 @pytest.fixture

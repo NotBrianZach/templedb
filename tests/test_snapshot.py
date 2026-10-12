@@ -23,7 +23,7 @@ from conftest import (
 
 @pytest.mark.workflow
 @pytest.mark.integration
-def test_snapshot_updates_after_commit(temp_workspace: Path):
+def test_snapshot_updates_after_commit(temp_workspace: Path, seeded_project: str):
     """
     Test that snapshots update after commit to prevent false conflicts
 
@@ -31,7 +31,7 @@ def test_snapshot_updates_after_commit(temp_workspace: Path):
     snapshots should be updated so the next commit doesn't see a false conflict.
     """
 
-    project_slug = "templedb"
+    project_slug = seeded_project
 
     # Initial checkout
     checkout_project(project_slug, temp_workspace, force=True)
@@ -59,10 +59,10 @@ def test_snapshot_updates_after_commit(temp_workspace: Path):
 
 
 @pytest.mark.workflow
-def test_multiple_files_sequential_commits(temp_workspace: Path):
+def test_multiple_files_sequential_commits(temp_workspace: Path, seeded_project: str):
     """Test that multiple files can be edited across sequential commits"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
 
     checkout_project(project_slug, temp_workspace, force=True)
 
@@ -84,10 +84,10 @@ def test_multiple_files_sequential_commits(temp_workspace: Path):
 
 
 @pytest.mark.workflow
-def test_commit_after_failed_commit(temp_workspace: Path):
+def test_commit_after_failed_commit(temp_workspace: Path, seeded_project: str):
     """Test that commit works after a previous commit failed"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
 
     checkout_project(project_slug, temp_workspace, force=True)
 
@@ -112,10 +112,10 @@ def test_commit_after_failed_commit(temp_workspace: Path):
 
 
 @pytest.mark.workflow
-def test_re_checkout_after_commit(temp_workspace: Path):
+def test_re_checkout_after_commit(temp_workspace: Path, seeded_project: str):
     """Test that re-checkout after commit works correctly"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
 
     # Checkout, edit, commit
     checkout_project(project_slug, temp_workspace, force=True)

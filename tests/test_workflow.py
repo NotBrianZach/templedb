@@ -32,10 +32,10 @@ from conftest import (
 
 @pytest.mark.workflow
 @pytest.mark.integration
-def test_checkout_edit_commit_workflow(temp_workspace: Path):
+def test_checkout_edit_commit_workflow(temp_workspace: Path, seeded_project: str):
     """Test complete checkout → edit → commit workflow"""
 
-    project_slug = "templedb"  # Use existing project
+    project_slug = seeded_project
     workspace = temp_workspace
 
     # Step 1: Checkout project
@@ -91,9 +91,18 @@ def test_checkout_edit_commit_workflow(temp_workspace: Path):
 
     assert len(commit_files) > 0, "Commit should have file changes"
 
-    # Should have at least: 1 add, 1 modify, 1 delete
+    # Should have at least: 1 add, 1 modify, 1 delete.
+    #
+    # Past tense: vcs_file_states.change_type is CHECKed against
+    # ('added', 'modified', 'deleted', 'renamed', 'unmodified'), so the
+    # 'add'/'modify' this asserted could never match. The test never
+    # reached the assertion to find out — it died at the checkout
+    # subprocess, which is what the seeded_project fixture fixed.
     change_types = {cf['change_type'] for cf in commit_files}
-    assert 'add' in change_types or 'modify' in change_types, "Should have additions or modifications"
+    assert {'added', 'modified'} & change_types, (
+        f"expected an addition or a modification, got {sorted(change_types)}")
+    assert 'deleted' in change_types, (
+        f"expected the deletion to be recorded, got {sorted(change_types)}")
 
     # Step 5: Test round-trip (checkout again and verify)
     workspace2 = temp_workspace.parent / f"{temp_workspace.name}_roundtrip"
@@ -122,16 +131,28 @@ def test_checkout_edit_commit_workflow(temp_workspace: Path):
         )
 
     finally:
-        # Cleanup workspace2
+        # Cleanup workspace2. Restore write permission first: `project
+        # checkout` locks the tree to 0444, and rmtree(ignore_errors=True)
+        # then fails on every file and says nothing, leaving the directory
+        # in /tmp. temp_workspace does the same for the dir it owns; this
+        # one is created by the test, so it needs its own.
+        import os
         import shutil
+        for root, dirs, fnames in os.walk(workspace2):
+            for name in dirs + fnames:
+                try:
+                    p = os.path.join(root, name)
+                    os.chmod(p, os.stat(p).st_mode | 0o200)
+                except OSError:
+                    pass
         shutil.rmtree(workspace2, ignore_errors=True)
 
 
 @pytest.mark.workflow
-def test_checkout_creates_directory(temp_workspace: Path):
+def test_checkout_creates_directory(temp_workspace: Path, seeded_project: str):
     """Test that checkout creates workspace directory if it doesn't exist"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
     new_workspace = temp_workspace / "subdir" / "workspace"
 
     # Directory doesn't exist yet
@@ -150,10 +171,10 @@ def test_checkout_creates_directory(temp_workspace: Path):
 
 
 @pytest.mark.workflow
-def test_commit_empty_workspace_fails(temp_workspace: Path):
+def test_commit_empty_workspace_fails(temp_workspace: Path, seeded_project: str):
     """Test that committing an empty workspace fails gracefully"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
 
     # Try to commit empty workspace (no checkout)
     result = commit_project(

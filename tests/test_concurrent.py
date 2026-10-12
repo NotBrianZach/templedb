@@ -43,10 +43,10 @@ def _migrated_db(bootstrap_schema):
 
 @pytest.mark.concurrent
 @pytest.mark.integration
-def test_non_conflicting_concurrent_edits(temp_workspace: Path):
+def test_non_conflicting_concurrent_edits(temp_workspace: Path, seeded_project: str):
     """Test that agents editing different files can both commit successfully"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
     workspace_a = temp_workspace / "agent_a"
     workspace_b = temp_workspace / "agent_b"
 
@@ -73,10 +73,10 @@ def test_non_conflicting_concurrent_edits(temp_workspace: Path):
 
 @pytest.mark.concurrent
 @pytest.mark.integration
-def test_conflicting_concurrent_edits_detected(temp_workspace: Path):
+def test_conflicting_concurrent_edits_detected(temp_workspace: Path, seeded_project: str):
     """Test that conflict is detected when agents edit the same file"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
     workspace_a = temp_workspace / "agent_a"
     workspace_b = temp_workspace / "agent_b"
 
@@ -111,10 +111,10 @@ def test_conflicting_concurrent_edits_detected(temp_workspace: Path):
 
 @pytest.mark.concurrent
 @pytest.mark.integration
-def test_force_overwrite_strategy(temp_workspace: Path):
+def test_force_overwrite_strategy(temp_workspace: Path, seeded_project: str):
     """Test that --force allows overwriting conflicting changes"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
     workspace_a = temp_workspace / "agent_a"
     workspace_b = temp_workspace / "agent_b"
 
@@ -144,10 +144,10 @@ def test_force_overwrite_strategy(temp_workspace: Path):
 
 
 @pytest.mark.concurrent
-def test_version_numbers_increment(temp_workspace: Path):
+def test_version_numbers_increment(temp_workspace: Path, seeded_project: str):
     """Test that file version numbers increment correctly after commits"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
 
     # Get a specific file's version
     file_row = query_one("""
@@ -184,10 +184,10 @@ def test_version_numbers_increment(temp_workspace: Path):
 
 @pytest.mark.concurrent
 @pytest.mark.slow
-def test_checkout_snapshots_recorded(temp_workspace: Path):
+def test_checkout_snapshots_recorded(temp_workspace: Path, seeded_project: str):
     """Test that checkout snapshots are recorded for conflict detection"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
 
     # Get initial snapshot count
     initial_count = query_one("""
@@ -213,10 +213,10 @@ def test_checkout_snapshots_recorded(temp_workspace: Path):
 
 
 @pytest.mark.concurrent
-def test_sequential_commits_no_conflict(temp_workspace: Path):
+def test_sequential_commits_no_conflict(temp_workspace: Path, seeded_project: str):
     """Test that sequential commits from same workspace don't create false conflicts"""
 
-    project_slug = "templedb"
+    project_slug = seeded_project
 
     # Checkout once
     checkout_project(project_slug, temp_workspace, force=True)
