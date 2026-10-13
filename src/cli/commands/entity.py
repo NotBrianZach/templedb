@@ -3767,6 +3767,8 @@ WantedBy=timers.target
              self._check_baseline_rows_still_describe_reality),
             ('file_states_have_recoverable_content',
              self._check_file_states_have_recoverable_content),
+            ('active_files_have_current_content',
+             self._check_active_files_have_current_content),
             ('symbol_refs_are_authority_disjoint',
              self._check_symbol_refs_are_authority_disjoint),
             ('machines_with_generations_are_registered',
@@ -3915,12 +3917,24 @@ WantedBy=timers.target
         if args.violated_only:
             clauses.append("status != 'ok'")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        # id DESC is the tiebreaker, and it is load-bearing. ran_at has
+        # second granularity and a doctor run inserts one row per check
+        # in well under a second, so a full pass leaves ~46 rows sharing
+        # a timestamp. `ORDER BY ran_at DESC LIMIT 20` then returns an
+        # arbitrary 20 of those ties — SQLite does not promise an order
+        # among equal keys — so the newest run was reported as a random
+        # subset of itself, and which subset moved with physical row
+        # layout. That is the wrong answer for the one question this
+        # command exists to answer ("when did this drift first appear?"),
+        # and it made test_doctor_history_prints pass or fail depending
+        # on what ran before it. id is monotonic per insert, so within a
+        # tied second it recovers the actual order the checks ran in.
         rows = query_all(
             f"""SELECT id, check_name, ran_at, duration_ms, status,
                        issue_count, sample_issues_json
                   FROM invariant_checks
                   {where}
-                 ORDER BY ran_at DESC
+                 ORDER BY ran_at DESC, id DESC
                  LIMIT ?""",
             tuple(params) + (int(args.limit),),
         )
@@ -4226,6 +4240,76 @@ WantedBy=timers.target
             f"recoverable content hash ({r['oldest'][:10]}..{r['newest'][:10]}) "
             f"— the commit recorded that the file had content and the "
             f"content is gone. Not repairable; this must not grow"
+            for r in rows]
+
+    def _check_active_files_have_current_content(self):
+        """Invariant: an active project_files row has content behind it.
+
+        A path-only row — `status='active'` with no `is_current`
+        file_contents row — is the index asserting a file exists with
+        nothing behind it, and every consumer disagrees about what that
+        means. get_files_for_project INNER JOINs file_contents when
+        include_content=True and LEFT JOINs when False, so the
+        materializer silently omits the path from every workspace it
+        writes while commit's scanner finds it absent from disk and
+        calls it a deletion. woofs_projects lost 8 files that way on
+        2026-10-07; commit.py now skips such paths instead.
+
+        Why this check and not that skip: the skip makes the row
+        harmless, not absent. It stays in `file ls`, it inflates the
+        denominator of commit's mass-deletion guard, and it is counted
+        by nothing — classify_edit_tree and _warn_if_behind both INNER
+        JOIN file_contents, so a path-only row is invisible to the two
+        functions that decide whether a tree is safe to commit from.
+        commit.py's comment named THIS as the reporter and pointed at
+        file_states_have_recoverable_content, which checks a different
+        table (vcs_file_states sentinels) and would never have fired.
+        The coverage was asserted in a comment and did not exist.
+
+        Measured 2026-10-13: 10 rows. templedb's
+        src/cli/commands/workitem.py was dropped by commit 43b437da
+        ("whose tables migration 070 removed") and its content rows went
+        with it while status stayed 'active' — so the fix for a deleted
+        file is `status='deleted'`, which tombstones the path, not
+        deleting the content and leaving the index claiming it. The nine
+        in woofs_projects are a second mechanism: .env files and
+        playwright artifacts the scanner indexed and whose content was
+        deliberately never stored.
+
+        Repairable, unlike the sentinel rows: nothing was lost, the
+        index is just wrong about a file's state.
+
+        Scoped to files the DB has committed at least once, which is
+        what makes this a defect rather than a phase. The importer
+        indexes an untracked file it scans into project_files without a
+        file_contents row — content lands at commit — so between a
+        `vcs status --refresh` and the next commit, a brand-new file is
+        legitimately an active row with no content. Requiring a
+        non-deleted vcs_file_states row excludes that window while still
+        catching both ways the rows are actually made: a resurrected
+        tombstone (whose earlier 'added'/'modified' states remain) and a
+        commit whose file_contents write silently matched nothing.
+        """
+        from db_utils import query_all
+        rows = query_all(
+            """SELECT p.slug, COUNT(*) AS n,
+                      MIN(pf.file_path) AS example
+                 FROM project_files pf
+                 JOIN projects p ON p.id = pf.project_id
+                WHERE pf.status = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM file_contents fc
+                       WHERE fc.file_id = pf.id AND fc.is_current = 1)
+                  AND EXISTS (
+                      SELECT 1 FROM vcs_file_states v
+                       WHERE v.file_id = pf.id
+                         AND v.change_type <> 'deleted')
+                GROUP BY p.slug ORDER BY n DESC""")
+        return [
+            f"{r['slug']}: {r['n']} active file row(s) have no current "
+            f"content (e.g. {r['example']}) — the materializer skips them "
+            f"and commit's scanner reads them as deletions. Set "
+            f"status='deleted' if the file is gone, or store its content"
             for r in rows]
 
     def _check_symbol_refs_are_authority_disjoint(self):

@@ -2783,8 +2783,17 @@ class TestReconcileHistory:
         cmd = EntityCommands()
         cmd.doctor_entities(argparse.Namespace(check=None))
         capsys.readouterr()
+        # Filtered by check rather than taking the newest 20 unfiltered.
+        # A doctor pass inserts ~46 rows in the same ran_at second, so
+        # `limit=20` with no filter showed an arbitrary slice of one run
+        # and this assertion passed or failed on what ran before it.
+        # doctor_history now breaks ran_at ties by id, which makes the
+        # unfiltered form deterministic — but asking for the check whose
+        # name is asserted does not depend on the limit at all, and
+        # covers the --check filter while it is here.
         rc = cmd.doctor_history(argparse.Namespace(
-            check=None, violated_only=False, limit=20
+            check='relations_reference_valid_entities',
+            violated_only=False, limit=20
         ))
         assert rc == 0
         out = capsys.readouterr().out

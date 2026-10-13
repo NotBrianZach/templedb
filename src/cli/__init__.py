@@ -86,7 +86,13 @@ def _register_top_level_aliases():
     )
     commit_parser.add_argument('project_slug', help='Project slug')
     commit_parser.add_argument('workspace_dir', help='Workspace directory')
-    commit_parser.add_argument('-m', '--message', required=True, help='Commit message')
+    # The registration that `templedb commit` actually uses. Three
+    # parsers declare this command — here, project.py's `project commit`
+    # subparser, and commit.py's own — so an option added to one of the
+    # other two is invisible from the top level, which is how -F reached
+    # `vcs commit` and not this one. See cli/commit_message.py.
+    from cli.commit_message import add_message_args
+    add_message_args(commit_parser)
     commit_parser.add_argument('--force', action='store_true', help='Force commit (ignore conflicts)')
     commit_parser.add_argument('--strategy',
                                choices=['abort', 'force'],

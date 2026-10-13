@@ -197,7 +197,10 @@ class CommitCommand:
         """
         project_slug = args.project_slug
         workspace_dir = Path(args.workspace_dir).resolve()
-        message = args.message
+        from cli.commit_message import resolve_message
+        message = resolve_message(args)
+        if message is None:
+            return 1
 
         logger.info(f"Committing changes for project: {project_slug}")
         logger.info(f"Workspace directory: {workspace_dir}")
@@ -383,10 +386,31 @@ class CommitCommand:
                 # Get or create 'main' branch
                 branch_id = self.vcs_repo.get_or_create_branch(project['id'], 'main')
 
-                # Generate commit hash (simple timestamp-based for now)
+                # Generate commit hash. [:16].upper(), matching
+                # `vcs commit` — NOT [:40] lowercase, which is what this
+                # minted until 2026-10-13.
+                #
+                # That format is git's, and these ids are native: nothing
+                # here is a git object. Migration 126 gave commit_hash a
+                # single meaning on the premise that 40-char lowercase
+                # identified a git SHA from git-history import, moved
+                # those to git_commit_hash, and left this writer alone —
+                # so `templedb commit` kept minting values that the new
+                # rule reads as git SHAs. commit_hash_is_canonical went
+                # red again and climbed to 77 rows across five projects,
+                # and the two namespaces it exists to separate were
+                # indistinguishable in exactly the rows this produced.
+                #
+                # Safe to change because nothing derives meaning from the
+                # length: get_commit_by_hash matches either column by
+                # prefix, and no schema constraint or test asserts 40.
+                # Pre-existing rows stay ambiguous and need a migration;
+                # this only stops new ones.
                 import hashlib
                 import time
-                commit_hash = hashlib.sha256(f"{project['id']}-{message}-{time.time()}".encode()).hexdigest()[:40]
+                commit_hash = hashlib.sha256(
+                    f"{project['id']}-{message}-{time.time()}".encode()
+                ).hexdigest()[:16].upper()
 
                 # Link to the branch's current head. Read it before
                 # create_commit, which fires update_branch_head_on_commit and
@@ -638,7 +662,13 @@ class CommitCommand:
             # intent, and recording a deletion here destroys the DB row.
             # Observed on woofs_projects 2026-10-07, which lost 8 files
             # this way. Skip it; `doctor entities`
-            # (file_states_have_recoverable_content) is what reports these.
+            # (active_files_have_current_content) is what reports these.
+            # That pointer previously named
+            # file_states_have_recoverable_content, which checks
+            # vcs_file_states for 'DELETED' content-hash sentinels — a
+            # different table and a different failure. So from 2026-10-07
+            # to 2026-10-13 this comment asserted coverage that did not
+            # exist, and the 10 live path-only rows went unreported.
             if file_info['content_hash'] is None:
                 logger.warning(
                     f"Skipping {path}: tracked but has no current content in "
@@ -803,8 +833,26 @@ class CommitCommand:
                 change.content.file_size
             ), commit=False)
 
-        # Update file_contents reference with version increment
-        self.file_repo.execute("""
+        # Update file_contents reference with version increment.
+        #
+        # Via execute_rowcount, because a bare UPDATE here was a silent
+        # no-op on a file with no is_current row — and vcs_file_states
+        # below then recorded a content_hash claiming the file HAS that
+        # content. The commit reported success, the blob landed in
+        # content_blobs, and the index never pointed at it: a path-only
+        # row, with history asserting otherwise.
+        #
+        # Reachable from an ordinary sequence, not a corrupt DB. The
+        # importer indexes an untracked file it scans into project_files
+        # (and content_blobs, and working state) without a file_contents
+        # row, so `vcs status --refresh` followed by a commit takes the
+        # MODIFIED branch — the row exists, its hash is NULL, NULL !=
+        # the disk hash — rather than the added branch that would have
+        # inserted one. Reproduced 2026-10-13 committing this very
+        # change: src/cli/commit_message.py landed as an active row with
+        # no content, recorded in vcs_file_states as 'modified'.
+        from db_utils import execute_rowcount
+        rows = execute_rowcount("""
             UPDATE file_contents
             SET content_hash = ?,
                 file_size_bytes = ?,
@@ -818,6 +866,18 @@ class CommitCommand:
             change.content.line_count,
             change.file_id
         ), commit=False)
+        if not rows:
+            self.file_repo.execute("""
+                INSERT INTO file_contents
+                    (file_id, content_hash, file_size_bytes, line_count,
+                     version, is_current)
+                VALUES (?, ?, ?, ?, 1, 1)
+            """, (
+                change.file_id,
+                change.content.hash_sha256,
+                change.content.file_size,
+                change.content.line_count,
+            ), commit=False)
 
         # Record in commit_files (legacy metadata)
         self.vcs_repo.record_file_change(
@@ -1122,7 +1182,8 @@ def main():
     parser = argparse.ArgumentParser(description='Commit workspace changes to TempleDB')
     parser.add_argument('project_slug', help='Project slug')
     parser.add_argument('workspace_dir', help='Workspace directory')
-    parser.add_argument('-m', '--message', required=True, help='Commit message')
+    from cli.commit_message import add_message_args
+    add_message_args(parser)
 
     args = parser.parse_args()
 

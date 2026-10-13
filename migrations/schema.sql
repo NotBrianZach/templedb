@@ -2178,6 +2178,15 @@ CREATE TABLE IF NOT EXISTS vcs_branches (
     UNIQUE(project_id, branch_name)
 );
 
+-- At most one default branch per project (migration 136). Partial, so
+-- it constrains only the flagged rows and leaves zero-default legal.
+-- Without it, three projects drifted into two is_default=1 rows and the
+-- unordered `WHERE is_default = 1 ... fetchone()` in publish and
+-- get_default_branch picked between them by query plan.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vcs_branches_one_default
+    ON vcs_branches(project_id)
+ WHERE is_default = 1;
+
 CREATE TABLE IF NOT EXISTS vcs_commit_metadata (
     id INTEGER PRIMARY KEY,
     commit_id INTEGER NOT NULL UNIQUE REFERENCES vcs_commits(id) ON DELETE CASCADE,

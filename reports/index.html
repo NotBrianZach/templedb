@@ -44,13 +44,23 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-10-13-0720-math-workbench-the-spec-and-the-engine-it-did-not-know-exist.html">
+  <div class="row">
+    <span class="date">2026-10-13 07:20</span>
+    <span class="title">Math Workbench: the spec, and the engine it did not know existed</span>
+  </div>
+  <div class="summary">
+    A new spec arrived declaring the project's direction: an Emacs/Org mathematics workspace over Calc and SymPy, with "correlation games" that branch creative interpretations off an investigation and return new mathematical questions to it. Recording it surfaced a problem with its own premise. The spec treats aireadalong.com as an unretrievable third party whose interface must be guessed at; aireadalong.com is this user's own bza project, and it already ships a correlation-game engine with a richer vocabulary than the one the spec invents. No code was written this session. What changed is what the next session should build.
+  </div>
+</a>
+
 <a class="report" href="2026-10-10-0817-the-half-done-ast-config-migration.html">
   <div class="row">
     <span class="date">2026-10-10 08:17</span>
     <span class="title">The half-done AST config migration</span>
   </div>
   <div class="summary">
-    One-paragraph summary of what this report covers and why.
+    TempleDB has two config models and only one of them reaches the machine. nixos config (table system_config) is production; config-ast/ast (table config_nodes) is a migration that was started, promoted to exactly one host, and abandoned in August 2026. This consolidates three session findings into one place, because the live generated_file_matches_generator invariant points at this and the remedy it prints is destructive. Facts re-verified 2026-10-10.
   </div>
 </a>
 

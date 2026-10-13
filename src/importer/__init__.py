@@ -685,8 +685,15 @@ class WorkingStateDetector:
             # Reported separately because it is not a change the user
             # made — it is a measurement of the tree they are scanning.
             'stale': 0,
+            # Tombstoned paths still on disk holding the very content
+            # the deletion removed. Not a change and not a return — a
+            # tree older than the deletion. Counted so a scan that
+            # leaves them alone still says it saw them, since the old
+            # behaviour (resurrect silently) left no trace either.
+            'debris': 0,
         }
         stale_paths = []
+        debris_paths = []
 
         # Snapshot currently-staged rows before the disk re-scan clobbers them.
         # A staged row represents user intent to commit that exact content_hash
@@ -785,20 +792,21 @@ class WorkingStateDetector:
                 # Check if modified
                 file_id = tracked_by_path[rel_path]
 
-                # The path is on disk but its row is marked deleted, so
-                # the file came back. Reactivate it: the deletion loop
-                # now skips non-active rows, so leaving the status alone
-                # would strand the file in a state where it exists, has
-                # detectable content, and is invisible to everything that
-                # filters on status='active' — `file ls`, checkout, and
+                # The path is on disk and its row is tombstoned, so the
+                # file MAY have come back — but presence alone does not
+                # say that, and this used to reactivate on presence
+                # alone. Decided below instead, once the disk hash is
+                # known: reactivating is right for a file someone
+                # rewrote, and wrong for the pre-deletion copy still
+                # sitting in a tree that was cut before the deletion.
+                # Deferred rather than deleted because the original
+                # reasoning holds for the first case — leaving the
+                # status alone would strand a file that exists, has
+                # detectable content, and is invisible to everything
+                # filtering on status='active': `file ls`, checkout, and
                 # the checkout_matches_db invariant among them.
-                if tracked_status.get(rel_path) not in (None, 'active'):
-                    execute("""
-                        UPDATE project_files
-                           SET status = 'active', updated_at = datetime('now')
-                         WHERE id = ?
-                    """, (file_id,), commit=False)
-                    tracked_status[rel_path] = 'active'
+                was_tombstoned = (
+                    tracked_status.get(rel_path) not in (None, 'active'))
 
                 # Get last *committed* content hash (not just stored/imported content)
                 # file_contents is updated by project sync, so comparing against it
@@ -833,6 +841,57 @@ class WorkingStateDetector:
                         })()
                     else:
                         continue
+
+                # Now the tombstone decision, with the hash in hand.
+                #
+                # Equal to the content as of the last non-deleted commit
+                # means nothing was written since the deletion: this is
+                # the copy the deletion was ABOUT, still on disk because
+                # the tree predates it. Reactivating that resurrects a
+                # file the user deliberately removed — and resurrects it
+                # broken, because the branch below classifies it
+                # 'unmodified' and an unmodified file writes no
+                # file_contents row, while _commit_deleted_file hard-
+                # deleted the ones it had. The result is status='active'
+                # with no current content: the materializer omits the
+                # path (it INNER JOINs file_contents) while commit's
+                # scanner finds it missing from disk and reads it as a
+                # deletion.
+                #
+                # That produced all 10 such rows in this database,
+                # across templedb and woofs_projects, in one scan window
+                # on 2026-10-12. templedb's src/cli/commands/workitem.py
+                # was dropped by 43b437da on 10-10 and came back two
+                # days later from a tree cut 09-04; it then read as
+                # untracked work in four stale edit trees, which is what
+                # kept checkout-gc from retiring any of them.
+                #
+                # Differing hash is the case the original reasoning is
+                # right about — someone rewrote the file — and that path
+                # must also restore the file_contents row, or
+                # reactivation only puts back one of the two things that
+                # make the row real.
+                if was_tombstoned:
+                    unchanged_since_deletion = bool(
+                        last_committed
+                        and last_committed['content_hash']
+                        == file_content.hash_sha256)
+                    if unchanged_since_deletion:
+                        changes['debris'] += 1
+                        debris_paths.append(rel_path)
+                        continue
+                    self._ensure_content_blob(file_content)
+                    execute("""
+                        UPDATE project_files
+                           SET status = 'active', updated_at = datetime('now')
+                         WHERE id = ?
+                    """, (file_id,), commit=False)
+                    execute("""
+                        INSERT INTO file_contents
+                            (file_id, content_hash, is_current)
+                        VALUES (?, ?, 1)
+                    """, (file_id, file_content.hash_sha256), commit=False)
+                    tracked_status[rel_path] = 'active'
 
                 if last_committed and last_committed['content_hash'] == file_content.hash_sha256:
                     state = 'unmodified'
@@ -955,6 +1014,18 @@ class WorkingStateDetector:
             print(f"   This checkout is behind the DB. `templedb edit "
                   f"{self.project_slug}` makes a current workspace; to "
                   f"revert deliberately, commit from the named tree.")
+        if changes['debris']:
+            print(f"   Deleted but still on disk: {changes['debris']} "
+                  f"(left tombstoned)")
+            for rel_path in debris_paths[:5]:
+                print(f"      {rel_path}")
+            if len(debris_paths) > 5:
+                print(f"      ... and {len(debris_paths) - 5} more")
+            print(f"   These hold the content their deletion removed, so "
+                  f"this tree predates it. Reactivating them is how a "
+                  f"path-only row is made; `doctor entities "
+                  f"--check active_files_have_current_content` reports any "
+                  f"that already exist.")
 
         return changes
 

@@ -725,6 +725,14 @@ class CheckoutCommand:
                 shown = ", ".join(v['untracked'][:3])
                 print(f"              {len(v['untracked'])} untracked "
                       f"file(s): {shown}")
+            if v.get('deleted_debris'):
+                # Said out loud because it is the reason a verdict can
+                # change without the tree changing: these used to count
+                # as untracked work and keep the row alive.
+                shown = ", ".join(v['deleted_debris'][:3])
+                print(f"              {len(v['deleted_debris'])} deleted "
+                      f"file(s) still on disk, unchanged since their "
+                      f"deletion — not work: {shown}")
             if v['stale']:
                 # A kept tree that is ALSO stale is the dangerous shape,
                 # and omitting this made "keep" read as "this tree is
@@ -737,9 +745,35 @@ class CheckoutCommand:
                       f"file(s) older than the DB (oldest from {oldest}) "
                       f"— copy the work out rather than committing from "
                       f"this tree")
-            print(f"              commit it, or name the tree explicitly: "
-                  f"templedb commit {row['project_slug']} "
-                  f"{row['checkout_path']}")
+            # The suggestion has to follow the verdict, which it did not.
+            # `templedb commit <slug> <dir>` diffs the WHOLE directory —
+            # near-identical in name to the staged-only, session-scoped
+            # `vcs commit -p <slug>`, and nothing like it in blast radius.
+            # Printing it unconditionally recommended the whole-tree
+            # command on a tree this function had just flagged as stale,
+            # two lines after saying "copy the work out rather than
+            # committing from this tree." Both sentences were in the same
+            # paragraph and only one of them was right.
+            if v['stale']:
+                work = ([f['file_path'] for f in v['has_work']]
+                        + list(v['untracked']))
+                print(f"              → rescue the work into a current "
+                      f"workspace; do NOT commit this tree:")
+                print(f"                  WS=$(templedb edit "
+                      f"{row['project_slug']} | "
+                      f"grep -o '/.*{row['project_slug']}/.*')")
+                for p in work[:5]:
+                    print(f"                  cp {row['checkout_path']}/{p} "
+                          f"$WS/{p}")
+                if len(work) > 5:
+                    print(f"                  # ... and {len(work) - 5} "
+                          f"more file(s) listed above")
+                print(f"                  templedb commit "
+                      f"{row['project_slug']} $WS -m \"…\"")
+            else:
+                print(f"              commit it, or name the tree "
+                      f"explicitly: templedb commit "
+                      f"{row['project_slug']} {row['checkout_path']}")
 
         if not prunable:
             return

@@ -9,7 +9,10 @@ from fastapi import APIRouter, Form, Query
 from fastapi.responses import HTMLResponse
 
 from db_utils import execute, query_all, query_one
-from gui_helpers import _base, _table, _search_bar, _file_link, _msg, _status_badge, _run, CSS
+from gui_helpers import (
+    _base, _table, _search_bar, _file_link, _msg, _status_badge, _run, CSS,
+    TEMPLEDB,
+)
 
 router = APIRouter()
 
@@ -31,6 +34,97 @@ def backup_gcs():
 def db_migrate():
     rc, out, err = _run("db", "migrate")
     return HTMLResponse(_msg(out or err or "Done", ok=rc == 0))
+
+
+# ── woofs offline sync (manual only) ─────────────────────────────────────────
+#
+# Both directions are deliberately button-driven. The 10-minute
+# woofs-snapshot-sync.timer that used to push automatically is off; see
+# services.woofs-snapshot-sync.autoSync in system_config.
+#
+# These run the project's own node scripts rather than going through
+# systemd, for two reasons: starting a system unit from the GUI would need
+# root or a polkit rule, and the unit's projectDir points at
+# ~/.local/share/templedb/fhs-deployments/woofs_projects/working, which is
+# only refreshed by a deploy and does not yet carry pullClientNotes.mjs.
+# The canonical checkout is kept current by `templedb publish`.
+WOOFS_CHECKOUT = Path.home() / ".config" / "templedb" / "checkouts" / "woofs_projects"
+
+
+def _woofs_sync(script: str, *extra: str) -> tuple[int, str, str]:
+    """Run a woofs sync script with the project's env loaded from TempleDB.
+
+    The env is sourced in-process via `var export --secrets`, so DATABASE_URL
+    never appears in this process's argv — the same reason var set grew
+    --value-stdin. Only the script's own stdout is surfaced; it prints
+    counts, not values.
+    """
+    path = WOOFS_CHECKOUT / "src" / "scripts" / script
+    if not path.exists():
+        return 1, "", (
+            f"{script} not found at {path}. Run "
+            "`templedb publish run woofs_projects` to materialise it."
+        )
+    # </dev/null on the export, and DEVNULL for the whole pipeline, are both
+    # load-bearing: `var export --secrets` writes "Decrypt using <file>?
+    # [Y/n]" to stderr and READS STDIN, treating an empty read as yes. Given
+    # a stdin that stays open it blocks forever — a direct run of this exact
+    # command without the redirect hung until it was killed at 5 minutes,
+    # where the redirected version finishes in 5 seconds. It appeared to work
+    # under uvicorn only because that stdin happened to hit EOF. Same trap the
+    # woofs-snapshot-sync envRenderer has to dodge.
+    cmd = (
+        'set -a; eval "$(' + TEMPLEDB + " var export woofs_projects "
+        '--target staging --format shell --secrets </dev/null 2>/dev/null)"; set +a; '
+        "exec node " + str(path) + (" " + " ".join(extra) if extra else "")
+    )
+    r = subprocess.run(
+        ["bash", "-c", cmd],
+        cwd=str(WOOFS_CHECKOUT),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=600,
+    )
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+def _sync_response(rc: int, out: str, err: str) -> HTMLResponse:
+    """Render both streams, never one or the other.
+
+    These scripts log progress to stdout and die to stderr, so `out or err`
+    shows a run that got four lines in and then failed as if it had
+    succeeded — which is exactly how a malformed schedules/2026.json looked
+    like a clean push. stderr is shown whenever it is non-empty, and a
+    non-zero exit is stated outright rather than left to the badge colour.
+    """
+    parts = []
+    if out:
+        parts.append(html.escape(out))
+    if err:
+        parts.append(("--- stderr ---\n" if out else "") + html.escape(err))
+    if rc != 0:
+        parts.append(f"--- exited {rc} ---")
+    body = "\n".join(parts) or "Done"
+    return HTMLResponse(_msg(f"<pre>{body}</pre>", ok=rc == 0))
+
+
+@router.post("/woofs/sync/push", response_class=HTMLResponse)
+def woofs_sync_push():
+    """local clientNotes.json + schedules -> Supabase."""
+    return _sync_response(*_woofs_sync("syncClientNotes.mjs"))
+
+
+@router.post("/woofs/sync/pull/preview", response_class=HTMLResponse)
+def woofs_sync_pull_preview():
+    """Supabase -> clientNotes.json, reporting only. Writes nothing."""
+    return _sync_response(*_woofs_sync("pullClientNotes.mjs"))
+
+
+@router.post("/woofs/sync/pull/apply", response_class=HTMLResponse)
+def woofs_sync_pull_apply():
+    """Supabase -> clientNotes.json for real. Gap-fill only; takes a .bak."""
+    return _sync_response(*_woofs_sync("pullClientNotes.mjs", "--write"))
 
 
 # ── CRUD: system_config ───────────────────────────────────────────────────────

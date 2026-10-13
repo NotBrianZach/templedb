@@ -18,6 +18,7 @@ primary write path.
 """
 import sys
 import os
+import re
 import subprocess
 import tempfile
 import hashlib
@@ -31,6 +32,62 @@ from cli.fuzzy_matcher import fuzzy_match_project, fuzzy_match_file
 from logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ── Double-encoded UTF-8 ("mojibake") detection ────────────────────────────
+#
+# UTF-8 bytes decoded as Latin-1 and re-encoded as UTF-8 double every
+# non-ASCII character: an em dash's E2 80 94 becomes C3 A2 C2 80 C2 94. The
+# result is still *valid* UTF-8, so every decode on the way into the DB
+# accepts it, and it renders as a stray "â" plus two C1 control characters
+# that browsers draw as nothing. bza's frontend/app/page.tsx was corrupted
+# this way on 2026-09-29 and shipped for two weeks before anyone noticed a
+# button reading "â   done" instead of "✓ done".
+#
+# The cause was not templedb. It was a `perl -0pi -e` one-liner: -0pi reads
+# the file as bytes, so every byte becomes one character, and inserting a
+# single literal above U+00FF (here \x{2014}) upgrades the whole buffer and
+# re-encodes all of it on output. Perl says "Wide character in print" and
+# that warning went to a discarded stderr. Since the hazard lives in
+# throwaway shell rather than in any code we own, the only place to catch it
+# is here, where content enters the DB.
+#
+# The character classes are built with chr() deliberately. Writing the C1
+# range as literals does not survive being pasted through tooling -- the
+# bytes get stripped and the class silently degrades to a two-member set
+# that matches nothing, reporting every file clean. That happened twice
+# while diagnosing the bza incident.
+_MOJIBAKE_CONT = "[%s-%s]" % (chr(0x80), chr(0xBF))
+_MOJIBAKE_RE = re.compile(
+    "[%s-%s]%s" % (chr(0xC2), chr(0xDF), _MOJIBAKE_CONT)
+    + "|[%s-%s]%s{2}" % (chr(0xE0), chr(0xEF), _MOJIBAKE_CONT)
+    + "|[%s-%s]%s{3}" % (chr(0xF0), chr(0xF4), _MOJIBAKE_CONT)
+)
+# Self-check, not decoration: if the classes above ever degrade, this module
+# would report every input clean rather than failing, which is the worst
+# possible behaviour for a corruption guard.
+assert _MOJIBAKE_RE.search("—".encode("utf-8").decode("latin-1")), (
+    "mojibake regex is broken -- its character classes did not survive"
+)
+
+
+def _mojibake_runs(text) -> list:
+    """Sequences in `text` that are valid UTF-8 when encoded back to Latin-1.
+
+    Each hit is returned as the character it would decode back to, so callers
+    can show "this looks like it should be —" rather than dumping bytes.
+    """
+    if not isinstance(text, str):
+        return []
+    out = []
+    for match in _MOJIBAKE_RE.finditer(text):
+        try:
+            out.append(match.group(0).encode('latin-1').decode('utf-8'))
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            # Matched the shape but is not actually re-decodable, so it is
+            # ordinary text that happens to look like the pattern.
+            pass
+    return out
 
 
 def _apply_session_override(value) -> None:
@@ -301,6 +358,62 @@ class FileCommands(Command):
                         f"  Or overwrite anyway:   drop --if-match"
                     )
                     return 2
+            # Refuse content that newly looks double-encoded. See the
+            # _MOJIBAKE_RE comment above for the failure this exists to
+            # catch: valid UTF-8 all the way down, so nothing else in the
+            # write path can notice it.
+            #
+            # The test is whether this write *increases* the count, not
+            # whether any is present. A file that already contains such
+            # sequences -- genuinely, or because it is already corrupt --
+            # must stay editable, and a repair that removes them has to
+            # pass. Only going up is suspicious.
+            if not getattr(args, 'allow_mojibake', False):
+                new_runs = _mojibake_runs(content)
+                if new_runs:
+                    prev_text = None
+                    try:
+                        _rec = self.file_repo.get_file_by_path(
+                            project['id'], args.file_path
+                        )
+                        if _rec:
+                            prev_text = self._read_content_from_db(_rec)
+                    except Exception as e:
+                        logger.debug(f"mojibake pre-read failed: {e}")
+                    prev_runs = _mojibake_runs(prev_text)
+                    if len(new_runs) > len(prev_runs):
+                        added = len(new_runs) - len(prev_runs)
+                        sample = sorted(set(new_runs))[:8]
+                        logger.error(
+                            f"Refusing to write {args.project}/"
+                            f"{args.file_path}: content looks like "
+                            f"double-encoded UTF-8 ({added} new sequence"
+                            f"{'s' if added != 1 else ''}; the file had "
+                            f"{len(prev_runs)})."
+                        )
+                        logger.error(
+                            "  These decode back to: "
+                            + " ".join(repr(c) for c in sample)
+                        )
+                        logger.error(
+                            "  That is UTF-8 read as Latin-1 and written "
+                            "back as UTF-8. It is valid UTF-8, so nothing "
+                            "downstream will catch it, and it renders as a "
+                            "stray 'a-circumflex' plus invisible control "
+                            "characters."
+                        )
+                        logger.error(
+                            "  Usual cause: `perl -0pi -e` inserting a "
+                            "literal above U+00FF, which upgrades the whole "
+                            "buffer and re-encodes every pre-existing "
+                            "character. Check for 'Wide character in print'."
+                        )
+                        logger.error(
+                            "  If the sequences are genuinely what you "
+                            "meant, pass --allow-mojibake."
+                        )
+                        return 3
+
             try:
                 _session_id = self.ctx.get_vcs_service().get_current_session()['id']
             except Exception:
@@ -1132,6 +1245,15 @@ def register(cli):
     set_parser.add_argument('--verify', action='store_true',
                             help='After write, confirm file_contents.is_current holds the written hash. '
                                  'Exits 2 on mismatch. Guards against silent revert (see docs/known-bugs).')
+    set_parser.add_argument('--allow-mojibake', action='store_true',
+                            dest='allow_mojibake',
+                            help='Permit content that adds double-encoded '
+                                 'UTF-8 sequences (UTF-8 read as Latin-1 and '
+                                 'written back as UTF-8). Refused by default '
+                                 'and exits 3, because the result is valid '
+                                 'UTF-8 that nothing downstream can catch and '
+                                 'that renders as invisible control '
+                                 'characters.')
     set_parser.add_argument('--skip-intent', action='store_true',
                             help='Bypass the EditIntent bookkeeping layer '
                                  '(Phase 2). Rare — mainly for bootstrap and '

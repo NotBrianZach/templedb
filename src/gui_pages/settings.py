@@ -581,6 +581,35 @@ def system_page(q: str = Query(""), host: str = Query("")):
     except Exception:
         pass
 
+    # ── woofs offline sync ────────────────────────────────────────────────────
+    #
+    # Manual only, by decision: the 10-minute auto-push timer is off. Pull is
+    # split preview/apply because it edits a 1561-client file that is the
+    # authoritative copy — the preview is the chance to see the counts before
+    # anything is written.
+    woofs_sync_html = """
+<h3 style="margin-top:1.5rem">Woofs offline sync <span class="muted" style="font-weight:normal;font-size:0.8rem">— manual; no timer</span></h3>
+<p class="muted" style="font-size:0.78rem;margin:0.2rem 0 0.5rem">
+  Push sends clientNotes.json and the year's schedule to Supabase.
+  Pull brings client fields back, gap-fill only: the file wins every
+  conflict and the database may only fill a blank. Pull keeps a timestamped
+  .bak. prices, notes and groomNotes are excluded — see pullClientNotes.mjs.
+</p>
+<div class="row" style="margin-bottom:0.5rem">
+  <form hx-post="/woofs/sync/push" hx-target="#woofs-sync-result" hx-swap="innerHTML">
+    <button type="submit" style="font-size:0.78rem">Push → Supabase</button>
+  </form>
+  <form hx-post="/woofs/sync/pull/preview" hx-target="#woofs-sync-result" hx-swap="innerHTML">
+    <button type="submit" style="font-size:0.78rem">Pull ← preview</button>
+  </form>
+  <form hx-post="/woofs/sync/pull/apply" hx-target="#woofs-sync-result" hx-swap="innerHTML"
+        hx-confirm="Apply the pull to clientNotes.json? Gap-fill only, and a .bak is kept.">
+    <button type="submit" style="font-size:0.78rem">Pull ← apply</button>
+  </form>
+</div>
+<div id="woofs-sync-result"></div>
+"""
+
     # ── Schema Browser link ───────────────────────────────────────────────────
     schema_link = '<p style="margin-top:1rem"><a href="/schema-browser">Schema Browser</a> <span class="muted">— browse all tables, columns, indexes, and sample data</span></p>'
 
@@ -604,6 +633,10 @@ def system_page(q: str = Query(""), host: str = Query("")):
 <hr class="sep">
 
 {backup_html}
+
+<hr class="sep">
+
+{woofs_sync_html}
 
 <hr class="sep">
 

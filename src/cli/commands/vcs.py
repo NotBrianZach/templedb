@@ -459,6 +459,127 @@ class VCSCommands(Command):
             logger.debug("Full error:", exc_info=True)
             return 1
 
+    @staticmethod
+    def _resolve_message(args):
+        """Kept as a thin alias; the logic is shared with `templedb
+        commit <slug> <dir>`, which had the same hazard and no -F."""
+        from cli.commit_message import resolve_message
+        return resolve_message(args)
+
+    def _amend_message(self, project, args, message: str) -> int:
+        """Replace the last commit's message in place.
+
+        Message-only, and that is a design choice rather than a first
+        increment. Folding staged files into the previous commit is the
+        other half of git's --amend, and git needs it because a commit
+        is content-addressed: appending a second commit changes the
+        hash of everything after it. Nothing here is. `commit_hash` is
+        sha256(slug:branch:message:time.time())[:16] — the wall clock is
+        an input, so the hash cannot be recomputed from the row and is
+        an opaque id rather than a digest. A follow-up commit therefore
+        costs nothing structural, while rewriting one would have to
+        re-point vcs_file_states, working state and the stage ledger for
+        no gain. So: messages here, new commits for content.
+
+        Two guards, and the second is the one that is easy to miss.
+        A commit with a git_commit_hash has been mirrored, so its
+        message is already outside this database. But `commit_hash`
+        ITSELF holds a git SHA on 77 rows across five projects —
+        migration 126 split the namespaces and fixed the data, while
+        whatever writes them kept going, which is why
+        commit_hash_is_canonical is currently red. Those are real git
+        commits with git_commit_hash NULL, so the mirrored test alone
+        would happily amend them. Reusing the canonical-format
+        predicate catches both.
+        """
+        from db_utils import query_one, execute
+
+        branch = None
+        if args.branch:
+            branches = self.vcs_repo.get_branches(project['id'])
+            branch = next((b for b in branches
+                           if b['branch_name'] == args.branch), None)
+            if not branch:
+                logger.error(f"Branch '{args.branch}' not found")
+                return 1
+        else:
+            branch = self.vcs_repo.get_active_branch(project['id'])
+            if not branch:
+                logger.error("Branch not found")
+                return 1
+
+        row = query_one("""
+            SELECT id, commit_hash, git_commit_hash, commit_message,
+                   commit_timestamp
+              FROM vcs_commits
+             WHERE project_id = ? AND branch_id = ?
+             ORDER BY commit_timestamp DESC, id DESC
+             LIMIT 1
+        """, (project['id'], branch['id']))
+        if not row:
+            logger.error(f"No commit on {branch['branch_name']} to amend.")
+            return 1
+
+        if row['git_commit_hash']:
+            logger.error(
+                f"Refusing to amend {row['commit_hash']}: it is mirrored to "
+                f"git as {row['git_commit_hash']}, so its message is already "
+                f"outside this database and amending would only desync the "
+                f"two.\n"
+                f"  Record the correction in a new commit instead."
+            )
+            return 1
+
+        h = row['commit_hash'] or ''
+        if (len(h) == 40 or h != h.upper()) and not getattr(
+                args, 'force', False):
+            # Ambiguous, not necessarily published — and the distinction
+            # is unrecoverable from the row, which is the point.
+            # 40-char lowercase was written by TWO generators: git-history
+            # import (real git SHAs, where amending rewrites published
+            # history) and `templedb commit <slug> <dir>` up to
+            # 2026-10-13 (native ids that merely wore git's format, where
+            # amending is perfectly safe). Both left git_commit_hash
+            # NULL, so nothing in the row separates them. Refuse by
+            # default because one of the two is published history, and
+            # take --force because the other is ordinary local work.
+            logger.error(
+                f"Refusing to amend {h}: a 40-char or lowercase "
+                f"commit_hash is ambiguous. It is either a git SHA from "
+                f"history import — amending rewrites published history — "
+                f"or a native id minted by `templedb commit <slug> <dir>` "
+                f"before 2026-10-13, which is safe to amend. Both leave "
+                f"git_commit_hash NULL, so this row cannot tell you "
+                f"which.\n"
+                f"  Safe to amend (a local commit you just made): "
+                f"add --force\n"
+                f"  Otherwise: record the correction in a new commit\n"
+                f"  Context: doctor entities --check "
+                f"commit_hash_is_canonical"
+            )
+            return 1
+
+        if message == row['commit_message']:
+            print(f"Message unchanged; nothing to amend.")
+            self.last_outcome = 'nothing-to-commit'
+            return 0
+
+        execute("UPDATE vcs_commits SET commit_message = ? WHERE id = ?",
+                (message, row['id']))
+        back = query_one("SELECT commit_message FROM vcs_commits WHERE id = ?",
+                         (row['id'],))
+        if not back or back['commit_message'] != message:
+            logger.error(
+                f"Amend did not land on {row['commit_hash']}: the message "
+                f"read back differently. The old message is unchanged."
+            )
+            return 1
+
+        print(f"✓ Amended {row['commit_hash']} ({row['commit_timestamp']})")
+        print(f"   {message.splitlines()[0]}")
+        self.last_outcome = 'committed'
+        return 0
+
     def commit(self, args) -> int:
         """Create VCS commit.
 
@@ -480,6 +601,17 @@ class VCSCommands(Command):
         if not project:
             _project_not_found(args.project)
             return 1
+
+        message = self._resolve_message(args)
+        if message is None:
+            return 1
+
+        if getattr(args, 'amend', False):
+            # Before _has_write_tree: amending a message touches one
+            # column and no tree, so requiring an edit workspace for it
+            # would refuse the repair exactly when a stale-tree warning
+            # has just told the caller not to use the tree they have.
+            return self._amend_message(project, args, message)
 
         if not _has_write_tree(project):
             return 1
@@ -535,7 +667,7 @@ class VCSCommands(Command):
         _stage_run_id = _stage_start(
             kind="vcs_commit", slug=project['slug'],
             input_hash=_stage_parent_hash, session_id=sid,
-            metadata={"message": (args.message or "")[:120]},
+            metadata={"message": (message or "")[:120]},
         )
 
         # Get staged files for THIS session only. content_text lives in
@@ -595,7 +727,7 @@ class VCSCommands(Command):
         author = args.author or self._get_author()
 
         # Generate commit hash
-        hash_input = f"{project['slug']}:{branch['branch_name']}:{args.message}:{time.time()}"
+        hash_input = f"{project['slug']}:{branch['branch_name']}:{message}:{time.time()}"
         commit_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16].upper()
 
         # Begin transaction — all commit operations are atomic
@@ -614,7 +746,7 @@ class VCSCommands(Command):
             branch_id=branch['id'],
             commit_hash=commit_hash,
             author=author,
-            message=args.message,
+            message=message,
             parent_hash=parent_hash
         )
 
@@ -821,7 +953,7 @@ class VCSCommands(Command):
             "session_id": sid,
             "session_name": session.get('name'),
             "other_session_files_skipped": other_staged_count,
-            "message": args.message,
+            "message": message,
             "readonly_updated": readonly_updated,
             "auto_deploys": deploy_results,
         }
@@ -2538,7 +2670,23 @@ def register(cli):
 
     # vcs commit
     commit_parser = subparsers.add_parser('commit', help='Create commit')
-    commit_parser.add_argument('-m', '--message', required=True, help='Commit message')
+    # -m is no longer required on its own: -F takes the message from a
+    # file instead. Not a convenience. A message passed inline is a
+    # double-quoted shell string, so every backtick span in it gets
+    # command-substituted away -- commit 217092EC lost three quoted
+    # command names that way and printed "command not found" three times
+    # while reporting success. Messages here quote CLI commands
+    # constantly, so the inline form is the one that corrupts prose and
+    # -F is the one to reach for.
+    from cli.commit_message import add_message_args
+    add_message_args(commit_parser)
+    commit_parser.add_argument('--amend', action='store_true',
+                               help="Replace the last commit's message. "
+                                    "Message-only: it never folds staged "
+                                    "files into the previous commit.")
+    commit_parser.add_argument('--force', action='store_true',
+                               help='With --amend, proceed on a commit whose '
+                                    'hash format cannot prove it is unpublished')
     commit_parser.add_argument('-p', '--project', required=True, help='Project name or pattern (fuzzy matching enabled)')
     commit_parser.add_argument('-b', '--branch', help='Branch name')
     # No `-a` short form here, deliberately. `-a` is --all on `vcs add`

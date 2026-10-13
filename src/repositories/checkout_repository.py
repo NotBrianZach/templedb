@@ -398,8 +398,18 @@ class CheckoutRepository(BaseRepository):
             "SELECT ended_at FROM vcs_sessions WHERE id = ?", (session_id,))
         return bool(row) and row['ended_at'] is None
 
+    # How many candidate paths this will hash before giving up on
+    # precision. The cheap query below answers "has the DB moved since
+    # this tree was cut", which on templedb is 56 paths against a 774-
+    # file tree — so confirming the candidates costs 7% of what
+    # classify_edit_tree costs, and that is the whole reason the
+    # confirmation is affordable here at all. A tree far enough behind
+    # to blow the cap is unambiguously stale anyway; the warning then
+    # says so without claiming a confirmed number.
+    BEHIND_CONFIRM_CAP = 200
+
     def _warn_if_behind(self, project_id: int, row: Dict[str, Any]) -> None:
-        """Say so when an adopted tree predates content now in the DB.
+        """Say so when an adopted tree holds content the DB moved past.
 
         The hole the prune does not close, and the reason "retire the
         stale trees" is not on its own an answer. Step 2 returns a lone
@@ -411,19 +421,45 @@ class CheckoutRepository(BaseRepository):
         2026-09-26, with no warning at all: strictly less noise and no
         more truth.
 
-        Counts blobs, not files on disk: this runs on the resolution path
-        of nearly every command, and classify_edit_tree hashes the whole
-        tree. One indexed comparison against checkout_at answers "has the
-        DB moved since this tree was cut" well enough for a warning, and
-        a warning is all this should be — the tree may still be the right
-        one to commit from, and only the reader knows.
+        Why it now reads the tree, having explicitly declined to: the
+        blob count alone was not a fact about this tree. `checkout_at`
+        is when the row was cut, and _refresh_ws_row_from_disk and
+        every materialise write into a tree WITHOUT moving it, so a
+        workspace that holds the newest bytes in the database still
+        reported every blob stored since its row was created. templedb
+        measured 56 on 2026-10-13 with no file in the tree actually
+        behind. A warning that fires on a current tree teaches the
+        reader to discount it, and it was duly discounted: it ran on
+        the resolution path of nearly every command, said "committing
+        from it may revert them" to callers that were only reading, and
+        produced an overcautious recommendation in a reader who was
+        paying attention.
+
+        So the cheap indexed query is now a candidate filter rather
+        than the answer, and the files it names are hashed against the
+        DB's current content. What survives is the set a commit would
+        genuinely revert, which is what the old docstring conceded only
+        the reader could know — "only the reader knows" is not a reason
+        to withhold the number that decides it. Empty is the common
+        case and is silent.
+
+        Staged paths are called out first. They are the set `vcs
+        commit` actually writes, so a staged file that is also behind
+        is the one shape here that is about to lose work rather than
+        merely able to.
         """
+        import hashlib
+        import os
+        from pathlib import Path
+
         when = row.get('checkout_at')
         if not when:
             return
         try:
-            newer = self.query_one("""
-                SELECT COUNT(*) AS n
+            candidates = self.query_all("""
+                SELECT pf.id AS file_id, pf.file_path,
+                       fc.content_hash AS db_hash,
+                       cb.created_at AS db_blob_created
                   FROM project_files pf
                   JOIN file_contents fc
                     ON fc.file_id = pf.id AND fc.is_current = 1
@@ -431,21 +467,104 @@ class CheckoutRepository(BaseRepository):
                     ON cb.hash_sha256 = fc.content_hash
                  WHERE pf.project_id = ? AND pf.status = 'active'
                    AND cb.created_at > ?
+                 ORDER BY cb.created_at ASC
             """, (project_id, when))
         except Exception as e:
             logger.debug("Could not check whether %s is behind: %s",
                          row['checkout_path'], e)
             return
-        n = (newer or {}).get('n', 0)
-        if not n:
+        if not candidates:
+            return
+
+        root = Path(row['checkout_path'])
+        capped = len(candidates) > self.BEHIND_CONFIRM_CAP
+        if capped:
+            # No silent cap: an unconfirmed count has to announce that
+            # it is unconfirmed, or it reads exactly like the precise
+            # one and we are back to a number nobody can act on.
+            logger.warning(
+                "Project %s: adopting edit checkout %s (materialised %s). "
+                "The DB has stored newer content for %d file(s) since then "
+                "— too many to confirm against the tree (cap %d), so that "
+                "count is an upper bound, not files known to be behind. A "
+                "tree this far back is rarely the one to commit from: "
+                "`templedb edit <slug>` makes a current workspace, and "
+                "`admin checkout-gc` says whether this one holds work.",
+                project_id, row['checkout_path'], when, len(candidates),
+                self.BEHIND_CONFIRM_CAP)
+            return
+
+        behind = []
+        for c in candidates:
+            f = root / c['file_path']
+            try:
+                disk_hash = hashlib.sha256(f.read_bytes()).hexdigest()
+            except OSError:
+                # Absent from the tree. It holds nothing, so it cannot
+                # be reverted from here — classify_edit_tree counts
+                # this as 'absent' and declines to judge it, and so
+                # does this.
+                continue
+            if disk_hash != c['db_hash']:
+                behind.append(c)
+
+        if not behind:
+            # The tree was written into after its row was cut. This is
+            # the case the blob count got wrong, and it is the usual one.
+            logger.debug(
+                "Adopted edit checkout %s is current: %d blob(s) stored "
+                "since %s, none of them newer than this tree's copy",
+                row['checkout_path'], len(candidates), when)
+            return
+
+        staged = self._staged_paths_behind(project_id, behind)
+        shown = ", ".join(c['file_path'] for c in behind[:3])
+        more = f" (+{len(behind) - 3} more)" if len(behind) > 3 else ""
+        if staged:
+            logger.warning(
+                "Project %s: adopting edit checkout %s, which holds content "
+                "the DB has moved past for %d file(s) — and %d of them are "
+                "STAGED in this session: %s. Committing now reverts those. "
+                "Copy the work out into `templedb edit <slug>` instead.",
+                project_id, row['checkout_path'], len(behind), len(staged),
+                ", ".join(sorted(staged)[:3]))
             return
         logger.warning(
-            "Project %s: adopting edit checkout %s, which was materialised "
-            "%s — the DB has newer content for %d file(s) since then. "
-            "Committing from it may revert them. `templedb edit <slug>` "
+            "Project %s: adopting edit checkout %s (materialised %s), which "
+            "holds content the DB has moved past for %d file(s): %s%s. "
+            "Nothing of yours is staged, so reading is safe; a whole-tree "
+            "commit from here would revert them. `templedb edit <slug>` "
             "makes a current workspace; `admin checkout-gc` says whether "
             "this one holds work.",
-            project_id, row['checkout_path'], when, n)
+            project_id, row['checkout_path'], when, len(behind), shown, more)
+
+    def _staged_paths_behind(
+        self, project_id: int, behind: List[Dict[str, Any]]
+    ) -> set:
+        """Which of `behind` this session has staged.
+
+        Scoped to the resolved session on purpose: another session's
+        stage is not included in this caller's commit (`vcs status`
+        groups it separately), so counting it would promote someone
+        else's rows into a warning about what *this* commit destroys.
+        Returns empty rather than raising — this is a diagnostic, and
+        one that breaks resolution is worse than a vaguer sentence.
+        """
+        session_id = self.current_session_id()
+        if session_id is None or not behind:
+            return set()
+        by_id = {c['file_id']: c['file_path'] for c in behind}
+        marks = ",".join("?" * len(by_id))
+        try:
+            rows = self.query_all(
+                f"""SELECT file_id FROM vcs_working_state
+                     WHERE project_id = ? AND staged_by_session_id = ?
+                       AND file_id IN ({marks})""",
+                (project_id, session_id, *by_id.keys()))
+        except Exception as e:
+            logger.debug("Could not check staged paths: %s", e)
+            return set()
+        return {by_id[r['file_id']] for r in rows if r['file_id'] in by_id}
 
     # --- phase 4: retiring edit trees nobody is using -------------------
     #
@@ -537,12 +656,21 @@ class CheckoutRepository(BaseRepository):
                     <dir>` still reaches a named tree through get_by_path
                     — which does not filter on is_active, exactly as
                     migration 122 relied on for scratch rows.
-          untracked a file in the tree with no project_files row. These
-                    DO count as work: a new file written into a workspace
-                    and not yet committed is this codebase's most
-                    expensive recurring loss (commit 7A3BF285 reported
-                    "Files: 2" and wrote one), so a tree holding any is
-                    never pruned automatically.
+          untracked a file in the tree with no ACTIVE project_files row.
+                    These DO count as work: a new file written into a
+                    workspace and not yet committed is this codebase's
+                    most expensive recurring loss (commit 7A3BF285
+                    reported "Files: 2" and wrote one), so a tree holding
+                    any is never pruned automatically.
+          deleted_debris
+                    split back out of untracked, because "no active row"
+                    conflated a file nobody has committed yet with one
+                    that was deliberately deleted and is still present in
+                    a tree cut earlier. Byte-identical to the content at
+                    the last non-deleted commit means nothing was written
+                    after the deletion, so there is no work to lose.
+                    Counted, not judged — and four of templedb's edit
+                    trees were unprunable off a single such path.
         """
         import hashlib
         import os
@@ -628,13 +756,79 @@ class CheckoutRepository(BaseRepository):
             if op != root and root in op.parents:
                 nested.add(op)
         result['nested_checkouts'] = sorted(str(p) for p in nested)
-        result['untracked'] = self._untracked_in_tree(root, tracked, nested)
+        untracked = self._untracked_in_tree(root, tracked, nested)
+        result['untracked'], result['deleted_debris'] = \
+            self._split_deletion_debris(project_id, root, untracked)
 
         if result['has_work'] or result['untracked']:
             result['verdict'] = self.TREE_HAS_WORK
         elif result['stale']:
             result['verdict'] = self.TREE_STALE
         return result
+
+    def _split_deletion_debris(self, project_id: int, root,
+                               untracked: List[str]):
+        """Separate "not yet committed" from "deleted, and this tree is older".
+
+        `untracked` means no ACTIVE project_files row, which conflates
+        two opposite things. A new file nobody has committed is this
+        codebase's most expensive recurring loss and keeps the tree. A
+        file that was deliberately deleted, still sitting in a tree cut
+        before the deletion, is debris — and treating it as work made
+        four of templedb's edit trees permanently unprunable off one
+        path, src/cli/commands/workitem.py, dropped by 43b437da.
+
+        Same discriminator the importer uses for the same decision: if
+        the bytes on disk are the bytes recorded at the last non-deleted
+        commit, nothing was written after the deletion, so there is no
+        work here. Bytes that DIFFER are a genuine edit at a deleted
+        path and stay in `untracked`.
+
+        Tombstoned rows are the only ones consulted. A path the database
+        has never heard of cannot be debris.
+        """
+        import hashlib
+        from pathlib import Path
+
+        if not untracked:
+            return [], []
+        marks = ",".join("?" * len(untracked))
+        try:
+            rows = self.query_all(f"""
+                SELECT pf.file_path, (
+                         SELECT vfs.content_hash
+                           FROM vcs_file_states vfs
+                           JOIN vcs_commits vc ON vc.id = vfs.commit_id
+                          WHERE vfs.file_id = pf.id
+                            AND vfs.change_type <> 'deleted'
+                          ORDER BY vc.commit_timestamp DESC LIMIT 1
+                       ) AS last_hash
+                  FROM project_files pf
+                 WHERE pf.project_id = ? AND pf.status <> 'active'
+                   AND pf.file_path IN ({marks})
+            """, (project_id, *untracked))
+        except Exception as e:
+            # A diagnostic that breaks the verdict is worse than a
+            # coarse verdict: fall back to calling everything work,
+            # which is the conservative half.
+            logger.debug("Could not classify deletion debris: %s", e)
+            return untracked, []
+
+        deleted_hash = {r['file_path']: r['last_hash'] for r in rows}
+        work, debris = [], []
+        for rel in untracked:
+            want = deleted_hash.get(rel)
+            if not want:
+                work.append(rel)
+                continue
+            try:
+                got = hashlib.sha256(
+                    (Path(root) / rel).read_bytes()).hexdigest()
+            except OSError:
+                work.append(rel)
+                continue
+            (debris if got == want else work).append(rel)
+        return work, debris
 
     @staticmethod
     def _untracked_in_tree(root, tracked: set,

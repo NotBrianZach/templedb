@@ -208,3 +208,96 @@ def test_active_file_on_disk_is_untouched(project):
     project.write('here.py')
     project.run()
     assert project.status_of('here.py') == 'active'
+
+
+# --- presence is not a return ------------------------------------------
+#
+# Reactivating on presence alone made all 10 of this database's
+# path-only rows in one scan window on 2026-10-12, across templedb and
+# woofs_projects. The row came back status='active' while
+# _commit_deleted_file had hard-deleted its file_contents, and the
+# branch that classifies an unchanged file 'unmodified' writes none — so
+# the materializer omitted the path (INNER JOIN on file_contents) while
+# commit's scanner read its absence from disk as a deletion.
+
+
+def _committed(project, rel, content, change_type='modified', ts='2026-09-04'):
+    """Give `rel` a commit recording `content` as its state."""
+    import hashlib
+    fid = query_one("""SELECT id FROM project_files
+                        WHERE project_id = ? AND file_path = ?""",
+                    (project.project_id, rel))['id']
+    execute("""INSERT INTO vcs_commits (project_id, commit_hash, commit_timestamp)
+               VALUES (?, 'abc', ?)""", (project.project_id, ts))
+    cid = query_one("SELECT id FROM vcs_commits ORDER BY id DESC LIMIT 1")['id']
+    execute("""INSERT INTO vcs_file_states
+                 (commit_id, file_id, content_hash, change_type)
+               VALUES (?, ?, ?, ?)""",
+            (cid, fid, hashlib.sha256(content.encode()).hexdigest(),
+             change_type))
+    return fid
+
+
+def test_the_pre_deletion_copy_on_disk_is_not_resurrected(project):
+    """templedb's workitem.py, in one test.
+
+    Dropped by 43b437da on 2026-10-10; four edit trees cut earlier still
+    held the 09-04 copy. A scan of one of those trees found the path,
+    called it a return and reactivated it. Nothing was written after the
+    deletion — the bytes on disk ARE the bytes the deletion removed — so
+    the tree predates the deletion and there is nothing to come back.
+    """
+    project.track('workitem.py', status='deleted')
+    _committed(project, 'workitem.py', 'content\n')
+    project.write('workitem.py', 'content\n')
+
+    changes = project.run()
+    assert project.status_of('workitem.py') == 'deleted', "stays tombstoned"
+    assert changes['debris'] == 1
+    assert changes['unmodified'] == 0, "not counted as a tracked file either"
+
+
+def test_a_rewritten_file_is_still_resurrected(project):
+    """The case the original reasoning is right about, and the reason
+    this is a discriminator rather than a removal. Content that differs
+    from what the deletion removed is someone writing the file again."""
+    project.track('back.py', status='deleted')
+    _committed(project, 'back.py', 'the version that was deleted\n')
+    project.write('back.py', 'a genuine rewrite\n')
+
+    changes = project.run()
+    assert project.status_of('back.py') == 'active'
+    assert changes['debris'] == 0
+
+
+def test_reactivation_restores_the_content_row(project):
+    """The path-only row, pinned at its source.
+
+    Flipping status without restoring file_contents put back one of the
+    two things that make a row real. Everything downstream then
+    disagreed about whether the file existed.
+    """
+    project.track('back.py', status='deleted')
+    _committed(project, 'back.py', 'deleted version\n')
+    project.write('back.py', 'rewritten\n')
+    project.run()
+
+    fid = query_one("""SELECT id FROM project_files
+                        WHERE project_id = ? AND file_path = 'back.py'""",
+                    (project.project_id,))['id']
+    current = query_all("""SELECT content_hash FROM file_contents
+                            WHERE file_id = ? AND is_current = 1""", (fid,))
+    assert len(current) == 1, "reactivated row must have current content"
+
+
+def test_debris_does_not_block_a_real_deletion_elsewhere(project):
+    """The two loops share `tracked_status`, and the skip must not make
+    the scan forget what it is iterating."""
+    project.track('workitem.py', status='deleted')
+    _committed(project, 'workitem.py', 'content\n')
+    project.write('workitem.py', 'content\n')
+    project.track('real.py', status='active')
+
+    changes = project.run()
+    assert changes['debris'] == 1
+    assert changes['deleted'] == 1, "real.py is gone from disk and still active"

@@ -536,6 +536,148 @@ def test_build_debris_does_not_read_as_work(repo, tmp_path, content_tables):
     assert v['verdict'] == r.TREE_CLEAN, v['untracked']
 
 
+# --- the adopted-a-stale-tree warning ---------------------------------
+#
+# It used to count blobs stored since `checkout_at` and say "committing
+# from it may revert them". Both halves were wrong together: the count
+# was not a fact about the tree (a materialise or _refresh_ws_row_from_
+# disk writes into a tree without moving its row), and the sentence was
+# addressed to a writer on a path that is mostly readers. templedb
+# reported 56 on 2026-10-13 against a tree with 44 files actually
+# behind, and the 4 on its newest tree were 1. A warning whose number
+# nobody can act on gets discounted, and was.
+
+
+_WS_STATE = """CREATE TABLE IF NOT EXISTS vcs_working_state (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   project_id INTEGER NOT NULL, file_id INTEGER NOT NULL,
+                   state TEXT, staged_by_session_id INTEGER)"""
+
+
+@pytest.fixture
+def working_state():
+    """Same leave-no-schema-behind contract as content_tables."""
+    execute("DROP TABLE IF EXISTS vcs_working_state")
+    execute(_WS_STATE)
+    yield
+    execute("DROP TABLE IF EXISTS vcs_working_state")
+
+
+def _warn(r, pid, caplog):
+    """Resolve for EDIT and return the warning lines, if any."""
+    import logging
+    with caplog.at_level(logging.WARNING):
+        r.resolve(pid, EDIT)
+    return [m for m in caplog.messages if 'adopting edit checkout' in m]
+
+
+def test_a_tree_written_into_after_its_row_was_cut_is_not_behind(
+        repo, tmp_path, content_tables, caplog):
+    """The false positive, in one assertion.
+
+    The blob postdates checkout_at, so the old count said "1 file behind,
+    committing may revert it" — while the tree held those exact bytes.
+    This is the common shape, because nothing moves checkout_at when a
+    materialise refreshes a tree in place.
+    """
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tracked_file(pid, 'a.py', 'current\n', '2026-09-20 00:00:00')
+    (tmp_path / 'ws' / 'a.py').write_text('current\n')
+
+    assert _warn(r, pid, caplog) == []
+
+
+def test_only_the_files_whose_bytes_differ_are_named(
+        repo, tmp_path, content_tables, caplog):
+    """56-becomes-44, scaled down. The count has to be the files a
+    commit would actually revert, and it has to name them — the old
+    message gave a number with no way to check it."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    for rel in ('same_a.py', 'same_b.py'):
+        _tracked_file(pid, rel, f'{rel} current\n', '2026-09-20 00:00:00')
+        (tmp_path / 'ws' / rel).write_text(f'{rel} current\n')
+    _tracked_file(pid, 'drifted.py', 'new\n', '2026-09-20 00:00:00')
+    (tmp_path / 'ws' / 'drifted.py').write_text('old\n')
+
+    msgs = _warn(r, pid, caplog)
+    assert len(msgs) == 1
+    assert 'for 1 file(s): drifted.py' in msgs[0]
+    assert 'same_a.py' not in msgs[0]
+
+
+def test_a_file_absent_from_the_tree_is_not_counted_as_behind(
+        repo, tmp_path, content_tables, caplog):
+    """Absence holds nothing, so it cannot be reverted from here —
+    classify_edit_tree declines to judge it and so does this. A tree cut
+    before a commit added files was 5 files on templedb, and counting
+    them was pure noise."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tracked_file(pid, 'added-later.py', 'x\n', '2026-09-20 00:00:00')
+
+    assert _warn(r, pid, caplog) == []
+
+
+def test_a_staged_file_that_is_behind_says_the_commit_reverts_it(
+        repo, tmp_path, content_tables, working_state, caplog, monkeypatch):
+    """The one shape here that is losing work rather than able to.
+
+    `vcs commit` writes the staged set, so staged-and-behind is the
+    intersection the old message gestured at without computing. Promoted
+    above the general case because the advice differs: copy out, now.
+    """
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tracked_file(pid, 'drifted.py', 'new\n', '2026-09-20 00:00:00')
+    (tmp_path / 'ws' / 'drifted.py').write_text('old\n')
+    sid = _session()
+    monkeypatch.setenv('TEMPLEDB_SESSION_ID', str(sid))
+    fid = query_one("SELECT id FROM project_files WHERE file_path='drifted.py'")['id']
+    execute("INSERT INTO vcs_working_state (project_id, file_id, state, "
+            "staged_by_session_id) VALUES (?, ?, 'staged', ?)",
+            (pid, fid, sid))
+
+    msgs = _warn(r, pid, caplog)
+    assert len(msgs) == 1
+    assert 'STAGED in this session' in msgs[0]
+    assert 'drifted.py' in msgs[0]
+
+
+def test_another_sessions_stage_is_not_called_this_commits_loss(
+        repo, tmp_path, content_tables, working_state, caplog, monkeypatch):
+    """`vcs status` groups another session's stage separately because it
+    is not in this caller's commit. Counting it here would warn about
+    work this command cannot destroy."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tracked_file(pid, 'drifted.py', 'new\n', '2026-09-20 00:00:00')
+    (tmp_path / 'ws' / 'drifted.py').write_text('old\n')
+    mine, theirs = _session(), _session()
+    monkeypatch.setenv('TEMPLEDB_SESSION_ID', str(mine))
+    fid = query_one("SELECT id FROM project_files WHERE file_path='drifted.py'")['id']
+    execute("INSERT INTO vcs_working_state (project_id, file_id, state, "
+            "staged_by_session_id) VALUES (?, ?, 'staged', ?)",
+            (pid, fid, theirs))
+
+    msgs = _warn(r, pid, caplog)
+    assert len(msgs) == 1
+    assert 'STAGED' not in msgs[0]
+    assert 'Nothing of yours is staged' in msgs[0]
+
+
+def test_a_count_too_large_to_confirm_says_it_is_an_upper_bound(
+        repo, tmp_path, content_tables, caplog, monkeypatch):
+    """No silent cap. An unconfirmed count that reads like a confirmed
+    one is the bug this whole change is about, one level up."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    monkeypatch.setattr(type(r), 'BEHIND_CONFIRM_CAP', 1)
+    for rel in ('a.py', 'b.py'):
+        _tracked_file(pid, rel, 'new\n', '2026-09-20 00:00:00')
+        (tmp_path / 'ws' / rel).write_text('old\n')
+
+    msgs = _warn(r, pid, caplog)
+    assert len(msgs) == 1
+    assert 'upper bound' in msgs[0]
+    assert 'cap 1' in msgs[0]
+
+
 def test_prune_candidates_require_an_ended_owner(repo, tmp_path):
     """Three rows, one candidate. An unowned row is NOT one, even though
     resolve() finds it equally adoptable: migration 113's backfill left
@@ -619,15 +761,23 @@ def test_a_lone_adoptable_tree_that_predates_the_db_still_warns(
     to say — and said nothing about whether it was current either.
     Retiring templedb's 6352 left the next unpinned `vcs status` reading
     a tree from 09-26 in silence, which is less noise and no more truth.
+
+    The tree now has to actually HOLD the stale copy. As first written
+    this test tracked a file and never wrote it into the workspace, then
+    asserted a warning — pinning the false positive rather than the
+    hole, because an absent file cannot be reverted by committing from
+    here. Same intent, a shape the warning can be right about.
     """
     import logging
     r, pid = repo([('edit', 'old-ws', 1, None, True)])
     _tracked_file(pid, 'a.py', 'published later\n', '2026-10-02 00:00:00')
     # repo() stamps checkout_at as 2026-09-10, before that blob.
+    (tmp_path / 'old-ws' / 'a.py').write_text('what the tree was cut with\n')
     with caplog.at_level(logging.WARNING):
         got = r.resolve(pid, EDIT)
     assert got['checkout_path'].endswith('old-ws'), "still resolves"
-    assert any('newer content for 1 file' in m for m in caplog.messages)
+    assert any('moved past for 1 file(s): a.py' in m
+               for m in caplog.messages), caplog.messages
 
 
 def test_a_current_lone_tree_is_adopted_without_complaint(
@@ -734,3 +884,109 @@ def test_write_refuses_when_there_are_no_checkout_rows_at_all(repo):
     assert r.resolve(pid, EDIT) is None, "readers still get None"
     with pytest.raises(NoEditCheckout):
         r.resolve(pid, WRITE)
+
+
+# --- "untracked" conflated two opposite things ------------------------
+#
+# No ACTIVE project_files row covers both "nobody has committed this
+# yet" (work, keep the tree) and "deliberately deleted, and this tree
+# predates the deletion" (debris). templedb had four unprunable edit
+# trees off one path — src/cli/commands/workitem.py, dropped by
+# 43b437da — each reporting it as the single untracked file holding the
+# tree back. Tombstoning the row does NOT fix it: classify_edit_tree
+# builds `tracked` from the file_contents join, so a path with no
+# current content is absent from it whatever its status says.
+
+
+@pytest.fixture
+def commit_tables():
+    """vcs_commits + vcs_file_states, dropped on both sides.
+
+    Same contract as content_tables. Without these the debris query
+    raises and _split_deletion_debris falls back to calling everything
+    work — which is the conservative half, and is what the tests above
+    exercise.
+    """
+    def _drop():
+        for t in ('vcs_file_states', 'vcs_commits'):
+            execute(f"DROP TABLE IF EXISTS {t}")
+    _drop()
+    execute("""CREATE TABLE vcs_commits (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   project_id INTEGER, commit_timestamp TEXT)""")
+    execute("""CREATE TABLE vcs_file_states (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   commit_id INTEGER, file_id INTEGER,
+                   content_hash TEXT, change_type TEXT)""")
+    yield
+    _drop()
+
+
+def _tombstoned_with_history(pid, rel, committed_content):
+    """A deleted file whose last non-deleted commit held `content`."""
+    import hashlib
+    execute("INSERT INTO project_files (project_id, file_path, status) "
+            "VALUES (?, ?, 'deleted')", (pid, rel))
+    fid = query_one("SELECT id FROM project_files WHERE project_id=? AND "
+                    "file_path=?", (pid, rel))['id']
+    execute("INSERT INTO vcs_commits (project_id, commit_timestamp) "
+            "VALUES (?, '2026-09-04 00:00:00')", (pid,))
+    cid = query_one("SELECT id FROM vcs_commits ORDER BY id DESC LIMIT 1")['id']
+    execute("INSERT INTO vcs_file_states (commit_id, file_id, content_hash, "
+            "change_type) VALUES (?, ?, ?, 'modified')",
+            (cid, fid, hashlib.sha256(committed_content.encode()).hexdigest()))
+    return fid
+
+
+def test_a_deleted_file_still_on_disk_is_not_untracked_work(
+        repo, tmp_path, content_tables, commit_tables):
+    """workitem.py, and the four trees it froze."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tombstoned_with_history(pid, 'workitem.py', 'the deleted version\n')
+    (tmp_path / 'ws' / 'workitem.py').write_text('the deleted version\n')
+
+    v = r.classify_edit_tree(pid, tmp_path / 'ws')
+    assert v['untracked'] == []
+    assert v['deleted_debris'] == ['workitem.py']
+    assert v['verdict'] != r.TREE_HAS_WORK
+
+
+def test_a_rewritten_deleted_path_is_still_work(
+        repo, tmp_path, content_tables, commit_tables):
+    """The discriminator has to cut both ways. Content that differs from
+    what the deletion removed is someone writing at that path again, and
+    nothing in this database has seen it."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    _tombstoned_with_history(pid, 'workitem.py', 'the deleted version\n')
+    (tmp_path / 'ws' / 'workitem.py').write_text('a genuine new draft\n')
+
+    v = r.classify_edit_tree(pid, tmp_path / 'ws')
+    assert v['untracked'] == ['workitem.py']
+    assert v['deleted_debris'] == []
+    assert v['verdict'] == r.TREE_HAS_WORK
+
+
+def test_a_path_the_db_never_knew_is_still_work(
+        repo, tmp_path, content_tables, commit_tables):
+    """The property this must not weaken. A brand-new file has no row at
+    all, so it cannot be debris — commit 7A3BF285's loss stays caught."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    (tmp_path / 'ws' / 'brand_new.py').write_text('print(1)\n')
+
+    v = r.classify_edit_tree(pid, tmp_path / 'ws')
+    assert v['untracked'] == ['brand_new.py']
+    assert v['verdict'] == r.TREE_HAS_WORK
+
+
+def test_a_deleted_path_with_no_commit_history_is_work(
+        repo, tmp_path, content_tables, commit_tables):
+    """A tombstone with nothing recorded cannot prove the bytes on disk
+    are the ones that were removed, so it does not get to claim them."""
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    execute("INSERT INTO project_files (project_id, file_path, status) "
+            "VALUES (?, 'orphan.py', 'deleted')", (pid,))
+    (tmp_path / 'ws' / 'orphan.py').write_text('who knows\n')
+
+    v = r.classify_edit_tree(pid, tmp_path / 'ws')
+    assert v['untracked'] == ['orphan.py']
+    assert v['verdict'] == r.TREE_HAS_WORK

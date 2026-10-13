@@ -700,7 +700,13 @@ def register(cli):
     commit_parser = subparsers.add_parser('commit', help='Commit workspace changes to database')
     commit_parser.add_argument('project_slug', help='Project slug')
     commit_parser.add_argument('workspace_dir', help='Workspace directory')
-    commit_parser.add_argument('-m', '--message', required=True, help='Commit message')
+    # -F as well as -m, and -m no longer required=True. This command
+    # diffs a whole directory, so it is the more dangerous of the two
+    # `commit`s — and until now it was also the only one that could
+    # still eat a message to shell command substitution (`vcs commit`
+    # got -F first). See cli/commit_message.py.
+    from cli.commit_message import add_message_args
+    add_message_args(commit_parser)
     commit_parser.add_argument('--force', '-f', action='store_true', help='Force commit, overwrite conflicts')
     commit_parser.add_argument('--strategy', choices=['abort', 'force', 'rebase'], help='Conflict resolution strategy')
     commit_parser.add_argument(

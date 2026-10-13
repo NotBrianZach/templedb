@@ -47,8 +47,25 @@ class TestMigrator:
         m = Migrator(tmp)
         applied, skipped = m.migrate()
         assert applied == 1  # schema.sql
-        from migrator import MIGRATION_SEQUENCE
-        assert skipped == len(MIGRATION_SEQUENCE)  # numbered migrations marked as applied
+        # Was `assert skipped == len(MIGRATION_SEQUENCE)`, a module-level
+        # list that no longer exists — migrator globs MIGRATIONS_DIR
+        # instead of carrying a hardcoded sequence, so the import raised
+        # ImportError and the test asserted nothing.
+        #
+        # Not restored as a count against _discover_migrations(). That
+        # number is not a constant: MIGRATIONS_DIR is resolved by
+        # probing candidate paths relative to the module, and the same
+        # call answered 93 under pytest, 99 inside Migrator (which
+        # passes its own migrations_dir and applied_filenames) and 0
+        # from a bare script with src on PYTHONPATH. Pinning it would
+        # mean re-deriving the migrator's own arguments and then
+        # asserting the implementation against itself.
+        #
+        # The property worth holding is below and was already there: a
+        # fresh install leaves nothing pending. All this adds is that
+        # the numbered migrations were marked rather than silently
+        # finding none.
+        assert skipped > 0
 
         status = m.status()
         pending = sum(1 for s in status if not s["applied"])
@@ -86,19 +103,24 @@ class TestMigrator:
         os.unlink(tmp)
 
 
-class TestFuseFS:
-    def test_path_parsing(self):
-        try:
-            from temple_fuse import TempleFS
-        except OSError:
-            pytest.skip("libfuse not available")
-
-        fs = TempleFS.__new__(TempleFS)
-
-        assert fs._parse_path("/") == (None, None)
-        assert fs._parse_path("/myproject") == ("myproject", None)
-        assert fs._parse_path("/myproject/src/main.py") == ("myproject", "src/main.py")
-        assert fs._parse_path("/a/b/c/d.txt") == ("a", "b/c/d.txt")
+# TestFuseFS lived here until 2026-10-13. FUSE was retired 2026-09-05
+# (see reports/2026-08-29-post-fuse-editing-ux-alternatives-and-
+# recommendation.html) and commit 954CDCDD purged it, including a fix to
+# test.yml which was "still importing the deleted temple_fuse and
+# cli.commands.mount modules" — so CI's import list got attention and
+# this file did not.
+#
+# It survived because its own guard was shaped for the previous era:
+# `except OSError: pytest.skip("libfuse not available")` was right when
+# the module existed and the C library might not. A deleted module
+# raises ModuleNotFoundError, which subclasses ImportError and not
+# OSError, so the skip never fired and the test simply failed — one of
+# the permanent reds that make a suite's failure count stop meaning
+# anything.
+#
+# Deleted rather than widened to `except (OSError, ImportError)`: that
+# would skip forever, and a test that always skips reads as coverage
+# while asserting nothing. There is no TempleFS to parse paths with.
 
 
 class TestKnowledgeGraph:
