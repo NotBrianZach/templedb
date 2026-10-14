@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from repositories import ProjectRepository, FileRepository, CheckoutRepository, VCSRepository
 from importer.content import ContentStore, FileContent
 from importer.scanner import FileScanner
+from cli.commands.file import _mojibake_runs
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -286,6 +287,91 @@ class CommitCommand:
                     "  If the deletions are real: --allow-mass-delete"
                 )
                 return 1
+
+            # Double-encoding guard, the same one `file set` applies. See
+            # the _MOJIBAKE_RE comment in cli/commands/file.py for the
+            # incident: UTF-8 read as Latin-1 and written back as UTF-8 is
+            # still valid UTF-8, so hashes match, --verify passes, and the
+            # only symptom is text that renders as a stray 'a-circumflex'
+            # plus invisible control characters. bza's page.tsx shipped that
+            # way for two weeks.
+            #
+            # Guarding `file set` alone was not enough: the workspace diff
+            # is the path we *recommend* for multi-file work, so it was the
+            # wider door of the two.
+            #
+            # Enforced on modifications only, and on the count rather than
+            # on presence. A modification has a baseline to compare against,
+            # which is what makes the test meaningful -- an already-corrupt
+            # file stays editable and a repair can land. Additions have no
+            # baseline, and vendored blobs trip the heuristic legitimately
+            # (frontend/public/pdf.worker.min.mjs has two such sequences
+            # inside a compressed glyph table), so those only warn. A guard
+            # that blocks commits has to be wrong approximately never.
+            if not getattr(args, 'allow_mojibake', False):
+                suspect = []
+                for change in changes['modified']:
+                    new_text = getattr(change.content, 'content_text', None)
+                    new_runs = _mojibake_runs(new_text)
+                    if not new_runs:
+                        continue
+                    prev_text = None
+                    try:
+                        row = self.file_repo.get_file_content(change.file_id)
+                        if row:
+                            prev_text = row.get('content_text')
+                    except Exception as e:
+                        logger.debug(
+                            f"mojibake baseline read failed for "
+                            f"{change.file_path}: {e}"
+                        )
+                    prev_runs = _mojibake_runs(prev_text)
+                    if len(new_runs) > len(prev_runs):
+                        suspect.append(
+                            (change.file_path, len(new_runs) - len(prev_runs),
+                             sorted(set(new_runs))[:6])
+                        )
+                if suspect:
+                    logger.error(
+                        f"Refusing to commit: {len(suspect)} file(s) gained "
+                        f"double-encoded UTF-8."
+                    )
+                    for path, added, sample in suspect[:5]:
+                        logger.error(
+                            f"  {path}: +{added} sequence"
+                            f"{'s' if added != 1 else ''} -> "
+                            + " ".join(repr(c) for c in sample)
+                        )
+                    if len(suspect) > 5:
+                        logger.error(f"  ... and {len(suspect) - 5} more")
+                    logger.info(
+                        "  That is UTF-8 read as Latin-1 and written back as "
+                        "UTF-8. Valid UTF-8, so nothing downstream catches it."
+                    )
+                    logger.info(
+                        "  Usual cause: `perl -0pi -e` inserting a literal "
+                        "above U+00FF, which upgrades the whole buffer and "
+                        "re-encodes every pre-existing character."
+                    )
+                    logger.info(
+                        "  If the sequences are what you meant: "
+                        "--allow-mojibake"
+                    )
+                    return 1
+
+                for change in changes['added']:
+                    runs = _mojibake_runs(
+                        getattr(change.content, 'content_text', None)
+                    )
+                    if runs:
+                        logger.warning(
+                            f"{change.file_path} is new and contains "
+                            f"{len(runs)} sequence(s) that look like "
+                            f"double-encoded UTF-8 "
+                            f"({' '.join(repr(c) for c in sorted(set(runs))[:4])})"
+                            f". Committing anyway -- a new file has no "
+                            f"baseline to compare against."
+                        )
 
             # Check for conflicts before committing (unless --force)
             conflicts = []

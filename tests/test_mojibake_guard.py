@@ -112,6 +112,21 @@ def test_refuses_corruption_added_on_top_of_existing_corruption():
     assert decision(corrupt + mangle("y = '…'\n"), corrupt)
 
 
+def test_commit_path_shares_the_detector():
+    """The workspace diff must use the same detector as `file set`.
+
+    `templedb commit <workspace>` is the path recommended for multi-file
+    work, so guarding only `file set` left the wider of the two doors open.
+    Importing across command modules is also the kind of edge a later
+    refactor breaks silently, since the guard failing open looks like a
+    clean commit.
+    """
+    import cli.commands.commit as commit_mod
+
+    assert commit_mod._mojibake_runs is _mojibake_runs
+    assert commit_mod._mojibake_runs(mangle("✓")) == ["✓"]
+
+
 def test_the_real_incident_is_caught():
     """The actual bza commit: one newly-typed em dash, the rest mangled."""
     before = (

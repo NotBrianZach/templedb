@@ -113,6 +113,14 @@ def _register_top_level_aliases():
              'default: that pattern almost always means the wrong directory '
              'was passed (e.g. the PARENT of a session workspace).',
     )
+    commit_parser.add_argument(
+        '--allow-mojibake', action='store_true', dest='allow_mojibake',
+        help='Permit modifications that add double-encoded UTF-8 sequences '
+             '(UTF-8 read as Latin-1 and written back as UTF-8). Refused by '
+             'default, because the result is valid UTF-8 that no hash or '
+             'build step can catch and that renders as invisible control '
+             'characters. New files only warn.',
+    )
     cli.commands['commit'] = commit_cmd.commit
 
     # templedb build <slug>  →  deploy nix build
