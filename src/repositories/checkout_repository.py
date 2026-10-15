@@ -784,8 +784,16 @@ class CheckoutRepository(BaseRepository):
         work here. Bytes that DIFFER are a genuine edit at a deleted
         path and stay in `untracked`.
 
-        Tombstoned rows are the only ones consulted. A path the database
-        has never heard of cannot be debris.
+        Tombstoned rows are consulted first, then git. A path the
+        *database* has never heard of can still be unambiguous debris:
+        templedb retired `src/cli/commands/nixops4.py` by removing its
+        project_files row outright rather than tombstoning it, so there is
+        nothing here to compare against — while git holds both the add
+        (7776c31) and the delete (fcbabea), and the tree's copy is
+        byte-identical to the add. Without the git pass, gc called that
+        file unrescued work and printed a cp-and-commit recipe for
+        resurrecting a module migration 130 retired, which is worse than
+        saying nothing: it is confident, specific and wrong.
         """
         import hashlib
         from pathlib import Path
@@ -828,6 +836,85 @@ class CheckoutRepository(BaseRepository):
                 work.append(rel)
                 continue
             (debris if got == want else work).append(rel)
+
+        # Second pass, over what the DB could not account for. Same
+        # discriminator — bytes on disk vs bytes at the last commit that
+        # still had the file — asked of the other authority.
+        if work:
+            work, git_debris = self._split_git_deletion_debris(
+                project_id, root, work)
+            debris.extend(git_debris)
+        return work, debris
+
+    def _split_git_deletion_debris(self, project_id: int, root,
+                                   candidates: List[str]):
+        """Ask git whether these untracked paths were deliberately deleted.
+
+        Returns `(still_work, debris)`. A path qualifies as debris only
+        when all three hold in the project's canonical checkout:
+
+          - it does not exist at HEAD (so it really is gone, not merely
+            missing from `project_files`),
+          - some commit deleted it, and
+          - the content immediately before that deletion is byte-identical
+            to the tree's copy, i.e. nothing was written after the delete.
+
+        Anything else — no canonical checkout, not a git repo, git absent
+        or erroring, bytes that differ — stays work. Being wrong in that
+        direction keeps a prunable tree around; being wrong the other way
+        discards an edit.
+        """
+        import hashlib
+        import subprocess
+        from pathlib import Path
+
+        row = self.query_one("""
+            SELECT checkout_path FROM checkouts
+             WHERE project_id = ? AND kind = 'canonical' AND is_active = 1
+             LIMIT 1
+        """, (project_id,))
+        if not row or not row.get('checkout_path'):
+            return candidates, []
+        repo = Path(row['checkout_path'])
+        if not (repo / '.git').exists():
+            return candidates, []
+
+        def git(*args, binary=False):
+            out = subprocess.run(
+                ['git', *args], cwd=str(repo), timeout=15,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            if out.returncode != 0:
+                return None
+            return out.stdout if binary else out.stdout.decode(
+                'utf-8', 'replace').strip()
+
+        work, debris = [], []
+        for rel in candidates:
+            try:
+                # Present at HEAD means git still tracks it; whatever this
+                # path is, it is not a deletion.
+                if git('cat-file', '-e', f'HEAD:{rel}') is not None:
+                    work.append(rel)
+                    continue
+                sha = git('log', '--diff-filter=D', '-1', '--format=%H',
+                          '--', rel)
+                if not sha:
+                    work.append(rel)
+                    continue
+                before = git('show', f'{sha}^:{rel}', binary=True)
+                if before is None:
+                    work.append(rel)
+                    continue
+                on_disk = (Path(root) / rel).read_bytes()
+            except (OSError, subprocess.SubprocessError, ValueError) as e:
+                logger.debug("git debris check failed for %s: %s", rel, e)
+                work.append(rel)
+                continue
+            if (hashlib.sha256(before).hexdigest()
+                    == hashlib.sha256(on_disk).hexdigest()):
+                debris.append(rel)
+            else:
+                work.append(rel)
         return work, debris
 
     @staticmethod
