@@ -4,9 +4,9 @@ How Claude runs *inside* Emacs as a native Org buffer rather than a terminal
 pane, what each moving part is responsible for, and the workflows the design
 is actually built around.
 
-Written 2026-10-01 against `integrations/emacs/templedb-agent.el` (3080
-lines) and `src/agent/`. Line numbers are indicative; the structure is the
-durable part.
+Written 2026-10-01 against `integrations/emacs/templedb-agent.el` and
+`src/agent/`; §7a added 2026-10-15 when the session list became the roster.
+Line numbers are indicative; the structure is the durable part.
 
 ---
 
@@ -204,7 +204,7 @@ therefore not only *what Claude is told* but *where Claude stands*.
 |---|---|
 | `SPC a T A n` | New session |
 | `SPC a T A o` | Open session by id |
-| `SPC a T A l` | List sessions |
+| `SPC a T A l` | Roster — all sessions, bucketed (§7a) |
 | `SPC a T A ?` | Ask about symbol at point |
 | `SPC a T A L` | Work log |
 | `SPC a T A d` | Doctor (provider health) |
@@ -233,6 +233,66 @@ therefore not only *what Claude is told* but *where Claude stands*.
 
 `, i` is worth internalising — mid-run steering without cancelling is the
 main ergonomic advantage over a terminal.
+
+---
+
+## 7a. The roster
+
+`SPC a T A l` (or `M-x templedb-agent-roster`) is no longer a flat list of
+sessions. It is a triage buffer: every session grouped by **who is blocked**,
+auto-refreshing while it is on screen.
+
+| Bucket | Means |
+|---|---|
+| `NEEDS INPUT` | a *live* ask or an undecided decision — the agent is stopped, waiting on you |
+| `WORKING` | `status='running'`; `⚠ stalled` when the newest event is >180s old |
+| `NEEDS ATTENTION` | failed, cancelled or interrupted — an interrupted run is *resumable*, so it is not "done" |
+| `DONE · your turn` | the agent finished its turn |
+| `IDLE` | finished >2d ago, or never started |
+
+| Key | Action |
+|---|---|
+| `RET` / `c` | open the session · reply to it without leaving the roster |
+| `a` | answer a live question inline |
+| `d` | dispatch a new agent (`C-u d` = no isolation) |
+| `r` / `k` / `K` | resume · kill · reap orphaned serve processes |
+| `X` | expire undeliverable asks |
+| `P` / `/` / `TAB` | filter by project · by substring · fold a bucket |
+| `g` / `G` | refresh · toggle auto-refresh |
+
+The buckets, the reasons and the stall threshold all come from `templedb ai
+agent fleet --json`, so the CLI, this buffer and the GUI cannot drift into
+three definitions of "needs input". Bucket rules are in
+`store.classify_fleet_row`, which is pure and unit-tested.
+
+The roster is a **reader** — it shells out to the CLI and runs no `ai agent
+serve` process of its own. Only the actions that talk to a session spawn or
+reuse one, and `c` reuses a live buffer rather than reopening, because
+`templedb-agent-open` restarts the serve process and would cut off a run in
+flight.
+
+### Two things worth knowing
+
+**Asks are answerable from anywhere.** `templedb_ask_user` polls its *own*
+`agent_pending_asks` row for the answer, so the answer only has to land in the
+table — it does not have to travel back through the session that asked. Hence
+`a` in the roster, and `templedb ai agent ask respond` from any shell.
+
+**But only for 600 seconds.** That is the handler's poll deadline, after which
+nothing is listening. The roster only offers *live* asks; `ask respond` refuses
+an expired one without `--force`, and `ask expire` sweeps the rest. Before this
+split existed, 16 asks aged 8–36 days were sitting `pending` with no reader —
+a needs-input queue built on `status='pending'` alone is mostly garbage.
+
+### Dispatch provisions isolation
+
+`d` opens a vcs session, exports it, and *then* runs `templedb edit` — that
+order, because the function stamping the `checkouts` row never creates a
+session, so an `edit` that runs first leaves `session_id IS NULL`. The session
+id goes into the **serve process** environment (the agent's `Bash` calls are
+its grandchildren, each with a fresh shell), and the workspace is passed as the
+context `cwd`, so the dispatched agent stands in its own tree. Toggle with
+`templedb-agent-dispatch-isolation`.
 
 ---
 
@@ -330,6 +390,7 @@ still used.
 | Context basket items | `src/agent/context.py` |
 | Adding a provider | `src/agent/providers/base.py` |
 | MCP tools | `src/mcp_server.py` |
-| Buffer rendering, keymaps | `integrations/emacs/templedb-agent.el` |
+| Buffer rendering, keymaps, the roster | `integrations/emacs/templedb-agent.el` |
+| Bucket rules, ask liveness | `src/agent/store.py` (`fleet`, `classify_fleet_row`) |
 | Leader keys | `system_config/emacs.d/layers/templedb/packages.el` |
 | Web views of the same data | `src/gui_pages/agent_{sections,sessions,work_log}.py` |

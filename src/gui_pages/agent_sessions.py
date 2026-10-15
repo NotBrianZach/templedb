@@ -47,12 +47,50 @@ def _pill(status: str) -> str:
     )
 
 
+# Bucket presentation only. The rules themselves live in
+# `store.classify_fleet_row` so this page, `ai agent fleet` and the Emacs
+# roster cannot drift into three definitions of "needs input".
+_BUCKET_LABEL = {
+    "needs_input": ("needs input", "#e94560"),
+    "working":     ("working",     "#3ea866"),
+    "attention":   ("attention",   "#e9a045"),
+    "done":        ("your turn",   "#7ec7ff"),
+    "idle":        ("idle",        "#8080a0"),
+}
+
+
+def _bucket_pill(bucket: str, stalled: bool = False) -> str:
+    label, color = _BUCKET_LABEL.get(bucket or "", (bucket or "?", "#8080a0"))
+    if stalled:
+        label += " ⚠"
+    return (
+        f'<span style="display:inline-block;padding:0 6px;border-radius:3px;'
+        f'font-size:0.7rem;font-weight:600;color:{color};'
+        f'border:1px solid {color};background:transparent">'
+        f'{html.escape(label)}</span>'
+    )
+
+
+def _fleet_index(limit: int):
+    """Map session id -> classification, from the shared classifier.
+
+    Returns an empty dict rather than raising: this page is a read-only
+    browser and a bucket column is worth less than the page loading.
+    """
+    try:
+        from agent import store as agent_store
+        result = agent_store.fleet(limit=max(limit, 500))
+    except Exception:  # pragma: no cover - defensive, page must still render
+        return {}
+    return {r["id"]: r for r in result["rows"]}
+
+
 def _list_filter_chip(current: str, value: str, label: str,
-                      other_params: str = "") -> str:
+                      other_params: str = "", param: str = "status") -> str:
     href = "/agent-sessions"
     parts = []
     if value:
-        parts.append(f"status={value}")
+        parts.append(f"{param}={value}")
     if other_params:
         parts.append(other_params)
     qs = "&".join(parts)
@@ -64,7 +102,8 @@ def _list_filter_chip(current: str, value: str, label: str,
 
 @router.get("/agent-sessions", response_class=HTMLResponse)
 def agent_sessions_list(status: str = "", project: str = "",
-                        provider: str = "", limit: int = 100):
+                        provider: str = "", bucket: str = "",
+                        limit: int = 100):
     where = []
     params: list = []
     if status:
@@ -94,6 +133,10 @@ def agent_sessions_list(status: str = "", project: str = "",
         """,
         (*params, limit),
     )
+
+    fleet = _fleet_index(limit)
+    if bucket:
+        rows = [r for r in rows if (fleet.get(r["id"]) or {}).get("bucket") == bucket]
 
     # Distinct statuses/providers for filter bar
     status_rows = query_all(
@@ -127,9 +170,23 @@ def agent_sessions_list(status: str = "", project: str = "",
     </style>
     """
 
+    bucket_counts: dict = {}
+    for row in fleet.values():
+        bucket_counts[row["bucket"]] = bucket_counts.get(row["bucket"], 0) + 1
+
     filter_bar = (
         '<div class="filter-bar">'
-        + _list_filter_chip(status, "", "all")
+        + _list_filter_chip(bucket, "", "all", param="bucket")
+        + "".join(
+            _list_filter_chip(bucket, b,
+                              f'{_BUCKET_LABEL[b][0]} ({bucket_counts[b]})',
+                              param="bucket")
+            for b in _BUCKET_LABEL
+            if bucket_counts.get(b)
+        )
+        + '</div>'
+        + '<div class="filter-bar">'
+        + _list_filter_chip(status, "", "any status")
         + "".join(
             _list_filter_chip(status, r["status"] or "",
                               f'{r["status"] or "?"} ({r["c"]})')
@@ -148,6 +205,8 @@ def agent_sessions_list(status: str = "", project: str = "",
     row_html = []
     for r in rows:
         title = (r["title"] or "").strip() or "(untitled)"
+        cls = fleet.get(r["id"]) or {}
+        reason = cls.get("reason") or ""
         row_html.append(
             f'<tr>'
             f'<td><a href="/agent-sessions/{r["id"]}">#{r["id"]}</a></td>'
@@ -157,6 +216,8 @@ def agent_sessions_list(status: str = "", project: str = "",
             f'  <div class="sess-muted">{html.escape(r["session_uuid"] or "")[:20]}'
             f'{" · " + html.escape(r["model"]) if r["model"] else ""}</div>'
             f'</td>'
+            f'<td>{_bucket_pill(cls.get("bucket"), cls.get("stalled")) if cls else "—"}'
+            f'<div class="sess-muted">{html.escape(reason[:48])}</div></td>'
             f'<td>{_pill(r["status"])}</td>'
             f'<td class="sess-muted">{html.escape(r["provider_name_col"] or "?")}</td>'
             f'<td class="sess-muted">'
@@ -172,10 +233,12 @@ def agent_sessions_list(status: str = "", project: str = "",
         + '<h2>Agent Sessions</h2>'
         + '<p class="muted" style="margin-bottom:0.8rem">'
         + f'{len(rows)} session(s), newest activity first. '
-        + '<code>r</code>=runs, <code>m</code>=messages.</p>'
+        + '<code>r</code>=runs, <code>m</code>=messages. '
+        + 'Buckets come from <code>templedb ai agent fleet</code> — the same '
+        + 'classifier the Emacs roster uses.</p>'
         + filter_bar
         + '<table class="sess-table">'
-        + '<thead><tr><th>id</th><th>title</th><th>status</th>'
+        + '<thead><tr><th>id</th><th>title</th><th>bucket</th><th>status</th>'
         + '<th>provider</th><th>project</th><th style="text-align:right">counts</th>'
         + '<th>updated</th></tr></thead>'
         + '<tbody>'

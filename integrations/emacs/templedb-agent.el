@@ -831,6 +831,14 @@ its state was mutated."
 (defvar-local templedb-agent--run-start-time nil "Start time of current run.")
 (defvar-local templedb-agent--selected-files nil
   "Alist of (slug . list-of-file-paths) for selected files context.")
+(defvar-local templedb-agent--vcs-session-id nil
+  "Integer id of the `vcs_sessions' row this agent stages into, if isolated.
+Exported into the serve process so the agent's own shells inherit it —
+see `templedb-agent--provision-isolation'.")
+(defvar-local templedb-agent--workspace nil
+  "Edit workspace this agent works in, if isolated.
+Passed as the context `cwd', which `_resolve_cwd' honours ahead of the
+project's repo path.")
 
 ;;;; Process management
 
@@ -838,7 +846,18 @@ its state was mutated."
   "Start the agent serve process."
   (when (and templedb-agent--process (process-live-p templedb-agent--process))
     (delete-process templedb-agent--process))
-  (let ((process-environment (append '("PYTHONDONTWRITEBYTECODE=1") process-environment))
+  (let ((process-environment
+         (append '("PYTHONDONTWRITEBYTECODE=1")
+                 ;; Must be on the serve process: the agent's Bash calls are
+                 ;; grandchildren of it, and each one gets a fresh shell with
+                 ;; a fresh session-leader PID. Without an inherited id they
+                 ;; would each open their own implicit session, which is how
+                 ;; `vcs add' in one call and `vcs commit' in the next end up
+                 ;; staging into different sessions.
+                 (when templedb-agent--vcs-session-id
+                   (list (format "TEMPLEDB_SESSION_ID=%d"
+                                 templedb-agent--vcs-session-id)))
+                 process-environment))
         (buf (current-buffer))
         (stderr-buf (get-buffer-create "*temple-agent-stderr*")))
     (setq templedb-agent--process
@@ -2764,19 +2783,91 @@ nothing is listening and an answer would be written into the void."
          (pick (completing-read "Which question? " choices nil t)))
     (cdr (assoc pick choices))))
 
-(defun templedb-agent-roster-dispatch (project text)
+(defcustom templedb-agent-dispatch-isolation t
+  "Whether roster dispatch provisions a session and edit workspace.
+
+With this on, `templedb-agent-roster-dispatch' opens a `vcs_sessions'
+row, exports it, and only then runs `templedb edit' — the documented
+order, because the function that stamps the `checkouts' row deliberately
+never creates a session, so an `edit' that runs first yields an unowned
+tree that `checkout-gc' cannot clean.
+
+Off, a dispatched agent shares whatever edit tree is newest for the
+project, which is fine for one agent and a collision for two."
+  :type 'boolean
+  :group 'templedb-agent)
+
+(defun templedb-agent--provision-isolation (project)
+  "Open a vcs session and edit workspace for an agent on PROJECT.
+
+Returns a cons of (SESSION-ID . WORKSPACE-PATH), or nil if either step
+fails — dispatch then proceeds unisolated rather than refusing to start,
+since a shared tree is only a hazard with a second concurrent agent.
+
+Order matters and is not interchangeable: the session must exist and be
+exported *before* `templedb edit', or the workspace is created with
+`session_id IS NULL' and nothing can later claim it."
+  (let* ((name (format "agent-%s-%s" project
+                       (format-time-string "%m%d-%H%M%S")))
+         (session-id
+          (with-temp-buffer
+            (when (zerop (call-process templedb-agent-executable nil t nil
+                                       "vcs" "session" "start" "--name" name))
+              (goto-char (point-min))
+              (when (re-search-forward "TEMPLEDB_SESSION_ID=\\([0-9]+\\)" nil t)
+                (string-to-number (match-string 1)))))))
+    (when session-id
+      (let* ((process-environment
+              (cons (format "TEMPLEDB_SESSION_ID=%d" session-id)
+                    process-environment))
+             (workspace
+              (with-temp-buffer
+                (when (zerop (call-process templedb-agent-executable nil t nil
+                                           "edit" project))
+                  (goto-char (point-min))
+                  (when (re-search-forward "^\\s-*Workspace:\\s-*\\(.+\\)$" nil t)
+                    (string-trim (match-string 1)))))))
+        (if (and workspace (file-directory-p workspace))
+            (cons session-id workspace)
+          ;; Do not leave a session row behind for a workspace that never
+          ;; appeared; an unused session is just another thing to reap.
+          (call-process templedb-agent-executable nil nil nil
+                        "vcs" "session" "end" (number-to-string session-id))
+          nil)))))
+
+(defun templedb-agent-roster-dispatch (project text &optional no-isolation)
   "Start a new session on PROJECT and send TEXT to it.
 The roster equivalent of dispatching work: pick a target, state the
-task, and let it land in WORKING without typing in a buffer."
+task, and let it land in WORKING without typing in a buffer.
+
+Unless NO-ISOLATION (interactively, a prefix argument) the agent gets
+its own vcs session and edit workspace, and stands in that workspace
+rather than the project's repo path. See
+`templedb-agent-dispatch-isolation'."
   (interactive
    (list (completing-read "Dispatch on project: "
                           (templedb-agent--project-slugs) nil nil)
-         (read-string "Task: ")))
+         (read-string "Task: ")
+         current-prefix-arg))
   (when (string-empty-p (string-trim text))
     (user-error "Nothing to dispatch"))
-  (templedb-agent-new project)
-  (templedb-agent--roster-dispatch-when-ready (current-buffer) text 0)
-  (message "Dispatching on %s…" project))
+  (let ((isolation (and templedb-agent-dispatch-isolation
+                        (not no-isolation)
+                        (progn (message "Provisioning session for %s…" project)
+                               (templedb-agent--provision-isolation project)))))
+    (templedb-agent-new project)
+    (when isolation
+      (setq templedb-agent--vcs-session-id (car isolation)
+            templedb-agent--workspace (cdr isolation))
+      ;; `templedb-agent-new' already started the process without the env
+      ;; var; restart it now that we have one to hand down.
+      (templedb-agent--start-process))
+    (templedb-agent--roster-dispatch-when-ready (current-buffer) text 0)
+    (if isolation
+        (message "Dispatching on %s — session #%d in %s"
+                 project (car isolation)
+                 (abbreviate-file-name (cdr isolation)))
+      (message "Dispatching on %s (no isolation)" project))))
 
 (defun templedb-agent--roster-dispatch-when-ready (buf text attempts)
   "Wait for BUF's new session to exist, then send TEXT.
@@ -3233,6 +3324,12 @@ Includes goal text and per-project context items."
         (push (cons 'goal goal) payload))
       (when templedb-agent-default-model
         (push (cons 'model templedb-agent-default-model) payload))
+      ;; An isolated agent stands in its own edit workspace rather than the
+      ;; project's repo path, so its writes cannot collide with another
+      ;; agent's tree. `_resolve_cwd' checks `cwd' before anything else.
+      (when (and templedb-agent--workspace
+                 (file-directory-p templedb-agent--workspace))
+        (push (cons 'cwd templedb-agent--workspace) payload))
       payload)))
 
 (defun templedb-agent-add-project (project)

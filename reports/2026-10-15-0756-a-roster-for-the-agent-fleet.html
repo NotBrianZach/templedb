@@ -291,7 +291,7 @@ templedb ai agent ask expire [--dry-run]</pre>
   <tr><td><code>RET</code></td><td>open the session in its own buffer</td></tr>
   <tr><td><code>c</code></td><td>reply without leaving the roster — reuses a live buffer, else opens one; <code>message.queue</code> if the agent is still working, so this doubles as mid-run guidance</td></tr>
   <tr><td><code>a</code></td><td>answer a live question inline (options offered via <code>completing-read</code>)</td></tr>
-  <tr><td><code>d</code></td><td>dispatch: pick a project, state a task, it lands in WORKING</td></tr>
+  <tr><td><code>d</code></td><td>dispatch: pick a project, state a task, it lands in WORKING — with its own vcs session and edit workspace (idea 1); <code>C-u d</code> to opt out</td></tr>
   <tr><td><code>r</code> / <code>k</code> / <code>K</code></td><td>resume · kill · reap orphaned serve processes</td></tr>
   <tr><td><code>X</code></td><td>expire undeliverable asks</td></tr>
   <tr><td><code>P</code> / <code>/</code> / <code>TAB</code></td><td>filter by project · by substring · fold a bucket</td></tr>
@@ -325,24 +325,37 @@ templedb ai agent ask expire [--dry-run]</pre>
 </p>
 
 <div class="idea">
-<h3>1. Dispatch should provision isolation, not just a session <span class="tag">highest value</span></h3>
+<h3>1. Dispatch provisions isolation, not just a session <span class="tag">shipped</span></h3>
 <p>
   Dispatch is the one genuinely new capability, and it is also the one that
-  breaks things. Two agents dispatched onto the same project share an edit
-  workspace, and TempleDB's documented hazards are nearly all collision
+  breaks things. Two agents dispatched onto the same project would share an
+  edit workspace, and TempleDB's documented hazards are nearly all collision
   hazards: unpinned sessions adopt whatever edit tree is newest, a materialise
   elsewhere can move it mid-run, <code>file set</code> reverts a whole file to
-  a stale copy. The roster currently hands a prompt to a new session and stops
-  there.
+  a stale copy.
 </p>
 <p>
-  <code>d</code> should instead do what a careful human does: <code>vcs session
-  start --name agent-&lt;slug&gt;-&lt;n&gt;</code>, export it, <em>then</em>
-  <code>templedb edit</code> so the tree is owned, and record the resulting
-  <code>session_id</code> on the agent session. That is four existing commands
-  in the documented order. It makes fleet-scale dispatch safe instead of
-  merely possible, and it would make <code>checkout_matches_db</code> stop
-  going red because of unpinned agents.
+  So <code>d</code> now does what a careful human does: <code>vcs session start
+  --name agent-&lt;slug&gt;-&lt;stamp&gt;</code>, export it, <em>then</em>
+  <code>templedb edit</code>. The order is not interchangeable and this is the
+  one place the sequence is enforced in code rather than in prose — the
+  function that stamps the <code>checkouts</code> row deliberately never
+  creates a session, so an <code>edit</code> that runs first yields
+  <code>session_id IS NULL</code>: a tree <code>checkout-gc</code> cannot
+  clean and that makes <code>checkout_matches_db</code> go red. Verified by
+  provisioning one and reading the row back: <code>session_id</code> set,
+  retired cleanly by <code>vcs session end</code>.
+</p>
+<p>
+  Two details carry the isolation the rest of the way. The session id is
+  exported into the <em>serve</em> process, because the agent's own
+  <code>Bash</code> calls are its grandchildren and each gets a fresh shell
+  with a fresh session-leader PID — without an inherited id, <code>vcs add</code>
+  in one call and <code>vcs commit</code> in the next stage into different
+  sessions. And the workspace is passed as the context <code>cwd</code>, which
+  <code>_resolve_cwd</code> honours ahead of the project's repo path, so a
+  dispatched agent <em>stands</em> in its own tree rather than in the shared
+  checkout it is told not to edit. <code>C-u d</code> opts out.
 </p>
 </div>
 
