@@ -672,6 +672,28 @@ class CommitCommand:
         # Scan filesystem (use scanner to get trackable files)
         scanned_files = self.scanner.scan_directory()
 
+        # Anything the scanner refused is reported, never swallowed: a commit
+        # that silently omits a file reads exactly like one that had nothing
+        # to omit — which is how an added `justfile` was lost from a commit
+        # that reported success with two files.
+        #
+        # Only *untracked* skips are at risk and so only those are named. A
+        # path the DB already knows is rescued below, where db_by_path
+        # leftovers are re-read from disk and compared on content rather
+        # than recorded as deletions. And inside a git repo the scanner now
+        # falls back to a generic type, so this is reachable mainly from a
+        # non-git workspace — which is what every edit workspace is.
+        lost = [p for p in self.scanner.skipped_files if p not in db_by_path]
+        if lost:
+            print(f"⚠ {len(lost)} new file(s) have an unrecognised name and "
+                  f"are NOT in this commit:")
+            for path in lost[:10]:
+                print(f"    {path}")
+            if len(lost) > 10:
+                print(f"    … and {len(lost) - 10} more")
+            print("  Land them with `templedb file set <slug> <path>`, which "
+                  "takes a path instead of scanning.")
+
         for scanned_file in scanned_files:
             rel_path = str(scanned_file.relative_path)
 
@@ -1146,35 +1168,33 @@ class CommitCommand:
               change.old_hash or 'DELETED'), commit=False)
 
     def _get_file_type_id(self, file_path: str) -> Optional[int]:
-        """Get file type ID for a file path"""
-        extension = Path(file_path).suffix.lstrip('.')
+        """Get file type ID for a project-relative file path.
 
-        # Map common extensions
-        extension_map = {
-            'py': 'python',
-            'js': 'javascript',
-            'ts': 'typescript',
-            'sql': 'sql',
-            'md': 'markdown',
-            'txt': 'text',
-            'json': 'json',
-            'yaml': 'yaml',
-            'yml': 'yaml',
-            'toml': 'toml',
-            'sh': 'shell',
-            'bash': 'shell',
-            'nix': 'nix',
-        }
+        Uses `scanner.classify_path` — the same classifier that decides
+        whether a file is scanned at all. This method used to carry a
+        private 14-entry extension map and, for anything outside it, take
+        `SELECT id FROM file_types LIMIT 1`: an arbitrary row that happens
+        to be `api_route`. That is why every `.rs` file, `Cargo.toml` and
+        `.gitignore` in templedb-rust is recorded as an API route.
 
-        type_name = extension_map.get(extension)
+        An unknown-but-classified type is inserted rather than coerced to
+        row 1, so a new language shows up as itself the first time it is
+        committed.
+        """
+        from importer.scanner import classify_path, GENERIC_TEXT_TYPE
 
-        # Get type ID, fall back to any file type for unknown extensions
-        file_type = None
-        if type_name:
-            file_type = self.file_repo.query_one("SELECT id FROM file_types WHERE type_name = ?", (type_name,))
-        if not file_type:
-            file_type = self.file_repo.query_one("SELECT id FROM file_types LIMIT 1")
-        return file_type['id'] if file_type else 1
+        type_name = classify_path(file_path) or GENERIC_TEXT_TYPE
+        row = self.file_repo.query_one(
+            "SELECT id FROM file_types WHERE type_name = ?", (type_name,))
+        if row:
+            return row['id']
+        self.file_repo.execute(
+            "INSERT OR IGNORE INTO file_types (type_name, category, description) "
+            "VALUES (?, 'uncategorized', 'Auto-registered on first commit')",
+            (type_name,), commit=False)
+        row = self.file_repo.query_one(
+            "SELECT id FROM file_types WHERE type_name = ?", (type_name,))
+        return row['id'] if row else 1
 
     def _detect_conflicts(self, project_id: int, workspace_dir: Path, modified_files: List[FileChange]) -> List[Dict]:
         """Detect version conflicts for modified files.

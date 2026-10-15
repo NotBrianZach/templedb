@@ -198,11 +198,24 @@ FILE_TYPE_PATTERNS = [
     (r'templedb-deploy\.sh$', 'deployment_script', None),
     (r'deployment.*\.ya?ml$', 'deployment_config', None),
 
+    # Task runners and extensionless build files. `Makefile` and `Dockerfile`
+    # were always here; these are the ones that were not, and an unmatched
+    # name is dropped silently — see `scan_directory`.
+    (r'(^|/)[Jj]ustfile$', 'justfile', None),
+    (r'(^|/)Taskfile\.ya?ml$', 'taskfile', None),
+    (r'(^|/)Caddyfile$', 'caddyfile', None),
+    (r'(^|/)Vagrantfile$', 'vagrantfile', None),
+    (r'(^|/)Brewfile$', 'brewfile', None),
+    (r'(^|/)CODEOWNERS$', 'codeowners', None),
+    (r'(^|/)Dockerfile\.', 'docker_file', None),   # Dockerfile.dev, .prod, …
+    (r'(^|/)\.dockerignore$', 'docker_ignore', None),
+    (r'\.mk$', 'makefile', None),
+
     # Documentation
     (r'README$', 'readme', lambda p: p.upper() == 'README'),
     (r'README\.md', 'markdown', None),
     (r'CHANGELOG\.md$', 'changelog', None),
-    (r'LICENSE$', 'license', None),
+    (r'LICENSE', 'license', None),                 # LICENSE, LICENSE.txt, …
     (r'CONTRIBUTING\.md$', 'contributing', None),
     (r'SECURITY\.md$', 'security_policy', None),
 
@@ -215,14 +228,55 @@ FILE_TYPE_PATTERNS = [
     (r'\.jsonc$', 'config_json', None),
     (r'\.json$', 'config_json', None),
     (r'\.toml$', 'config_toml', None),
+    (r'\.(ini|cfg|conf|properties)$', 'config_file', None),
+
+    # Interface definitions
+    (r'\.proto$', 'protobuf', None),
+    (r'\.graphql$', 'graphql', None),
+    (r'\.xml$', 'xml', None),
 
     # Scripts
     (r'\.sh$', 'shell_script', None),
+    (r'\.(bash|zsh)$', 'shell_script', None),
+    (r'\.ps1$', 'powershell', None),
+    (r'\.(bat|cmd)$', 'batch_script', None),
     (r'\.py$', 'python', None),
+    (r'\.exs?$', 'elixir', None),
+    (r'\.jl$', 'julia', None),
+    (r'\.zig$', 'zig', None),
 
-    # Documentation (catch-all)
+    # Documentation and plain text (catch-all)
     (r'\.md$', 'markdown', None),
+    (r'\.(rst|adoc|org)$', 'document', None),
+    (r'\.tex$', 'latex', None),
+    (r'\.(patch|diff)$', 'patch', None),
+    (r'\.csv$', 'csv', None),
+    (r'\.te?xt$', 'text_file', None),
 ]
+
+# Reached only for a path the project's own authority already claims. See
+# `scan_directory`: `get_file_type` returning None means "I don't recognise
+# this", which is not the same as "this isn't part of the project", and
+# conflating the two is how a `justfile` disappeared from a commit that
+# reported success with two files.
+GENERIC_TEXT_TYPE = 'text_file'
+GENERIC_BINARY_TYPE = 'binary_asset'
+
+
+def classify_path(rel_path: str) -> Optional[str]:
+    """Return the file type for a project-relative path, or None if unknown.
+
+    The single classifier. `commit.py` used to carry a second, much smaller
+    extension map of its own and fall back to `file_types LIMIT 1` for
+    anything it missed, which is why every `.rs` file in templedb-rust is
+    recorded as `api_route`.
+    """
+    for pattern, type_name, test_func in FILE_TYPE_PATTERNS:
+        if re.search(pattern, rel_path):
+            if test_func and not test_func(rel_path):
+                continue
+            return type_name
+    return None
 
 # Directories to skip during scanning
 SKIP_DIRS = {
@@ -250,6 +304,8 @@ class FileScanner:
     def __init__(self, project_root: str):
         self.project_root = Path(project_root).resolve()
         self._git_files: Optional[Set[str]] = self._load_git_files()
+        # Project-relative paths the last scan refused to return.
+        self.skipped_files: List[str] = []
 
     def _load_git_files(self) -> Optional[Set[str]]:
         """
@@ -274,15 +330,16 @@ class FileScanner:
 
     def get_file_type(self, file_path: Path) -> Optional[str]:
         """Detect file type based on patterns"""
-        rel_path = str(file_path.relative_to(self.project_root))
+        return classify_path(str(file_path.relative_to(self.project_root)))
 
-        for pattern, type_name, test_func in FILE_TYPE_PATTERNS:
-            if re.search(pattern, rel_path):
-                if test_func and not test_func(rel_path):
-                    continue
-                return type_name
-
-        return None
+    @staticmethod
+    def _looks_binary(file_path: Path) -> bool:
+        """NUL byte in the first 8KB — the heuristic `git diff` uses."""
+        try:
+            with open(file_path, 'rb') as fh:
+                return b'\0' in fh.read(8192)
+        except OSError:
+            return False
 
     def extract_component_name(self, file_path: Path, content: str) -> str:
         """Extract component/function name from file content"""
@@ -357,8 +414,14 @@ class FileScanner:
         return len(content.splitlines())
 
     def scan_directory(self) -> List[ScannedFile]:
-        """Recursively scan directory and return list of tracked files"""
+        """Recursively scan directory and return list of tracked files.
+
+        Paths this refuses to return are recorded in `self.skipped_files` so
+        callers can say so. A scan that drops a file and reports success is
+        indistinguishable from one that had nothing to drop.
+        """
         scanned_files = []
+        self.skipped_files = []
 
         for root, dirs, files in os.walk(self.project_root):
             # Filter out directories to skip
@@ -380,7 +443,21 @@ class FileScanner:
                 # Detect file type
                 file_type = self.get_file_type(file_path)
                 if not file_type:
-                    continue
+                    # Unrecognised is not the same as out of scope. When git
+                    # is the authority for membership and git tracks this
+                    # path, the user has already declared it part of the
+                    # project, so dropping it would lose work — silently,
+                    # since the commit still reports success for the files
+                    # it did see. Fall back to a generic type instead.
+                    if self._git_files is not None:
+                        file_type = (GENERIC_BINARY_TYPE
+                                     if self._looks_binary(file_path)
+                                     else GENERIC_TEXT_TYPE)
+                    else:
+                        # No authority says this belongs; skip, but on the
+                        # record.
+                        self.skipped_files.append(rel_path)
+                        continue
 
                 # For binary asset types, skip text analysis — ContentStore will
                 # read them as bytes and store to content_blob (or external file for large).
