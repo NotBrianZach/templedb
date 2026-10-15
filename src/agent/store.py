@@ -1012,3 +1012,340 @@ def decide_notification(notification_id, decision):
              AND decided_at IS NULL""",
         (decision, _now(), notification_id),
     )
+
+
+# ---------------------------------------------------------------------------
+# Fleet roster — one triage row per session, bucketed by who is blocked.
+# ---------------------------------------------------------------------------
+
+BUCKET_NEEDS_INPUT = "needs_input"
+BUCKET_WORKING = "working"
+BUCKET_ATTENTION = "attention"
+BUCKET_DONE = "done"
+BUCKET_IDLE = "idle"
+
+# Render order. needs_input first because it is the only bucket where a
+# session is literally stopped waiting on the human.
+FLEET_BUCKET_ORDER = (
+    BUCKET_NEEDS_INPUT,
+    BUCKET_WORKING,
+    BUCKET_ATTENTION,
+    BUCKET_DONE,
+    BUCKET_IDLE,
+)
+
+# A session whose row says 'running' but whose newest event is older than
+# this has almost certainly lost its provider: the Emacs buffer was killed,
+# `stop-stale` reaped the serve process, or `claude` died without emitting a
+# terminal event. Nothing rewrites the status in those cases, so without a
+# heartbeat the roster would report work that nobody is doing.
+FLEET_STALL_SECONDS = 180
+
+# How long a finished session stays in `done` before it drops to `idle`.
+FLEET_IDLE_DAYS = 2
+
+# `tool_ask_user` in mcp_server.py polls its own `agent_pending_asks` row for
+# 600s and then returns an error to Claude. Nothing marks the row afterwards,
+# so a `status='pending'` ask older than this has no reader left: answering it
+# writes into a table nobody is watching. Keep this in sync with that
+# deadline, or the roster will queue up asks that can no longer be delivered
+# (16 such rows, 8-27 days old, existed when this was written).
+FLEET_ASK_DEADLINE_SECONDS = 600
+
+
+def fleet_rows(project_id=None, newer_than_days=None, limit=200,
+               ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS):
+    """Return one triage row per session, newest activity first.
+
+    Each row is `agent_sessions.*` plus the counts a roster view needs:
+    message/ask/decision/section totals, the latest run, and
+    `last_event_at` — the real heartbeat, since `updated_at` only moves on
+    status transitions and so looks frozen for the whole of a long run.
+
+    Classification is deliberately *not* done here: see
+    `classify_fleet_row`, which is pure and therefore testable without a DB.
+    """
+    sql = """
+        SELECT s.*,
+               p.name  AS provider_name,
+               pr.slug AS project_slug,
+               COALESCE(m.msg_count, 0)       AS msg_count,
+               COALESCE(a.pending_asks, 0)    AS pending_asks,
+               COALESCE(a.live_asks, 0)       AS live_asks,
+               COALESCE(a.dead_asks, 0)       AS dead_asks,
+               COALESCE(a.pending_msgs, 0)    AS pending_msgs,
+               COALESCE(n.pending_decisions, 0) AS pending_decisions,
+               COALESCE(sec.findings, 0)      AS findings,
+               COALESCE(sec.todos_open, 0)    AS todos_open,
+               COALESCE(sec.questions_open, 0) AS questions_open,
+               COALESCE(w.cost_usd, 0.0)      AS cost_usd,
+               r.id        AS run_id,
+               r.status    AS run_status,
+               r.started_at AS run_started_at,
+               r.error_text AS run_error,
+               (SELECT MAX(e.created_at) FROM agent_events e
+                 WHERE e.run_id = r.id) AS last_event_at
+          FROM agent_sessions s
+          JOIN agent_providers p ON s.provider_id = p.id
+          LEFT JOIN projects pr ON pr.id = s.project_id
+          LEFT JOIN (SELECT session_id, COUNT(*) AS msg_count
+                       FROM agent_messages GROUP BY session_id) m
+                 ON m.session_id = s.id
+          LEFT JOIN (SELECT session_id,
+                            SUM(kind = 'question') AS pending_asks,
+                            SUM(kind = 'question'
+                                AND datetime(created_at) >= datetime('now', ?))
+                              AS live_asks,
+                            SUM(kind = 'question'
+                                AND datetime(created_at) < datetime('now', ?))
+                              AS dead_asks,
+                            -- messages are one-way: nothing ever flips them
+                            -- to 'responded', so delivery is the only
+                            -- meaningful notion of outstanding.
+                            SUM(kind = 'message' AND dispatched_at IS NULL)
+                              AS pending_msgs
+                       FROM agent_pending_asks
+                      WHERE status = 'pending'
+                      GROUP BY session_id) a
+                 ON a.session_id = s.id
+          LEFT JOIN (SELECT session_id, COUNT(*) AS pending_decisions
+                       FROM agent_notifications
+                      WHERE kind = 'decision' AND decided_at IS NULL
+                      GROUP BY session_id) n
+                 ON n.session_id = s.id
+          LEFT JOIN (SELECT session_id,
+                            SUM(section = 'findings') AS findings,
+                            SUM(section = 'todo'
+                                AND COALESCE(json_extract(entry_json, '$.done'), 0) = 0)
+                              AS todos_open,
+                            SUM(section = 'open-questions'
+                                AND COALESCE(json_extract(entry_json, '$.answered'), 0) = 0)
+                              AS questions_open
+                       FROM agent_session_sections GROUP BY session_id) sec
+                 ON sec.session_id = s.id
+          LEFT JOIN (SELECT session_id, SUM(COALESCE(cost_usd, 0)) AS cost_usd
+                       FROM agent_work_log GROUP BY session_id) w
+                 ON w.session_id = s.id
+          LEFT JOIN agent_runs r
+                 ON r.id = (SELECT r2.id FROM agent_runs r2
+                             WHERE r2.session_id = s.id
+                             ORDER BY r2.id DESC LIMIT 1)
+         WHERE 1=1"""
+    # The two leading params belong to the live/dead ask split inside the
+    # LEFT JOIN, which is textually ahead of this WHERE clause.
+    cutoff = f"-{int(ask_deadline_seconds)} seconds"
+    params = [cutoff, cutoff]
+    if project_id is not None:
+        sql += " AND s.project_id = ?"
+        params.append(project_id)
+    if newer_than_days and newer_than_days > 0:
+        sql += " AND datetime(s.updated_at) >= datetime('now', ?)"
+        params.append(f"-{int(newer_than_days)} days")
+    sql += " ORDER BY datetime(s.updated_at) DESC LIMIT ?"
+    params.append(limit)
+    return query_all(sql, tuple(params))
+
+
+def _age_seconds(stamp, now=None):
+    """Seconds since a `YYYY-MM-DD HH:MM:SS` UTC stamp, or None."""
+    if not stamp:
+        return None
+    try:
+        then = datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return max(0.0, ((now or datetime.utcnow()) - then).total_seconds())
+
+
+def classify_fleet_row(row, stall_seconds=FLEET_STALL_SECONDS,
+                       idle_days=FLEET_IDLE_DAYS, now=None):
+    """Classify one `fleet_rows` row into a bucket.
+
+    Returns a dict of derived fields to merge into the row: `bucket`,
+    `reason` (why it landed there, for display), `stalled`, `heartbeat_age`
+    and `age_seconds`. Pure — no DB access — so the bucket rules can be
+    tested directly.
+
+    The rules in priority order:
+      1. a *live* ask or undecided decision outranks everything, because the
+         agent is blocked on you and burning its 600s deadline. An ask past
+         that deadline is not blocking anything — see
+         `FLEET_ASK_DEADLINE_SECONDS` — so it only annotates the row;
+      2. 'running' with a dead heartbeat is `working` but flagged stalled,
+         never silently dropped into `done`;
+      3. failed/cancelled/interrupted is `attention`, not `done` — an
+         interrupted run is resumable and should not look finished;
+      4. 'waiting' means the agent finished its turn, which is `done`
+         *and* your move; it ages out to `idle`.
+    """
+    now = now or datetime.utcnow()
+    status = (row.get("status") or "").strip()
+    age = _age_seconds(row.get("updated_at"), now)
+    beat = _age_seconds(row.get("last_event_at") or row.get("updated_at"), now)
+    # Fall back to the raw count when the caller handed us a row from
+    # `list_sessions` rather than `fleet_rows` (no live/dead split).
+    live = int(row.get("live_asks") if row.get("live_asks") is not None
+               else row.get("pending_asks") or 0)
+    dead = int(row.get("dead_asks") or 0)
+    decisions = int(row.get("pending_decisions") or 0)
+    msgs = int(row.get("pending_msgs") or 0)
+    stalled = False
+
+    if live or decisions:
+        parts = []
+        if live:
+            parts.append(f"{live} question{'s' if live > 1 else ''} pending")
+        if decisions:
+            parts.append(f"{decisions} decision{'s' if decisions > 1 else ''} to approve")
+        bucket, reason = BUCKET_NEEDS_INPUT, ", ".join(parts)
+    elif status == "running":
+        bucket = BUCKET_WORKING
+        if beat is not None and beat > stall_seconds:
+            stalled = True
+            reason = f"no event for {_humanize_age(beat)} — provider may be gone"
+        else:
+            reason = "working"
+    elif status in ("failed", "cancelled"):
+        bucket = BUCKET_ATTENTION
+        reason = f"{status}: {_error_gist(row.get('run_error'))}" \
+            if row.get("run_error") else status
+    elif status == "interrupted":
+        bucket, reason = BUCKET_ATTENTION, "interrupted — resumable"
+    elif status == "created" and not int(row.get("msg_count") or 0):
+        bucket, reason = BUCKET_IDLE, "never started"
+    else:
+        bucket = BUCKET_DONE
+        reason = "your turn"
+        if int(row.get("questions_open") or 0):
+            reason = f"{row['questions_open']} open question(s)"
+        if age is not None and age > idle_days * 86400:
+            bucket, reason = BUCKET_IDLE, f"idle {_humanize_age(age)}"
+
+    if msgs and bucket != BUCKET_NEEDS_INPUT:
+        reason = f"{reason} · {msgs} undelivered message(s)"
+    if dead:
+        # Worth surfacing: the agent asked, nobody answered inside the
+        # deadline, and it carried on (or died) without your input.
+        reason = f"{reason} · {dead} ask(s) expired unanswered"
+
+    return {
+        "bucket": bucket,
+        "reason": reason,
+        "stalled": stalled,
+        "heartbeat_age": beat,
+        "age_seconds": age,
+        "expired_asks": dead,
+    }
+
+
+def _error_gist(text):
+    """First meaningful clause of a provider error, for a narrow column.
+
+    Provider failures arrive as `idle_timeout; open_tools=['toolu_01...']` —
+    the clause before the semicolon is the whole diagnosis, and the tool ids
+    after it just push the rest of the row off screen.
+    """
+    first = (text or "").strip().splitlines()
+    if not first:
+        return ""
+    gist = first[0].split(";")[0].strip()
+    return gist[:48] if gist else first[0][:48]
+
+
+def _humanize_age(seconds):
+    """`93847.0` -> `'1d'`. Coarse on purpose: roster columns are narrow."""
+    if seconds is None:
+        return "?"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def fleet(project_id=None, newer_than_days=None, limit=200,
+          stall_seconds=FLEET_STALL_SECONDS, idle_days=FLEET_IDLE_DAYS,
+          ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS):
+    """`fleet_rows` + classification, grouped for display.
+
+    Returns `{"rows": [...], "counts": {bucket: n}}` with rows carrying the
+    derived fields and ordered by bucket priority, then newest activity.
+    """
+    now = datetime.utcnow()
+    rows = []
+    for row in fleet_rows(project_id=project_id, newer_than_days=newer_than_days,
+                          limit=limit,
+                          ask_deadline_seconds=ask_deadline_seconds):
+        row = dict(row)
+        row.update(classify_fleet_row(row, stall_seconds=stall_seconds,
+                                      idle_days=idle_days, now=now))
+        row["age_label"] = _humanize_age(row.get("age_seconds"))
+        rows.append(row)
+
+    order = {b: i for i, b in enumerate(FLEET_BUCKET_ORDER)}
+    rows.sort(key=lambda r: (order.get(r["bucket"], 99),
+                             r.get("age_seconds") or 0.0))
+    counts = {b: 0 for b in FLEET_BUCKET_ORDER}
+    for row in rows:
+        counts[row["bucket"]] = counts.get(row["bucket"], 0) + 1
+    return {"rows": rows, "counts": counts}
+
+
+def pending_asks(session_id=None, include_messages=True, only_live=False,
+                 ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS):
+    """Every unanswered ask, oldest first. The roster's needs-input inbox.
+
+    Unlike `undispatched_asks_for_session` this ignores `dispatched_at`: an
+    ask already pushed to one Emacs buffer is still unanswered, and the
+    roster needs to show it so it can be answered from anywhere.
+
+    Each row gains `age_seconds` and `live` — whether a reader is still
+    polling for the answer (see `FLEET_ASK_DEADLINE_SECONDS`). Pass
+    `only_live=True` for a queue of asks that can actually be delivered.
+    """
+    sql = """SELECT a.*, s.title AS session_title, pr.slug AS project_slug
+               FROM agent_pending_asks a
+               JOIN agent_sessions s ON s.id = a.session_id
+               LEFT JOIN projects pr ON pr.id = s.project_id
+              WHERE a.status = 'pending'"""
+    params = []
+    if not include_messages:
+        sql += " AND a.kind = 'question'"
+    if session_id is not None:
+        sql += " AND a.session_id = ?"
+        params.append(session_id)
+    sql += " ORDER BY datetime(a.created_at)"
+
+    now = datetime.utcnow()
+    out = []
+    for row in query_all(sql, tuple(params)):
+        row = dict(row)
+        row["age_seconds"] = _age_seconds(row.get("created_at"), now)
+        row["age_label"] = _humanize_age(row["age_seconds"])
+        row["live"] = (row["age_seconds"] is not None
+                       and row["age_seconds"] <= ask_deadline_seconds)
+        if only_live and not row["live"]:
+            continue
+        out.append(row)
+    return out
+
+
+def expire_stale_asks(ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS):
+    """Mark asks nobody is polling for any more as 'expired'.
+
+    Housekeeping, not a behaviour change: `tool_ask_user` already gave up on
+    these. Flipping the status stops them being counted as outstanding work
+    forever, and keeps `status` honest about whether an answer was ever
+    delivered. Returns the number of rows changed.
+    """
+    return execute(
+        """UPDATE agent_pending_asks
+              SET status = 'expired'
+            WHERE status = 'pending'
+              AND kind = 'question'
+              AND datetime(created_at) < datetime('now', ?)""",
+        (f"-{int(ask_deadline_seconds)} seconds",),
+    )

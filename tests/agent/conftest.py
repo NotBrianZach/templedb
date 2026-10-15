@@ -73,10 +73,12 @@ def _init_test_db():
     # Agent migrations, in order.
     mig_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'migrations')
     for fname in ('073_add_temple_agent.sql',
+                  '076_agent_work_log.sql',
                   '080_agent_pending_asks.sql',
                   '084_agent_sections.sql',
                   '085_agent_user_edits.sql',
-                  '094_tool_calls.sql'):
+                  '094_tool_calls.sql',
+                  '106_agent_notifications.sql'):
         p = os.path.join(mig_dir, fname)
         if os.path.exists(p):
             with open(p) as f:

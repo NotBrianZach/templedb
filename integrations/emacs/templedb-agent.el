@@ -2289,61 +2289,571 @@ If PROJECT has a recent session, offers to resume it."
     (templedb-agent--start-process)
     (templedb-agent--wait-and-open-session buf session-id)))
 
-(defvar templedb-agent-list-mode-map
+;;;; Roster — the fleet triage view
+;;
+;; One buffer for every session you have in flight, bucketed by who is
+;; blocked: NEEDS INPUT (the agent is stopped, waiting on you), WORKING,
+;; NEEDS ATTENTION (failed or interrupted), DONE (your turn) and IDLE.
+;;
+;; Buckets, reasons and the stall heuristic all come from
+;; `templedb ai agent fleet --json' so that the CLI, this buffer and the
+;; GUI cannot drift into three different opinions about what "needs input"
+;; means. This buffer therefore needs no `ai agent serve' process of its
+;; own — it is a reader. Only the actions that talk to a session (reply,
+;; resume) spawn or reuse that session's process.
+
+(defcustom templedb-agent-roster-refresh-interval 5
+  "Seconds between roster auto-refreshes, or nil to refresh only on `g'.
+The timer skips work unless the roster buffer is actually displayed in a
+window, so a buried roster costs nothing."
+  :type '(choice (const :tag "Manual only" nil) integer)
+  :group 'templedb-agent)
+
+(defcustom templedb-agent-roster-recent-days 14
+  "Only show sessions touched within this many days.
+Set to nil for all history — expect a long IDLE section."
+  :type '(choice (const :tag "All" nil) integer)
+  :group 'templedb-agent)
+
+(defface templedb-agent-roster-needs-input-face
+  '((t :inherit warning :weight bold))
+  "Face for the NEEDS INPUT bucket."
+  :group 'templedb-agent)
+
+(defface templedb-agent-roster-working-face
+  '((t :inherit success))
+  "Face for the WORKING bucket."
+  :group 'templedb-agent)
+
+(defface templedb-agent-roster-attention-face
+  '((t :inherit error))
+  "Face for the NEEDS ATTENTION bucket."
+  :group 'templedb-agent)
+
+(defface templedb-agent-roster-idle-face
+  '((t :inherit shadow))
+  "Face for the IDLE bucket."
+  :group 'templedb-agent)
+
+(defconst templedb-agent--roster-buckets
+  '(("needs_input" "NEEDS INPUT"      templedb-agent-roster-needs-input-face)
+    ("working"     "WORKING"          templedb-agent-roster-working-face)
+    ("attention"   "NEEDS ATTENTION"  templedb-agent-roster-attention-face)
+    ("done"        "DONE · your turn" default)
+    ("idle"        "IDLE"             templedb-agent-roster-idle-face))
+  "Bucket id, heading and face, in render order.
+Order matches `FLEET_BUCKET_ORDER' in `src/agent/store.py'.")
+
+(defvar templedb-agent--roster-timer nil
+  "The single repeating roster refresh timer, or nil.")
+
+(defvar-local templedb-agent--roster-project nil
+  "Project slug the roster is filtered to, or nil for all.")
+
+(defvar-local templedb-agent--roster-filter nil
+  "Substring the roster is filtered to, or nil.")
+
+(defvar-local templedb-agent--roster-collapsed nil
+  "List of bucket ids rendered as a count-only one-liner.")
+
+(defvar-local templedb-agent--roster-counts nil
+  "Alist of (bucket-id . count) from the last fetch.")
+
+(defconst templedb-agent--roster-buffer "*Temple Agent Roster*")
+
+(defvar templedb-agent-roster-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "RET") #'templedb-agent-list-open-at-point)
-    (define-key map (kbd "k")   #'templedb-agent-list-kill-at-point)
-    (define-key map (kbd "K")   #'templedb-agent-list-reap-stale)
-    (define-key map (kbd "g")   #'templedb-agent-list)
+    (define-key map (kbd "RET") #'templedb-agent-roster-open)
+    (define-key map (kbd "n")   #'templedb-agent-roster-next)
+    (define-key map (kbd "p")   #'templedb-agent-roster-previous)
+    (define-key map (kbd "c")   #'templedb-agent-roster-reply)
+    (define-key map (kbd "a")   #'templedb-agent-roster-answer)
+    (define-key map (kbd "d")   #'templedb-agent-roster-dispatch)
+    (define-key map (kbd "r")   #'templedb-agent-roster-resume)
+    (define-key map (kbd "k")   #'templedb-agent-roster-kill)
+    (define-key map (kbd "K")   #'templedb-agent-roster-reap)
+    (define-key map (kbd "X")   #'templedb-agent-roster-expire-asks)
+    (define-key map (kbd "P")   #'templedb-agent-roster-filter-project)
+    (define-key map (kbd "/")   #'templedb-agent-roster-filter)
+    (define-key map (kbd "TAB") #'templedb-agent-roster-toggle-bucket)
+    (define-key map (kbd "g")   #'templedb-agent-roster-refresh)
+    (define-key map (kbd "G")   #'templedb-agent-roster-toggle-auto-refresh)
     map)
-  "Keymap for `templedb-agent-list-mode'.")
+  "Keymap for `templedb-agent-roster-mode'.")
 
-(define-derived-mode templedb-agent-list-mode special-mode "TAgent-List"
-  "Major mode for the Temple Agent session list buffer.")
+(define-derived-mode templedb-agent-roster-mode special-mode "TAgent-Roster"
+  "Major mode for the Temple Agent roster.
 
-(defun templedb-agent--list-session-id-at-point ()
-  "Return the numeric session ID on the current line, or nil."
-  (save-excursion
-    (beginning-of-line)
-    (when (looking-at "\\s-*\\([0-9]+\\)\\b")
-      (string-to-number (match-string 1)))))
+\\{templedb-agent-roster-mode-map}"
+  (setq truncate-lines t)
+  (add-hook 'kill-buffer-hook #'templedb-agent--roster-stop-timer nil t))
 
-(defun templedb-agent-list-open-at-point ()
-  "Open the agent session on the current line."
+;;; Data
+
+(defun templedb-agent--roster-fetch ()
+  "Return the parsed `ai agent fleet --json' payload, or nil on failure.
+Must be called from the roster buffer: the project filter is buffer-local
+and `with-temp-buffer' below would not see it."
+  (let ((args (append (list "--json" "ai" "agent" "fleet")
+                      (when templedb-agent-roster-recent-days
+                        (list "--recent-days"
+                              (number-to-string
+                               templedb-agent-roster-recent-days)))
+                      (when templedb-agent--roster-project
+                        (list "--project" templedb-agent--roster-project)))))
+    (with-temp-buffer
+      (when (zerop (apply #'call-process templedb-agent-executable
+                          nil t nil args))
+        (condition-case nil
+            (json-read-from-string (buffer-string))
+          (error nil))))))
+
+(defun templedb-agent--roster-row-matches-p (row)
+  "Non-nil if ROW passes the buffer's substring filter."
+  (or (null templedb-agent--roster-filter)
+      (let ((needle (downcase templedb-agent--roster-filter)))
+        (cl-some (lambda (field)
+                   (let ((v (alist-get field row)))
+                     (and (stringp v)
+                          (string-match-p (regexp-quote needle) (downcase v)))))
+                 '(title project_slug reason status)))))
+
+;;; Rendering
+
+(defun templedb-agent--roster-row-line (row)
+  "Return the display line for ROW, carrying its data as text properties."
+  (let* ((id (alist-get 'id row))
+         (title (replace-regexp-in-string
+                 "[\n\t]+" " " (or (alist-get 'title row) "(untitled)")))
+         (badges (string-join
+                  (delq nil
+                        (list (templedb-agent--roster-badge "F" (alist-get 'findings row))
+                              (templedb-agent--roster-badge "T" (alist-get 'todos_open row))
+                              (templedb-agent--roster-badge "Q" (alist-get 'questions_open row))))
+                  " "))
+         (reason (concat (or (alist-get 'reason row) "")
+                         (if (eq (alist-get 'stalled row) t) "  ⚠ stalled" "")))
+         (line (format "  %-5s %-14s %4s  %-44s %s%s"
+                       (format "#%s" id)
+                       (or (alist-get 'project_slug row) "-")
+                       (or (alist-get 'age_label row) "")
+                       (truncate-string-to-width title 44 nil nil "…")
+                       reason
+                       (if (string-empty-p badges) "" (concat "  " badges)))))
+    (propertize line
+                'templedb-session-id id
+                'templedb-roster-row row)))
+
+(defun templedb-agent--roster-badge (letter n)
+  "Return \"LETTER:N\" when N is a positive count, else nil."
+  (and (numberp n) (> n 0) (format "%s:%d" letter n)))
+
+(defun templedb-agent--roster-render (payload)
+  "Render PAYLOAD into the current buffer, preserving point by session id."
+  (let* ((inhibit-read-only t)
+         (was (templedb-agent--roster-session-at-point))
+         (rows (cl-remove-if-not #'templedb-agent--roster-row-matches-p
+                                 (append (alist-get 'rows payload) nil)))
+         (counts (alist-get 'counts payload)))
+    (setq templedb-agent--roster-counts counts)
+    (erase-buffer)
+    (insert (propertize
+             (format "Temple Agent Roster%s%s\n"
+                     (if templedb-agent--roster-project
+                         (format "  [project: %s]" templedb-agent--roster-project) "")
+                     (if templedb-agent--roster-filter
+                         (format "  [filter: %s]" templedb-agent--roster-filter) ""))
+             'face 'bold))
+    (insert (propertize
+             (concat "RET open  c reply  a answer  d dispatch  r resume  "
+                     "k kill  K reap procs  X expire asks\n"
+                     "P project  / filter  TAB fold  g refresh  "
+                     (format "G auto-refresh (%s)  q quit\n\n"
+                             (if templedb-agent--roster-timer "on" "off")))
+             'face 'shadow))
+    (dolist (spec templedb-agent--roster-buckets)
+      (let* ((id (nth 0 spec))
+             (heading (nth 1 spec))
+             (face (nth 2 spec))
+             (group (cl-remove-if-not
+                     (lambda (r) (equal (alist-get 'bucket r) id)) rows))
+             (collapsed (member id templedb-agent--roster-collapsed)))
+        (when group
+          (insert (propertize (format "%s  (%d)%s\n" heading (length group)
+                                      (if collapsed "  …" ""))
+                              'face face
+                              'templedb-roster-bucket id))
+          (unless collapsed
+            (dolist (row group)
+              (insert (templedb-agent--roster-row-line row) "\n")))
+          (insert "\n"))))
+    (when (= (point) (point-min))
+      (insert "  No sessions match.\n"))
+    (goto-char (point-min))
+    ;; Restore point to the same session rather than the same line number:
+    ;; rows move between buckets constantly, which is the whole point.
+    (if (and was (text-property-search-forward 'templedb-session-id was #'equal))
+        (beginning-of-line)
+      (templedb-agent-roster-next))))
+
+;;; Point helpers
+
+(defun templedb-agent--roster-session-at-point ()
+  "Session id on the current line, or nil."
+  (get-text-property (line-beginning-position) 'templedb-session-id))
+
+(defun templedb-agent--roster-row-at-point ()
+  "Full roster row alist on the current line, or nil."
+  (get-text-property (line-beginning-position) 'templedb-roster-row))
+
+(defun templedb-agent--roster-require-session ()
+  "Session id on the current line, or signal."
+  (or (templedb-agent--roster-session-at-point)
+      (user-error "No session on this line")))
+
+(defun templedb-agent-roster-next ()
+  "Move to the next session row."
   (interactive)
-  (if-let ((id (templedb-agent--list-session-id-at-point)))
-      (templedb-agent-open id)
-    (user-error "No session ID on this line")))
+  (let ((start (point)))
+    (forward-line 1)
+    (while (and (not (eobp)) (not (templedb-agent--roster-session-at-point)))
+      (forward-line 1))
+    (unless (templedb-agent--roster-session-at-point)
+      (goto-char start))))
 
-(defun templedb-agent-list-kill-at-point ()
-  "Kill the agent session on the current line.
+(defun templedb-agent-roster-previous ()
+  "Move to the previous session row."
+  (interactive)
+  (let ((start (point)))
+    (forward-line -1)
+    (while (and (not (bobp)) (not (templedb-agent--roster-session-at-point)))
+      (forward-line -1))
+    (unless (templedb-agent--roster-session-at-point)
+      (goto-char start))))
+
+;;; Refresh and the timer
+
+(defun templedb-agent-roster-refresh ()
+  "Re-fetch and re-render the roster."
+  (interactive)
+  (let ((buf (get-buffer templedb-agent--roster-buffer)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (let ((payload (templedb-agent--roster-fetch)))
+          (if payload
+              (templedb-agent--roster-render payload)
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert "Could not read the roster.\n\n"
+                      "`templedb --json ai agent fleet' failed — check that\n"
+                      "the installed templedb has the `fleet' subcommand\n"
+                      "(it needs a rebuild after the DB commit).\n"))))))))
+
+(defun templedb-agent--roster-tick ()
+  "Timer body: refresh only while the roster is on screen."
+  (let ((buf (get-buffer templedb-agent--roster-buffer)))
+    (cond
+     ((not (buffer-live-p buf)) (templedb-agent--roster-stop-timer))
+     ;; Never redraw under an open minibuffer: the user is mid-prompt, quite
+     ;; possibly in one of our own `completing-read's over the row at point.
+     ((active-minibuffer-window) nil)
+     ((get-buffer-window buf t) (templedb-agent-roster-refresh)))))
+
+(defun templedb-agent--roster-start-timer ()
+  "Start the roster refresh timer if configured and not already running."
+  (when (and templedb-agent-roster-refresh-interval
+             (null templedb-agent--roster-timer))
+    (setq templedb-agent--roster-timer
+          (run-at-time templedb-agent-roster-refresh-interval
+                       templedb-agent-roster-refresh-interval
+                       #'templedb-agent--roster-tick))))
+
+(defun templedb-agent--roster-stop-timer ()
+  "Cancel the roster refresh timer."
+  (when templedb-agent--roster-timer
+    (cancel-timer templedb-agent--roster-timer)
+    (setq templedb-agent--roster-timer nil)))
+
+(defun templedb-agent-roster-toggle-auto-refresh ()
+  "Toggle roster auto-refresh."
+  (interactive)
+  (if templedb-agent--roster-timer
+      (progn (templedb-agent--roster-stop-timer)
+             (message "Roster auto-refresh off"))
+    (templedb-agent--roster-start-timer)
+    (message "Roster auto-refresh every %ss"
+             templedb-agent-roster-refresh-interval))
+  (templedb-agent-roster-refresh))
+
+;;; Filters
+
+(defun templedb-agent-roster-filter-project (project)
+  "Filter the roster to PROJECT, or clear with empty input."
+  (interactive
+   (list (completing-read "Project (empty = all): "
+                          (templedb-agent--project-slugs) nil nil)))
+  (setq templedb-agent--roster-project
+        (and (not (string-empty-p project)) project))
+  (templedb-agent-roster-refresh))
+
+(defun templedb-agent-roster-filter (needle)
+  "Filter roster rows by NEEDLE, or clear with empty input."
+  (interactive (list (read-string "Filter (empty = clear): ")))
+  (setq templedb-agent--roster-filter
+        (and (not (string-empty-p needle)) needle))
+  (templedb-agent-roster-refresh))
+
+(defun templedb-agent-roster-toggle-bucket ()
+  "Collapse or expand the bucket at point."
+  (interactive)
+  (let ((bucket (or (get-text-property (line-beginning-position)
+                                       'templedb-roster-bucket)
+                    (alist-get 'bucket (templedb-agent--roster-row-at-point)))))
+    (unless bucket (user-error "No bucket on this line"))
+    (setq templedb-agent--roster-collapsed
+          (if (member bucket templedb-agent--roster-collapsed)
+              (delete bucket templedb-agent--roster-collapsed)
+            (cons bucket templedb-agent--roster-collapsed)))
+    (templedb-agent-roster-refresh)))
+
+;;; Actions
+
+(defun templedb-agent-roster-open ()
+  "Open the session on the current line in its own agent buffer."
+  (interactive)
+  (templedb-agent-open (templedb-agent--roster-require-session)))
+
+(defun templedb-agent--roster-session-buffer (id)
+  "Return a live agent buffer already serving session ID, or nil.
+Reusing it matters: `templedb-agent-open' restarts the serve process,
+which would cut off a run that is mid-flight."
+  (cl-find-if
+   (lambda (buf)
+     (with-current-buffer buf
+       (and (derived-mode-p 'templedb-agent-mode)
+            (equal templedb-agent--session-id id)
+            templedb-agent--process
+            (process-live-p templedb-agent--process))))
+   (buffer-list)))
+
+(defun templedb-agent-roster-reply (text)
+  "Send TEXT to the session on the current line without leaving the roster.
+Reuses the session's existing buffer and process when there is one,
+otherwise opens the session first. `templedb-agent-send' decides between
+`message.send' and `message.queue', so replying to a session that is
+still working queues the message as mid-run guidance."
+  (interactive (list (read-string
+                      (format "Reply to #%s: "
+                              (templedb-agent--roster-require-session)))))
+  (when (string-empty-p (string-trim text))
+    (user-error "Nothing to send"))
+  (let* ((id (templedb-agent--roster-require-session))
+         (existing (templedb-agent--roster-session-buffer id)))
+    (if existing
+        (with-current-buffer existing
+          (templedb-agent--fill-next-prompt text)
+          (templedb-agent-send)
+          (message "Sent to session #%s" id))
+      (let ((roster (current-buffer)))
+        (templedb-agent-open id)
+        (templedb-agent--roster-send-when-ready (current-buffer) id text 0)
+        (when (buffer-live-p roster)
+          (message "Opening #%s to deliver the reply…" id))))))
+
+(defun templedb-agent--roster-send-when-ready (buf id text attempts)
+  "Wait for BUF to finish opening session ID, then send TEXT.
+Polls rather than hooking the RPC callback so this stays independent of
+`templedb-agent-open''s internals. Gives up after ~10s."
+  (cond
+   ((> attempts 40)
+    (message "Session #%s did not open in time; the reply is in Next Prompt"
+             id))
+   ((and (buffer-live-p buf)
+         (with-current-buffer buf
+           (and templedb-agent--process
+                (process-live-p templedb-agent--process)
+                (equal templedb-agent--session-id id))))
+    (with-current-buffer buf
+      (templedb-agent--fill-next-prompt text)
+      (templedb-agent-send))
+    (message "Sent to session #%s" id))
+   (t
+    (when (buffer-live-p buf)
+      (with-current-buffer buf (templedb-agent--fill-next-prompt text)))
+    (run-at-time 0.25 nil #'templedb-agent--roster-send-when-ready
+                 buf id text (1+ attempts)))))
+
+(defun templedb-agent-roster-answer ()
+  "Answer a pending question for the session on the current line.
+
+Asks round-trip through `agent_pending_asks', and the MCP handler polls
+that table for its own row — so the answer only has to land in the DB,
+not travel back through the session's own serve process. That is why a
+question can be answered from here at all.
+
+Only asks still inside the handler's poll deadline are offered: past it
+nothing is listening and an answer would be written into the void."
+  (interactive)
+  (let* ((id (templedb-agent--roster-require-session))
+         (asks (templedb-agent--roster-live-asks id)))
+    (unless asks
+      (user-error
+       "No live question for #%s — expired asks need a reply in the session"
+       id))
+    (let* ((ask (if (= (length asks) 1)
+                    (car asks)
+                  (templedb-agent--roster-pick-ask asks)))
+           (questions (append (alist-get 'questions (alist-get 'payload ask)) nil))
+           (q (if (= (length questions) 1)
+                  (car questions)
+                (templedb-agent--roster-pick-question questions)))
+           (text (or (alist-get 'question q) "answer"))
+           (options (mapcar (lambda (o)
+                              (or (alist-get 'label o) (format "%s" o)))
+                            (append (alist-get 'options q) nil)))
+           (answer (if options
+                       (completing-read (format "%s " text) options nil nil)
+                     (read-string (format "%s " text)))))
+      (when (string-empty-p (string-trim answer))
+        (user-error "Empty answer"))
+      (with-temp-buffer
+        (let ((code (call-process templedb-agent-executable nil t nil
+                                  "ai" "agent" "ask" "respond"
+                                  (alist-get 'ask_id ask)
+                                  "--question" text
+                                  "--answer" answer)))
+          (if (zerop code)
+              (message "Answered #%s: %s" id answer)
+            (user-error "%s" (string-trim (buffer-string))))))
+      (templedb-agent-roster-refresh))))
+
+(defun templedb-agent--roster-live-asks (id)
+  "Pending, still-deliverable asks for session ID as a list of alists."
+  (with-temp-buffer
+    (let ((code (call-process templedb-agent-executable nil t nil
+                              "--json" "ai" "agent" "ask" "list"
+                              "--session" (number-to-string id)
+                              "--questions-only" "--live")))
+      (when (zerop code)
+        (condition-case nil
+            (append (json-read-from-string (buffer-string)) nil)
+          (error nil))))))
+
+(defun templedb-agent--roster-pick-ask (asks)
+  "Prompt for one of ASKS."
+  (let* ((choices (mapcar
+                   (lambda (a)
+                     (cons (format "%s · %s"
+                                   (substring (alist-get 'ask_id a) 0 8)
+                                   (or (alist-get 'question
+                                                  (car (append (alist-get 'questions
+                                                                          (alist-get 'payload a))
+                                                               nil)))
+                                       "(no text)"))
+                           a))
+                   asks))
+         (pick (completing-read "Which question? " choices nil t)))
+    (cdr (assoc pick choices))))
+
+(defun templedb-agent--roster-pick-question (questions)
+  "Prompt for one of QUESTIONS."
+  (let* ((choices (mapcar (lambda (q)
+                            (cons (or (alist-get 'question q) "(no text)") q))
+                          questions))
+         (pick (completing-read "Which question? " choices nil t)))
+    (cdr (assoc pick choices))))
+
+(defun templedb-agent-roster-dispatch (project text)
+  "Start a new session on PROJECT and send TEXT to it.
+The roster equivalent of dispatching work: pick a target, state the
+task, and let it land in WORKING without typing in a buffer."
+  (interactive
+   (list (completing-read "Dispatch on project: "
+                          (templedb-agent--project-slugs) nil nil)
+         (read-string "Task: ")))
+  (when (string-empty-p (string-trim text))
+    (user-error "Nothing to dispatch"))
+  (templedb-agent-new project)
+  (templedb-agent--roster-dispatch-when-ready (current-buffer) text 0)
+  (message "Dispatching on %s…" project))
+
+(defun templedb-agent--roster-dispatch-when-ready (buf text attempts)
+  "Wait for BUF's new session to exist, then send TEXT.
+`templedb-agent-new' creates the session asynchronously, so there is a
+window where the buffer exists but has no session id yet."
+  (cond
+   ((> attempts 60)
+    (message "Session did not start in time; the task is in Next Prompt"))
+   ((and (buffer-live-p buf)
+         (with-current-buffer buf
+           (and templedb-agent--session-id
+                templedb-agent--process
+                (process-live-p templedb-agent--process))))
+    (with-current-buffer buf
+      (templedb-agent--fill-next-prompt text)
+      (templedb-agent-send))
+    (templedb-agent-roster-refresh))
+   (t
+    (when (buffer-live-p buf)
+      (with-current-buffer buf (templedb-agent--fill-next-prompt text)))
+    (run-at-time 0.25 nil #'templedb-agent--roster-dispatch-when-ready
+                 buf text (1+ attempts)))))
+
+(defun templedb-agent-roster-resume ()
+  "Resume the interrupted session on the current line."
+  (interactive)
+  (let* ((id (templedb-agent--roster-require-session))
+         (existing (templedb-agent--roster-session-buffer id)))
+    (if existing
+        (with-current-buffer existing (templedb-agent-resume))
+      (templedb-agent-open id)
+      (run-at-time 1.5 nil
+                   (lambda (buf)
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf (templedb-agent-resume))))
+                   (current-buffer)))))
+
+(defun templedb-agent-roster-kill ()
+  "Kill the session on the current line.
 If an Emacs buffer for the session is live, close it cleanly (RPC
 session.close + delete process + kill buffer). Otherwise mark the DB
 row status='interrupted' so it stops showing as active."
   (interactive)
-  (let ((id (templedb-agent--list-session-id-at-point)))
-    (unless id (user-error "No session ID on this line"))
-    (when (y-or-n-p (format "Kill agent session #%d? " id))
-      (let ((buf (get-buffer (format "*Temple Agent: #%d*" id))))
+  (let ((id (templedb-agent--roster-require-session)))
+    (when (y-or-n-p (format "Kill agent session #%s? " id))
+      (let ((buf (or (templedb-agent--roster-session-buffer id)
+                     (get-buffer (format "*Temple Agent: #%s*" id)))))
         (if (buffer-live-p buf)
             (with-current-buffer buf (templedb-agent-close))
           (templedb-agent--sql-execute
-           (format "UPDATE agent_sessions SET status='interrupted', updated_at=datetime('now') WHERE id=%d" id))
-          (message "Session #%d marked interrupted (no live buffer)" id)))
-      (templedb-agent-list))))
+           (format "UPDATE agent_sessions SET status='interrupted', updated_at=datetime('now') WHERE id=%s" id))
+          (message "Session #%s marked interrupted (no live buffer)" id)))
+      (templedb-agent-roster-refresh))))
 
-(defun templedb-agent-list-reap-stale ()
+(defun templedb-agent-roster-reap ()
   "Reap orphaned `ai agent serve' subprocesses via `templedb ai agent stop-stale'.
-Refreshes the sessions list buffer if it is visible."
+Never kills by PID from here: `stop-stale' excludes its own ancestor
+chain, which hand-rolled reaping has gotten wrong before."
   (interactive)
   (let ((output (with-temp-buffer
                   (call-process templedb-agent-executable nil t nil
                                 "ai" "agent" "stop-stale")
                   (buffer-string))))
     (message "%s" (string-trim output)))
-  (when (get-buffer "*Temple Agent Sessions*")
-    (templedb-agent-list)))
+  (templedb-agent-roster-refresh))
+
+(defun templedb-agent-roster-expire-asks ()
+  "Mark asks past the handler's poll deadline as expired.
+They are already undeliverable; this stops them being counted as
+outstanding work forever."
+  (interactive)
+  (let ((output (with-temp-buffer
+                  (call-process templedb-agent-executable nil t nil
+                                "ai" "agent" "ask" "expire")
+                  (buffer-string))))
+    (message "%s" (string-trim output)))
+  (templedb-agent-roster-refresh))
 
 (defun templedb-agent--sql-execute (sql)
   "Execute SQL against the TempleDB SQLite database (write mode)."
@@ -2355,24 +2865,20 @@ Refreshes the sessions list buffer if it is visible."
     (call-process sqlite3 nil nil nil db-path sql)))
 
 ;;;###autoload
-(defun templedb-agent-list ()
-  "List Temple Agent sessions in an interactive buffer.
-Keys: =RET= open, =k= kill session at point, =g= refresh, =q= quit."
+(defun templedb-agent-roster ()
+  "Show the Temple Agent roster: every session bucketed by who is blocked."
   (interactive)
-  (let ((output (with-temp-buffer
-                  (call-process templedb-agent-executable nil t nil
-                                "ai" "agent" "sessions")
-                  (buffer-string))))
-    (if (string-match-p "No agent sessions" output)
-        (message "No agent sessions found.")
-      (with-current-buffer (get-buffer-create "*Temple Agent Sessions*")
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (insert "Keys: RET open  k kill at point  K reap orphan procs  g refresh  q quit\n\n")
-          (insert output))
-        (templedb-agent-list-mode)
-        (goto-char (point-min))
-        (display-buffer (current-buffer))))))
+  (let ((buf (get-buffer-create templedb-agent--roster-buffer)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'templedb-agent-roster-mode)
+        (templedb-agent-roster-mode))
+      (templedb-agent--roster-start-timer)
+      (templedb-agent-roster-refresh))
+    (pop-to-buffer buf)))
+
+;;;###autoload
+(defalias 'templedb-agent-list #'templedb-agent-roster
+  "List Temple Agent sessions. Now the bucketed roster.")
 
 ;;;###autoload
 (defun templedb-agent-doctor ()

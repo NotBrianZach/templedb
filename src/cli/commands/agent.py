@@ -86,6 +86,193 @@ class AgentCommands(Command):
             ))
         return 0
 
+    def fleet(self, args):
+        """Triage view: every session bucketed by who is blocked on whom."""
+        from agent import store as _store
+        from db_utils import query_one
+
+        project_id = None
+        if getattr(args, 'project', None):
+            row = query_one("SELECT id FROM projects WHERE slug = ?",
+                            (args.project,))
+            if not row:
+                print(f"error: no such project: {args.project}",
+                      file=sys.stderr)
+                return 1
+            project_id = row['id']
+
+        result = _store.fleet(
+            project_id=project_id,
+            newer_than_days=getattr(args, 'recent_days', None),
+            limit=getattr(args, 'limit', 200) or 200,
+            stall_seconds=getattr(args, 'stale_seconds', None)
+                or _store.FLEET_STALL_SECONDS,
+            idle_days=getattr(args, 'idle_days', None)
+                or _store.FLEET_IDLE_DAYS,
+        )
+        rows = result['rows']
+        wanted = getattr(args, 'bucket', None)
+        if wanted:
+            rows = [r for r in rows if r['bucket'] == wanted]
+
+        if getattr(args, 'json', False):
+            print(json.dumps({'rows': rows, 'counts': result['counts']},
+                             default=str))
+            return 0
+
+        if not rows:
+            print("No agent sessions match.")
+            return 0
+
+        labels = {
+            _store.BUCKET_NEEDS_INPUT: 'NEEDS INPUT',
+            _store.BUCKET_WORKING: 'WORKING',
+            _store.BUCKET_ATTENTION: 'NEEDS ATTENTION',
+            _store.BUCKET_DONE: 'DONE (your turn)',
+            _store.BUCKET_IDLE: 'IDLE',
+        }
+        for bucket in _store.FLEET_BUCKET_ORDER:
+            group = [r for r in rows if r['bucket'] == bucket]
+            if not group:
+                continue
+            print(f"\n{labels[bucket]}  ({len(group)})")
+            print("-" * 78)
+            for r in group:
+                title = (r.get('title') or '(untitled)').replace('\n', ' ')
+                flags = []
+                if r.get('findings'):
+                    flags.append(f"F:{r['findings']}")
+                if r.get('todos_open'):
+                    flags.append(f"T:{r['todos_open']}")
+                if r.get('questions_open'):
+                    flags.append(f"Q:{r['questions_open']}")
+                stall = ' !STALLED' if r.get('stalled') else ''
+                print(f"  #{r['id']:<4} {r.get('project_slug') or '-':<14} "
+                      f"{r['age_label']:>4}  {title[:44]:<44} "
+                      f"{r['reason']}{stall} {' '.join(flags)}")
+        print()
+        return 0
+
+    def ask_list(self, args):
+        """List unanswered asks — the cross-session needs-input inbox."""
+        from agent import store as _store
+        rows = _store.pending_asks(
+            session_id=getattr(args, 'session', None),
+            include_messages=not getattr(args, 'questions_only', False),
+            only_live=getattr(args, 'live', False),
+        )
+        if getattr(args, 'json', False):
+            out = []
+            for r in rows:
+                r = dict(r)
+                try:
+                    r['payload'] = json.loads(r['payload'])
+                except (ValueError, TypeError):
+                    pass
+                out.append(r)
+            print(json.dumps(out, default=str))
+            return 0
+        if not rows:
+            print("No pending asks.")
+            return 0
+        for r in rows:
+            try:
+                payload = json.loads(r['payload'])
+            except (ValueError, TypeError):
+                payload = {}
+            live = 'LIVE' if r.get('live') else 'expired'
+            print(f"{r['ask_id'][:12]}  session #{r['session_id']}  "
+                  f"{r['kind']}  {r.get('age_label', '?')} ago  [{live}]")
+            for q in payload.get('questions') or []:
+                opts = q.get('options') or []
+                print(f"    Q: {q.get('question') or q.get('header') or ''}")
+                for o in opts:
+                    label = o.get('label') if isinstance(o, dict) else o
+                    print(f"       - {label}")
+            if payload.get('header'):
+                print(f"    {payload['header']}: "
+                      f"{(payload.get('body') or '')[:120]}")
+        return 0
+
+    def ask_respond(self, args):
+        """Answer a pending ask from outside its Emacs buffer.
+
+        The MCP `templedb_ask_user` handler polls `agent_pending_asks` for
+        its own row, so the answer only has to land in the table — it does
+        not have to travel back through the session's serve process. That is
+        what makes a single cross-session inbox possible.
+        """
+        from agent import store as _store
+        row = _store.get_pending_ask(args.ask_id)
+        if not row:
+            # Accept an unambiguous prefix, since full hex ids are unusable
+            # by hand and the roster displays 12 chars.
+            matches = [r for r in _store.pending_asks()
+                       if r['ask_id'].startswith(args.ask_id)]
+            if len(matches) == 1:
+                row = matches[0]
+            elif len(matches) > 1:
+                print(f"error: ambiguous ask id prefix {args.ask_id!r} "
+                      f"({len(matches)} matches)", file=sys.stderr)
+                return 2
+            else:
+                print(f"error: no pending ask {args.ask_id!r}",
+                      file=sys.stderr)
+                return 1
+        if row['status'] != 'pending':
+            print(f"error: ask already {row['status']}", file=sys.stderr)
+            return 1
+
+        age = _store._age_seconds(row['created_at'])
+        if age is not None and age > _store.FLEET_ASK_DEADLINE_SECONDS \
+                and not getattr(args, 'force', False):
+            print(f"error: ask is {_store._humanize_age(age)} old — the "
+                  f"handler stopped polling after "
+                  f"{_store.FLEET_ASK_DEADLINE_SECONDS}s, so this answer "
+                  f"would go nowhere.\n"
+                  f"       Reply in the session instead, or pass --force to "
+                  f"record it anyway.", file=sys.stderr)
+            return 2
+
+        try:
+            payload = json.loads(row['payload'])
+        except (ValueError, TypeError):
+            payload = {}
+        questions = payload.get('questions') or []
+        question = getattr(args, 'question', None)
+        if not question:
+            if len(questions) > 1:
+                print("error: this ask has multiple questions; pass "
+                      "--question to say which one you are answering",
+                      file=sys.stderr)
+                return 2
+            question = (questions[0].get('question')
+                        if questions else 'answer')
+        _store.record_ask_response(row['ask_id'],
+                                   {'answers': {question: args.answer}})
+        print(f"answered ask {row['ask_id'][:12]} "
+              f"(session #{row['session_id']})")
+        return 0
+
+    def ask_expire(self, args):
+        """Mark asks nobody is polling for any more as 'expired'."""
+        from agent import store as _store
+        stale = [r for r in _store.pending_asks(include_messages=False)
+                 if not r['live']]
+        if getattr(args, 'dry_run', False):
+            if not stale:
+                print("No stale asks.")
+                return 0
+            print(f"Would expire {len(stale)} ask(s):")
+            for r in stale:
+                print(f"  {r['ask_id'][:12]}  session #{r['session_id']}  "
+                      f"{r['age_label']} old")
+            return 0
+        n = _store.expire_stale_asks()
+        print(f"Expired {n} ask(s) past the "
+              f"{_store.FLEET_ASK_DEADLINE_SECONDS}s handler deadline.")
+        return 0
+
     def chat(self, args):
         """Simple interactive chat with an agent session (for testing)."""
         from agent.service import AgentService
@@ -432,6 +619,57 @@ def register_agent_commands(subparsers, cli):
     sessions_parser.add_argument('--limit', type=int, default=50, help=(
         "Maximum rows to return (default 50)"))
     cli.commands['ai.agent.sessions'] = cmd.sessions
+
+    # fleet — the roster / triage view behind the Emacs dashboard
+    fleet_parser = agent_sub.add_parser(
+        'fleet', help='Triage roster: needs-input / working / done')
+    fleet_parser.add_argument('--project', help='Filter by project slug')
+    fleet_parser.add_argument('--bucket', choices=[
+        'needs_input', 'working', 'attention', 'done', 'idle'],
+        help='Only show one bucket')
+    fleet_parser.add_argument('--recent-days', type=int, help=(
+        "Only include sessions updated within the last N days"))
+    fleet_parser.add_argument('--stale-seconds', type=int, help=(
+        "Flag a 'running' session stalled after N seconds with no event "
+        "(default 180)"))
+    fleet_parser.add_argument('--idle-days', type=int, help=(
+        "Age a finished session out of `done` after N days (default 2)"))
+    fleet_parser.add_argument('--limit', type=int, default=200)
+    cli.commands['ai.agent.fleet'] = cmd.fleet
+
+    # ask — the cross-session needs-input inbox
+    ask_parser = agent_sub.add_parser(
+        'ask', help='Pending agent→user questions (answerable out-of-band)')
+    ask_sub = ask_parser.add_subparsers(dest='ask_subcommand')
+
+    ask_list_p = ask_sub.add_parser('list', help='List unanswered asks')
+    ask_list_p.add_argument('--session', type=int, help='Filter by session id')
+    ask_list_p.add_argument('--questions-only', action='store_true',
+                            help='Hide one-way messages')
+    ask_list_p.add_argument('--live', action='store_true', help=(
+        "Only asks still inside the handler's 600s poll deadline — i.e. "
+        "ones an answer can still reach"))
+    cli.commands['ai.agent.ask.list'] = cmd.ask_list
+
+    ask_respond_p = ask_sub.add_parser(
+        'respond', help='Answer a pending ask (id or unambiguous prefix)')
+    ask_respond_p.add_argument('ask_id')
+    ask_respond_p.add_argument('--answer', required=True,
+                               help='The answer text to hand back')
+    ask_respond_p.add_argument('--question', help=(
+        "Which question you are answering (required when the ask has "
+        "more than one)"))
+    ask_respond_p.add_argument('--force', action='store_true', help=(
+        "Record the answer even though no handler is polling for it"))
+    cli.commands['ai.agent.ask.respond'] = cmd.ask_respond
+
+    ask_expire_p = ask_sub.add_parser(
+        'expire', help="Mark asks past the handler's deadline as expired")
+    ask_expire_p.add_argument('--dry-run', action='store_true')
+    cli.commands['ai.agent.ask.expire'] = cmd.ask_expire
+
+    # bare `ai agent ask` → list
+    cli.commands['ai.agent.ask'] = cmd.ask_list
 
     # chat (testing)
     chat_parser = agent_sub.add_parser('chat', help='Interactive chat (for testing)')
