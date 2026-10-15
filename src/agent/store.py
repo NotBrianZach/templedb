@@ -1221,6 +1221,19 @@ def classify_fleet_row(row, stall_seconds=FLEET_STALL_SECONDS,
         if age is not None and age > idle_days * 86400:
             bucket, reason = BUCKET_IDLE, f"idle {_humanize_age(age)}"
 
+    # `attention` ages out too, for the same reason `done` does: a bucket
+    # with no aging rule is an archive, not a queue. Without this, every
+    # failure and every lost process accumulates there permanently — 15 of
+    # them had, going back 13 days, which is what made the bucket unusable.
+    # Aging is also the only honest way to "write one off": nothing is
+    # destroyed, it stops claiming your attention. The reason line keeps
+    # saying what happened, so an aged-out failure is still legible in
+    # `--bucket idle`.
+    if bucket == BUCKET_ATTENTION and age is not None \
+            and age > idle_days * 86400:
+        bucket = BUCKET_IDLE
+        reason = f"{reason}, {_humanize_age(age)} ago"
+
     if msgs and bucket != BUCKET_NEEDS_INPUT:
         reason = f"{reason} · {msgs} undelivered message(s)"
     if dead:

@@ -108,6 +108,32 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(got["bucket"], "attention")
         self.assertIn("resumable", got["reason"])
 
+    def test_attention_ages_out_to_idle(self):
+        """A bucket with no aging rule is an archive, not a queue."""
+        got = self.classify(status="interrupted", updated_at=stamp(days=9),
+                            last_event_at=stamp(days=9))
+        self.assertEqual(got["bucket"], "idle")
+
+    def test_an_aged_out_failure_still_says_what_happened(self):
+        got = self.classify(status="failed", run_error="idle_timeout; x=[1]",
+                            updated_at=stamp(days=9),
+                            last_event_at=stamp(days=9))
+        self.assertEqual(got["bucket"], "idle")
+        self.assertIn("idle_timeout", got["reason"])
+        self.assertIn("9d ago", got["reason"])
+
+    def test_a_recent_failure_stays_in_attention(self):
+        got = self.classify(status="failed", updated_at=stamp(hours=6),
+                            last_event_at=stamp(hours=6))
+        self.assertEqual(got["bucket"], "attention")
+
+    def test_a_live_ask_outranks_attention_aging(self):
+        """Age must not bury a session that is actually blocked on you."""
+        got = self.classify(status="interrupted", live_asks=1, pending_asks=1,
+                            updated_at=stamp(days=9),
+                            last_event_at=stamp(days=9))
+        self.assertEqual(got["bucket"], "needs_input")
+
     def test_waiting_is_done_and_your_turn(self):
         got = self.classify(status="waiting")
         self.assertEqual(got["bucket"], "done")
