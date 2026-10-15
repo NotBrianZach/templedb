@@ -149,3 +149,119 @@ def test_an_existing_row_is_updated_not_duplicated(committer):
     assert len(rows) == 1, "exactly one current row"
     assert rows[0]['content_hash'] == second.content.hash_sha256
     assert rows[0]['version'] == 2, "version still increments"
+
+
+# --- a file added after the workspace was cut is not a deletion -------
+#
+# Walked into on 2026-10-13. A parallel session added
+# tests/test_mojibake_guard.py while this workspace was open, and
+# committing the workspace tombstoned it: the whole-tree scan found a
+# tracked path absent from disk and called it a deletion. One file, so
+# the mass-deletion guard could not help — its floor is 10, right for
+# catching a wrong directory and useless against a tree that is merely a
+# few hours old. classify_edit_tree already separates this case out as
+# `absent` ("the ordinary shape of a tree cut before a commit added
+# files"); the commit scanner did not consult the same reasoning.
+
+
+@pytest.fixture
+def scanner_db():
+    """project_files + content_blobs + file_contents + checkouts.
+
+    Enough for _added_after_workspace_was_cut, which dates a path's
+    current blob against the checkouts row for the directory being
+    diffed.
+    """
+    def _drop():
+        for t in ('file_contents', 'content_blobs', 'project_files',
+                  'checkouts'):
+            execute(f"DROP TABLE IF EXISTS {t}")
+    _drop()
+    for stmt in (
+        """CREATE TABLE project_files (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER,
+               file_path TEXT, status TEXT DEFAULT 'active')""",
+        """CREATE TABLE content_blobs (
+               hash_sha256 TEXT PRIMARY KEY, created_at TEXT)""",
+        """CREATE TABLE file_contents (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER,
+               content_hash TEXT, is_current INTEGER DEFAULT 1)""",
+        # Every column get_by_path SELECTs. A short table here made the
+        # lookup raise "no such column: branch_name", which
+        # _added_after_workspace_was_cut catches and treats as "cannot
+        # date it" — so the guard silently did nothing and the first run
+        # of these tests failed for a reason that had nothing to do with
+        # the logic under test.
+        """CREATE TABLE checkouts (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER,
+               checkout_path TEXT, branch_name TEXT DEFAULT 'main',
+               checkout_at TEXT, last_sync_at TEXT,
+               is_active INTEGER DEFAULT 1, kind TEXT DEFAULT 'edit')""",
+    ):
+        execute(stmt)
+
+    from cli.commands.commit import CommitCommand
+
+    class Harness:
+        command = CommitCommand()
+        project_id = 1
+
+        def workspace(self, path, cut_at):
+            execute("INSERT INTO checkouts (project_id, checkout_path, "
+                    "checkout_at) VALUES (1, ?, ?)", (str(path), cut_at))
+
+        def tracked(self, rel, blob_created):
+            execute("INSERT INTO content_blobs (hash_sha256, created_at) "
+                    "VALUES (?, ?)", (f'hash-{rel}', blob_created))
+            execute("INSERT INTO project_files (project_id, file_path) "
+                    "VALUES (1, ?)", (rel,))
+            fid = query_one("SELECT id FROM project_files WHERE file_path=?",
+                            (rel,))['id']
+            execute("INSERT INTO file_contents (file_id, content_hash, "
+                    "is_current) VALUES (?, ?, 1)", (fid, f'hash-{rel}'))
+
+        def postdates(self, ws, rel):
+            return self.command._added_after_workspace_was_cut(1, ws, rel)
+
+    yield Harness()
+    _drop()
+
+
+def test_a_file_added_after_the_cut_is_not_a_deletion(scanner_db, tmp_path):
+    """test_mojibake_guard.py, in one assertion."""
+    scanner_db.workspace(tmp_path, '2026-10-13 14:18:00')
+    scanner_db.tracked('tests/test_mojibake_guard.py', '2026-10-13 18:46:00')
+    assert scanner_db.postdates(tmp_path, 'tests/test_mojibake_guard.py')
+
+
+def test_a_file_that_predates_the_cut_still_deletes(scanner_db, tmp_path):
+    """The property this must not weaken. A file that WAS in the tree and
+    is now gone is a real deletion — that is the data-loss signal the
+    whole scan exists to produce."""
+    scanner_db.workspace(tmp_path, '2026-10-13 14:18:00')
+    scanner_db.tracked('src/old.py', '2026-10-01 09:00:00')
+    assert not scanner_db.postdates(tmp_path, 'src/old.py')
+
+
+def test_an_unregistered_directory_does_not_suppress(scanner_db, tmp_path):
+    """A plain scratch copy has no checkouts row and therefore no
+    checkout_at to compare against. Declining to guess is the
+    conservative half: a tree nobody registered is one nothing can
+    vouch for, so the deletion stands."""
+    scanner_db.tracked('src/old.py', '2026-10-13 18:46:00')
+    assert not scanner_db.postdates(tmp_path, 'src/old.py')
+
+
+def test_another_projects_path_is_not_consulted(scanner_db, tmp_path):
+    """The blob-age lookup is project-scoped. Two projects routinely hold
+    the same relative path, and an unrelated project's newer copy must
+    not suppress a real deletion here."""
+    scanner_db.workspace(tmp_path, '2026-10-13 14:18:00')
+    execute("INSERT INTO content_blobs (hash_sha256, created_at) "
+            "VALUES ('other', '2026-10-13 20:00:00')")
+    execute("INSERT INTO project_files (project_id, file_path) "
+            "VALUES (2, 'src/shared.py')")
+    fid = query_one("SELECT id FROM project_files WHERE project_id=2")['id']
+    execute("INSERT INTO file_contents (file_id, content_hash, is_current) "
+            "VALUES (?, 'other', 1)", (fid,))
+    assert not scanner_db.postdates(tmp_path, 'src/shared.py')

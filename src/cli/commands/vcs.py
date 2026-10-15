@@ -466,6 +466,38 @@ class VCSCommands(Command):
         from cli.commit_message import resolve_message
         return resolve_message(args)
 
+    # Audit tables left behind by the commit_hash migrations, newest
+    # first. Each keeps old_hash -> new_hash precisely so a stale
+    # citation stays answerable; this is the one reader that uses them.
+    _HASH_MIGRATION_TABLES = (
+        ('137', 'commit_hash_migration_137'),
+        ('126', 'commit_hash_migration_126'),
+    )
+
+    @classmethod
+    def _renamed_by_migration(cls, old_hash: str):
+        """Where a pre-migration commit id went, or None.
+
+        Matches by prefix as well as exactly, since the ids people
+        actually paste are abbreviated. Never raises: a database
+        predating either migration simply has no such table, and a
+        lookup hint must not turn a clean "not found" into a traceback.
+        """
+        from db_utils import query_one
+        for migration, table in cls._HASH_MIGRATION_TABLES:
+            try:
+                row = query_one(
+                    f"""SELECT new_hash FROM {table}
+                         WHERE old_hash = ? OR old_hash LIKE ?
+                         LIMIT 1""",
+                    (old_hash, f"{old_hash}%"))
+            except Exception:
+                continue
+            if row:
+                return {'migration': migration,
+                        'new_hash': row['new_hash']}
+        return None
+
     def _amend_message(self, project, args, message: str) -> int:
         """Replace the last commit's message in place.
 
@@ -1882,6 +1914,20 @@ class VCSCommands(Command):
 
         if not commit:
             logger.error(f"Commit not found: {args.commit}")
+            renamed = self._renamed_by_migration(args.commit)
+            if renamed:
+                # Two migrations have rewritten commit_hash (126 and
+                # 137), and reports, handoffs and older commit messages
+                # cite the pre-migration values. Without this the only
+                # signal is "not found", which reads as "that commit
+                # never existed" — the same confusion migration 126 was
+                # written to end, one level up.
+                logger.info(f"  That id was canonicalised by migration "
+                            f"{renamed['migration']}; it is now "
+                            f"{renamed['new_hash']}")
+                logger.info(f"  templedb vcs show {args.project} "
+                            f"{renamed['new_hash']}")
+                return 1
             logger.info(f"Use: templedb vcs log {args.project} to see available commits")
             return 1
 

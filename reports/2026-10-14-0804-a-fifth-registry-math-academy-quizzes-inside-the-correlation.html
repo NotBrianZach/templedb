@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A fifth registry: Math Academy quizzes inside the correlation-game architecture</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --green: #6ac77a;
+    --red: #e05c6e;
+    --yellow: #d4b24a;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  pre code { background: none; padding: 0; color: inherit; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  blockquote { border-left: 3px solid var(--border); margin: 1.1rem 0;
+               padding: 0.2rem 0 0.2rem 1.1rem; color: #b8b8d4; font-style: italic; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid var(--border); padding: 0.45rem 0.65rem;
+           text-align: left; vertical-align: top; }
+  th { background: var(--panel); color: #b0b0d0; font-weight: 600; }
+  ul, ol { margin: 0 0 1rem; padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  .status { font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em;
+            padding: 1px 7px; border-radius: 3px; font-weight: 700; }
+  .status.have { background: #1b3a24; color: var(--green); }
+  .status.none { background: #3a1b22; color: var(--red); }
+  .status.part { background: #3a331b; color: var(--yellow); }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>A fifth registry: Math Academy quizzes inside the correlation-game architecture</h1>
+<p class="lede">
+  Asked whether bza could grow a Math Academy–style quiz feature, parameterised over a
+  semantic tree of concepts the way the correlation games are parameterised over media.
+  The answer is yes, and the mechanism is already in the codebase under a name that does
+  not advertise it: <code>lib/correlate/scope.ts</code>, the fourth registry, exists
+  precisely because "a medium is not a flat space." A concept tree is a scope ontology
+  over the <code>theorem</code> medium. Two of the eleven existing games are already the
+  right shape. But three of the turn engine's load-bearing guarantees <em>invert</em> under
+  mechanical judgement, which is why this should be a sibling engine sharing the registries
+  rather than a twelfth game sharing the route. Of the four requested surface features, three
+  are largely already present in <code>package.json</code>; one is genuinely new.
+</p>
+
+<h2>What was asked</h2>
+
+<p>
+  Whether bza could have a Math Academy–inspired quiz feature that, like the correlation
+  games, is parameterised over a semantic tree of concepts — adding a notion of
+  prerequisites, incorporating Math Academy's learning philosophy, and with support for
+  Emacs-style keybindings, an RPN calculator, "math vibe coding," and a LaTeX pipeline.
+</p>
+
+<p>
+  This report answers the architecture question first, because it determines whether the
+  four surface features are cheap or expensive. Everything below is read from the
+  TempleDB-indexed <code>bza</code> revision and from
+  <a href="https://www.mathacademy.com/pedagogy">mathacademy.com/pedagogy</a>.
+</p>
+
+<h2>The mechanism already exists, and it is not the one you would guess</h2>
+
+<p>
+  There are <strong>four</strong> registries in <code>lib/correlate/</code>, not three. The
+  fourth is <code>scope.ts</code>, and its own docstring makes the argument better than a
+  summary would:
+</p>
+
+<blockquote>
+  Media say what an offering can be made of. Relations say what a reply can do to one.
+  Tuning says in what proportion. None of them can say "music, but jazz" or "a stretch, but
+  for legs" — and those are the restrictions people actually reach for, because a medium is
+  not a flat space. Scope is that axis.
+</blockquote>
+
+<p>
+  The implementation is two things per facet: a <strong>hint folded into the search</strong>
+  and a <strong>pattern deciding whether what came back belongs</strong>. That is a
+  generalisation of what <code>offerings/knowledge.ts</code> already does to carve four
+  media (theorem, phenomenon, organism, place) out of one Wikipedia provider.
+</p>
+
+<p>
+  <strong>A mathematical concept tree is a scope ontology over the <code>theorem</code>
+  medium.</strong> Not by analogy — by construction. "Algebra → rational expressions →
+  partial fractions" is a region of a medium, expressed as a search hint plus a membership
+  pattern, which is exactly what a facet is.
+</p>
+
+<h3>The honesty distinction transfers intact</h3>
+
+<p>Scope already declares, per facet, which kind of promise it can make:</p>
+
+<table>
+  <tr><th>Facet kind</th><th>bza's definition</th><th>In a mathematics ontology</th></tr>
+  <tr>
+    <td><code>checked</code></td>
+    <td>"The provider gives us the field, or the text is authored here, so a reply outside
+        the scope is detected and discarded exactly like a search that found nothing — the
+        ordinary miss, which the retry stage already knows how to answer."</td>
+    <td>A mathlib-backed concept. Declaration names, module paths, hypotheses and axioms are
+        fields we actually have. Membership is decidable.</td>
+  </tr>
+  <tr>
+    <td><code>guided</code></td>
+    <td>"The provider does not tell us, so the instruction goes in the prompt and the hint
+        goes in the query, and that is the whole of it. The facet carries a
+        <code>caveat</code> saying so, and the UI prints it."</td>
+    <td>"The intuitive parts of algebra." No field decides it. Says so, visibly.</td>
+  </tr>
+</table>
+
+<p>
+  This is the same distinction as the Wikipedia-versus-mathlib fidelity gap raised in
+  <code>PROPOSAL-BZA.md</code> §3, wearing a different hat. Music genre is bza's own honest
+  example: Deezer returns no genre, so genre is <code>guided</code> and admits it, while
+  music <em>era</em> is <code>checked</code> because the track re-fetch carries
+  <code>release_date</code>. The pattern is established; mathematics just happens to be a
+  domain where a very large fraction of the ontology can be <code>checked</code>.
+</p>
+
+<h2>Two existing games are already the right shape</h2>
+
+<p>
+  Games are pure data — <code>games.ts</code> holds eleven, the turn route never branches on
+  game id, and each carries a <code>constraint</code> string that states its one rule. Two
+  of those constraints are, read slightly sideways, descriptions of a practice loop:
+</p>
+
+<table>
+  <tr><th>Game</th><th>Its constraint, verbatim</th><th>Read as practice</th></tr>
+  <tr>
+    <td><code>investigation</code></td>
+    <td>"You choose where to look, never what you find."</td>
+    <td>You choose which concept to probe; you do not choose which problem you get.</td>
+  </tr>
+  <tr>
+    <td><code>navigation</code></td>
+    <td>"You pick the key, never the door."</td>
+    <td>You offer what you know; it lands you at what that unlocks. A prerequisite walk.</td>
+  </tr>
+</table>
+
+<p>
+  <code>navigation</code>'s world keys are <code>here</code> (where you are standing),
+  <code>atlas</code> (places reached, each with one fixed detail) and <code>route</code>
+  (order of arrival). Relabel those as <em>current frontier</em>, <em>concepts reached with
+  their strength</em>, and <em>order of introduction</em>, and the structure is a
+  prerequisite traversal with no change to its shape.
+</p>
+
+<div class="callout">
+  <strong>This is the idea worth building.</strong> Not a practice queue sitting beside a
+  game, but a traversal of the concept space that <em>generates</em> the queue. It keeps the
+  thing feeling like one product rather than a learning app stapled to a game, and it reuses
+  a framing the codebase has already proven it can express as data.
+</div>
+
+<h2>Where the engine inverts — three places, and they decide the architecture</h2>
+
+<p>
+  "Modes as data" is the property that makes an eleven-game space tractable, and it holds
+  almost everywhere. It does not hold here, in three specific and non-negotiable places.
+</p>
+
+<h3>1. There is no mechanical judge</h3>
+
+<p>
+  <code>Judge = 'player' | 'narrator'</code>. Both are interpretive: one is you ruling and
+  the interpreter arguing, the other is an in-fiction interpreter whose ruling sticks.
+  Mechanical judgement — a worker returning <code>supported</code> /
+  <code>counterexample_found</code> / <code>inconclusive</code> — is a third kind, and it is
+  a new ruling path rather than a data edit. This is the single place the data-driven design
+  does not absorb the feature.
+</p>
+
+<h3>2. The reply guarantee is backwards for practice</h3>
+
+<p>
+  The route guarantees a legal turn never persists without a real reply, through four stages:
+  interpreter plan → corrective retry → server salvage search → composed floor. The floor
+  reaches composed media <em>through a mute</em> because composed media cannot miss.
+</p>
+
+<p>
+  For a game this is humane and correct: a player who scoped themselves into a corner gets
+  an answer rather than a dead chain. For practice it is dishonest. When the learner is
+  wrong, the correct response is <em>wrong, and here is the step that broke</em> — not a
+  salvaged offering that keeps the turn alive. The guarantee that makes the game kind would
+  make the quiz lie, and there is no parameter value that fixes it, because the guarantee is
+  the point.
+</p>
+
+<h3>3. Scope relaxation has the opposite priority</h3>
+
+<p>
+  From <code>scope.ts</code>: checked scopes bite on the interpreter's plan and its one
+  corrective retry, and are <strong>relaxed at salvage</strong>, "for the same reason a total
+  mute is ignored by <code>weightedReplyMedia</code>: the engine guarantees that a legal turn
+  carries a real reply, and a guarantee outranks a preference."
+</p>
+
+<p>
+  Prerequisite scope must be the one thing that never relaxes. Serving a problem whose
+  prerequisites are unmet is precisely the failure mastery learning exists to prevent — it is
+  the mechanism, not a quality-of-service degradation. Same machinery, inverted priority.
+</p>
+
+<h3>And a structural mismatch</h3>
+
+<p>
+  Spaced repetition is cross-session and due-date driven. A turn graph is a branch
+  <em>within</em> a session, with <code>parent_turn_id</code> and a world that evolves along
+  it. Due dates do not belong in <code>listen_turns</code>, and a review assignment that
+  draws from four concepts is not a branch of anything.
+</p>
+
+<h2>Therefore: a fifth registry and a sibling engine</h2>
+
+<table>
+  <tr><th>Share</th><th>Do not share</th></tr>
+  <tr>
+    <td>
+      The four registries (media, relations, tuning, scope)<br>
+      The concept-scope ontology itself<br>
+      <code>lib/offerings/*</code> resolvers<br>
+      Games-as-data, including <code>constraint</code> and <code>persona</code><br>
+      The honesty discipline: name the search, never write the content
+    </td>
+    <td>
+      <code>app/api/correlate/turn/route.ts</code><br>
+      The four-stage reply guarantee<br>
+      World deltas and the narrative personae<br>
+      <code>listen_turns</code> / <code>listen_sessions</code><br>
+      Scope relaxation at salvage
+    </td>
+  </tr>
+</table>
+
+<h3>The fifth registry: concepts</h3>
+
+<p>
+  Media / relations / tuning / scope answer <em>what an offering is made of</em>, <em>what a
+  reply does to one</em>, <em>in what proportion</em> and <em>from which region</em>. None of
+  them answers <em>what depends on what</em>. That is the fifth axis, and it is a graph
+  rather than a flat enum, which is why it cannot be folded into scope.
+</p>
+
+<pre><code>// lib/concepts/types.ts  (proposed)
+
+export interface Concept {
+  id: string
+  name: string
+  /** The scope facet that selects this concept's offerings. */
+  scope: ScopeFacet
+  /** 'checked' when a formal library backs it; 'guided' otherwise. Inherited
+   *  from the facet, restated here because the UI needs it per concept. */
+  fidelity: 'checked' | 'guided'
+  objectives: Objective[]        // each names its task kinds; no kind, no objective
+  knowledgePoints: KnowledgePoint[]
+}
+
+export interface KnowledgePoint {
+  id: string
+  conceptId: string
+  statement: string             // one or two sentences, learner's language
+  workedExample: WorkedExample  // REQUIRED. subgoal-labelled, not a flat list
+  visualRef?: string            // dual coding
+  position: number
+  automaticityTarget?: number   // ms; absent means automaticity is not tracked
+}
+
+export type ConceptEdgeKind =
+  | 'prerequisite'              // promoted, attributed, reviewed
+  | 'candidate_prerequisite'    // imported from a proof term or scraped
+  | 'interferes_with'           // non-interference: never introduce together
+  | 'encompasses'               // layering: exercising this exercises that
+
+export interface ConceptEdge {
+  id: string
+  from: string
+  to: string
+  kind: ConceptEdgeKind
+  promotedBy?: string           // null for candidates
+  rationale?: string
+}</code></pre>
+
+<p>
+  Four edge kinds rather than one, because Math Academy's principles are not all the same
+  relation. <code>prerequisite</code> gates introduction (mastery learning).
+  <code>encompasses</code> is what makes <strong>layering</strong> computable — exercising an
+  advanced concept exercises what it encompasses, which is how credit propagates and why a
+  prerequisite you just used does not come due as though untouched.
+  <code>interferes_with</code> is <strong>non-interference</strong> as a selection constraint:
+  authored, not inferred, because similarity of name is a poor proxy —
+  <code>sin</code> and <code>sinh</code> interfere, two unrelated lemmas with similar names do
+  not. <code>candidate_prerequisite</code> keeps imported structure quarantined until a human
+  promotes it.
+</p>
+
+<h3>The verifier judge</h3>
+
+<pre><code>export type Judge = 'player' | 'narrator' | 'verifier'   // third kind
+
+export interface Verdict {
+  ruling: 'correct' | 'incorrect' | 'inconclusive' | 'abandoned'
+  /** How it was decided. An inconclusive ruling names what it tried. */
+  method: string
+  /** Populated for 'incorrect': the first step that does not follow. */
+  brokeAt?: { step: number; detail: string }
+  /** The domain the ruling holds on. Never dropped. */
+  conditions: string[]
+}</code></pre>
+
+<p>
+  <code>inconclusive</code> is a first-class ruling and is <strong>never scored as
+  wrong</strong>. It is routed to human review. Scoring it wrong would train the learner on
+  the engine's limitations, and it is the one rule in this design most likely to be quietly
+  violated by a later convenience.
+</p>
+
+<p>
+  <code>brokeAt</code> is what replaces the reply guarantee. The game's answer to a failed
+  turn is a salvaged offering; practice's answer is a located error. Both refuse to leave the
+  learner with nothing — they just disagree about what "something" is.
+</p>
+
+<h2>The four surface features</h2>
+
+<p>Checked against <code>frontend/package.json</code> rather than assumed.</p>
+
+<table>
+  <tr><th>Feature</th><th>State</th><th>What exists / what is missing</th></tr>
+  <tr>
+    <td>Emacs keybindings</td>
+    <td><span class="status have">cheap</span></td>
+    <td><code>@replit/codemirror-vim</code> is <strong>already a dependency</strong>, alongside
+        CodeMirror 6 (<code>@codemirror/state</code>, <code>view</code>,
+        <code>lang-markdown</code>, <code>@uiw/react-codemirror</code>). So modal keymaps over
+        CM6 are a proven path in this repo. <code>@replit/codemirror-emacs@6.1.0</code> exists
+        from the same vendor — verified against the npm registry. Sibling package, same
+        mechanism.</td>
+  </tr>
+  <tr>
+    <td>LaTeX pipeline</td>
+    <td><span class="status have">mostly there</span></td>
+    <td><code>katex@0.16.45</code> + <code>rehype-katex</code> for render;
+        <code>@myriaddreamin/typst.ts</code> with <code>typst-ts-web-compiler</code> and
+        <code>typst-ts-renderer</code> for real typesetting <em>in the browser</em>;
+        <code>/api/typst-ai</code>; Mathpix routes (<code>mathpix-submit</code>,
+        <code>-status</code>, <code>-url</code>) for image→LaTeX ingest. The gap is the return
+        leg: nothing feeds <em>computed</em> output back in. The math-workbench worker already
+        returns a <code>latex</code> field on every result, so that seam is one field wide.</td>
+  </tr>
+  <tr>
+    <td>Math vibe coding</td>
+    <td><span class="status part">one real hole</span></td>
+    <td>Taken as: type math in a buffer, see it rendered <em>and evaluated</em> live, iterate
+        by feel. The editor exists, the renderer exists and runs client-side, the AI route
+        exists. What has no trace in the project is <strong>exact computation</strong> — no
+        SymPy, no CAS of any kind. Two options: call the math-workbench worker as a service,
+        or run SymPy in-browser via Pyodide. Pyodide is tens of megabytes and would duplicate
+        the run ledger's provenance story; calling the worker keeps one authority for
+        "what was computed and under which assumptions."</td>
+  </tr>
+  <tr>
+    <td>RPN calculator</td>
+    <td><span class="status none">net new</span></td>
+    <td>Nothing exists. The only genuinely new build. Worth constraining: the Emacs Calc
+        adapter already captures expression text, calculation mode, precision, angle
+        convention and engine version with every snapshot. If the web RPN widget emits that
+        same record shape, a calculation is one object on both sides and can cross between
+        them. Built freehand, the two diverge on day one.</td>
+  </tr>
+</table>
+
+<h2>Scheduling, and the overlap nobody has decided yet</h2>
+
+<p>
+  bza already contains a spaced-repetition implementation: <code>lib/queries/quiz.ts</code>
+  has SM-2 inline (<code>interval_days</code>, <code>ease_factor</code>,
+  <code>repetitions</code>, <code>next_review_at</code>), and
+  <code>lib/queries/knowledge-graph.ts</code> calls it from <code>updateMastery</code> with
+  <code>mastered</code> at a quiz score of 0.6.
+</p>
+
+<p>It should not be the basis for this, for two reasons that are substantive rather than stylistic:</p>
+
+<ul>
+  <li><strong>SM-2 is graph-blind.</strong> It cannot know that practising an advanced concept
+    exercised three prerequisites, so those prerequisites come due anyway and the learner
+    re-drills what they just used. In a domain that is mostly prerequisite structure, that is
+    the dominant inefficiency — and <code>encompasses</code> above exists to fix exactly it.</li>
+  <li><strong><code>mastered = score >= 0.6</code> counts any success as mastery regardless of
+    assistance.</strong> A hint-assisted correct answer and an independent one are different
+    observations, and collapsing them is the one thing the whole evidence design is built to
+    prevent.</li>
+</ul>
+
+<p>
+  Recommendation: <strong>leave bza's quiz path alone.</strong> Book comprehension and
+  mathematical practice are different jobs, bza's graph is per-book and per-user while a
+  concept graph is subject-wide, and the only cost of leaving both is two schedulers that
+  never meet. Generalising bza's to be graph-aware couples a reading feature to a mathematics
+  curriculum for no gain.
+</p>
+
+<div class="callout">
+  <strong>Amendment, 2026-10-15 — the recommendation above was wrong, and the callout
+  that followed it has been resolved.</strong>
+
+  <p>
+    The paragraph above argues from an architectural mismatch that does not exist. The
+    artifacts were checked afterwards and three facts contradict it:
+  </p>
+
+  <ul>
+    <li><strong>The SM-2 state is already stored on graph nodes.</strong>
+      <code>knowledge_nodes</code> carries <code>interval_days</code>,
+      <code>ease_factor</code>, <code>repetitions</code>, <code>next_review_at</code>,
+      <code>mastered</code> and <code>mastery_score</code> as columns. There is no separate
+      cards table. A prerequisite-aware scheduler needs no new storage.</li>
+    <li><strong><code>knowledge_edges</code> is already a prerequisite graph.</strong> The
+      extractor prompt, now committed at
+      <code>supabase/functions/build-knowledge-graph/index.ts</code>, says verbatim:
+      <em>“Edges: &quot;from&quot; index is PREREQUISITE for &quot;to&quot; index (must
+      understand A before B)”</em>. The table has no <code>relationship</code> column because
+      prerequisite is the only kind of edge it has ever held.</li>
+    <li><strong>Nothing reads those edges when scheduling.</strong>
+      <code>updateMastery</code> writes one row — <code>.eq('id', nodeId)</code> — and never
+      touches <code>knowledge_edges</code>.</li>
+  </ul>
+
+  <p>
+    So “SM-2 is graph-blind” describes a missing traversal, not a missing structure. The
+    first bullet above overstated its own conclusion: it is an argument for <em>adding</em>
+    propagation, and it was used as an argument for keeping two systems apart. A hybrid —
+    prerequisite-aware discharge over bza's existing per-book DAG — is considerably cheaper
+    than this report claimed.
+  </p>
+
+  <p>
+    <strong>The second bullet survives and gets sharper.</strong> Collapsing assistance is
+    tolerable in isolated SM-2 because the error stays local to one card. Under propagation
+    it fans out: one hint-assisted success discharges review pressure on every prerequisite
+    it claims to have exercised. That makes the assistance distinction a
+    <em>precondition</em> for propagation rather than a refinement of it — propagation first
+    would make the scheduler worse than leaving it alone.
+  </p>
+
+  <p>
+    <strong>What does not merge.</strong> <code>knowledge_nodes</code> is keyed per-book
+    <em>and</em> per-user, so the same concept in two books is two unrelated rows with
+    independent review state and no identity linking them. Propagation works inside a book
+    and structurally cannot cross one. Subject-wide identity remains the concept registry's
+    job. The conclusion is therefore a shared <em>mechanism</em> over two scopes, not one
+    system — which is close to what the paragraph above recommended, reached for a different
+    and better reason.
+  </p>
+
+  <p>
+    Revised order of work: (1) fix the assistance collapse; (2) add backwards traversal along
+    <code>from_node</code> to <code>updateMastery</code>, with a visited-set; (3) keep the
+    registries scope-separate. Step 2 needs the visited-set because
+    <strong>acyclicity is promised only by the prompt</strong> — the extractor filters
+    self-loops in JavaScript, and no constraint in any layer rejects a longer cycle.
+  </p>
+
+  <p>
+    Timing favours doing it: <code>concept_observations</code> and
+    <code>concept_point_strength</code> are both at <strong>0</strong> rows, and the book
+    graph holds 10 nodes and 6 edges across one book with one node mastered. There is no live
+    learner state to migrate.
+  </p>
+</div>
+
+<div class="callout">
+  <strong>Resolved, 2026-10-15.</strong> The original callout read: “<code>knowledge_nodes</code>
+  and <code>knowledge_edges</code> are referenced by <code>lib/queries/knowledge-graph.ts</code>
+  but are <strong>defined in no <code>.sql</code> under <code>supabase/setup/</code></strong>.
+  Either an edge function creates them or a migration is untracked.”
+
+  <p>
+    It was the untracked-migration case. Both tables exist in <code>bza_public</code> in
+    production; no edge function creates them. The DDL has been transcribed out of
+    <code>information_schema</code>/<code>pg_catalog</code> into
+    <code>supabase/setup/62_knowledge_graph_ddl.sql</code> and verified by running it inside a
+    transaction against production and rolling back — every statement succeeds and every index
+    reports already-exists, which checks that it matches rather than merely compiles.
+  </p>
+
+  <p>
+    The same sweep found a second untracked artifact: <code>build-knowledge-graph</code> was
+    deployed and <code>ACTIVE</code> with no source in the repo, recoverable only from the
+    deployed eszip's sourcemap. It is now committed, which is what makes the edge semantics
+    above quotable rather than inferred.
+  </p>
+
+  <p>
+    Two defects were recorded rather than silently fixed, each deserving its own migration:
+    no <code>CHECK (from_node &lt;&gt; to_node)</code> and no cycle prevention anywhere; and
+    <code>anon</code> holding <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code>/<code>TRUNCATE</code>
+    on both tables. RLS neutralises the first three, but
+    <strong>Postgres does not apply row-level security to <code>TRUNCATE</code></strong> —
+    that is privilege-only. Not reachable through PostgREST, which exposes no
+    <code>TRUNCATE</code> verb, so latent rather than open.
+  </p>
+</div>
+
+<h2>What this costs</h2>
+
+<p>Stated plainly, because the architecture section reads more encouraging than the bill.</p>
+
+<ul>
+  <li><strong>A second judge path and a second scheduler.</strong> Not large, but they are new
+    code in a subsystem whose current virtue is that adding a game is a data edit.</li>
+  <li><strong>An ontology someone has to author.</strong> The real cost. Mitigated more than
+    expected: the <code>math-academy-scraper</code> project already captures Math Academy's
+    <em>own topic prerequisite graph</em> — hand-authored, at the granularity their pedagogy
+    assumes. That is a seed rather than a blank page, and aligning it against mathlib's
+    checked statements is a much smaller job than promoting mathlib edges from nothing.</li>
+  <li><strong>Two spaced-repetition implementations</strong> in one product, by choice.</li>
+  <li><strong>A worker dependency</strong> if math vibe coding is wanted, since the browser has
+    no CAS.</li>
+</ul>
+
+<p>
+  What it does <em>not</em> cost: the registries, the resolvers, the scope mechanism, the
+  honesty guards, or the games-as-data property. Those transfer unchanged, and they are the
+  parts that took the longest to get right.
+</p>
+
+<h2>Suggested sequencing</h2>
+
+<ol>
+  <li><strong>Concept registry, read-only.</strong> The fifth registry plus a scope ontology
+    for one subject area, seeded from the scraped Math Academy graph. No practice loop. Ship a
+    browser for it. This is where you learn whether the ontology is authorable at all, and it
+    is cheap to abandon.</li>
+  <li><strong>The verifier judge on one task kind.</strong> Transform-into-a-named-form, scored
+    by the worker's <code>equivalent</code> operation, which already returns
+    <code>supported</code> / <code>counterexample_found</code> / <code>inconclusive</code> with
+    a domain. One kind, end to end, including the <code>inconclusive</code> path — because that
+    path is the one that gets skipped.</li>
+  <li><strong>The <code>navigation</code> reframing.</strong> Prerequisite traversal as a game,
+    reusing the existing game's structure. This is the part that makes it feel like bza rather
+    than like a learning app.</li>
+  <li><strong>Scheduling.</strong> Strength per knowledge point, advancement on unaided success
+    only, credit propagation along <code>encompasses</code>, mixed assembly across concepts,
+    and <code>interferes_with</code> as a hard selection constraint.</li>
+  <li><strong>Surface features</strong>, in the order the table implies: Emacs keymap, then the
+    LaTeX return leg, then RPN against the Calc record shape, then the worker call for live
+    evaluation.</li>
+</ol>
+
+<p>
+  Steps 1 and 2 are the minimum that proves or kills the idea. Neither touches the turn route,
+  the reply guarantee, or <code>listen_turns</code>, so neither can regress the correlation
+  games.
+</p>
+
+<h2>Open questions</h2>
+
+<ol>
+  <li><strong>Is the concept ontology authorable at scale?</strong> Step 1 answers it. The
+    measurement is the promotion rate from candidate to promoted prerequisite: a very low rate
+    means the formal library supplies statements but not structure, which is still useful but a
+    much smaller claim.</li>
+  <li><strong>Where do Math Academy's graph and mathlib's disagree?</strong> They will. An MA
+    edge is a claim about learners; a mathlib edge is a fact about proofs. A conflict usually
+    means the formal development took a route a learner should not. Those disagreements should
+    be preserved rather than resolved by fiat — they are the most informative data in the
+    alignment.</li>
+  <li><strong>Does the game framing actually help learning, or just engagement?</strong>
+    Explicitly a hypothesis. The design is positioned to answer it — provenance records whether
+    a task arrived via a traversal or a scheduler — and presupposing the benefit is what would
+    destroy the ability to find out.</li>
+  <li><strong>Server or client for evaluation?</strong> Worker call versus Pyodide. Leaning
+    worker, on provenance grounds rather than performance.</li>
+</ol>
+
+<h2>Sources</h2>
+
+<p>
+  Read from the TempleDB-indexed <code>bza</code> revision:
+  <code>lib/correlate/{scope,games,types,relations,graph,tuning}.ts</code>,
+  <code>lib/offerings/knowledge.ts</code>,
+  <code>lib/queries/{quiz,knowledge-graph}.ts</code>,
+  <code>app/api/correlate/turn/route.ts</code>,
+  <code>docs/CORRELATION_GAMES.md</code>,
+  <code>supabase/setup/{50_listen_along,52_correlation_games}.sql</code>,
+  <code>frontend/package.json</code>.
+  Pedagogy from <a href="https://www.mathacademy.com/pedagogy">mathacademy.com/pedagogy</a>,
+  which publishes its principles and explicitly withholds its spacing and credit-propagation
+  algorithms — every policy proposed here is this project's own and must not be described as
+  theirs. Companion documents in the <code>math</code> project:
+  <code>SPEC.md</code>, <code>SPEC-LEARNING.md</code>, <code>PROPOSAL-BZA.md</code>.
+</p>
+
+</body>
+</html>

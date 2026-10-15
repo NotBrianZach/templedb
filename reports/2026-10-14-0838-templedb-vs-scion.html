@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TempleDB vs Scion</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --ok: #7ad17a;
+    --part: #e0c060;
+    --no: #e07a7a;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  .wrap { overflow-x: auto; margin: 1.1rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { text-align: left; padding: 0.45rem 0.7rem;
+           border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase;
+       letter-spacing: 0.04em; font-size: 0.74rem; }
+  td.num { text-align: right; font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .tag { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.05em;
+         padding: 1px 6px; border-radius: 3px; white-space: nowrap; }
+  .t-ok   { color: var(--ok);   border: 1px solid var(--ok); }
+  .t-part { color: var(--part); border: 1px solid var(--part); }
+  .t-no   { color: var(--no);   border: 1px solid var(--no); }
+  ul { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin-bottom: 0.35rem; }
+  blockquote { margin: 1.1rem 0; padding-left: 1rem; color: var(--muted);
+               border-left: 2px solid var(--border); font-style: italic; }
+  .foot { color: var(--muted); font-size: 0.82rem; margin-top: 3rem;
+          border-top: 1px solid var(--border); padding-top: 1rem; }
+</style>
+</head>
+<body>
+
+<h1>TempleDB vs Scion</h1>
+<p class="lede">
+  Anthropic's <em>Redesigning source control</em> describes Scion, a version control
+  system built because git stopped scaling at 30,000 merges a day. TempleDB arrived at
+  four of Scion's six design principles independently and from the opposite direction —
+  normalization, not throughput — and the convergence is sharpest exactly where it
+  matters: commits are changesets against a parent, content is addressed by hash in a
+  shared blob table, merges run where the data lives, and working copies are optional.
+  TempleDB then deliberately inverts Scion's first principle (clients are always online)
+  by building CRDT sync for offline peers. The genuine gaps are concurrency — SQLite's
+  single writer is the exact opposite of "lock-free commits" — and derived data: the
+  entity graph is a richer derivation layer than anything Scion describes, but there is
+  still no blame index or path-history structure.
+</p>
+
+<h2>The two systems, stated plainly</h2>
+
+<p><strong>Scion</strong> is a client-server VCS that replaced git at Anthropic in five
+months, built by seven engineers while merge volume grew tenfold. Its forcing function
+was agent scale: by September 2026 nearly 100&nbsp;GB of history, a 25&nbsp;GB compressed
+working copy, 25&nbsp;million CI checkouts a day, and a naive-fetch bill of 600&nbsp;petabytes
+of daily traffic. Several hundred internal git mirrors were the stopgap, and they
+"became harder to operate as our merge rate increased."</p>
+
+<p><strong>TempleDB</strong> is a database-native project manager whose VCS is one
+subsystem among deploy, nix, config-AST, agent runtime and entity graph. Its forcing
+function was stated in <code>docs/DESIGN_PHILOSOPHY.md</code> in March 2026 and has
+nothing to do with throughput:</p>
+
+<blockquote>Normalization is not just a database principle — it's the key to maintaining
+truth in complex systems.</blockquote>
+
+<p>The thesis there is that git treats code as duplicated text files, so the same
+<code>Button.jsx</code> lives in four repos and no one can say which is true. Store
+content once, address it by hash, reference it from everywhere. That is a
+deduplication argument. It produces, as a side effect, most of Scion's storage model.</p>
+
+<h2>Scale: not the same sport</h2>
+
+<div class="wrap">
+<table>
+  <thead><tr><th>Dimension</th><th>Scion (Anthropic)</th><th>TempleDB (this install)</th></tr></thead>
+  <tbody>
+    <tr><td>Write rate</td><td>&gt;30,000 merges/day (Sept 2026), up from 2,500/day in May</td><td>1,260 commits <em>lifetime</em></td></tr>
+    <tr><td>History size</td><td>~100 GB</td><td>127 MB of blob content; 340 MB total DB</td></tr>
+    <tr><td>Working copy</td><td>&gt;25 GB compressed</td><td>2,464 tracked files across 25 projects</td></tr>
+    <tr><td>Checkouts</td><td>25M/day in CI</td><td>108 Checkout entities, all time</td></tr>
+    <tr><td>Writers</td><td>Tens of thousands of engineers and agents</td><td>1 human + agents; 755 sessions, 14 active</td></tr>
+    <tr><td>Branches</td><td>Not stated; repo not materialized anywhere</td><td>23</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Anthropic merges a TempleDB-lifetime of commits roughly once an hour. This is worth
+stating up front because it means every performance claim in the article is irrelevant
+here, and every <em>structural</em> claim may not be. The article is explicit that Scion
+is "by no means a suitable replacement for git for general use" and lists the
+preconditions: tens of thousands of code-writing agents, tolerance for massive token
+expenditure, willingness to migrate the whole development lifecycle. TempleDB meets none
+of them. So this is not a "should we build Scion" report. It is a report on which of
+Scion's six principles TempleDB already satisfies, which it rejected on purpose, and
+which two are real unclaimed wins.</p>
+
+<h2>Scorecard against the six principles</h2>
+
+<div class="wrap">
+<table>
+  <thead><tr><th>Scion principle</th><th>TempleDB</th><th>Evidence</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>1. Clients are always online</td>
+      <td><span class="tag t-no">INVERTED</span></td>
+      <td><code>templedb sync</code> — cr-sqlite CRDTs over Tailscale, built precisely so peers can diverge offline and reconcile</td>
+    </tr>
+    <tr>
+      <td>2. Client-server asymmetry; server does history, merges, rebases, blame</td>
+      <td><span class="tag t-ok">YES</span></td>
+      <td>Merge, cherry-pick and conflict strategies all execute against SQLite; no client-side working copy participates. <code>templedb-rs</code> is a read-only client by design</td>
+    </tr>
+    <tr>
+      <td>3. Comprehensive service enabling novel applications</td>
+      <td><span class="tag t-ok">YES</span></td>
+      <td>432-command CLI, MCP tool surface, FastAPI GUI on 8420, <code>--json</code> on everything</td>
+    </tr>
+    <tr>
+      <td>4. Horizontal scalability; nothing fully materialized</td>
+      <td><span class="tag t-part">HALF</span></td>
+      <td>Nothing-materialized: yes. Horizontal: no — one SQLite file, no tiering</td>
+    </tr>
+    <tr>
+      <td>5. Cheap, incremental, lock-free commits</td>
+      <td><span class="tag t-part">HALF</span></td>
+      <td>Incremental and server-side: yes. Lock-free: no — SQLite single writer, 30s <code>busy_timeout</code>. <code>templedb-rust</code>'s Postgres backend is the in-flight path</td>
+    </tr>
+    <tr>
+      <td>6. Optional, sparse-by-design working copies</td>
+      <td><span class="tag t-ok">YES</span></td>
+      <td><code>source snapshot --rev</code>, <code>file cat</code> / <code>file ls</code>, <code>project checkout</code>, <code>templedb edit</code></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h2>Where TempleDB already converged</h2>
+
+<h3>The changeset model is the same decision</h3>
+
+<p>Scion's fundamental unit is a changeset that "stores <em>changed files relative to
+first parent</em> rather than full tree pointers," pointing at content-addressed
+compressed blobs. TempleDB's <code>vcs_file_states</code> is that table:</p>
+
+<pre>vcs_file_states(commit_id, file_id, file_path,
+                change_type CHECK(IN ('added','modified','deleted',
+                                      'renamed','unmodified')),
+                content_hash, old_content_hash, previous_path, ...)
+                UNIQUE(commit_id, file_id)</pre>
+
+<p>One row per <em>changed</em> file per commit, carrying both the new and old content
+hash and an explicit rename with <code>previous_path</code>. 1,260 commits produce 6,355
+file-state rows — about 5 changed files per commit, not 2,464 tree entries per commit,
+which is what a git-style snapshot model would have cost. Content lives in
+<code>content_blobs</code>, keyed by <code>hash_sha256</code> as the primary key, with
+<code>reference_count</code>, <code>compression IN ('zstd','gzip')</code> and
+<code>storage_location IN ('inline','external','remote')</code>. That is Scion's storage
+tier description almost line for line.</p>
+
+<p>Two caveats on that last point. All 4,265 blobs on this install are
+<code>inline</code> with no compression — the external and remote paths exist in the
+schema and in <code>docs/BLOB_STORAGE.md</code> (S3, R2, Backblaze) but nothing has
+exercised them. And TempleDB has no packfiles for the same reason Scion has none: there
+was never a packfile. Neither system needs repository maintenance; TempleDB needs
+<em>database</em> maintenance instead, which is a real cost the article's architecture
+doesn't have an analogue for.</p>
+
+<h3>Merges happen where the data is</h3>
+
+<p>Scion's asymmetry principle puts history queries, merges, rebases and blame on the
+server so clients stay thin. TempleDB gets this for free by construction: there is no
+client. <code>vcs merge</code>, <code>vcs cherry-pick</code> (a three-way merge of a
+single commit) and the <code>--strategy ours/theirs</code> auto-resolution all read and
+write SQLite directly. A merge never requires a materialized tree. The config-AST
+subsystem goes further than Scion describes — <code>ConfigCompilerService.resolve()</code>
+deep-merges typed config nodes with documented semantics per
+<code>docs/AST_MERGE_SEMANTICS.md</code> (attrset recursion, list concat in priority
+order, <code>with</code>-unwrap-merge-rewrap), which is a structural merge over an AST
+rather than a textual three-way merge. Scion resolves conflicts by handing them to
+Claude; TempleDB resolves a narrow class of them by type.</p>
+
+<h3>Sparse, optional working copies were the original point</h3>
+
+<p>Scion's principle 6 lets a CI job request a diff or compute an operation via API
+without materializing files. TempleDB's equivalents are more numerous than Scion's:</p>
+
+<ul>
+  <li><strong><code>source snapshot --rev</code></strong> — read one file at one revision
+  with no checkout at all. This is exactly the API-first history read the article argues
+  for, and it is already how agents read code here.</li>
+  <li><strong><code>file cat</code> / <code>file ls</code> / <code>file get</code></strong>
+  — single-path reads against the DB, materializing nothing. <code>file ls &lt;slug&gt;
+  src/ -l</code> answers "what is in this directory" without constructing the directory.</li>
+  <li><strong><code>templedb edit</code></strong> — provision a writable workspace per
+  session, diff it against the DB on commit, discard it after.</li>
+  <li><strong>Git mirrors</strong> — <code>publish run</code> materializes to a git
+  remote for the tools that still require one, which is the inverse of Anthropic's
+  "several hundred git mirrors" problem: the DB is authoritative and git is the export
+  format.</li>
+</ul>
+
+<p>There was a fifth, and its removal is the most direct evidence for Scion's principle 6
+in this whole comparison. TempleDB ran a FUSE mount at <code>~/temple/&lt;project&gt;/</code>
+with <code>project@branch/</code> views that reconstructed trees on demand from the
+<code>vcs_file_states</code> chain plus a <code>vcs_working_state</code> overlay. It is
+now deprecated and gone — there is no <code>templedb fuse</code> command, no mount, and
+no <code>~/temple/</code> directory. A filesystem projection is still a projection into
+tree shape, with a cache to invalidate and a kernel boundary to cross; the API reads
+above do the same job without either. Anthropic argues the same thing prospectively,
+letting CI jobs "request diffs or compute operations via API without materializing
+files." TempleDB built the mount, used it, and arrived at the conclusion by subtraction.</p>
+
+<h3>Derived data — where TempleDB is ahead</h3>
+
+<p>Scion computes "derived data" recursively from the changeset log: blame indices, path
+history, skip lists for commit graphs, with the stated benefit that new optimizations
+land without client changes. TempleDB has the same architecture and a much wider
+derivation surface: the entity graph currently holds <strong>64,737 entities</strong>
+and <strong>73,754 relations</strong> across git, nix, agent-runtime, deployment and
+author authorities — 21,442 Symbols, 17,813 ToolCalls, 13,443 StorePaths, 1,259
+Commits — plus an FTS5 index over file contents, import-graph hygiene snapshots, and
+provenance walks that answer "what motivated the code running on this machine." Scion
+derives facts about <em>code history</em>. TempleDB derives facts about code history,
+the nix closure that got built from it, the deployment that shipped it, and the agent
+session that wrote it.</p>
+
+<div class="callout">
+  <strong>The honest asymmetry:</strong> TempleDB's derivations are richer but weaker.
+  <code>ingest git</code> reads <code>vcs_commits</code>, not git — so a fresh ingest
+  means "the graph matches the tables," not "the graph matches reality." Scion's derived
+  data is computed from the write-ahead log that <em>is</em> reality. TempleDB needs
+  <code>doctor</code> and <code>reconcile</code> to close that loop; Scion needs nothing
+  because there is no second authority to drift from.
+</div>
+
+<h2>Where TempleDB chose differently, and was right to</h2>
+
+<h3>Offline-first is a deliberate inversion</h3>
+
+<p>Principle 1 — "clients are always online" — is the one Scion leans on hardest, and
+TempleDB spent real effort going the other way. <code>templedb sync</code> initializes
+cr-sqlite CRDTs on the database and replicates <code>sync_projects</code>,
+<code>sync_vcs_commits</code>, <code>sync_vcs_branches</code>,
+<code>sync_entities</code>, <code>sync_relations</code>,
+<code>sync_environment_variables</code> and <code>sync_system_config</code> across
+Tailscale peers, each with its <code>__crsql_clock</code> table. That is a conflict-free
+replicated merge for machines that were apart.</p>
+
+<p>Both choices follow from the deployment model. Anthropic's clients are datacenter
+jobs with a network. TempleDB's "clients" are five NixOS hosts — zMothership2,
+zMothership3, zStation, WilliamZacharyAbelTheZeroth, zachMothership — that are sometimes
+on, sometimes not, and sometimes being reinstalled. A system whose premise is constant
+connectivity to an authoritative server would be unusable for the exact job TempleDB
+does. Scion's principle is correct for Scion and wrong here.</p>
+
+<h3>No merge queue, for a different reason</h3>
+
+<p>The article argues "a proper merge queue... doesn't make much sense at agent scale,"
+and replaces global repository locks with post-merge automated testing, pre-deploy
+conflict testing, and Claude's automated conflict resolution. TempleDB also has no merge
+queue, trivially — there is no contention at 1,260 lifetime commits. But it does have
+the replacement half built: <code>templedb test &lt;project&gt;</code> is a DB-backed QA
+runner with auto-detection and per-project test definitions, and
+<code>templedb validate</code> runs env/nixos/deploy validators. The structure Anthropic
+needed at 30,000 merges/day — test after the merge, not before it — is the structure
+that already exists here because there was never a gate to begin with.</p>
+
+<h2>What is actually worth taking</h2>
+
+<p>Four things, ordered by value per unit of effort. The first two are small and
+self-contained. The third is the only one that matters architecturally, and it turns out
+to be half-built already. The fourth is a precondition, not a project.</p>
+
+<h3>1. Path history — one index and one flag</h3>
+
+<p>Start here, because it is the smallest change on the list and the other items depend
+on it. <code>vcs_file_states.previous_path</code> already records renames, and
+<code>change_type</code> already has a <code>'renamed'</code> value, but nothing indexes
+either — so "show me this file's history" means scanning every commit's changeset, and
+following a file across a rename means noticing the rename by eye. Two pieces:</p>
+
+<pre>-- migration 138 (137 is current head)
+CREATE INDEX idx_file_states_path
+  ON vcs_file_states(file_path, commit_id);
+CREATE INDEX idx_file_states_prev
+  ON vcs_file_states(previous_path)
+  WHERE previous_path IS NOT NULL;</pre>
+
+<p>Then a <code>--path</code> filter on <code>vcs log</code>, which currently accepts
+only <code>-n</code>, <code>--branch</code>, <code>--published</code>,
+<code>--session</code> and <code>--all-sessions</code>. The query is a join from
+<code>vcs_commits</code> to <code>vcs_file_states</code> on <code>commit_id</code>,
+filtered on <code>file_path</code>, following <code>previous_path</code> when
+<code>change_type = 'renamed'</code> to continue the walk under the old name. That is
+the whole feature. It is worth doing first because rename-following is exactly the part
+of blame that is annoying to retrofit afterwards.</p>
+
+<h3>2. Blame as a lazily-materialized cache</h3>
+
+<p>Scion lists file blame indices first among its derived structures, and TempleDB has
+nothing: no <code>blame</code> command, and <code>source revisions</code> lists a file's
+revisions while attributing nothing to a line. The input is already in the right shape —
+each <code>vcs_file_states</code> row carries both <code>content_hash</code> and
+<code>old_content_hash</code>, so the two versions of a changed file are both
+addressable in <code>content_blobs</code> without reconstructing a tree.</p>
+
+<p>The implementation is a fold, not a tree walk. Python already depends on stdlib
+<code>difflib</code> (it is what <code>vcs diff</code> and <code>vcs show</code> render
+through, and what the Rust port's <code>difflib.rs</code> exists to match byte for byte),
+so <code>SequenceMatcher(...).get_opcodes()</code> over the two blobs gives
+<code>equal</code> / <code>replace</code> / <code>insert</code> / <code>delete</code>
+ranges per commit. Carry a line→origin-commit vector forward along the chain: on
+<code>equal</code> copy the attribution across, on <code>replace</code> and
+<code>insert</code> stamp the current <code>commit_id</code>, on <code>delete</code> drop
+the entries.</p>
+
+<p>Do not store that vector for every (file, commit) pair — that is O(lines × commits)
+and would dwarf the 127 MB of actual content. Cache it at the revisions someone asks
+about, and replay forward from the nearest cached ancestor:</p>
+
+<pre>-- migration 139
+CREATE TABLE vcs_blame_cache (
+  file_id      INTEGER NOT NULL REFERENCES project_files(id) ON DELETE CASCADE,
+  commit_id    INTEGER NOT NULL REFERENCES vcs_commits(id) ON DELETE CASCADE,
+  -- line_no (1-based) -> origin commit_id, JSON array
+  blame_json   TEXT NOT NULL,
+  line_count   INTEGER NOT NULL,
+  computed_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (file_id, commit_id)
+);</pre>
+
+<p>This is cache, not truth — it is derivable from <code>vcs_file_states</code> at any
+time, so it can be dropped and rebuilt, which is the property that makes Scion's derived
+tier safe to iterate on without touching clients. CLI surface:
+<code>templedb vcs blame &lt;slug&gt; &lt;path&gt; [--rev COMMIT]</code>, matching
+<code>source snapshot</code>'s existing <code>--rev</code> spelling.</p>
+
+<p><strong>Why this is worth more here than it is at Anthropic.</strong>
+<code>vcs_commits</code> carries a <code>session_id</code> FK into
+<code>vcs_sessions</code>, and the entity graph already holds <code>Session</code> (755),
+<code>AgentSession</code> (326), <code>Report</code> (54) and <code>EditIntent</code>
+(1,107) entities wired by <code>from-commit</code>, <code>applied-to</code>,
+<code>motivated</code> and <code>proposed</code> relations — which is what
+<code>provenance commit</code> and <code>provenance report</code> walk. All of that
+resolves at <em>commit</em> granularity today. Blame drops it to <em>line</em>
+granularity, which makes "which agent session wrote this line, under which EditIntent,
+motivated by which report" a single query. Scion's blame answers who; TempleDB's would
+answer what was being attempted. That chain is the thing this database has that git
+does not, and blame is the missing join.</p>
+
+<p>Validate it the way the project validates everything else — a named invariant in
+<code>doctor entities</code>, alongside the fourteen that run now
+(<code>entity_counts_match_source_tables</code> and friends), asserting that a cached
+vector's <code>line_count</code> matches the <code>line_count</code> on the
+corresponding <code>vcs_file_states</code> row. Results persist to
+<code>invariant_checks</code>, so drift shows up in <code>doctor history</code> without
+new plumbing.</p>
+
+<div class="callout">
+  <strong>Register the surfaces up front.</strong> The dead-imports feature is the
+  cautionary tale: its bridge-relation set has to be edited in four places in sync —
+  <code>cli/commands/entity.py</code>, <code>cli/commands/summary.py</code>,
+  <code>cli/commands/hygiene.py</code> and <code>gui_pages/entities.py</code>. A new
+  derived structure should name its consumers in one place on day one, or it acquires the
+  same tax.
+</div>
+
+<h3>3. Lock-free commits: the Rust port is already the path</h3>
+
+<p>Principle 5 is where TempleDB is genuinely at odds with the article, and the evidence
+is all in the project's own operating notes: <code>busy_timeout</code> at 30s,
+<code>_retry_on_lock()</code> with exponential backoff on agent hot paths, streaming
+writes batched at 0.25s, every agent write funnelled through a single-writer
+<code>agent/store.py</code>, and <code>admin db check</code> / <code>admin db
+repair</code> for when it goes wrong anyway. SQLite gives one writer; each of those is a
+workaround for the thing Scion designed away.</p>
+
+<p>The obvious reading is "nothing to do at this scale," and for throughput that is
+correct — 1,260 lifetime commits will never strain a write lock. But the load pattern
+that breaks this design is not volume, it is <strong>parallel agents</strong>, and that
+is already present: 14 active sessions, and a <code>vcs_sessions</code> table whose
+755 rows exist because concurrent agents collide hard enough to need per-session staging
+isolation. The 2026-08-29 incident where a bash loop of 259 <code>file rm</code> calls
+spawned 258 orphan sessions is the same root cause.</p>
+
+<p>Three concrete moves, in order:</p>
+
+<p><strong>(a) Route reads away from the writer.</strong> The <code>templedb-rust</code>
+project — restarted 2026-10-04, 31 files, binary <code>templedb-rs</code> — is a
+deliberately <em>read-only</em> subset verified byte-for-byte against the Python
+implementation across <code>file cat</code>, <code>file ls</code>, <code>vcs log</code>,
+<code>vcs show</code>, <code>vcs diff</code>, <code>vcs branch</code>, <code>source
+snapshot</code>, <code>source revisions</code>, <code>entity explore</code>,
+<code>entity trace</code>, <code>entity paths</code>, <code>entity dead-imports</code>
+and more. That read-only invariant is not a limitation to escape — it <em>is</em>
+Scion's principle 2. A thin, always-connected reader that never contends for the write
+lock is exactly the client half of the asymmetry. Pointing agent read traffic at
+<code>templedb-rs</code> is the cheapest available concurrency win and needs no schema
+change at all.</p>
+
+<p><strong>(b) The Postgres backend already exists.</strong>
+<code>crates/templedb-db/src/backend/pg.rs</code> sits behind a <code>Store</code> /
+<code>Dialect</code> abstraction next to <code>backend/sqlite.rs</code>, with
+<code>value_from_pg</code> narrowing Postgres's static types into SQLite's five storage
+classes in one place and erroring on an unmapped type rather than silently nulling. The
+port reads either engine today. Whatever the original motivation, this is the escape
+hatch from single-writer, and it is further along than any other item in this report.</p>
+
+<p><strong>(c) The schema change that actually unblocks it.</strong> Swapping engines is
+not sufficient, because two UNIQUE constraints make currency a <em>mutable pointer</em>
+and therefore a serialization point:</p>
+
+<pre>file_contents     UNIQUE(file_id, is_current)
+vcs_working_state UNIQUE(project_id, branch_id, file_id)</pre>
+
+<p>The first is already a known sharp edge — the project's own notes say you must DELETE
+the old row rather than <code>SET is_current = 0</code>, or the update collides with
+itself. That is the signature of a design where "which version is current" is stored
+rather than derived. Scion has no such pointer: currency is a property of the branch
+head, read out of the changeset log. TempleDB can do the same thing, because
+<code>vcs_file_states</code> plus <code>vcs_branches.head_commit_id</code> already
+determine the current content of every file — that is precisely what the retired FUSE
+branch views reconstructed. <strong>Deriving <code>is_current</code> from the commit
+chain instead of storing it is the single change that most moves TempleDB toward
+principle 5</strong>, and it is worth doing on its own merits even if the engine never
+changes: <code>content_blobs</code> and <code>vcs_file_states</code> are append-only
+already, so once the mutable-current pointer is gone, the write path is almost entirely
+insert-only.</p>
+
+<p>Sequence it (a) → (b) → (c) and each step is independently useful. Note that (c)
+interacts with the ghost-record failure mode — <code>project_files</code> rows with
+<code>status='active'</code> and no <code>file_contents</code> row, which present as
+tracked and return zero bytes. Deriving currency from the chain would make that class of
+record impossible to represent, which is a second reason to want it.</p>
+
+<h3>4. Post-merge testing is already the right shape — wire it up</h3>
+
+<p>Anthropic replaced the merge queue with post-merge automated testing, pre-deploy
+conflict testing, and Claude resolving conflicts. TempleDB has the pieces and no
+trigger: <code>templedb test &lt;slug&gt;</code> is a DB-backed QA runner with
+per-project definitions in <code>project_tests</code> and dependencies in
+<code>project_test_deps</code>, and <code>templedb validate</code> runs the env, nixos
+and deploy validators. Nothing invokes either on commit. Since
+<code>DeploymentPipelineService</code> already owns triggers and rollback, the move is to
+run the project's own test definitions after a commit lands and record the result against
+the <code>Commit</code> entity — turning "tested" into a queryable fact in the graph
+rather than something a human remembers doing. That is Anthropic's post-merge posture at
+1/20,000th the scale, and it costs a hook rather than an architecture.</p>
+
+<h3>5. Directory-level IAM — only if there is ever a second writer</h3>
+
+<p>Scion shipped beside Antique (code review with semantic approval constraints), code
+search, and fine-grained IAM at directory level. TempleDB has code search already (three
+flavors, which is its own problem) and the skeleton of a review surface in
+<code>intent</code> — 1,107 EditIntents with
+<code>create/list/show/apply/cancel</code>, where a proposed edit is inert until applied.
+Antique's "semantic approval constraints" map onto exactly that: a constraint on which
+intents may self-apply. There is no access control at all today, which is correct for one
+operator. It becomes a prerequisite the moment agents should hold write scopes narrower
+than "the entire database" — and given that <code>file set</code> can silently replace a
+whole file, "narrower than everything" is already the right default for an autonomous
+agent. Worth keeping in view, not worth building now.</p>
+
+<h2>Finding: a stale design doc</h2>
+
+<p>While checking TempleDB's server-side story against Scion's,
+<code>docs/GIT_SERVER.md</code> turned out to document a database-native git smart-HTTP
+server driven by <code>tdb gitserver start</code> on port 9418, serving repos from
+<code>vcs_commits</code> / <code>vcs_branches</code> / <code>content_blobs</code> with
+on-the-fly git object conversion, intended for Nix flake inputs. <code>templedb
+gitserver</code> is not a registered command — it returns <code>Unknown command:
+'gitserver'</code>. The live path is <code>templedb publish</code> (mirror-add,
+mirror-list, run), which pushes to external git remotes rather than serving from the DB.</p>
+
+<p>This matters for the comparison because an on-the-fly git protocol server <em>is</em>
+Scion's principle 3 applied to the existing ecosystem — the article's own closing
+recommendation is that the git ecosystem adopt "comprehensive server-side RPCs" rather
+than that anyone reimplement Scion. TempleDB designed that and shipped a mirror-push
+instead. Whether the service module exists unwired (as happened with
+<code>nix_store_service.py</code>) or was never built is not established here; the doc
+should either be marked historical or the command registered. Same shape as the
+<code>config-ast</code> and <code>ast</code> entries in <code>--help</code>, which at
+least label themselves <em>INCOMPLETE MIGRATION</em>.</p>
+
+<h2>Verdict</h2>
+
+<p>TempleDB is not a small Scion, and the article's preconditions make clear it should
+not try to be. But the two systems independently reached the same four structural
+conclusions — changesets over snapshots, content-addressed shared blobs, operations
+where the data lives, working copies as an optional projection — from completely
+different pressures. Anthropic got there from 600 petabytes a day. TempleDB got there
+from a <code>Button.jsx</code> copied into four repos. That the storage model is the
+same either way is the most interesting thing in this comparison: it suggests the
+changeset-plus-blob-store design is what you get whenever you stop assuming every client
+needs a full offline replica, regardless of why you stopped.</p>
+
+<p>The two principles TempleDB only half-satisfies are half-satisfied for opposite
+reasons. Horizontal scalability is absent and should stay absent — one SQLite file is
+correct for 25 projects and one operator. Lock-free commits are absent and that one is a
+real liability, because the thing generating write pressure here is the same thing that
+generated it at Anthropic: agents, in parallel, not waiting their turn. Volume will never
+be the problem; concurrency already is.</p>
+
+<p>Which makes the most useful finding in this comparison an accident. The
+<code>templedb-rust</code> port was presumably not undertaken to satisfy a design
+principle Anthropic published later, but it is simultaneously a thin read-only client
+(principle 2, verified byte-for-byte against the Python implementation) and a working
+Postgres backend (the only credible route to principle 5). The structure Scion needed
+seven engineers and five months to build deliberately is, in miniature and for entirely
+unrelated reasons, already sitting in this database at 31 files. Finishing it is a
+smaller job than starting it.</p>
+
+<p class="foot">
+  Source: <a href="https://www.anthropic.com/engineering/redesigning-source-control">Redesigning source control at Anthropic</a>.
+  TempleDB figures from this install's database on 2026-10-14 (1,260 commits, 6,355 file states,
+  4,265 blobs, 25 projects, 64,737 entities) and from <code>templedb --help</code> /
+  per-command <code>--help</code> at the same date. Scion figures are as published.
+</p>
+
+</body>
+</html>

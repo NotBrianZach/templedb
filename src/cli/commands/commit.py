@@ -763,6 +763,30 @@ class CommitCommand:
                 )
                 continue
 
+            # A file whose content entered the DB AFTER this workspace was
+            # cut was never in this tree, so its absence says nothing
+            # about intent either — same reasoning as the path-only case
+            # above, and the same blob-age discriminator the rest of this
+            # codebase uses to tell a stale tree from a deliberate change.
+            #
+            # Walked into on 2026-10-13: a parallel session added
+            # tests/test_mojibake_guard.py while this workspace was open,
+            # and committing the workspace tombstoned it. One file, so the
+            # mass-deletion guard could not help — its floor is 10, which
+            # is correct for catching a wrong directory and useless
+            # against the much more common case of a tree that is merely
+            # a few hours old. Nothing was lost (content_blobs still had
+            # it) but the row had to be un-tombstoned by hand, and a
+            # commit should not need that.
+            if self._added_after_workspace_was_cut(project_id, workspace_dir,
+                                                   path):
+                logger.warning(
+                    f"Skipping {path}: its content entered the DB after "
+                    f"this workspace was materialized, so it was never in "
+                    f"this tree — not treating its absence as a deletion"
+                )
+                continue
+
             changes['deleted'].append(FileChange(
                 change_type='deleted',
                 file_path=path,
@@ -890,6 +914,49 @@ class CommitCommand:
 
         # Store file_id in change for later snapshot update
         change.file_id = file_id
+
+    def _added_after_workspace_was_cut(self, project_id: int, workspace_dir,
+                                       file_path: str) -> bool:
+        """True if this path's current content postdates the workspace.
+
+        Answers "could this file ever have been in the tree I am
+        diffing?" If the blob behind its is_current row was created after
+        the checkouts row for this directory, then no — a materialise
+        writes what the DB held at the time, so a later addition cannot
+        be there, and its absence is not a deletion.
+
+        Keyed on the checkouts row for the exact directory passed, via
+        get_by_path, which does not filter on is_active — the same thing
+        migration 122 relied on for naming scratch trees. An unregistered
+        directory (a plain `/tmp` scratch copy) has no checkout_at to
+        compare against, so this returns False and the deletion stands:
+        declining to guess is the conservative half here, since a tree
+        nobody registered is one nothing can vouch for.
+        """
+        try:
+            row = self.checkout_repo.get_by_path(project_id,
+                                                 str(workspace_dir))
+            when = (row or {}).get('checkout_at')
+            if not when:
+                return False
+            newer = self.file_repo.query_one("""
+                SELECT 1 AS x
+                  FROM project_files pf
+                  JOIN file_contents fc
+                    ON fc.file_id = pf.id AND fc.is_current = 1
+                  JOIN content_blobs cb
+                    ON cb.hash_sha256 = fc.content_hash
+                 WHERE pf.project_id = ? AND pf.file_path = ?
+                   AND cb.created_at > ?
+                 LIMIT 1
+            """, (project_id, file_path, when))
+            return bool(newer)
+        except Exception as e:
+            # A deletion-suppressing heuristic that raises must not take
+            # the commit with it, and must not suppress by accident.
+            logger.debug("Could not date %s against the workspace: %s",
+                         file_path, e)
+            return False
 
     def _commit_modified_file(self, project_id: int, commit_id: int, change: FileChange):
         """Commit a modified file"""

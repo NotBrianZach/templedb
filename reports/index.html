@@ -44,6 +44,36 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-10-15-0735-the-write-path-what-porting-it-actually-requires.html">
+  <div class="row">
+    <span class="date">2026-10-15 07:35</span>
+    <span class="title">The write path: what porting it actually requires</span>
+  </div>
+  <div class="summary">
+    templedb-rust answers every read-only command and verifies each one by byte-diffing stdout against Python. Step 12 of its porting order is &ldquo;any write path, and not without a design document.&rdquo; This is that document. Its conclusion is that the two things blocking writes are not SQL: the verification method cannot test a mutation, and the trait the whole port is built on has no way to perform one. Both have fixes, and the fixes are the first work, before any command.
+  </div>
+</a>
+
+<a class="report" href="2026-10-14-0838-templedb-vs-scion.html">
+  <div class="row">
+    <span class="date">2026-10-14 08:38</span>
+    <span class="title">TempleDB vs Scion</span>
+  </div>
+  <div class="summary">
+    Anthropic's Redesigning source control describes Scion, a version control system built because git stopped scaling at 30,000 merges a day. TempleDB arrived at four of Scion's six design principles independently and from the opposite direction — normalization, not throughput — and the convergence is sharpest exactly where it matters: commits are changesets against a parent, content is addressed by hash in a shared blob table, merges run where the data lives, and working copies are optional. TempleDB then deliberately inverts Scion's first principle (clients are always online) by building CRDT sync for offline peers. The genuine gaps are concurrency — SQLite's single writer is the exact opposite of "lock-free commits" — and derived data: the entity graph is a richer derivation layer than anything Scion describes, but there is still no blame index or path-history structure.
+  </div>
+</a>
+
+<a class="report" href="2026-10-14-0804-a-fifth-registry-math-academy-quizzes-inside-the-correlation.html">
+  <div class="row">
+    <span class="date">2026-10-14 08:04</span>
+    <span class="title">A fifth registry: Math Academy quizzes inside the correlation-game architecture</span>
+  </div>
+  <div class="summary">
+    Asked whether bza could grow a Math Academy–style quiz feature, parameterised over a semantic tree of concepts the way the correlation games are parameterised over media. The answer is yes, and the mechanism is already in the codebase under a name that does not advertise it: lib/correlate/scope.ts, the fourth registry, exists precisely because "a medium is not a flat space." A concept tree is a scope ontology over the theorem medium. Two of the eleven existing games are already the right shape. But three of the turn engine's load-bearing guarantees invert under mechanical judgement, which is why this should be a sibling engine sharing the registries rather than a twelfth game sharing the route. Of the four requested surface features, three are largely already present in package.json; one is genuinely new.
+  </div>
+</a>
+
 <a class="report" href="2026-10-13-0720-math-workbench-the-spec-and-the-engine-it-did-not-know-exist.html">
   <div class="row">
     <span class="date">2026-10-13 07:20</span>
