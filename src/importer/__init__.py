@@ -886,11 +886,31 @@ class WorkingStateDetector:
                            SET status = 'active', updated_at = datetime('now')
                          WHERE id = ?
                     """, (file_id,), commit=False)
+                    # file_size_bytes and line_count are NOT NULL, and this
+                    # statement used to omit both -- so the reactivation it
+                    # exists to perform aborted the whole scan with
+                    # "NOT NULL constraint failed: file_contents.file_size_bytes".
+                    # Not a rare path: any tombstoned file that reappears on disk
+                    # with content differing from the deletion reaches it, which
+                    # is what recovering bza's 25 edge-function sources did to
+                    # three paths on 2026-10-15. `vcs status --refresh` could not
+                    # scan that workspace at all, while `vcs commit` went through
+                    # its own write and worked -- so the repair this branch was
+                    # added for had never once run successfully.
+                    #
+                    # Same column list as the importer's own insert above; the
+                    # blob was just written by _ensure_content_blob, which reads
+                    # the identical two fields off file_content.
                     execute("""
                         INSERT INTO file_contents
-                            (file_id, content_hash, is_current)
-                        VALUES (?, ?, 1)
-                    """, (file_id, file_content.hash_sha256), commit=False)
+                            (file_id, content_hash, file_size_bytes, line_count, is_current)
+                        VALUES (?, ?, ?, ?, 1)
+                    """, (
+                        file_id,
+                        file_content.hash_sha256,
+                        file_content.file_size,
+                        file_content.line_count,
+                    ), commit=False)
                     tracked_status[rel_path] = 'active'
 
                 if last_committed and last_committed['content_hash'] == file_content.hash_sha256:

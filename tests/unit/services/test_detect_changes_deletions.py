@@ -111,9 +111,17 @@ def _schema():
                content_blob BLOB, content_type TEXT, encoding TEXT,
                file_size_bytes INTEGER,
                created_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
+        # file_size_bytes is NOT NULL here because it is NOT NULL in the real
+        # schema, and declaring it nullable is how the bug below survived: the
+        # reactivation INSERT omitted the column entirely, every test in this
+        # module passed, and `vcs status --refresh` died on the first tombstoned
+        # file that came back in a real database. A partial schema that is laxer
+        # than production tests the wrong thing twice — it accepts what would be
+        # rejected, and it reports success for it.
         """CREATE TABLE IF NOT EXISTS file_contents (
                id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER,
-               content_hash TEXT, file_size_bytes INTEGER, line_count INTEGER,
+               content_hash TEXT, file_size_bytes INTEGER NOT NULL,
+               line_count INTEGER,
                version INTEGER DEFAULT 1, is_current INTEGER DEFAULT 1)""",
         """CREATE TABLE IF NOT EXISTS vcs_branches (
                id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER,
@@ -285,9 +293,24 @@ def test_reactivation_restores_the_content_row(project):
     fid = query_one("""SELECT id FROM project_files
                         WHERE project_id = ? AND file_path = 'back.py'""",
                     (project.project_id,))['id']
-    current = query_all("""SELECT content_hash FROM file_contents
+    current = query_all("""SELECT content_hash, file_size_bytes, line_count
+                             FROM file_contents
                             WHERE file_id = ? AND is_current = 1""", (fid,))
     assert len(current) == 1, "reactivated row must have current content"
+
+    # And the row must be complete, not merely present.
+    #
+    # The INSERT listed only (file_id, content_hash, is_current). Against the
+    # real schema, where file_size_bytes is NOT NULL, that aborts the entire
+    # scan with "NOT NULL constraint failed" — so this branch, which exists to
+    # repair path-only rows, had never once completed outside this module's
+    # laxer test schema. Found 2026-10-15 recovering bza's edge-function
+    # sources: three tombstoned paths came back on disk with new content and
+    # `vcs status --refresh` could not scan the workspace at all, while
+    # `vcs commit` went through a different write and succeeded.
+    assert current[0]['file_size_bytes'] == len('rewritten\n'), \
+        "size must be the file on disk, not the deleted version and not NULL"
+    assert current[0]['line_count'] == 1
 
 
 def test_debris_does_not_block_a_real_deletion_elsewhere(project):
