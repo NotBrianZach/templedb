@@ -492,9 +492,47 @@ export interface Verdict {
   <p>
     Revised order of work: (1) fix the assistance collapse; (2) add backwards traversal along
     <code>from_node</code> to <code>updateMastery</code>, with a visited-set; (3) keep the
-    registries scope-separate. Step 2 needs the visited-set because
-    <strong>acyclicity is promised only by the prompt</strong> — the extractor filters
-    self-loops in JavaScript, and no constraint in any layer rejects a longer cycle.
+    registries scope-separate.
+  </p>
+
+  <p>
+    On step 2's visited-set, correcting this amendment's own first draft. It originally
+    justified the visited-set defensively — “acyclicity is promised only by the prompt” — as
+    though a cycle were a data defect the traversal has to survive. That was still the wrong
+    framing, and briefly became a wrong migration: <code>64</code> added a trigger rejecting
+    any edge that closed a loop, which <code>65</code> then reverted.
+    <strong>Cycles are permitted by design, and the visited-set is therefore obligatory
+    rather than precautionary.</strong>
+  </p>
+
+  <p>
+    Cycles are ordinary in this graph rather than corrupt. Co-requisite pairs bootstrap each
+    other — limits and continuity, matrices and linear transformations — with no fact of the
+    matter about which comes first. Spiral curricula are two-cycles by construction: partial
+    understanding of A enables B, and B deepens A, which is the honest encoding when nodes
+    are one row per concept rather than per mastery-level, as <code>knowledge_nodes</code>
+    is. And the extractor is handed prose, where exposition order is not prerequisite order,
+    so mutual references are its expected output.
+  </p>
+
+  <p>
+    This matters for the mechanism and not just for termination:
+    <strong>mutual discharge is the correct semantics for a co-requisite pair</strong>, not a
+    degenerate case to be guarded against. An independent success at either node is evidence
+    about both, and refreshing both is what the pair means. The visited-set makes that
+    terminate while still crediting each node once. Only <code>CHECK (from_node &lt;&gt;
+    to_node)</code> was kept, because a self-edge asserts nothing a two-cycle between
+    distinct nodes does not express better.
+  </p>
+
+  <p>
+    A deliberate non-decision: a <code>relationship</code> column
+    (<code>prerequisite</code> | <code>corequisite</code> | …) would let a mutual pair be
+    labelled instead of inferred from a cycle's presence, scoping any ordering claim to the
+    prerequisite subset. Worth doing, but it is a vocabulary change touching the extractor
+    prompt, the graph legend and the scheduler at once, and none of the above waits on it —
+    an untyped cyclic graph is strictly more faithful than an untyped graph with its cycles
+    rejected.
   </p>
 
   <p>
@@ -528,13 +566,49 @@ export interface Verdict {
   </p>
 
   <p>
-    Two defects were recorded rather than silently fixed, each deserving its own migration:
-    no <code>CHECK (from_node &lt;&gt; to_node)</code> and no cycle prevention anywhere; and
-    <code>anon</code> holding <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code>/<code>TRUNCATE</code>
-    on both tables. RLS neutralises the first three, but
-    <strong>Postgres does not apply row-level security to <code>TRUNCATE</code></strong> —
-    that is privilege-only. Not reachable through PostgREST, which exposes no
-    <code>TRUNCATE</code> verb, so latent rather than open.
+    Two defects were recorded rather than silently fixed, each deserving its own migration.
+    Both have since been dealt with, and neither landed the way it was first written down.
+  </p>
+
+  <p>
+    <strong>The missing constraints, in <code>64</code> and then <code>65</code>.</strong>
+    <code>CHECK (from_node &lt;&gt; to_node)</code> was added and kept. The cycle prevention
+    added alongside it was wrong and was reverted — see the amendment above: cycles are
+    ordinary in a prerequisite graph over concept-level nodes, nothing required a DAG
+    (<code>computeLayout</code> is a bounded relaxation and was always cycle-tolerant), and
+    the trigger actively broke graph builds by aborting an entire batch on one mutual pair.
+    Termination belongs to the traversal.
+  </p>
+
+  <p>
+    <strong>The grants, in <code>63</code> — and this one was not latent.</strong> The
+    framing above is wrong twice. It is not a two-table problem: 67 relations carried the
+    wide ACL, because migration <code>57</code> moved them in from <code>public</code> with
+    <code>ALTER TABLE SET SCHEMA</code>, which preserves a relation's ACL instead of
+    re-deriving it from the destination schema's defaults — and
+    <code>bza_public</code>'s defaults were already correct.
+  </p>
+
+  <p>
+    More seriously, “latent rather than open” was true only of the tables. The first draft of
+    <code>63</code> looped on <code>relkind='r'</code> and its assertions caught that it left
+    views and materialized views untouched — which is where the real problem was.
+    <code>bza_public.monthly_usage_summary</code> is a materialized view over
+    <code>api_usage</code>, and <strong>row-level security does not apply to materialized
+    views at all</strong>; there is no <code>security_invoker</code> for them.
+    <code>anon</code> held the full ACL, so every user's id, request volume, token
+    consumption, cost and last-activity time was readable by anyone holding the publishable
+    key that ships inside the frontend bundle. Confirmed with a live unauthenticated request
+    returning real rows across nine users. It is referenced nowhere in any project; revoked
+    against production immediately, and that endpoint now answers <code>401</code>.
+  </p>
+
+  <p>
+    The rule <code>63</code> now encodes: <strong>RLS is the gate, so any relation RLS
+    cannot gate must not be reachable by a role a browser can assume.</strong> It enforces
+    that for ordinary views too, refusing to grant <code>SELECT</code> on any view lacking
+    <code>security_invoker=true</code> rather than trusting that today's two happen to have
+    it.
   </p>
 </div>
 
