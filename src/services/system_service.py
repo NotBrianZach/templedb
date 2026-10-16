@@ -17,7 +17,60 @@ from typing import Callable, Dict, Any, Optional, List
 from datetime import datetime
 import getpass
 
+from contextlib import contextmanager
+
 from db_utils import query_one, query_all, execute, get_connection
+
+
+@contextmanager
+def _lock_file_writable(flake_dir: Path):
+    """Make `flake.lock` writable for the duration, then restore its mode.
+
+    Every nix invocation in a materialised checkout needs this, and the
+    reason is a sequence that defeats itself: `materialize_from_db`
+    rewrites DB-tracked files and chmods them read-only (that is what
+    `admin lock-checkouts` restores), and flake.lock IS DB-tracked. nix
+    then evaluates the flake, decides the lock needs an entry it does not
+    have, and tries to write it back into the tree the materialise just
+    made 444. Both `update_flake_input` and `_rebuild_home_manager`
+    failed this way with
+
+        error: opening file ".../flake.lock": Permission denied
+
+    which took `templedb reload` out entirely -- it fails on step 2 of 4
+    and skips the rebuild and the migrate. Observed 2026-10-16 on
+    system_config, whose checkout is additionally a git submodule whose
+    working tree no longer matches its committed rev, so nix wants to
+    regenerate the lock on every single call rather than occasionally.
+
+    Doing this by hand does not work, which is the trap worth recording:
+    a `chmod u+w` before the command is undone by the materialise that
+    runs inside it. The unlock has to happen after materialising and
+    before nix, which is exactly here.
+
+    Restores the original mode rather than a hardcoded 444, so a
+    writable checkout -- an edit workspace, say -- is left writable. A
+    missing flake.lock is not an error: `nix flake update` creates one,
+    and that is the first-run case.
+    """
+    lock = Path(flake_dir) / "flake.lock"
+    previous = None
+    try:
+        if lock.exists():
+            previous = lock.stat().st_mode
+            os.chmod(lock, previous | 0o200)
+        yield
+    finally:
+        if previous is not None and lock.exists():
+            try:
+                os.chmod(lock, previous)
+            except OSError as e:
+                # Not fatal: the file is readable either way and
+                # `admin lock-checkouts` re-locks the tree. Worth a line
+                # because a checkout left writable is how DB-vs-checkout
+                # divergence starts.
+                logger.warning(
+                    "could not restore mode on %s: %s", lock, e)
 
 logger = logging.getLogger(__name__)
 
@@ -560,11 +613,16 @@ class SystemService:
                     f"No flake.nix in {checkout}", "db_synced": False}
 
         try:
-            result = subprocess.run(
-                ["nix", "flake", "update", input_name],
-                cwd=str(checkout),
-                capture_output=True, text=True, timeout=180,
-            )
+            # Writable for the nix call only. This command's whole purpose
+            # is an updated flake.lock to mirror back to the DB, so
+            # suppressing the write with --no-write-lock-file would remove
+            # the output rather than fix the error.
+            with _lock_file_writable(checkout):
+                result = subprocess.run(
+                    ["nix", "flake", "update", input_name],
+                    cwd=str(checkout),
+                    capture_output=True, text=True, timeout=180,
+                )
         except subprocess.TimeoutExpired:
             return {"success": False, "stdout": "",
                     "stderr": "nix flake update timed out after 180s",
@@ -1441,10 +1499,15 @@ class SystemService:
                 for build_path in candidates:
                     attempted.append(build_path)
                     print(f"  Building home-manager: {build_path}")
-                    build_result = self._run_streaming(
-                        ["nix", "build", build_path, "--out-link", out_link],
-                        timeout=build_timeout,
-                    )
+                    # A build does not want an updated lock, but nix still
+                    # writes one when it finds the committed lock short an
+                    # entry, and fails on a read-only tree instead of
+                    # building. See `_lock_file_writable`.
+                    with _lock_file_writable(flake_path):
+                        build_result = self._run_streaming(
+                            ["nix", "build", build_path, "--out-link", out_link],
+                            timeout=build_timeout,
+                        )
                     if build_result['timed_out']:
                         return {
                             'success': False,

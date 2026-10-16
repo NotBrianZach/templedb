@@ -1111,6 +1111,7 @@ class VCSCommands(Command):
                 "clean": not (status.get('staged') or status.get('modified') or status.get('untracked')),
                 "checkout": checkout_info,
                 "all_sessions_view": grouped,
+                "active_merges": self._active_merges(project['id']),
             }
 
             def _human(d):
@@ -1124,6 +1125,18 @@ class VCSCommands(Command):
                         f"Pending publish: {pending} commit(s) in this session — "
                         f"run `templedb publish {d['project']}` to fast-forward "
                         f"onto shared HEAD (or `templedb vcs log --session` to view)."
+                    )
+                # An unfinished merge is the single most important thing to
+                # know before touching a branch, and the only other trace
+                # of it is conflict markers with no provenance.
+                for mg in d.get('active_merges') or []:
+                    print(
+                        f"MERGE UNDERWAY: #{mg['id']} [{mg['status']}] "
+                        f"{mg['source_branch']} -> {mg['target_branch']}, "
+                        f"started {(mg['started_at'] or '')[:16]}"
+                        f" by {mg['author'] or '?'} — "
+                        f"{mg['conflict_count']} conflict(s). "
+                        f"`templedb vcs merge-show {mg['id']}`"
                     )
                 if d['checkout']:
                     c = d['checkout']
@@ -1384,9 +1397,37 @@ class VCSCommands(Command):
         # Create branch
         if hasattr(args, 'name') and args.name:
             current = self.vcs_repo.get_active_branch(project['id'])
+
             if not current:
-                logger.error("No active branch found")
-                return 1
+                # Bootstrap. `project import` creates no branch, and this
+                # command used to require an active one to copy a head
+                # from — so there was no path to a project's FIRST branch
+                # and nothing could be committed, branched or merged. Six
+                # real projects were sitting in that state (frontend,
+                # woofsledger, cathedraldb, oeis-numerical-llm,
+                # trig-navigator-godot, vr-fitness-slimevr).
+                existing = self.vcs_repo.query_one(
+                    "SELECT COUNT(*) AS n FROM vcs_branches WHERE project_id = ?",
+                    (project['id'],))
+                if existing and existing['n']:
+                    logger.error(
+                        "No active branch, but %s already has %d branch(es) — "
+                        "pick one with `templedb vcs switch %s <name>`",
+                        project['slug'], existing['n'], project['slug'])
+                    return 1
+                branch_id = self.vcs_repo.execute("""
+                    INSERT INTO vcs_branches
+                        (project_id, branch_name, parent_branch_id,
+                         head_commit_id, is_default)
+                    VALUES (?, ?, NULL, NULL, 1)
+                """, (project['id'], args.name))
+                self.vcs_repo.execute(
+                    "UPDATE projects SET active_branch_id = ? WHERE id = ?",
+                    (branch_id, project['id']))
+                print(f"Created branch '{args.name}' as the default for "
+                      f"'{project['slug']}' (no branches existed) and made "
+                      f"it active")
+                return 0
 
             # Create branch with head pointing to current branch's head
             branch_id = self.vcs_repo.execute("""
@@ -2042,6 +2083,264 @@ class VCSCommands(Command):
 
         return 0
 
+    # --- merge records (migration 139) --------------------------------
+    #
+    # A merge is a multi-step operation that can stop halfway: on conflict
+    # `merge` writes markers and exits, leaving someone else to finish.
+    # These helpers record what is underway so that someone else — very
+    # often another agent — can read the situation instead of inferring it
+    # from conflict markers.
+
+    def _active_merges(self, project_id):
+        """Merges not yet in a terminal state, for `vcs status`.
+
+        Returns [] if the table is absent — this is read on a hot path
+        that must keep working on a database one migration behind.
+        """
+        try:
+            return [dict(r) for r in self.vcs_repo.query_all("""
+                SELECT id, status, source_branch, target_branch, author,
+                       started_at, conflict_count, auto_merged_count
+                  FROM vcs_merges
+                 WHERE project_id = ?
+                   AND status IN ('in_progress', 'conflicted')
+                 ORDER BY datetime(started_at)
+            """, (project_id,))]
+        except Exception as e:
+            logger.debug("Could not read active merges: %s", e)
+            return []
+
+    def _merge_open(self, project, source, current, base_commit_id,
+                    strategy, squash, plan):
+        """Record a merge as in_progress. Returns its id, or None.
+
+        Never raises: a failure to record must not take down the merge it
+        is describing. A missing record costs legibility; a merge aborted
+        mid-write costs content.
+        """
+        try:
+            return self.vcs_repo.execute("""
+                INSERT INTO vcs_merges
+                    (project_id, source_branch_id, source_branch,
+                     target_branch_id, target_branch, base_commit_id,
+                     source_commit_id, target_commit_id, strategy, squash,
+                     status, plan_md, author, session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?, ?)
+            """, (project['id'], source['id'], source['branch_name'],
+                  current['id'], current['branch_name'], base_commit_id,
+                  source['head_commit_id'], current['head_commit_id'],
+                  strategy, 1 if squash else 0, plan, self._get_author(),
+                  self.vcs_repo.current_session_id()
+                  if hasattr(self.vcs_repo, 'current_session_id') else None))
+        except Exception as e:
+            # Warning, not debug: the merge proceeds either way, but a
+            # merge nobody can read about is the exact failure this record
+            # exists to prevent, so say so out loud.
+            logger.warning("Could not open a merge record: %s — the merge "
+                           "itself is unaffected, but nothing will "
+                           "describe it", e)
+            return None
+
+    def _merge_file(self, merge_id, file_path, disposition, **kw):
+        """Record one file's disposition within a merge. Never raises."""
+        if not merge_id:
+            return
+        try:
+            self.vcs_repo.execute("""
+                INSERT INTO vcs_merge_files
+                    (merge_id, file_id, file_path, disposition, conflict_type,
+                     ours_hash, theirs_hash, base_hash, reasoning,
+                     confidence, decided_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(merge_id, file_path) DO UPDATE SET
+                    disposition = excluded.disposition,
+                    reasoning   = COALESCE(excluded.reasoning,
+                                           vcs_merge_files.reasoning),
+                    confidence  = COALESCE(excluded.confidence,
+                                           vcs_merge_files.confidence)
+            """, (merge_id, kw.get('file_id'), file_path, disposition,
+                  kw.get('conflict_type'), kw.get('ours_hash'),
+                  kw.get('theirs_hash'), kw.get('base_hash'),
+                  kw.get('reasoning'), kw.get('confidence'),
+                  kw.get('decided_by')), commit=False)
+        except Exception as e:
+            logger.warning("Could not record the merge disposition for "
+                           "%s: %s", file_path, e)
+
+    def _merge_close(self, merge_id, status, conflicts=0, auto_merged=0,
+                     merge_commit_id=None, note=None):
+        """Move a merge record to a terminal state. Never raises."""
+        if not merge_id:
+            return
+        try:
+            self.vcs_repo.execute("""
+                UPDATE vcs_merges
+                   SET status = ?, conflict_count = ?, auto_merged_count = ?,
+                       merge_commit_id = ?, outcome_note = ?,
+                       updated_at = datetime('now'),
+                       completed_at = CASE WHEN ? IN ('completed','abandoned')
+                                           THEN datetime('now') END
+                 WHERE id = ?
+            """, (status, conflicts, auto_merged, merge_commit_id, note,
+                  status, merge_id))
+        except Exception as e:
+            logger.warning("Could not close merge record %s: %s — it will "
+                           "stay in_progress and look underway", merge_id, e)
+
+    def merge_list(self, args) -> int:
+        """List merges, newest first. The 'what is underway' view."""
+        from cli.json_output import emit
+
+        where, params = "1=1", []
+        if getattr(args, 'project', None):
+            project = fuzzy_match_project(args.project, show_matched=False)
+            if not project:
+                _project_not_found(args.project)
+                return 1
+            where, params = "m.project_id = ?", [project['id']]
+        if getattr(args, 'active', False):
+            where += " AND m.status IN ('in_progress','conflicted')"
+        elif getattr(args, 'status', None):
+            where += " AND m.status = ?"
+            params.append(args.status)
+
+        rows = self.vcs_repo.query_all(f"""
+            SELECT m.*, pr.slug AS project_slug
+              FROM vcs_merges m
+              JOIN projects pr ON pr.id = m.project_id
+             WHERE {where}
+             ORDER BY datetime(m.started_at) DESC
+             LIMIT ?
+        """, (*params, getattr(args, 'limit', 20) or 20))
+
+        return emit(args, {"merges": [dict(r) for r in rows]},
+                    human_fn=lambda d: self._print_merge_list(d["merges"]))
+
+    @staticmethod
+    def _print_merge_list(merges):
+        if not merges:
+            print("No merges recorded.")
+            return
+        print(f"{'id':>5}  {'project':<14} {'status':<12} "
+              f"{'source -> target':<32} {'files':>11}  started")
+        print("-" * 100)
+        for m in merges:
+            arrow = f"{m['source_branch']} -> {m['target_branch']}"
+            files = f"{m['conflict_count']}c/{m['auto_merged_count']}a"
+            print(f"{m['id']:>5}  {m['project_slug']:<14} {m['status']:<12} "
+                  f"{arrow[:32]:<32} {files:>11}  {(m['started_at'] or '')[:16]}")
+            if m['status'] in ('in_progress', 'conflicted') and m['plan_md']:
+                first = m['plan_md'].strip().splitlines()[0]
+                print(f"         plan: {first[:80]}")
+
+    def merge_show(self, args) -> int:
+        """Show one merge: its plan, its three commits, every file."""
+        from cli.json_output import emit, emit_error
+
+        merge = self.vcs_repo.query_one("""
+            SELECT m.*, pr.slug AS project_slug,
+                   bc.commit_hash AS base_hash,
+                   sc.commit_hash AS source_hash,
+                   tc.commit_hash AS target_hash,
+                   mc.commit_hash AS merge_hash
+              FROM vcs_merges m
+              JOIN projects pr ON pr.id = m.project_id
+              LEFT JOIN vcs_commits bc ON bc.id = m.base_commit_id
+              LEFT JOIN vcs_commits sc ON sc.id = m.source_commit_id
+              LEFT JOIN vcs_commits tc ON tc.id = m.target_commit_id
+              LEFT JOIN vcs_commits mc ON mc.id = m.merge_commit_id
+             WHERE m.id = ?
+        """, (args.merge_id,))
+        if not merge:
+            return emit_error(args, "NOT_FOUND",
+                              f"No merge #{args.merge_id}")
+
+        files = self.vcs_repo.query_all("""
+            SELECT * FROM vcs_merge_files
+             WHERE merge_id = ?
+             ORDER BY CASE disposition WHEN 'conflict' THEN 0 ELSE 1 END,
+                      file_path
+        """, (args.merge_id,))
+
+        payload = {"merge": dict(merge), "files": [dict(f) for f in files]}
+        return emit(args, payload,
+                    human_fn=lambda d: self._print_merge_show(d))
+
+    @staticmethod
+    def _print_merge_show(d):
+        m, files = d["merge"], d["files"]
+        print(f"Merge #{m['id']}  [{m['status']}]  {m['project_slug']}")
+        print(f"  {m['source_branch']} -> {m['target_branch']}"
+              f"{'  (squash)' if m['squash'] else ''}")
+        print(f"  strategy:  {m['strategy']}")
+        print(f"  started:   {m['started_at']}  by {m['author'] or '?'}"
+              f"{f'  session #' + str(m['session_id']) if m['session_id'] else ''}")
+        if m['completed_at']:
+            print(f"  finished:  {m['completed_at']}")
+        print(f"  base:      {(m['base_hash'] or '(none — unrelated histories)')}")
+        print(f"  source:    {m['source_hash'] or '?'}")
+        print(f"  target:    {m['target_hash'] or '?'}")
+        if m['merge_hash']:
+            print(f"  merge:     {m['merge_hash']}")
+        if m['outcome_note']:
+            print(f"  outcome:   {m['outcome_note']}")
+        if m['plan_md']:
+            print("\nPlan (as written by whoever started this merge):")
+            for line in m['plan_md'].strip().splitlines():
+                print(f"  | {line}")
+        if files:
+            print(f"\nFiles ({len(files)}):")
+            for f in files:
+                mark = '!' if f['disposition'] == 'conflict' else ' '
+                print(f"  {mark} {f['disposition']:<13} {f['file_path']}")
+                if f['reasoning']:
+                    conf = f"[{f['confidence']}] " if f['confidence'] else ""
+                    print(f"      {conf}{f['reasoning']}")
+                if f['decided_by']:
+                    print(f"      decided by: {f['decided_by']}")
+        print()
+
+    def merge_note(self, args) -> int:
+        """Append testimony to a merge's plan.
+
+        Append rather than replace: a merge that changes hands should
+        accumulate the account of what each party did, not overwrite it.
+        """
+        from cli.json_output import emit, emit_error
+        merge = self.vcs_repo.query_one(
+            "SELECT id, plan_md FROM vcs_merges WHERE id = ?",
+            (args.merge_id,))
+        if not merge:
+            return emit_error(args, "NOT_FOUND", f"No merge #{args.merge_id}")
+        stamp = f"\n\n--- {self._get_author()} @ "
+        from datetime import datetime
+        stamp += datetime.utcnow().strftime('%Y-%m-%d %H:%M') + " ---\n"
+        updated = (merge['plan_md'] or '') + stamp + args.text
+        self.vcs_repo.execute(
+            "UPDATE vcs_merges SET plan_md = ?, updated_at = datetime('now') "
+            "WHERE id = ?", (updated.strip(), args.merge_id))
+        return emit(args, {"merge_id": args.merge_id, "ok": True},
+                    human_fn=lambda d: print(f"Noted on merge #{d['merge_id']}"))
+
+    def merge_abandon(self, args) -> int:
+        """Mark an underway merge as deliberately given up on."""
+        from cli.json_output import emit, emit_error
+        merge = self.vcs_repo.query_one(
+            "SELECT id, status FROM vcs_merges WHERE id = ?", (args.merge_id,))
+        if not merge:
+            return emit_error(args, "NOT_FOUND", f"No merge #{args.merge_id}")
+        if merge['status'] not in ('in_progress', 'conflicted'):
+            return emit_error(args, "NOT_ACTIVE",
+                              f"Merge #{args.merge_id} is already "
+                              f"{merge['status']}")
+        self._merge_close(args.merge_id, 'abandoned',
+                          note=getattr(args, 'reason', None))
+        return emit(args, {"merge_id": args.merge_id, "status": "abandoned"},
+                    human_fn=lambda d: print(
+                        f"Merge #{d['merge_id']} marked abandoned. Conflict "
+                        f"markers in the working state are NOT reverted — "
+                        f"`templedb vcs reset` is the tool for that."))
+
     def merge(self, args) -> int:
         """Merge a branch into the current branch"""
         from cli.json_output import emit, emit_error
@@ -2167,6 +2466,13 @@ class VCSCommands(Command):
 
         strategy = getattr(args, 'strategy', 'manual') or 'manual'
 
+        # Open the record before touching anything, so an interruption
+        # leaves an in_progress row naming the three commits rather than
+        # bare conflict markers.
+        merge_id = self._merge_open(
+            project, source, current, common_ancestor_id, strategy,
+            getattr(args, 'squash', False), getattr(args, 'plan', None))
+
         for fid in all_file_ids:
             ours = ours_tree.get(fid)
             theirs = theirs_tree.get(fid)
@@ -2186,14 +2492,31 @@ class VCSCommands(Command):
                 if theirs:
                     merged_contents[fid] = theirs['content_text']
                     auto_merged.append(file_path)
+                    self._merge_file(
+                        merge_id, file_path, 'fast_forward', file_id=fid,
+                        ours_hash=ours_hash, theirs_hash=theirs_hash,
+                        base_hash=base_hash, confidence='high',
+                        decided_by='three-way',
+                        reasoning='unchanged on the target side since the '
+                                  'common ancestor, so the source version '
+                                  'is taken wholesale')
                 continue
 
             # Both changed — need three-way merge
             file_path = (ours or theirs or base)['file_path']
             if ours and theirs and ours.get('content_text') and theirs.get('content_text'):
-                base_version = FileVersion(
-                    content=base['content_text'] if base and base.get('content_text') else '',
-                    hash=base_hash or '', source='base')
+                # None, not an empty FileVersion. A file both sides added
+                # (or that predates the base commit's file states) has no
+                # base, and merge_files switches to a real two-way merge
+                # only when base is falsy — an empty FileVersion is a
+                # truthy object, so it instead ran diff3 against an empty
+                # base, which returns neither merged content nor a
+                # conflict.
+                base_version = None
+                if base and base.get('content_text'):
+                    base_version = FileVersion(
+                        content=base['content_text'],
+                        hash=base_hash or '', source='base')
                 ours_version = FileVersion(
                     content=ours['content_text'], hash=ours_hash, source='ours')
                 theirs_version = FileVersion(
@@ -2205,14 +2528,65 @@ class VCSCommands(Command):
                 if success and merged:
                     merged_contents[fid] = merged
                     auto_merged.append(file_path)
+                    self._merge_file(
+                        merge_id, file_path, 'auto_merged', file_id=fid,
+                        ours_hash=ours_hash, theirs_hash=theirs_hash,
+                        base_hash=base_hash, confidence='high',
+                        decided_by='three-way',
+                        reasoning='both sides changed, but the changed '
+                                  'regions do not overlap')
                 elif conflict:
                     conflicts.append(conflict)
+                    self._merge_file(
+                        merge_id, file_path, 'conflict', file_id=fid,
+                        conflict_type=getattr(
+                            conflict.conflict_type, 'value',
+                            str(conflict.conflict_type)),
+                        ours_hash=ours_hash, theirs_hash=theirs_hash,
+                        base_hash=base_hash,
+                        confidence=conflict.ai_confidence,
+                        reasoning=getattr(conflict, 'ai_reasoning', None)
+                        or 'both sides changed overlapping regions',
+                        decided_by='three-way')
+                else:
+                    # Neither merged content nor a conflict object. There
+                    # was no `else` here, so a file both sides changed
+                    # could fall through both branches and simply not
+                    # appear in the merge — and the merge then reported a
+                    # clean success and committed without it. Fail closed:
+                    # an unexplained outcome is a conflict.
+                    from merge_resolver import MergeConflict, ConflictType
+                    synthetic = MergeConflict(
+                        file_path=file_path,
+                        conflict_type=ConflictType.BOTH_MODIFIED)
+                    synthetic.conflict_markers = merger._generate_conflict_markers(
+                        file_path, ours['content_text'],
+                        theirs['content_text'],
+                        base['content_text'] if base else None)
+                    conflicts.append(synthetic)
+                    self._merge_file(
+                        merge_id, file_path, 'conflict', file_id=fid,
+                        conflict_type=ConflictType.BOTH_MODIFIED.value,
+                        ours_hash=ours_hash, theirs_hash=theirs_hash,
+                        base_hash=base_hash, decided_by='three-way',
+                        reasoning='the merge engine returned neither merged '
+                                  'content nor a conflict for a file both '
+                                  'sides changed — treated as a conflict '
+                                  'rather than dropped')
             else:
                 # Binary or missing content — conflict
                 from merge_resolver import MergeConflict, ConflictType
                 conflicts.append(MergeConflict(
                     file_path=file_path,
                     conflict_type=ConflictType.BOTH_MODIFIED))
+                self._merge_file(
+                    merge_id, file_path, 'conflict', file_id=fid,
+                    conflict_type=ConflictType.BOTH_MODIFIED.value,
+                    ours_hash=ours_hash, theirs_hash=theirs_hash,
+                    base_hash=base_hash, decided_by='three-way',
+                    reasoning='no diffable text on one or both sides '
+                              '(binary, or content missing from the blob '
+                              'store) — a three-way merge is not possible')
 
         if conflicts:
             # Write conflict markers to working state
@@ -2232,10 +2606,16 @@ class VCSCommands(Command):
                                       content_text = excluded.content_text
                     """, (project['id'], current['id'], file_row['id'], conflict.conflict_markers))
 
+            self._merge_close(merge_id, 'conflicted', len(conflicts),
+                              len(auto_merged))
             print(f"Merge has conflicts ({len(conflicts)} files):")
             for c in conflicts:
                 print(f"  CONFLICT  {c.file_path}")
             print(f"\nAuto-merged: {len(auto_merged)} files")
+            if merge_id:
+                print(f"\nRecorded as merge #{merge_id} — "
+                      f"`templedb vcs merge-show {merge_id}` for the plan, "
+                      f"the three commits and every file's disposition.")
             print(f"\nResolve conflicts, then commit:")
             print(f"  templedb vcs commit -p {project['slug']} -m \"Merge '{args.source}' into '{current['branch_name']}'\"")
             return 1
@@ -2333,6 +2713,9 @@ class VCSCommands(Command):
             "UPDATE vcs_branches SET head_commit_id = ? WHERE id = ?",
             (commit_id, current['id']))
 
+        self._merge_close(merge_id, 'completed', 0, len(auto_merged),
+                          merge_commit_id=commit_id)
+
         merge_type = "Squash merged" if squash else "Merged"
         result = {
             "project": project['slug'],
@@ -2341,6 +2724,7 @@ class VCSCommands(Command):
             "auto_merged": len(auto_merged),
             "commit_hash": commit_hash,
             "squash": squash,
+            "merge_id": merge_id,
         }
         return emit(args, result, human_fn=lambda d: (
             print(f"{merge_type} '{d['source']}' into '{d['target']}'"),
@@ -2844,8 +3228,47 @@ def register(cli):
     merge_parser.add_argument('--squash', action='store_true',
                               help='Squash into single commit (linear history)')
     merge_parser.add_argument('--strategy', choices=['manual', 'ours', 'theirs', 'ai-assisted'],
-                              default='manual', help='Merge strategy for conflicts')
+                              default='manual', help=(
+                                  'Merge strategy for conflicts. RECORDED BUT '
+                                  'NOT YET APPLIED — see merge-show; the '
+                                  'resolver it would drive is not wired in'))
+    merge_parser.add_argument('--plan', help=(
+        "Why this merge, and how conflicts should be settled. Stored on the "
+        "merge record for whoever picks it up — including another agent."))
     cli.commands['vcs.merge'] = cmd.merge
+
+    # vcs merge-list / merge-show / merge-note / merge-abandon
+    #
+    # The read side of the merge record: what is underway, what the plan
+    # was, and what happened to each file. All support --json, which is how
+    # another agent consumes them.
+    ml_parser = subparsers.add_parser(
+        'merge-list', help='List merges (use --active for ones underway)')
+    ml_parser.add_argument('project', nargs='?',
+                           help='Project name or pattern (default: all)')
+    ml_parser.add_argument('--active', action='store_true',
+                           help='Only merges in_progress or conflicted')
+    ml_parser.add_argument('--status', choices=['in_progress', 'conflicted',
+                                                'completed', 'abandoned'])
+    ml_parser.add_argument('--limit', type=int, default=20)
+    cli.commands['vcs.merge-list'] = cmd.merge_list
+
+    ms_parser = subparsers.add_parser(
+        'merge-show', help='Show a merge: plan, commits, per-file disposition')
+    ms_parser.add_argument('merge_id', type=int)
+    cli.commands['vcs.merge-show'] = cmd.merge_show
+
+    mn_parser = subparsers.add_parser(
+        'merge-note', help="Append testimony to a merge's plan")
+    mn_parser.add_argument('merge_id', type=int)
+    mn_parser.add_argument('text', help='What you did, or decided, and why')
+    cli.commands['vcs.merge-note'] = cmd.merge_note
+
+    ma_parser = subparsers.add_parser(
+        'merge-abandon', help='Mark an underway merge as given up on')
+    ma_parser.add_argument('merge_id', type=int)
+    ma_parser.add_argument('--reason', help='Recorded as the outcome note')
+    cli.commands['vcs.merge-abandon'] = cmd.merge_abandon
 
     # vcs diff
     diff_parser = subparsers.add_parser('diff', help='Show diff between file versions')

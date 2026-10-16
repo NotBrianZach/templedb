@@ -469,8 +469,19 @@ class CommitCommand:
             logger.info("Committing changes to database...")
 
             with self.vcs_repo.transaction():
-                # Get or create 'main' branch
-                branch_id = self.vcs_repo.get_or_create_branch(project['id'], 'main')
+                # Commit to the branch the project is actually on. This
+                # hardcoded 'main', so `vcs switch` followed by a workspace
+                # commit put the work on main regardless — which, together
+                # with `vcs switch` raising on every call and `vcs branch`
+                # being unable to create a first branch, is why nothing in
+                # this database has ever been committed to a non-default
+                # branch. Falls back to get_or_create_branch('main') so a
+                # project with no branches still bootstraps exactly as
+                # before.
+                active = self.vcs_repo.get_active_branch(project['id'])
+                branch_id = (active['id'] if active else
+                             self.vcs_repo.get_or_create_branch(
+                                 project['id'], 'main'))
 
                 # Generate commit hash. [:16].upper(), matching
                 # `vcs commit` — NOT [:40] lowercase, which is what this

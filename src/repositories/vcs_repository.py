@@ -368,50 +368,57 @@ class VCSRepository(BaseRepository):
             (target_branch_id,))
         head_commit_id = branch['head_commit_id'] if branch else None
 
-        # Clear all file_contents for this project — we'll re-insert current ones below.
-        # Using DELETE avoids UNIQUE(file_id, is_current) conflicts from stale rows.
-        self.execute("""
-            DELETE FROM file_contents
-            WHERE file_id IN (SELECT id FROM project_files WHERE project_id = ?)
-        """, (project_id,), commit=False)
+        # Every write below is commit=False and lands as one transaction.
+        # It used to end in `self.commit()` — a method BaseRepository does
+        # not have, so `vcs switch` raised AttributeError on every single
+        # invocation, after issuing the DELETE. Nothing was lost (the
+        # transaction rolled back), but the command never worked, which is
+        # also why nothing could be merged: you cannot get onto the branch
+        # you want to merge into. `transaction()` is the documented idiom
+        # for exactly this commit=False sequence.
+        with self.transaction():
+            # Clear all file_contents for this project — we'll re-insert current ones below.
+            # Using DELETE avoids UNIQUE(file_id, is_current) conflicts from stale rows.
+            self.execute("""
+                DELETE FROM file_contents
+                WHERE file_id IN (SELECT id FROM project_files WHERE project_id = ?)
+            """, (project_id,), commit=False)
 
-        if head_commit_id:
-            # Set is_current for files at the target branch's head commit
-            # Walk back through the commit chain to build the full file tree
-            file_states = self.query_all("""
-                WITH RECURSIVE branch_commits AS (
-                    SELECT id, parent_commit_id FROM vcs_commits WHERE id = ?
-                    UNION ALL
-                    SELECT c.id, c.parent_commit_id
-                    FROM vcs_commits c
-                    JOIN branch_commits bc ON c.id = bc.parent_commit_id
-                )
-                SELECT fs.file_id, fs.content_hash, fs.file_size, fs.line_count, fs.change_type
-                FROM vcs_file_states fs
-                JOIN branch_commits bc ON fs.commit_id = bc.id
-                ORDER BY fs.commit_id DESC
-            """, (head_commit_id,))
+            if head_commit_id:
+                # Set is_current for files at the target branch's head commit
+                # Walk back through the commit chain to build the full file tree
+                file_states = self.query_all("""
+                    WITH RECURSIVE branch_commits AS (
+                        SELECT id, parent_commit_id FROM vcs_commits WHERE id = ?
+                        UNION ALL
+                        SELECT c.id, c.parent_commit_id
+                        FROM vcs_commits c
+                        JOIN branch_commits bc ON c.id = bc.parent_commit_id
+                    )
+                    SELECT fs.file_id, fs.content_hash, fs.file_size, fs.line_count, fs.change_type
+                    FROM vcs_file_states fs
+                    JOIN branch_commits bc ON fs.commit_id = bc.id
+                    ORDER BY fs.commit_id DESC
+                """, (head_commit_id,))
 
-            # Build latest state per file (most recent commit wins)
-            seen = set()
-            for fs in file_states:
-                if fs['file_id'] in seen:
-                    continue
-                seen.add(fs['file_id'])
-                if fs['change_type'] == 'deleted':
-                    continue
-                # Insert current file_contents row
-                self.execute("""
-                    INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
-                    VALUES (?, ?, ?, ?, 1)
-                """, (fs['file_id'], fs['content_hash'], fs.get('file_size', 0), fs.get('line_count')), commit=False)
+                # Build latest state per file (most recent commit wins)
+                seen = set()
+                for fs in file_states:
+                    if fs['file_id'] in seen:
+                        continue
+                    seen.add(fs['file_id'])
+                    if fs['change_type'] == 'deleted':
+                        continue
+                    # Insert current file_contents row
+                    self.execute("""
+                        INSERT INTO file_contents (file_id, content_hash, file_size_bytes, line_count, is_current)
+                        VALUES (?, ?, ?, ?, 1)
+                    """, (fs['file_id'], fs['content_hash'], fs.get('file_size', 0), fs.get('line_count')), commit=False)
 
-        # Update active_branch_id
-        self.execute(
-            "UPDATE projects SET active_branch_id = ? WHERE id = ?",
-            (target_branch_id, project_id), commit=False)
-
-        self.commit()
+            # Update active_branch_id
+            self.execute(
+                "UPDATE projects SET active_branch_id = ? WHERE id = ?",
+                (target_branch_id, project_id), commit=False)
 
     def get_dirty_files(self, project_id: int, branch_id: int) -> List[Dict[str, Any]]:
         """Get uncommitted changes for a branch (any session)."""
