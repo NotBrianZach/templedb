@@ -119,6 +119,14 @@ FILE_TYPE_PATTERNS = [
     (r'\.erl$', 'erlang', None),
     (r'\.hs$', 'haskell', None),
     (r'\.lua$', 'lua', None),
+    # `.pl` is ambiguous between Perl and Prolog. templedb's own six are
+    # Prolog — src/services/*_logic.pl, SWI-Prolog rule sets that are the
+    # source of truth for deploy/env/nixos/test/merge/graph decisions — so
+    # the naming convention discriminates before the Perl fallback.
+    # Classification is path-only by design here, so a content sniff for
+    # `:- ` is not available.
+    (r'_logic\.pl$', 'prolog_source', None),
+    (r'\.(pro|plt)$', 'prolog_source', None),
     (r'\.pl$', 'perl', None),
     (r'\.r$', 'r', None),
 
@@ -278,6 +286,31 @@ def classify_path(rel_path: str) -> Optional[str]:
             return type_name
     return None
 
+# Individual files to skip, by path pattern. Policy, not accident: these
+# are named here deliberately, the way SKIP_DIRS names node_modules, so
+# they are skipped silently rather than reported as unrecognised.
+#
+# `<name>.tmp.<pid>[.<suffix>]` is atomic-write debris — write to a temp
+# path, then `os.replace` onto the target, which leaves nothing behind on
+# success. A surviving temp file therefore means a writer died mid-write,
+# and 67 of them had been scanned into project_files with current content
+# (55 in math-academy-scraper, 9 in frontend, 3 in system_config), where
+# they also materialise into every workspace those projects produce.
+# templedb writes this shape itself in cli/commands/file.py.
+SKIP_FILE_PATTERNS = [
+    r'\.tmp\.\d+(\.[0-9a-f]+)?$',   # foo.ts.tmp.241132.1784033891676
+    r'(^|/)\.#',                    # Emacs lock symlinks
+    r'~$',                          # editor backups
+    r'(^|/)\.DS_Store$',
+    r'\.orig$', r'\.rej$',          # merge/patch debris
+]
+
+
+def is_ignored_path(rel_path: str) -> bool:
+    """True for paths SKIP_FILE_PATTERNS declares out of scope."""
+    return any(re.search(p, rel_path) for p in SKIP_FILE_PATTERNS)
+
+
 # Directories to skip during scanning
 SKIP_DIRS = {
     'node_modules', '.git', 'venv', '__pycache__',
@@ -435,6 +468,11 @@ class FileScanner:
                     continue
 
                 rel_path = str(file_path.relative_to(self.project_root))
+
+                # Declared out of scope — checked before the git filter so
+                # debris is dropped even in a repo that happens to track it.
+                if is_ignored_path(rel_path):
+                    continue
 
                 # If in a git repo, respect .gitignore by filtering against git's file list
                 if self._git_files is not None and rel_path not in self._git_files:

@@ -938,7 +938,8 @@ class CheckoutRepository(BaseRepository):
         import os
         from pathlib import Path
         try:
-            from importer.scanner import FileScanner, SKIP_DIRS
+            from importer.scanner import (FileScanner, SKIP_DIRS,
+                                          is_ignored_path)
         except ImportError:
             # Without the scanner there is no trustworthy definition of
             # "trackable", so claim everything is work and let the prune
@@ -970,6 +971,11 @@ class CheckoutRepository(BaseRepository):
                     continue
                 rel = str(p.relative_to(root))
                 if rel in tracked:
+                    continue
+                # Same policy the scanner applies on the way in. Without
+                # it, one abandoned `.tmp.<pid>` from an interrupted write
+                # keeps a whole tree unprunable as "untracked work".
+                if is_ignored_path(rel):
                     continue
                 if scanner.get_file_type(p):
                     untracked.append(rel)

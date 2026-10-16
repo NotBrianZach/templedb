@@ -543,6 +543,134 @@ class FileCommands(Command):
             logger.debug("Full error:", exc_info=True)
             return 1
 
+    def retype(self, args) -> int:
+        """Re-run the classifier over recorded files and correct file_type_id.
+
+        `project_files.file_type_id` is set once, at the moment a file is
+        first recorded, by whatever logic was in play then — so it is a
+        snapshot of a past classifier, not a derived value. Two sources of
+        wrongness accumulated behind that:
+
+          - `_get_file_type_id` used to carry its own 14-entry extension
+            map and, for anything outside it, take `SELECT id FROM
+            file_types LIMIT 1`. That row is `api_route`, which is how 495
+            rows across 10 projects — including templedb's own
+            requirements.txt, pyproject.toml and .gitignore — came to be
+            recorded as API routes, none of them API routes.
+          - `file_types` was missing roughly half the names the scanner
+            emits, so even a correct classification had nowhere to land
+            (migration 138 seeded it).
+
+        Dry by default. Only rows whose current type differs from what the
+        classifier says are touched, so running it twice is a no-op.
+        """
+        from importer.scanner import (classify_path, is_ignored_path,
+                                      GENERIC_TEXT_TYPE)
+        from repositories.base import BaseRepository
+        from collections import Counter
+
+        base = BaseRepository()
+        where, params = "1=1", []
+        if getattr(args, 'project', None):
+            project = fuzzy_match_project(args.project, show_matched=False)
+            if not project:
+                logger.error(f"Project '{args.project}' not found")
+                return 1
+            where, params = "pf.project_id = ?", [project['id']]
+        only = getattr(args, 'from_type', None)
+        if only:
+            where += " AND ft.type_name = ?"
+            params.append(only)
+
+        rows = base.query_all(f"""
+            SELECT pf.id, pf.file_path, pr.slug, ft.type_name AS current_type
+              FROM project_files pf
+              JOIN projects pr ON pr.id = pf.project_id
+              LEFT JOIN file_types ft ON ft.id = pf.file_type_id
+             WHERE {where} AND pf.status = 'active'
+        """, tuple(params))
+
+        type_ids, changes, unresolved, ignored = {}, [], 0, []
+
+        def type_id(name):
+            """Resolve or create. Never falls back to an arbitrary row —
+            that fallback is the bug this command exists to repair."""
+            if name in type_ids:
+                return type_ids[name]
+            row = base.query_one(
+                "SELECT id FROM file_types WHERE type_name = ?", (name,))
+            if not row:
+                base.execute(
+                    "INSERT OR IGNORE INTO file_types "
+                    "(type_name, category, description) VALUES "
+                    "(?, 'uncategorized', 'Auto-registered by file retype')",
+                    (name,))
+                row = base.query_one(
+                    "SELECT id FROM file_types WHERE type_name = ?", (name,))
+            type_ids[name] = row['id'] if row else None
+            return type_ids[name]
+
+        for r in rows:
+            # A path the scanner would now refuse has no right type. Say
+            # so instead of assigning one — these are debris that got
+            # recorded before the filter existed, and giving them a tidy
+            # type would make them look deliberate.
+            if is_ignored_path(r['file_path']):
+                ignored.append(r)
+                continue
+            want = classify_path(r['file_path'])
+            if not want:
+                unresolved += 1
+                want = GENERIC_TEXT_TYPE
+            if want == r['current_type']:
+                continue
+            changes.append((r, want))
+
+        if ignored:
+            print(f"{len(ignored)} active file(s) match a path the scanner "
+                  f"now ignores — debris, not content. Not re-typed; "
+                  f"`templedb file rm` is the fix:")
+            for r in ignored[:10]:
+                print(f"    {r['slug']}/{r['file_path']}")
+            if len(ignored) > 10:
+                print(f"    … and {len(ignored) - 10} more")
+            print()
+
+        if not changes:
+            print(f"Nothing to re-type ({len(rows)} active file(s) checked).")
+            return 0
+
+        moves = Counter(f"{r['current_type']} -> {want}"
+                        for r, want in changes)
+        print(f"{len(changes)} of {len(rows)} active file(s) are recorded "
+              f"with a type the classifier disagrees with:\n")
+        for move, n in moves.most_common(25):
+            print(f"  {n:5}  {move}")
+        if len(moves) > 25:
+            print(f"  … and {len(moves) - 25} more kinds of change")
+        if unresolved:
+            print(f"\n  {unresolved} path(s) the classifier cannot name at "
+                  f"all would become '{GENERIC_TEXT_TYPE}'.")
+
+        if not getattr(args, 'apply', False):
+            print("\nDry run. Re-run with --apply to write these.")
+            return 0
+
+        written = 0
+        for r, want in changes:
+            tid = type_id(want)
+            if tid is None:
+                logger.warning("Could not resolve file type %r; skipping %s",
+                               want, r['file_path'])
+                continue
+            base.execute(
+                "UPDATE project_files SET file_type_id = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (tid, r['id']))
+            written += 1
+        print(f"\nRe-typed {written} file(s).")
+        return 0
+
     def rm(self, args) -> int:
         """Stage a file for deletion. On commit, project_files row is hard-deleted (history preserved in vcs_file_states)."""
         try:
@@ -1136,13 +1264,28 @@ class FileCommands(Command):
                 # written and the checkout NOT, exactly the split this
                 # mirror exists to prevent.
                 tmp = f"{target}.tmp.{os.getpid()}"
-                if isinstance(content, (bytes, bytearray)):
-                    with open(tmp, "wb") as f:
-                        f.write(content)
-                else:
-                    with open(tmp, "w", encoding="utf-8") as f:
-                        f.write(content)
-                os.replace(tmp, target)
+                # `os.replace` leaves nothing behind on success, so a
+                # surviving temp file means this died mid-write — and the
+                # next scan picks it up as a real file. 67 such paths were
+                # tracked with current content before the scanner learned
+                # to ignore the shape (SKIP_FILE_PATTERNS). Clean up our
+                # own debris rather than relying on that filter alone.
+                try:
+                    if isinstance(content, (bytes, bytearray)):
+                        with open(tmp, "wb") as f:
+                            f.write(content)
+                    else:
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            f.write(content)
+                    os.replace(tmp, target)
+                except BaseException:
+                    # BaseException, not Exception: a KeyboardInterrupt
+                    # here is exactly the case that produced the debris.
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
             else:
                 logger.warning(
                     "No checkout directory for '%s' — %s was written to the "
@@ -1294,6 +1437,20 @@ def register(cli):
                                  '"non-immutable" matches anything opted '
                                  'out of the default.')
     cli.commands['file.ls'] = cmd.ls
+
+    # file retype (re-run the classifier over recorded file_type_id)
+    retype_parser = file_subparsers.add_parser(
+        'retype',
+        help='Re-run the classifier over recorded files and fix file_type_id'
+    )
+    retype_parser.add_argument('project', nargs='?',
+                               help='Project name or pattern (default: all)')
+    retype_parser.add_argument('--from-type', dest='from_type', help=(
+        "Only consider rows currently recorded as this type, e.g. "
+        "--from-type api_route"))
+    retype_parser.add_argument('--apply', action='store_true',
+                               help='Write the changes (default: dry run)')
+    cli.commands['file.retype'] = cmd.retype
 
     # file mark (set the edit_mode attribute on a file — mig 106)
     mark_parser = file_subparsers.add_parser(
