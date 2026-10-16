@@ -88,6 +88,24 @@ class BackupCommands(Command):
             logger.error(f"Backup failed: {e}")
             return 1
 
+    @staticmethod
+    def _integrity_ok(path: Path) -> bool:
+        """True if SQLite can vouch for this file end to end.
+
+        `PRAGMA integrity_check` rather than `quick_check`: the failures
+        actually seen here were 'database disk image is malformed' and a
+        bad freelist, and quick_check skips the freelist.
+        """
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                row = conn.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                conn.close()
+            return bool(row) and row[0] == 'ok'
+        except sqlite3.Error:
+            return False
+
     def prune(self, args) -> int:
         """Delete old local backups under an explicit keep policy.
 
@@ -123,13 +141,41 @@ class BackupCommands(Command):
             print(f"No files matching {pattern} in {backup_dir}")
             return 0
 
+        # Integrity changes the policy, it does not just annotate it. A
+        # survey of this directory found 3 of the 6 files the date-based
+        # policy would have KEPT to be unrestorable — including 2 of the
+        # newest 5 — so "newest N" was about to preserve malformed copies
+        # while deleting good ones. With --verify, N counts restorable
+        # backups, and a corrupt file is deletable at any age for the same
+        # reason the loose `backup_malformed` was: it cannot be restored
+        # from, so there is no value to weigh against its size.
+        verify = getattr(args, 'verify', False)
+        status = {}
+        if verify:
+            print(f"Verifying {len(files)} backup(s) — this reads every "
+                  f"byte, so it is not quick…")
+            for p in files:
+                status[p] = self._integrity_ok(p)
+            bad = [p for p in files if not status[p]]
+            if bad:
+                print(f"  {len(bad)} of {len(files)} FAIL integrity_check "
+                      f"and cannot be restored from.")
+
         cutoff = time.time() - keep_days * 86400 if keep_days else None
-        keep, drop = [], []
-        for i, p in enumerate(files):
-            # Union, deliberately: newest-N OR within-window.
-            if (keep_last and i < keep_last) or \
+        keep, drop, corrupt = [], [], []
+        restorable_kept = 0
+        for p in files:
+            ok = status.get(p, True)       # unverified counts as eligible
+            if verify and not ok:
+                corrupt.append(p)
+                drop.append(p)
+                continue
+            # Union, deliberately: newest-N OR within-window. With
+            # --verify, the N counts only restorable files.
+            if (keep_last and restorable_kept < keep_last) or \
                (cutoff is not None and p.stat().st_mtime >= cutoff):
                 keep.append(p)
+                restorable_kept += 1
             else:
                 drop.append(p)
 
@@ -139,25 +185,40 @@ class BackupCommands(Command):
         print(f"{backup_dir}")
         print(f"  {len(files)} file(s), {gb(files):.1f} GB")
         print(f"  policy: keep newest {keep_last}"
+              f"{' restorable' if verify else ''}"
               f"{f' or newer than {keep_days}d' if keep_days else ''}")
         print(f"  keep {len(keep)} ({gb(keep):.1f} GB), "
-              f"delete {len(drop)} ({gb(drop):.1f} GB)")
+              f"delete {len(drop)} ({gb(drop):.1f} GB)"
+              + (f" — {len(corrupt)} of them corrupt ({gb(corrupt):.1f} GB)"
+                 if corrupt else ""))
         if not drop:
             print("\nNothing to prune.")
             return 0
         for p in drop[:8]:
-            print(f"    - {p.name}")
+            tag = ' [corrupt]' if p in corrupt else ''
+            print(f"    - {p.name}{tag}")
         if len(drop) > 8:
             print(f"    … and {len(drop) - 8} more")
 
         if not getattr(args, 'apply', False):
-            print("\nDry run. Re-run with --apply to delete these.")
+            print("\nDry run. Re-run with --apply to delete these."
+                  + ("" if verify else
+                     "\nConsider --verify first: this directory has held "
+                     "unrestorable backups, and without it a date-based "
+                     "policy can keep those and delete the good ones."))
             return 0
 
         # Never leave zero restore points, whatever the arithmetic said.
         if not keep:
             logger.error("Refusing to delete every backup — the policy "
                          "kept none. Widen --keep-last/--keep-days.")
+            return 2
+        # With --verify, "kept something" is not enough: every survivor
+        # could in principle be corrupt, which is no restore point at all.
+        if verify and not any(status.get(p, False) for p in keep):
+            logger.error("Refusing to prune: not one file the policy would "
+                         "keep passes integrity_check. Fix the backup "
+                         "producer before deleting anything.")
             return 2
 
         freed, failed = 0, 0
@@ -576,17 +637,43 @@ class BackupCommands(Command):
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup_path = backup_dir / f"templedb_backup_{ts}.sqlite"
         print(f"Creating local backup: {backup_path}")
-        result2 = subprocess.run(
-            [sys.executable, "-m", "cli", "backup", "local", str(backup_path)],
-            capture_output=True, text=True,
-        )
-        if result2.returncode != 0 or not backup_path.exists():
-            # try direct copy as fallback
+        # Use the SQLite backup API in-process. This used to shell out to
+        # `python -m cli backup local <path>` — a command that does not
+        # exist (the real path is `storage backup local`), so it ALWAYS
+        # failed and ALWAYS fell through to safe_copy_db, which is
+        # wal_checkpoint + shutil.copy2.
+        #
+        # That fallback is only sound if the checkpoint actually drained
+        # the WAL, and here it cannot: two long-lived readers hold
+        # snapshots, so a checkpoint moves 18 of 130,000 frames and copy2
+        # captures a .sqlite whose committed data is still in the sidecar
+        # .sqlite-wal. The result is a file that opens and then reports
+        # "database disk image is malformed" — 8 of 19 October backups,
+        # 42%, were unrestorable this way.
+        #
+        # Connection.backup() is WAL-aware and copies committed pages
+        # regardless of reader snapshots, which is the whole reason it
+        # exists.
+        try:
+            src = _sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+            dst = _sqlite3.connect(str(backup_path))
             try:
-                safe_copy_db(str(DB_PATH), str(backup_path))
-            except Exception as e:
-                print(f"Backup creation failed: {e}", file=sys.stderr)
-                return 1
+                src.backup(dst)
+            finally:
+                dst.close()
+                src.close()
+        except Exception as e:
+            print(f"Backup creation failed: {e}", file=sys.stderr)
+            backup_path.unlink(missing_ok=True)
+            return 1
+
+        # Verify before upload. Shipping a corrupt backup to GCS is worse
+        # than failing: it looks like a restore point and is not one.
+        if not BackupCommands._integrity_ok(backup_path):
+            print(f"Backup failed integrity_check and was NOT uploaded: "
+                  f"{backup_path}", file=sys.stderr)
+            backup_path.unlink(missing_ok=True)
+            return 1
 
         size = backup_path.stat().st_size
         print(f"Backup size: {size // 1024 // 1024} MB")

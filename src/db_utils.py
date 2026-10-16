@@ -73,14 +73,32 @@ def wal_checkpoint(db_path=None):
 
 
 def safe_copy_db(src=None, dst=None):
-    """Copy the DB file safely — checkpoints WAL first.
-    
+    """Copy the DB file safely — uses the SQLite backup API.
+
     Use this instead of shutil.copy2() for any DB file copy.
+
+    This used to be `wal_checkpoint(src)` then `shutil.copy2`, which is
+    only sound if the checkpoint drained the WAL. A checkpoint cannot do
+    that while any reader holds an older snapshot: observed moving 18 of
+    130,102 frames with two long-lived readers attached. copy2 then
+    produced a .sqlite whose committed data was still in the sidecar
+    .sqlite-wal — a file that opens and then reports "database disk image
+    is malformed". 42% of one month's backups were unrestorable this way.
+
+    Connection.backup() copies committed pages irrespective of reader
+    snapshots, so it does not depend on a checkpoint succeeding.
     """
-    import shutil
+    import sqlite3 as _sq
     src = src or DB_PATH
-    wal_checkpoint(src)
-    shutil.copy2(str(src), str(dst))
+    source = _sq.connect(f"file:{src}?mode=ro", uri=True)
+    try:
+        dest = _sq.connect(str(dst))
+        try:
+            source.backup(dest)
+        finally:
+            dest.close()
+    finally:
+        source.close()
 
 
 # Thread-local storage for connections

@@ -38,6 +38,12 @@ def register(cli):
     prune_parser.add_argument('--dir', help='Backup directory override')
     prune_parser.add_argument('--pattern',
                               help='Glob (default templedb_backup_*.sqlite)')
+    prune_parser.add_argument('--verify', action='store_true', help=(
+        'Integrity-check every backup first. --keep-last then counts only '
+        'RESTORABLE files, and corrupt ones become deletable at any age. '
+        'Strongly advised: a survey of this directory found 2 of the '
+        'newest 5 unrestorable, so a date-only policy kept bad copies and '
+        'deleted good ones'))
     prune_parser.add_argument('--apply', action='store_true',
                               help='Delete them (default: dry run)')
     cli.commands['storage.backup.prune'] = backup_cmd.prune
