@@ -1,5 +1,5 @@
 -- TempleDB canonical schema
--- Generated from live database, sourced with migrations 001-125 applied.
+-- Generated from live database, sourced with migrations 001-140 applied.
 -- Regenerate after adding any new migration:
 --     python3 scripts/regen_schema.py
 --
@@ -14,7 +14,7 @@
 -- That failure mode has bitten twice (075-082, then 084-125). Use --check in CI.
 
 -- ======================================================================
--- Tables (132)
+-- Tables (136)
 -- ======================================================================
 
 CREATE TABLE IF NOT EXISTS agent_events (
@@ -224,6 +224,27 @@ CREATE TABLE IF NOT EXISTS backup_history (
                 backup_path TEXT NOT NULL,
                 size_bytes INTEGER NOT NULL
             );
+
+CREATE TABLE IF NOT EXISTS blob_deletions (
+    id               INTEGER PRIMARY KEY,
+    hash_sha256      TEXT    NOT NULL,
+    file_size_bytes  INTEGER NOT NULL,
+    content_type     TEXT,
+    -- How old the blob was when collected. The age guard is the main
+    -- safety property of gc, so an incident review needs to see
+    -- whether a deleted blob was actually old.
+    blob_created_at  TEXT,
+    -- Which code path removed it. 'blob_gc' today; a future tier
+    -- migration or a manual sweep would use its own value, and a
+    -- deletion with no row here was raw SQL.
+    deleted_via      TEXT    NOT NULL,
+    reason           TEXT    NOT NULL,
+    -- Groups one invocation, so "what did that run take?" is one
+    -- query. Assigned by the caller: SQLite has no uuid(), and a
+    -- timestamp alone collides when two runs share a second.
+    gc_run_id        TEXT,
+    deleted_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
 
 CREATE TABLE IF NOT EXISTS blue_green_state (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -441,6 +462,29 @@ CREATE TABLE IF NOT EXISTS code_symbols (
     CHECK(scope IN ('exported', 'public_api', 'entry_point'))
 );
 
+CREATE TABLE IF NOT EXISTS commit_hash_migration_126 (
+    commit_id  INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL,
+    old_hash   TEXT NOT NULL,
+    new_hash   TEXT NOT NULL,
+    -- 'git-sha'   the old value was a git SHA and moves to
+    --             git_commit_hash
+    -- 'case-only' a native id that was merely lowercase; no SHA to keep
+    kind       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS commit_hash_migration_137 (
+    commit_id  INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL,
+    old_hash   TEXT NOT NULL,
+    new_hash   TEXT NOT NULL,
+    -- 'native-40'  a native id that merely wore git's 40-char lowercase
+    --              format. There is no other kind in this migration;
+    --              the column exists so the audit trail says which
+    --              claim was made, as 126's does.
+    kind       TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS config_checkouts (
     id INTEGER PRIMARY KEY,
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -503,13 +547,8 @@ CREATE TABLE IF NOT EXISTS "config_nodes" (
                     'Import', 'Interpolation', 'Conditional', 'Assert',
                     'BinOp', 'UnaryOp', 'Select', 'HasAttr', 'Inherit',
                     'RawNix',
-                    -- Carries its own leading '#' in `value`; unnamed, and
-                    -- emitted without a trailing semicolon. Added by
-                    -- migration 135, and required here too: a fresh install
-                    -- applies schema.sql and marks the numbered migrations
-                    -- via-schema.sql WITHOUT running them, so omitting it
-                    -- here would give new databases a config_nodes that
-                    -- rejects Comment while reporting 135 as applied.
+                    -- New. Carries its own leading '#' in `value`; has no
+                    -- name and takes no trailing semicolon.
                     'Comment'
                 )),
 
@@ -531,6 +570,10 @@ CREATE TABLE IF NOT EXISTS "config_nodes" (
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
+    -- Comments are unnamed, so several under one parent all have
+    -- name IS NULL. SQLite treats NULLs as distinct in a UNIQUE index,
+    -- so this does not collide — unlike a named binding, which still
+    -- cannot be duplicated per (parent, host).
     UNIQUE(parent_id, name, host_id)
 );
 
@@ -1030,48 +1073,6 @@ CREATE TABLE IF NOT EXISTS file_types (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS "fleet_deployments" (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    network_id INTEGER NOT NULL REFERENCES "fleet_networks"(id) ON DELETE CASCADE,
-
-    -- Deployment identification
-    deployment_uuid TEXT NOT NULL UNIQUE,
-
-    -- Operation type
-    operation TEXT NOT NULL,              -- 'deploy', 'destroy', 'reboot', 'rebuild', 'modify'
-    target_machines TEXT,                 -- JSON array: specific machines deployed (null = all)
-
-    -- Configuration
-    config_revision TEXT,                 -- Git commit hash or flake revision
-    nixpkgs_revision TEXT,                -- Nixpkgs revision used
-
-    -- Deployment options
-    deploy_options TEXT,                  -- JSON: flags like --build-only, --dry-run, --force-reboot
-
-    -- Execution
-    started_at TIMESTAMP NOT NULL,
-    completed_at TIMESTAMP,
-    duration_seconds INTEGER,
-
-    -- Status
-    status TEXT DEFAULT 'running',        -- 'running', 'success', 'partial', 'failed', 'cancelled'
-    exit_code INTEGER,
-
-    -- Output
-    stdout_log TEXT,                      -- Captured stdout
-    stderr_log TEXT,                      -- Captured stderr
-
-    -- Changes made
-    changes_summary TEXT,                 -- JSON: summary of what changed per machine
-    services_restarted TEXT,              -- JSON: services that were restarted
-
-    -- Metadata
-    triggered_by TEXT,                    -- User or automation source
-    triggered_reason TEXT,                -- Why was this deployment triggered
-
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE IF NOT EXISTS "fleet_local_services" (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   network_id INTEGER NOT NULL REFERENCES "fleet_networks"(id) ON DELETE CASCADE,
@@ -1115,39 +1116,6 @@ CREATE TABLE IF NOT EXISTS "fleet_local_services" (
   UNIQUE(network_id, profile_name, service_name),
   CHECK(service_type IN ('database', 'cache', 'queue', 'mock', 'custom')),
   CHECK(status IN ('stopped', 'starting', 'running', 'failed', 'unhealthy'))
-);
-
-CREATE TABLE IF NOT EXISTS "fleet_machine_deployments" (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    deployment_id INTEGER NOT NULL REFERENCES "fleet_deployments"(id) ON DELETE CASCADE,
-    machine_id INTEGER NOT NULL REFERENCES "fleet_machines"(id) ON DELETE CASCADE,
-
-    -- Build information
-    build_started_at TIMESTAMP,
-    build_completed_at TIMESTAMP,
-    build_duration_seconds INTEGER,
-
-    -- Deployment to machine
-    deploy_started_at TIMESTAMP,
-    deploy_completed_at TIMESTAMP,
-    deploy_duration_seconds INTEGER,
-
-    -- Status
-    status TEXT DEFAULT 'pending',        -- 'pending', 'building', 'deploying', 'success', 'failed', 'skipped'
-    error_message TEXT,
-
-    -- Results
-    old_system_profile TEXT,              -- Previous system profile
-    new_system_profile TEXT,              -- New system profile
-    units_restarted TEXT,                 -- JSON array: systemd units restarted
-
-    -- Activation
-    activation_script_ran BOOLEAN DEFAULT 0,
-    activation_warnings TEXT,             -- JSON array: warnings during activation
-
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-    UNIQUE(deployment_id, machine_id)
 );
 
 CREATE TABLE IF NOT EXISTS "fleet_machines" (
@@ -1210,31 +1178,6 @@ CREATE TABLE IF NOT EXISTS "fleet_networks" (
     created_by TEXT,
 
     UNIQUE(project_id, network_name)
-);
-
-CREATE TABLE IF NOT EXISTS "fleet_resources" (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    network_id INTEGER NOT NULL REFERENCES "fleet_networks"(id) ON DELETE CASCADE,
-    machine_id INTEGER REFERENCES "fleet_machines"(id) ON DELETE CASCADE,  -- null for network-level resources
-
-    -- Resource identification
-    resource_name TEXT NOT NULL,
-    resource_type TEXT NOT NULL,          -- 'dns-record', 'storage-volume', 'ssh-key', 'vpc', 'security-group', etc.
-    resource_uuid TEXT NOT NULL UNIQUE,
-
-    -- Resource details
-    provider TEXT,                        -- 'route53', 'cloudflare', 'gcs', 'aws', 'azure', etc.
-    provider_resource_id TEXT,            -- Provider-specific resource ID
-    resource_config TEXT,                 -- JSON: resource configuration
-
-    -- State
-    status TEXT DEFAULT 'planned',        -- 'planned', 'creating', 'created', 'updating', 'deleting', 'deleted', 'failed'
-
-    -- Metadata
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-    UNIQUE(network_id, resource_name, resource_type)
 );
 
 CREATE TABLE IF NOT EXISTS graph_query_log (
@@ -1563,7 +1506,6 @@ CREATE TABLE IF NOT EXISTS nix_generations (
     commit_hash TEXT,                          -- denormalized for display
     project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
     -- Deploy linkage
-    deployment_id INTEGER REFERENCES fleet_deployments(id) ON DELETE SET NULL,
     system_deployment_id INTEGER REFERENCES system_deployments(id) ON DELETE SET NULL,
     -- Metadata
     nixos_version TEXT,                        -- e.g. "24.11pre-git"
@@ -1907,6 +1849,110 @@ CREATE TABLE IF NOT EXISTS reconcile_runs (
     ran_by            TEXT
 );
 
+CREATE TABLE IF NOT EXISTS reconciliation_items (
+    id                INTEGER PRIMARY KEY,
+    reconciliation_id INTEGER NOT NULL
+                        REFERENCES reconciliations(id) ON DELETE CASCADE,
+
+    -- The individual thing in disagreement: a file path, a row id, a
+    -- column name, a machine attribute.
+    item_ref          TEXT NOT NULL,
+    detail            TEXT,
+
+    --   open              not yet addressed
+    --   fixed             the disagreement is gone
+    --   accepted          tolerated, with reasoning
+    --   not_reproducible  looked, could not find it
+    --   wont_fix          deliberately left
+    disposition       TEXT NOT NULL DEFAULT 'open'
+                        CHECK (disposition IN ('open', 'fixed', 'accepted',
+                                               'not_reproducible',
+                                               'wont_fix')),
+
+    -- Per-item testimony, same three columns as vcs_merge_files so the
+    -- two read the same way.
+    reasoning         TEXT,
+    confidence        TEXT,
+    decided_by        TEXT,
+
+    resolved_at       TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+
+    UNIQUE(reconciliation_id, item_ref)
+);
+
+CREATE TABLE IF NOT EXISTS reconciliations (
+    id              INTEGER PRIMARY KEY,
+
+    -- What sort of disagreement. Open vocabulary on purpose — a new
+    -- producer should not need a migration to register itself. Known:
+    --   'invariant'      doctor entities / doctor history
+    --   'machine_drift'  reconcile machine
+    --   'db_vs_head'     content ahead of HEAD
+    --   'db_vs_checkout' materialised tree disagrees with the DB
+    --   'vcs_merge'      a branch merge
+    --   'unmaintained_column', 'dormant_table'
+    kind            TEXT NOT NULL,
+
+    -- Stable identity WITHIN kind. For 'invariant' this is the
+    -- check_name; for 'machine_drift' the machine name. Re-detection
+    -- matches on (kind, subject_ref), which is what makes an hourly
+    -- producer idempotent.
+    subject_ref     TEXT NOT NULL,
+    title           TEXT,
+
+    -- NULL for database-wide discrepancies, which most invariants are.
+    project_id      INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+
+    -- The two sides, named rather than implied. 'db' vs 'git',
+    -- 'db' vs 'zMothership2', 'entities' vs 'vcs_commits'.
+    authority_a     TEXT,
+    authority_b     TEXT,
+
+    -- What each side said, most recent observation. JSON so a producer
+    -- can be specific without this table knowing its shape.
+    observed_json   TEXT,
+    item_count      INTEGER NOT NULL DEFAULT 0,
+
+    --   open         detected, nobody has picked it up
+    --   in_progress  someone is working on it (see owner, plan_md)
+    --   settled      the authorities agree again
+    --   accepted     deliberately tolerated; see accepted_reason and
+    --                accepted_fingerprint
+    --   superseded   no longer the right frame for the problem
+    status          TEXT NOT NULL DEFAULT 'open'
+                      CHECK (status IN ('open', 'in_progress', 'settled',
+                                        'accepted', 'superseded')),
+
+    -- Testimony. Appended to, not replaced, so an episode that changes
+    -- hands accumulates the account of what each party did.
+    plan_md         TEXT,
+
+    owner           TEXT,
+    session_id      INTEGER REFERENCES vcs_sessions(id),
+
+    -- Which detection log row surfaced this, for provenance.
+    source_kind     TEXT,
+    source_id       INTEGER,
+
+    -- Acceptance, with the state it was accepted at. A changed
+    -- fingerprint re-opens the episode.
+    accepted_reason      TEXT,
+    accepted_fingerprint TEXT,
+    accepted_at          TEXT,
+    -- Honest about "for now": an acceptance with no review date quietly
+    -- becomes permanent, which is how unmaintained_columns_baseline
+    -- behaves today.
+    review_after         TEXT,
+
+    first_detected_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_observed_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    observation_count INTEGER NOT NULL DEFAULT 1,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at         TEXT,
+    outcome_note      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS relations (
     id                INTEGER PRIMARY KEY,
 
@@ -2178,15 +2224,6 @@ CREATE TABLE IF NOT EXISTS vcs_branches (
     UNIQUE(project_id, branch_name)
 );
 
--- At most one default branch per project (migration 136). Partial, so
--- it constrains only the flagged rows and leaves zero-default legal.
--- Without it, three projects drifted into two is_default=1 rows and the
--- unordered `WHERE is_default = 1 ... fetchone()` in publish and
--- get_default_branch picked between them by query plan.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_vcs_branches_one_default
-    ON vcs_branches(project_id)
- WHERE is_default = 1;
-
 CREATE TABLE IF NOT EXISTS vcs_commit_metadata (
     id INTEGER PRIMARY KEY,
     commit_id INTEGER NOT NULL UNIQUE REFERENCES vcs_commits(id) ON DELETE CASCADE,
@@ -2329,6 +2366,97 @@ CREATE TABLE IF NOT EXISTS vcs_file_states (
     UNIQUE(commit_id, file_id)
 );
 
+CREATE TABLE IF NOT EXISTS vcs_merge_files (
+    id              INTEGER PRIMARY KEY,
+    merge_id        INTEGER NOT NULL REFERENCES vcs_merges(id) ON DELETE CASCADE,
+
+    -- file_id can be NULL: a path present only on the source side may have
+    -- no project_files row on this branch yet. The path is the identity
+    -- here, which is also why it is NOT NULL.
+    file_id         INTEGER,
+    file_path       TEXT NOT NULL,
+
+    --   auto_merged   three-way merge succeeded with no human input
+    --   fast_forward  unchanged on our side; took theirs wholesale
+    --   conflict      needs resolution; markers written
+    --   resolved      was a conflict, since settled
+    --   taken_ours / taken_theirs   settled by strategy, not by content
+    --   skipped       no change on the source side
+    disposition     TEXT NOT NULL
+                      CHECK (disposition IN ('auto_merged', 'fast_forward',
+                                             'conflict', 'resolved',
+                                             'taken_ours', 'taken_theirs',
+                                             'skipped')),
+    conflict_type   TEXT,
+
+    ours_hash       TEXT,
+    theirs_hash     TEXT,
+    base_hash       TEXT,
+
+    -- Per-file testimony: why this disposition. For a conflict settled by
+    -- an agent, the argument for the resolution. `confidence` mirrors the
+    -- resolver's high/medium/low and the Prolog strategy rules' third
+    -- argument, both of which are currently computed and thrown away.
+    reasoning       TEXT,
+    confidence      TEXT,
+    decided_by      TEXT,          -- 'three-way' | 'strategy:ours' | agent id
+
+    resolved_at     TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+
+    UNIQUE(merge_id, file_path)
+);
+
+CREATE TABLE IF NOT EXISTS vcs_merges (
+    id                INTEGER PRIMARY KEY,
+    project_id        INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+
+    -- Branch being merged FROM / INTO, by id and by name. The names are
+    -- denormalised on purpose: a branch can be deleted after the merge and
+    -- the record still has to read sensibly.
+    source_branch_id  INTEGER REFERENCES vcs_branches(id),
+    source_branch     TEXT NOT NULL,
+    target_branch_id  INTEGER REFERENCES vcs_branches(id),
+    target_branch     TEXT NOT NULL,
+
+    -- The three points of the three-way merge, as resolved at start.
+    base_commit_id    INTEGER REFERENCES vcs_commits(id),
+    source_commit_id  INTEGER REFERENCES vcs_commits(id),
+    target_commit_id  INTEGER REFERENCES vcs_commits(id),
+
+    strategy          TEXT NOT NULL DEFAULT 'manual',
+    squash            INTEGER NOT NULL DEFAULT 0,
+
+    --   in_progress  opened, outcome not yet known
+    --   conflicted   stopped with conflicts; markers are in
+    --                vcs_working_state and someone must resolve them
+    --   completed    merge commit created (see merge_commit_id)
+    --   abandoned    given up on deliberately; says so rather than
+    --                leaving an in_progress row to rot
+    status            TEXT NOT NULL DEFAULT 'in_progress'
+                        CHECK (status IN ('in_progress', 'conflicted',
+                                          'completed', 'abandoned')),
+
+    -- Agent testimony. Written by whoever starts the merge, for whoever
+    -- picks it up: why this merge, and how conflicts should be settled.
+    plan_md           TEXT,
+
+    -- Who. author is free text as elsewhere in vcs_*; session_id ties the
+    -- merge to the staging session so a parallel agent's work is
+    -- attributable.
+    author            TEXT,
+    session_id        INTEGER REFERENCES vcs_sessions(id),
+
+    merge_commit_id   INTEGER REFERENCES vcs_commits(id),
+    conflict_count    INTEGER NOT NULL DEFAULT 0,
+    auto_merged_count INTEGER NOT NULL DEFAULT 0,
+
+    started_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at      TEXT,
+    outcome_note      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS vcs_session_heads (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES vcs_sessions(id) ON DELETE CASCADE,
@@ -2402,7 +2530,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS file_contents_fts USING fts5(
 );
 
 -- ======================================================================
--- Views (47)
+-- Views (45)
 -- ======================================================================
 
 CREATE VIEW IF NOT EXISTS active_project_prompts_view AS
@@ -2738,34 +2866,6 @@ FROM project_files pf
 JOIN file_types ft ON pf.file_type_id = ft.id
 JOIN projects p ON pf.project_id = p.id;
 
-CREATE VIEW IF NOT EXISTS fleet_deployment_history AS
-SELECT
-    d.id,
-    d.deployment_uuid,
-    d.network_id,
-    n.network_name,
-    n.project_id,
-    p.slug AS project_slug,
-    d.operation,
-    d.target_machines,
-    d.config_revision,
-    d.status,
-    d.started_at,
-    d.completed_at,
-    d.duration_seconds,
-    d.triggered_by,
-    COUNT(md.id) AS total_machines,
-    COUNT(CASE WHEN md.status = 'success' THEN 1 END) AS successful_machines,
-    COUNT(CASE WHEN md.status = 'failed' THEN 1 END) AS failed_machines
-FROM fleet_deployments d
-JOIN fleet_networks n ON d.network_id = n.id
-JOIN projects p ON n.project_id = p.id
-LEFT JOIN fleet_machine_deployments md ON d.id = md.deployment_id
-GROUP BY d.id, d.deployment_uuid, d.network_id, n.network_name, n.project_id,
-         p.slug, d.operation, d.target_machines, d.config_revision, d.status,
-         d.started_at, d.completed_at, d.duration_seconds, d.triggered_by
-ORDER BY d.started_at DESC;
-
 CREATE VIEW IF NOT EXISTS fleet_local_machines AS
 SELECT
     m.id,
@@ -2786,26 +2886,10 @@ WHERE m.is_local = TRUE;
 
 CREATE VIEW IF NOT EXISTS fleet_machine_health AS
 SELECT
-    m.id,
-    m.machine_name,
-    m.network_id,
-    n.network_name,
-    n.project_id,
-    p.slug AS project_slug,
-    m.target_host,
-    m.deployment_status,
-    m.health_status,
-    m.last_deployed_at,
-    m.last_health_check_at,
-    m.nixos_version,
-    (SELECT started_at
-     FROM fleet_machine_deployments md
-     JOIN fleet_deployments d ON md.deployment_id = d.id
-     WHERE md.machine_id = m.id AND md.status = 'success'
-     ORDER BY md.deploy_completed_at DESC LIMIT 1) AS last_successful_deployment,
-    (SELECT COUNT(*)
-     FROM fleet_machine_deployments md
-     WHERE md.machine_id = m.id AND md.status = 'failed') AS failed_deployment_count
+    m.id, m.machine_name, m.network_id,
+    n.network_name, n.project_id, p.slug AS project_slug,
+    m.target_host, m.deployment_status, m.health_status,
+    m.last_deployed_at, m.last_health_check_at, m.nixos_version
 FROM fleet_machines m
 JOIN fleet_networks n ON m.network_id = n.id
 JOIN projects p ON n.project_id = p.id
@@ -2813,27 +2897,19 @@ ORDER BY n.network_name, m.machine_name;
 
 CREATE VIEW IF NOT EXISTS fleet_network_summary AS
 SELECT
-    n.id,
-    n.project_id,
-    n.network_name,
-    n.network_uuid,
-    n.is_active,
-    p.slug AS project_slug,
-    p.name AS project_name,
+    n.id, n.project_id, n.network_name, n.network_uuid, n.is_active,
+    p.slug AS project_slug, p.name AS project_name,
     COUNT(DISTINCT m.id) AS machine_count,
-    COUNT(DISTINCT CASE WHEN m.deployment_status = 'deployed' THEN m.id END) AS deployed_machines,
-    COUNT(DISTINCT r.id) AS resource_count,
-    MAX(d.started_at) AS last_deployment_at,
-    n.created_at,
-    n.updated_at
+    COUNT(DISTINCT CASE WHEN m.deployment_status = 'deployed'
+                        THEN m.id END) AS deployed_machines,
+    MAX(m.last_deployed_at) AS last_deployment_at,
+    n.created_at, n.updated_at
 FROM fleet_networks n
 JOIN projects p ON n.project_id = p.id
 LEFT JOIN fleet_machines m ON n.id = m.network_id
-LEFT JOIN fleet_resources r ON n.id = r.network_id
-LEFT JOIN fleet_deployments d ON n.id = d.network_id
 WHERE n.is_active = 1
-GROUP BY n.id, n.project_id, n.network_name, n.network_uuid, n.is_active,
-         p.slug, p.name, n.created_at, n.updated_at;
+GROUP BY n.id, n.project_id, n.network_name, n.network_uuid,
+         n.is_active, p.slug, p.name, n.created_at, n.updated_at;
 
 CREATE VIEW IF NOT EXISTS javascript_components_view AS
 SELECT
@@ -3037,15 +3113,6 @@ SELECT
     MAX(used_at) as last_used
 FROM prompt_usage_log
 GROUP BY prompt_type, prompt_id;
-
--- related_readmes removed 2026-10-10. It selected from readme_topics,
--- which migration 121 dropped; schema.sql kept creating the view anyway,
--- so every fresh install got a view that cannot be queried. SQLite
--- validates a view body only at query time, which is why this applied
--- cleanly for six migrations and is the exact case the
--- views_are_runnable invariant was written after. The live database no
--- longer has either object, so nothing needs a DROP migration — only
--- fresh installs were still resurrecting it.
 
 CREATE VIEW IF NOT EXISTS secrets_with_keys_view AS
 SELECT
@@ -3298,7 +3365,7 @@ WHERE m.impact_level IN ('high', 'critical')
 ORDER BY c.commit_timestamp DESC;
 
 -- ======================================================================
--- Indexes (256)
+-- Indexes (260)
 -- ======================================================================
 
 CREATE INDEX IF NOT EXISTS agent_pending_asks_session_status
@@ -3356,6 +3423,15 @@ CREATE INDEX IF NOT EXISTS idx_ast_builds_hash ON ast_builds(output_hash);
 
 CREATE INDEX IF NOT EXISTS idx_ast_builds_host ON ast_builds(host_name, generated_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_blob_deletions_hash
+    ON blob_deletions(hash_sha256);
+
+CREATE INDEX IF NOT EXISTS idx_blob_deletions_run
+    ON blob_deletions(gc_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_blob_deletions_time
+    ON blob_deletions(deleted_at);
+
 CREATE INDEX IF NOT EXISTS idx_blue_green_state_lookup
     ON blue_green_state(project_id, target);
 
@@ -3411,13 +3487,13 @@ CREATE INDEX IF NOT EXISTS idx_config_links_checkout ON config_links(checkout_id
 
 CREATE INDEX IF NOT EXISTS idx_config_links_target ON config_links(target_path);
 
-CREATE INDEX IF NOT EXISTS idx_config_nodes_host ON config_nodes(host_id);
+CREATE INDEX IF NOT EXISTS idx_config_nodes_host   ON config_nodes(host_id);
 
 CREATE INDEX IF NOT EXISTS idx_config_nodes_parent ON config_nodes(parent_id);
 
-CREATE INDEX IF NOT EXISTS idx_config_nodes_scope ON config_nodes(scope);
+CREATE INDEX IF NOT EXISTS idx_config_nodes_scope  ON config_nodes(scope);
 
-CREATE INDEX IF NOT EXISTS idx_config_nodes_type ON config_nodes(node_type);
+CREATE INDEX IF NOT EXISTS idx_config_nodes_type   ON config_nodes(node_type);
 
 CREATE INDEX IF NOT EXISTS idx_content_blobs_external_path ON content_blobs(external_path) WHERE external_path IS NOT NULL;
 
@@ -3563,17 +3639,9 @@ CREATE INDEX IF NOT EXISTS idx_flake_metadata_project ON nix_flake_metadata(proj
 
 CREATE INDEX IF NOT EXISTS idx_flake_metadata_updated ON nix_flake_metadata(updated_at);
 
-CREATE INDEX IF NOT EXISTS idx_fleet_deployments_network ON fleet_deployments(network_id, started_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_fleet_deployments_status ON fleet_deployments(status);
-
 CREATE INDEX IF NOT EXISTS idx_fleet_local_services_network_profile ON fleet_local_services(network_id, profile_name);
 
 CREATE INDEX IF NOT EXISTS idx_fleet_local_services_status ON fleet_local_services(status);
-
-CREATE INDEX IF NOT EXISTS idx_fleet_machine_deployments ON fleet_machine_deployments(deployment_id);
-
-CREATE INDEX IF NOT EXISTS idx_fleet_machine_deployments_machine ON fleet_machine_deployments(machine_id, deploy_completed_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_fleet_machines_is_local ON fleet_machines(is_local) WHERE is_local = TRUE;
 
@@ -3584,12 +3652,6 @@ CREATE INDEX IF NOT EXISTS idx_fleet_machines_status ON fleet_machines(deploymen
 CREATE INDEX IF NOT EXISTS idx_fleet_networks_active ON fleet_networks(project_id, is_active) WHERE is_active = 1;
 
 CREATE INDEX IF NOT EXISTS idx_fleet_networks_project ON fleet_networks(project_id);
-
-CREATE INDEX IF NOT EXISTS idx_fleet_resources_machine ON fleet_resources(machine_id);
-
-CREATE INDEX IF NOT EXISTS idx_fleet_resources_network ON fleet_resources(network_id);
-
-CREATE INDEX IF NOT EXISTS idx_fleet_resources_type ON fleet_resources(resource_type);
 
 CREATE INDEX IF NOT EXISTS idx_graph_query_log_lookup
     ON graph_query_log(command, target_kind, target_key);
@@ -3763,6 +3825,16 @@ CREATE INDEX IF NOT EXISTS idx_reconcile_runs_status
     ON reconcile_runs(status, ran_at DESC)
     WHERE status IN ('drift', 'unreachable', 'error');
 
+CREATE INDEX IF NOT EXISTS idx_reconciliation_items_parent
+    ON reconciliation_items(reconciliation_id, disposition);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reconciliations_live_subject
+    ON reconciliations(kind, subject_ref)
+ WHERE status IN ('open', 'in_progress', 'accepted');
+
+CREATE INDEX IF NOT EXISTS idx_reconciliations_status
+    ON reconciliations(status, last_observed_at);
+
 CREATE INDEX IF NOT EXISTS idx_relations_from
     ON relations(from_entity_id, kind);
 
@@ -3848,6 +3920,10 @@ CREATE INDEX IF NOT EXISTS idx_validation_history_type ON nix_flake_validation_h
 
 CREATE INDEX IF NOT EXISTS idx_vcs_branches_head ON vcs_branches(head_commit_id);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vcs_branches_one_default
+    ON vcs_branches(project_id)
+ WHERE is_default = 1;
+
 CREATE INDEX IF NOT EXISTS idx_vcs_commit_metadata_ai ON vcs_commit_metadata(ai_assisted);
 
 CREATE INDEX IF NOT EXISTS idx_vcs_commit_metadata_breaking ON vcs_commit_metadata(is_breaking);
@@ -3865,6 +3941,9 @@ CREATE INDEX IF NOT EXISTS idx_vcs_commit_tags_commit ON vcs_commit_tags(commit_
 CREATE INDEX IF NOT EXISTS idx_vcs_commit_tags_name ON vcs_commit_tags(tag_name);
 
 CREATE INDEX IF NOT EXISTS idx_vcs_commits_branch ON vcs_commits(branch_id);
+
+CREATE INDEX IF NOT EXISTS idx_vcs_commits_git_hash
+    ON vcs_commits(git_commit_hash);
 
 CREATE INDEX IF NOT EXISTS idx_vcs_commits_hash ON vcs_commits(commit_hash);
 
@@ -3887,6 +3966,15 @@ CREATE INDEX IF NOT EXISTS idx_vcs_file_states_file
 
 CREATE INDEX IF NOT EXISTS idx_vcs_file_states_hash
     ON vcs_file_states(content_hash);
+
+CREATE INDEX IF NOT EXISTS idx_vcs_merge_files_merge
+    ON vcs_merge_files(merge_id, disposition);
+
+CREATE INDEX IF NOT EXISTS idx_vcs_merges_project_status
+    ON vcs_merges(project_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_vcs_merges_started
+    ON vcs_merges(started_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_vcs_session_heads_branch
     ON vcs_session_heads(branch_id);
@@ -3921,7 +4009,7 @@ CREATE INDEX IF NOT EXISTS idx_vcs_working_state_staged_session
 CREATE INDEX IF NOT EXISTS idx_vcs_working_state_state ON vcs_working_state(state);
 
 -- ======================================================================
--- Triggers (38)
+-- Triggers (37)
 -- ======================================================================
 
 CREATE TRIGGER IF NOT EXISTS decrement_blob_reference
@@ -4074,33 +4162,6 @@ BEGIN
        AND cb.content_text IS NOT NULL;
 END;
 
-CREATE TRIGGER IF NOT EXISTS fleet_calculate_deployment_duration
-AFTER UPDATE OF completed_at ON fleet_deployments
-WHEN NEW.completed_at IS NOT NULL AND OLD.completed_at IS NULL
-BEGIN
-    UPDATE fleet_deployments
-    SET duration_seconds = CAST((julianday(NEW.completed_at) - julianday(NEW.started_at)) * 86400 AS INTEGER)
-    WHERE id = NEW.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS fleet_calculate_machine_build_duration
-AFTER UPDATE OF build_completed_at ON fleet_machine_deployments
-WHEN NEW.build_completed_at IS NOT NULL AND OLD.build_completed_at IS NULL
-BEGIN
-    UPDATE fleet_machine_deployments
-    SET build_duration_seconds = CAST((julianday(NEW.build_completed_at) - julianday(NEW.build_started_at)) * 86400 AS INTEGER)
-    WHERE id = NEW.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS fleet_calculate_machine_deploy_duration
-AFTER UPDATE OF deploy_completed_at ON fleet_machine_deployments
-WHEN NEW.deploy_completed_at IS NOT NULL AND OLD.deploy_completed_at IS NULL
-BEGIN
-    UPDATE fleet_machine_deployments
-    SET deploy_duration_seconds = CAST((julianday(NEW.deploy_completed_at) - julianday(NEW.deploy_started_at)) * 86400 AS INTEGER)
-    WHERE id = NEW.id;
-END;
-
 CREATE TRIGGER IF NOT EXISTS fleet_local_services_allocate_port
 AFTER INSERT ON fleet_local_services
 FOR EACH ROW
@@ -4152,6 +4213,31 @@ BEGIN
     UPDATE content_blobs
     SET reference_count = reference_count + 1
     WHERE hash_sha256 = NEW.content_hash;
+END;
+
+CREATE TRIGGER IF NOT EXISTS link_intent_to_commit
+AFTER INSERT ON vcs_file_states
+FOR EACH ROW
+WHEN NEW.content_hash IS NOT NULL
+BEGIN
+    UPDATE edit_intents
+       SET applied_commit_id = NEW.commit_id
+     WHERE id = (
+        SELECT ei.id
+          FROM edit_intents ei
+          JOIN vcs_commits c ON c.id = NEW.commit_id
+         WHERE ei.applied_commit_id IS NULL
+           AND ei.status = 'applied'
+           AND ei.project_id = c.project_id
+           AND ei.new_content_hash = NEW.content_hash
+           AND ei.file_path = COALESCE(
+                 NEW.file_path,
+                 (SELECT file_path FROM project_files
+                   WHERE id = NEW.file_id))
+           AND ei.created_at <= c.commit_timestamp
+         ORDER BY ei.created_at DESC, ei.id DESC
+         LIMIT 1
+     );
 END;
 
 CREATE TRIGGER IF NOT EXISTS nix_configs_updated_at
@@ -4233,6 +4319,19 @@ BEGIN
     VALUES
         (NEW.kind, NEW.external_ref, NEW.label, NEW.source_authority,
          NEW.id, OLD.label, OLD.source_authority);
+END;
+
+CREATE TRIGGER IF NOT EXISTS update_blob_reference
+AFTER UPDATE OF content_hash ON file_contents
+FOR EACH ROW
+WHEN OLD.content_hash IS NOT NEW.content_hash
+BEGIN
+    UPDATE content_blobs
+       SET reference_count = MAX(0, reference_count - 1)
+     WHERE hash_sha256 = OLD.content_hash;
+    UPDATE content_blobs
+       SET reference_count = reference_count + 1
+     WHERE hash_sha256 = NEW.content_hash;
 END;
 
 CREATE TRIGGER IF NOT EXISTS update_branch_head_on_commit

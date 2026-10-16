@@ -174,6 +174,8 @@ class SummaryCommand(Command):
                 more = len(errored) + len(violated) - 3
                 print(f"    {_c(f'... and {more} more — `templedb doctor entities`', 'muted')}")
 
+        self._print_reconciliations()
+
         # --- Reconcile per machine ---
         print()
         print(_c("── Reconcile (per fleet machine) ──", 'accent'))
@@ -323,6 +325,55 @@ class SummaryCommand(Command):
 
         print()
         return 0
+
+    # An open reconciliation is a discrepancy someone said they would
+    # deal with. The point of surfacing it here is the idle column: a
+    # violated invariant that has been red for nine days is invisible in
+    # the pane above, because that pane only reports the latest result.
+    # This one reports whether anybody is acting on it.
+    RECONCILE_STALE_DAYS = 7
+
+    def _print_reconciliations(self, max_rows=4):
+        try:
+            from services import reconciliation_service as svc
+            counts = svc.counts()
+            rows = svc.listing(live_only=True, limit=50)
+        except Exception:
+            return      # table absent (DB one migration behind) — say nothing
+        if not rows and not any(counts.get(k) for k in
+                                ('open', 'in_progress', 'accepted')):
+            return
+        print()
+        print(_c("── Reconciliations (discrepancies being worked on) ──",
+                 'accent'))
+        open_n = counts.get('open', 0)
+        prog_n = counts.get('in_progress', 0)
+        acc_n = counts.get('accepted', 0)
+        review_n = counts.get('review_due', 0)
+        head = (f"{open_n} open, {prog_n} in progress, {acc_n} accepted")
+        colour = 'red' if open_n else ('yellow' if prog_n else 'green')
+        extra = ''
+        if review_n:
+            extra = _c(f"  — {review_n} acceptance(s) past their review date",
+                       'yellow')
+        print(f"  {_c(head, colour)}{extra}")
+
+        stale = [r for r in rows
+                 if r['status'] in ('open', 'in_progress')
+                 and (r['days_since_observed'] or 0) >= self.RECONCILE_STALE_DAYS]
+        if stale:
+            print(f"  {_c(f'{len(stale)} untouched for '
+                          f'{self.RECONCILE_STALE_DAYS}+ days', 'red')}")
+        for r in (stale or rows)[:max_rows]:
+            marker = '!' if r['status'] == 'open' else '~'
+            col = 'red' if r['status'] == 'open' else 'yellow'
+            owner = f"  {r['owner']}" if r.get('owner') else ''
+            print(f"    {_c(marker, col)} {r['kind']}/{r['subject_ref'][:40]:<40}"
+                  f" {r['item_count']:>4} item(s), idle "
+                  f"{r['days_since_observed']}d{_c(owner, 'muted')}")
+        if len(rows) > max_rows:
+            print(f"    {_c(f'... {len(rows) - max_rows} more — '
+                            f'`templedb reconcile list`', 'muted')}")
 
     def _print_systemd(self, max_rows=6):
         """Failed and crash-looping units.

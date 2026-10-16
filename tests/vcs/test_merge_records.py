@@ -16,9 +16,12 @@ import os
 import sys
 import unittest
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 
+@pytest.mark.usefixtures("bootstrap_schema")
 class TestMergeRecordSchema(unittest.TestCase):
     """Shape checks that do not need a merge to have happened."""
 

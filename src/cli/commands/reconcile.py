@@ -299,6 +299,212 @@ class ReconcileCommands(Command):
         except Exception as e:
             logger.debug(f"reconcile_runs record failed: {e}")
 
+    # --- reconciliations: the episode surface (migration 140) ---------
+    #
+    # `machine` / `history` above are DETECTION: probe, log the result.
+    # These record what is being done about a discrepancy, for any kind
+    # of discrepancy — the generalisation of vcs_merges and of
+    # unmaintained_columns_baseline.
+
+    def _author(self) -> str:
+        import os
+        return (os.environ.get('TEMPLEDB_AUTHOR')
+                or os.environ.get('USER') or 'unknown')
+
+    def rec_list(self, args) -> int:
+        from services import reconciliation_service as svc
+        from cli.json_output import emit
+        rows = svc.listing(
+            status=getattr(args, 'status', None),
+            kind=getattr(args, 'kind', None),
+            live_only=not getattr(args, 'all', False)
+            and not getattr(args, 'status', None),
+            stale_days=getattr(args, 'stale_days', None),
+            limit=getattr(args, 'limit', 50) or 50,
+        )
+        return emit(args, {"reconciliations": rows},
+                    human_fn=lambda d: self._print_rec_list(
+                        d["reconciliations"]))
+
+    @staticmethod
+    def _print_rec_list(rows):
+        if not rows:
+            print("No reconciliations match.")
+            return
+        print(f"{'id':>4}  {'status':<12} {'kind':<16} {'subject':<38} "
+              f"{'items':>5}  {'age':>5} {'idle':>5}  owner")
+        print("-" * 108)
+        for r in rows:
+            flag = ''
+            if (r['status'] == 'accepted' and r.get('review_after')
+                    and r['review_after'] <= str(r['last_observed_at'])[:10]):
+                flag = ' REVIEW DUE'
+            print(f"{r['id']:>4}  {r['status']:<12} {r['kind'][:16]:<16} "
+                  f"{r['subject_ref'][:38]:<38} {r['item_count']:>5}  "
+                  f"{str(r['age_days']) + 'd':>5} "
+                  f"{str(r['days_since_observed']) + 'd':>5}  "
+                  f"{r['owner'] or '-'}{flag}")
+        print("\nage = since first detected, idle = since last observed.")
+
+    def rec_show(self, args) -> int:
+        from services import reconciliation_service as svc
+        from cli.json_output import emit, emit_error
+        row = svc.get(args.reconciliation_id)
+        if not row:
+            return emit_error(args, "NOT_FOUND",
+                              f"No reconciliation #{args.reconciliation_id}")
+        payload = {"reconciliation": row,
+                   "items": svc.items(args.reconciliation_id)}
+        return emit(args, payload, human_fn=lambda d: self._print_rec_show(d))
+
+    @staticmethod
+    def _print_rec_show(d):
+        r, its = d["reconciliation"], d["items"]
+        print(f"Reconciliation #{r['id']}  [{r['status']}]  {r['kind']}")
+        print(f"  subject:   {r['subject_ref']}")
+        if r.get('title'):
+            print(f"  title:     {r['title']}")
+        if r.get('authority_a') or r.get('authority_b'):
+            print(f"  between:   {r.get('authority_a') or '?'}  vs  "
+                  f"{r.get('authority_b') or '?'}")
+        print(f"  items:     {r['item_count']}")
+        print(f"  detected:  {r['first_detected_at']}"
+              f"   last seen {r['last_observed_at']}"
+              f"   ({r['observation_count']} observation(s))")
+        if r.get('owner'):
+            print(f"  owner:     {r['owner']}")
+        if r.get('source_kind'):
+            print(f"  surfaced by: {r['source_kind']}"
+                  f"{'#' + str(r['source_id']) if r.get('source_id') else ''}")
+        if r['status'] == 'accepted':
+            print(f"  accepted:  {r['accepted_at']} "
+                  f"(fingerprint {r['accepted_fingerprint']})")
+            print(f"    reason:  {r['accepted_reason']}")
+            print(f"    review:  {r.get('review_after') or 'NO REVIEW DATE '
+                                  '— this acceptance is permanent until '
+                                  'someone revisits it'}")
+        if r.get('closed_at'):
+            print(f"  closed:    {r['closed_at']}  {r.get('outcome_note') or ''}")
+        if r.get('observed_json'):
+            print(f"\nLast observation:\n  {str(r['observed_json'])[:400]}")
+        if r.get('plan_md'):
+            print("\nPlan and testimony:")
+            for line in r['plan_md'].strip().splitlines():
+                print(f"  | {line}")
+        if its:
+            print(f"\nItems ({len(its)}):")
+            for i in its:
+                mark = '!' if i['disposition'] == 'open' else ' '
+                print(f"  {mark} {i['disposition']:<17} {i['item_ref']}")
+                if i.get('detail'):
+                    print(f"      {i['detail'][:90]}")
+                if i.get('reasoning'):
+                    conf = f"[{i['confidence']}] " if i.get('confidence') else ""
+                    print(f"      {conf}{i['reasoning'][:90]}")
+        print()
+
+    def rec_open(self, args) -> int:
+        from services import reconciliation_service as svc
+        from cli.json_output import emit
+        result = svc.observe(
+            args.kind, args.subject, title=getattr(args, 'title', None),
+            authority_a=getattr(args, 'authority_a', None),
+            authority_b=getattr(args, 'authority_b', None),
+            item_count=getattr(args, 'items', 0) or 0,
+            source_kind='manual')
+        if getattr(args, 'plan', None):
+            svc.note(result['id'], args.plan, self._author())
+        return emit(args, result, human_fn=lambda d: print(
+            f"Reconciliation #{d['id']} ({d['action']}) — "
+            f"`templedb reconcile show {d['id']}`"))
+
+    def rec_claim(self, args) -> int:
+        from services import reconciliation_service as svc
+        from cli.json_output import emit, emit_error
+        import os
+        sid = os.environ.get('TEMPLEDB_SESSION_ID')
+        ok = svc.claim(args.reconciliation_id, self._author(),
+                       plan=getattr(args, 'plan', None),
+                       session_id=int(sid) if sid and sid.isdigit() else None)
+        if not ok:
+            return emit_error(args, "NOT_CLAIMABLE",
+                              f"#{args.reconciliation_id} is missing or "
+                              f"already closed")
+        return emit(args, {"reconciliation_id": args.reconciliation_id,
+                           "status": "in_progress"},
+                    human_fn=lambda d: print(
+                        f"#{d['reconciliation_id']} is yours (in_progress)"))
+
+    def rec_note(self, args) -> int:
+        from services import reconciliation_service as svc
+        from cli.json_output import emit, emit_error
+        if not svc.note(args.reconciliation_id, args.text, self._author()):
+            return emit_error(args, "NOT_FOUND",
+                              f"No reconciliation #{args.reconciliation_id}")
+        return emit(args, {"reconciliation_id": args.reconciliation_id},
+                    human_fn=lambda d: print(
+                        f"Noted on #{d['reconciliation_id']}"))
+
+    def rec_accept(self, args) -> int:
+        from services import reconciliation_service as svc
+        from cli.json_output import emit, emit_error
+        if not svc.accept(args.reconciliation_id, args.reason,
+                          review_after=getattr(args, 'review_after', None),
+                          author=self._author()):
+            return emit_error(args, "NOT_ACCEPTABLE",
+                              f"#{args.reconciliation_id} is missing or "
+                              f"already closed")
+        row = svc.get(args.reconciliation_id)
+        return emit(args, {"reconciliation_id": args.reconciliation_id,
+                           "fingerprint": row['accepted_fingerprint'],
+                           "review_after": row.get('review_after')},
+                    human_fn=lambda d: (
+                        print(f"#{d['reconciliation_id']} accepted at "
+                              f"fingerprint {d['fingerprint']} — a later "
+                              f"observation that differs will re-open it"),
+                        print("  No review date set; this acceptance stands "
+                              "until someone revisits it."
+                              if not d['review_after'] else
+                              f"  Review after {d['review_after']}."),
+                    ) and None)
+
+    def rec_settle(self, args) -> int:
+        from services import reconciliation_service as svc
+        from cli.json_output import emit, emit_error
+        row = svc.get(args.reconciliation_id)
+        if not row:
+            return emit_error(args, "NOT_FOUND",
+                              f"No reconciliation #{args.reconciliation_id}")
+        closed = svc.settle(row['kind'], row['subject_ref'],
+                            note=getattr(args, 'note', None))
+        if not closed:
+            return emit_error(args, "NOT_LIVE",
+                              f"#{args.reconciliation_id} is already closed")
+        return emit(args, {"reconciliation_id": closed, "status": "settled"},
+                    human_fn=lambda d: print(
+                        f"#{d['reconciliation_id']} settled. A future "
+                        f"detection of the same subject opens a fresh "
+                        f"episode rather than reviving this one."))
+
+    def rec_item(self, args) -> int:
+        from services import reconciliation_service as svc
+        from cli.json_output import emit, emit_error
+        if not svc.get(args.reconciliation_id):
+            return emit_error(args, "NOT_FOUND",
+                              f"No reconciliation #{args.reconciliation_id}")
+        svc.set_item(args.reconciliation_id, args.item_ref,
+                     detail=getattr(args, 'detail', None),
+                     disposition=args.disposition,
+                     reasoning=getattr(args, 'reasoning', None),
+                     confidence=getattr(args, 'confidence', None),
+                     decided_by=self._author())
+        return emit(args, {"reconciliation_id": args.reconciliation_id,
+                           "item_ref": args.item_ref,
+                           "disposition": args.disposition},
+                    human_fn=lambda d: print(
+                        f"#{d['reconciliation_id']} {d['item_ref']}: "
+                        f"{d['disposition']}"))
+
     def schedule(self, args) -> int:
         """Manage the systemd user timer for scheduled reconcile.
 
@@ -521,6 +727,72 @@ def register(cli):
     h.add_argument('--limit', default=30,
                    help='Max rows (default 30)')
     cli.commands['reconcile.history'] = cmd.history
+
+    # Reconciliations — the episode surface. `machine`/`history` detect;
+    # these record what is being done about what was detected.
+    ls = sub.add_parser('list',
+                        help='Reconciliations: discrepancies being worked on')
+    ls.add_argument('--kind', help='e.g. invariant, machine_drift, vcs_merge')
+    ls.add_argument('--status', choices=['open', 'in_progress', 'settled',
+                                        'accepted', 'superseded'])
+    ls.add_argument('--all', action='store_true',
+                    help='Include settled/superseded (default: live only)')
+    ls.add_argument('--stale-days', dest='stale_days', type=int, help=(
+        'Only open/in_progress episodes untouched this long — the ones '
+        'nobody is actually working on'))
+    ls.add_argument('--limit', type=int, default=50)
+    cli.commands['reconcile.list'] = cmd.rec_list
+
+    sh = sub.add_parser('show', help='One reconciliation: plan and items')
+    sh.add_argument('reconciliation_id', type=int)
+    cli.commands['reconcile.show'] = cmd.rec_show
+
+    op = sub.add_parser('open', help='Record a discrepancy by hand')
+    op.add_argument('kind')
+    op.add_argument('subject', help='Stable identity within kind')
+    op.add_argument('--title')
+    op.add_argument('--authority-a', dest='authority_a')
+    op.add_argument('--authority-b', dest='authority_b')
+    op.add_argument('--items', type=int, default=0,
+                    help='How many individual things disagree')
+    op.add_argument('--plan', help='Why this matters and how to settle it')
+    cli.commands['reconcile.open'] = cmd.rec_open
+
+    cl = sub.add_parser('claim', help='Take ownership; moves to in_progress')
+    cl.add_argument('reconciliation_id', type=int)
+    cl.add_argument('--plan', help='Your plan, appended to the record')
+    cli.commands['reconcile.claim'] = cmd.rec_claim
+
+    nt = sub.add_parser('note', help='Append testimony to a reconciliation')
+    nt.add_argument('reconciliation_id', type=int)
+    nt.add_argument('text')
+    cli.commands['reconcile.note'] = cmd.rec_note
+
+    ac = sub.add_parser('accept', help=(
+        'Tolerate a discrepancy deliberately. Fingerprints the current '
+        'state, so a later observation that differs re-opens it instead '
+        'of being absorbed'))
+    ac.add_argument('reconciliation_id', type=int)
+    ac.add_argument('--reason', required=True)
+    ac.add_argument('--review-after', dest='review_after', help=(
+        'YYYY-MM-DD. Without one, an acceptance quietly becomes permanent'))
+    cli.commands['reconcile.accept'] = cmd.rec_accept
+
+    st = sub.add_parser('settle', help='The authorities agree again')
+    st.add_argument('reconciliation_id', type=int)
+    st.add_argument('--note')
+    cli.commands['reconcile.settle'] = cmd.rec_settle
+
+    it = sub.add_parser('item', help="Set one item's disposition")
+    it.add_argument('reconciliation_id', type=int)
+    it.add_argument('item_ref')
+    it.add_argument('--disposition', default='open',
+                    choices=['open', 'fixed', 'accepted',
+                             'not_reproducible', 'wont_fix'])
+    it.add_argument('--detail')
+    it.add_argument('--reasoning', help='Why this disposition')
+    it.add_argument('--confidence', choices=['low', 'medium', 'high'])
+    cli.commands['reconcile.item'] = cmd.rec_item
 
     sc = sub.add_parser('schedule',
                         help='Install/uninstall systemd user timer '

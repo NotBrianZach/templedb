@@ -407,6 +407,101 @@
   <code>templedb</code> on PATH while incomplete breaks callers silently.
 </p>
 
+<h2>Decided: Postgres is primary, and the port drops SQLite</h2>
+
+<div class="callout">
+  <strong>2026-10-16.</strong> The last open question below was answered the
+  other way: Postgres-as-primary is <em>in</em> scope, and the Rust port
+  should not carry SQLite at all. That was the one question flagged as
+  changing every recommendation above, so this section records what it
+  changes rather than quietly leaving the body of the document wrong.
+</div>
+
+<h3>What it settles</h3>
+
+<p>
+  Two of the four open questions dissolve. <strong>Linking system SQLite
+  versus bundling 3.50.2</strong> stops existing: no SQLite in the port means
+  no second engine, so the version-skew risk and the two-versions-one-FTS5-index
+  problem both go away. And the <code>READ_ONLY</code> open flag that was the
+  port's structural guarantee against corrupting the store becomes a read-only
+  Postgres <em>role</em> — enforced by the server rather than by a caller
+  remembering a flag, which is strictly better.
+</p>
+
+<p>
+  A fair amount of the crate also becomes deletable rather than portable:
+  <code>backend/sqlite.rs</code>, the <code>Dialect</code> enum, and the
+  placeholder rewriting in <code>dialect.rs</code> that exists only so one
+  SQL string can serve <code>?1</code> and <code>$1</code>. The pure-logic
+  modules — <code>difflib.rs</code>, <code>fuzzy.rs</code>,
+  <code>like.rs</code> — are unaffected.
+</p>
+
+<h3>What it costs</h3>
+
+<table>
+  <tr><th>Cost</th><th>Detail</th></tr>
+  <tr>
+    <td><strong>The schema boundary moves from 11 tables to everything</strong></td>
+    <td>The read subset is 11 tables and 1 view because, as the README puts
+        it, the boundary follows the readers. A <em>primary</em> has no such
+        luxury: it must hold everything Python writes — 164 tables, 45 views,
+        61 triggers. This, not the write code, is now the bulk of the work.</td>
+  </tr>
+  <tr>
+    <td><strong>cr-sqlite has no Postgres story at all</strong></td>
+    <td>This was the cheapest open question and is now the hardest. 58 of the
+        61 triggers are cr-sqlite's, across 10 <code>sync_*</code> tables, and
+        the extension is SQLite-only. CRDT sync between machines cannot be
+        ported — it has to be redesigned (logical replication is the obvious
+        candidate and is not equivalent), or dropped, or the sync tables stay
+        on a SQLite side-car, which partly defeats the decision.</td>
+  </tr>
+  <tr>
+    <td><strong>FTS5 has no equivalent either</strong></td>
+    <td>The <code>file_contents_fts</code> triggers would become
+        <code>tsvector</code>/GIN, with different tokenisation and ranking.
+        Step 3 already moved matching into Rust, so the <em>reader</em> does
+        not care — which turns out to be the single piece of luck in this
+        decision.</td>
+  </tr>
+  <tr>
+    <td><strong>The test fixture is SQLite</strong></td>
+    <td>Roughly 119 references across 9 modules, underpinning most of the 180
+        tests in <code>templedb-db</code>, all built on an in-memory SQLite
+        database that includes an FTS5 virtual table
+        (<code>testdb.rs</code>). Replacing it means the tests need a
+        Postgres server, which costs the property the README states plainly:
+        <em>no Postgres server is needed to build or to run</em>
+        <code>cargo test</code>. Keeping SQLite as a test-only dependency
+        would preserve it and contradict the decision; the honest options are
+        a server in CI, an ephemeral instance per run, or accepting a much
+        smaller unit-test surface.</td>
+  </tr>
+</table>
+
+<h3>What it changes about verification</h3>
+
+<p>
+  This is the consequence worth reading twice. Byte-diffing against Python
+  works today for one reason: both implementations read the same SQLite file.
+  The moment Postgres is primary, Python is reading a <em>different
+  database</em>, and the 40-invocation sweep stops comparing two
+  implementations and starts comparing two datasets — passing or failing on
+  replication lag rather than on code.
+</p>
+
+<p>
+  So the parity method has an expiry date, and the mirror becomes load-bearing
+  for verification rather than a performance experiment: during cutover the
+  sweep has to run against a Postgres mirrored from a known instant, with
+  Python pointed at the SQLite snapshot that mirror was taken from. After
+  cutover, parity against Python is no longer a meaningful test at all, and
+  the only remaining checks are the unit tests, the difflib oracle, and
+  whatever is written fresh.
+</p>
+
 <h2>Open questions</h2>
 
 <p>
@@ -414,23 +509,28 @@
 </p>
 
 <ul>
-  <li><strong>cr-sqlite: load it, or refuse every <code>sync_*</code>
-  write?</strong> Refusing is cheap and safe and leaves CRDT sync
-  Python-only, possibly forever. Loading it means matching the extension
-  version Python uses and taking on the CRDT semantics.</li>
+  <li><strong>Who writes Postgres first — and what happens to Python in the
+  meantime?</strong> This now gates everything else, and the decision above
+  does not answer it. If Python keeps writing SQLite while Postgres is
+  primary, the data splits. The options are to port Python's write paths to
+  Postgres (433 commands, its own project), to hold Postgres as a replica
+  until the Rust port reaches write parity and cut over in one step with
+  Python retired or read-only, or to run a period where Python writes SQLite
+  and a continuous mirror feeds a read-only Postgres that Rust serves. The
+  rest of this document assumes the second, because it is the only one of the
+  three in which a wrong answer is recoverable.</li>
+
+  <li><strong>cr-sqlite: redesign the sync layer, drop it, or keep a SQLite
+  side-car for the <code>sync_*</code> tables?</strong> No longer a question
+  about loading an extension.</li>
 
   <li><strong>May the harness copy the live database?</strong> The state-diff
   method wants two copies at roughly 340 MB each. If that is unacceptable,
   the alternative is a seeded fixture, which tests less.</li>
 
-  <li><strong>Does the writer link system SQLite instead of bundling
-  3.50.2?</strong> This removes the version-skew question at the cost of the
-  reproducible build the bundled dependency gives.</li>
-
-  <li><strong>Does Postgres-as-primary stay out of scope?</strong> The README
-  couples it to the write path. This document assumes it stays out: writes go
-  to SQLite, Postgres stays a replica. Deciding otherwise changes every
-  recommendation above.</li>
+  <li><strong>What replaces the in-memory test fixture?</strong> An ephemeral
+  Postgres per test run, a shared one in CI, or a smaller unit surface. The
+  current answer — SQLite — is no longer available.</li>
 </ul>
 
 <h2>What this document commits to</h2>
@@ -442,6 +542,18 @@
   order; the guards are the deliverable rather than the SQL; cr-sqlite is a
   boundary not to cross by accident; and the first three pieces of work are a
   clock seam, an exit-code fix and a harness, none of which is a write.
+</p>
+
+<p>
+  The Postgres-as-primary decision does not change any of that. It changes
+  the <em>size</em> of what comes after: the guards still have to be ported
+  one at a time and still carry the incidents that produced them, but they
+  now have to be ported onto a schema that does not exist yet and verified by
+  a method with a known expiry date. The ordering above survives because
+  every step in it — the clock seam, the exit codes, the harness — is engine-
+  independent. The step that was "first write: <code>file set</code>" is now
+  gated on the schema port, which is the one piece of work this document did
+  not previously contain.
 </p>
 
 </body>

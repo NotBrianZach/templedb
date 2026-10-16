@@ -3830,8 +3830,47 @@ WantedBy=timers.target
                 logger.debug(f"invariant_checks record failed: {e}")
             if status == 'ok':
                 self._assert_invariant_claim(claim_scope, name, check_row_id)
+            self._reconcile_invariant(name, status, issues, check_row_id)
             problems.extend(issues)
         return 0 if not problems else 1
+
+    @staticmethod
+    def _reconcile_invariant(name, status, issues, check_row_id):
+        """Keep this check's reconciliation episode in step with the result.
+
+        invariant_checks records that the check ran; this records what is
+        being done about it. Three transitions, all idempotent so an
+        hourly doctor run neither duplicates episodes nor overwrites
+        resolution work:
+
+          violated -> observe()  opens an episode the first time, and
+                      afterwards only bumps the observation counters —
+                      unless the state has moved away from what an
+                      acceptance was granted against, which re-opens it.
+          ok       -> settle()   the authorities agree again.
+          error    -> left alone. A check that could not run is not
+                      evidence that the discrepancy is gone, and
+                      settling on it would silently close real work.
+        """
+        try:
+            from services import reconciliation_service as svc
+            if status == 'violated':
+                svc.observe(
+                    'invariant', name,
+                    title=f"{len(issues)} issue(s) from doctor entities",
+                    authority_a='invariant', authority_b='database',
+                    observed=issues[:20], item_count=len(issues),
+                    source_kind='invariant_checks', source_id=check_row_id)
+            elif status == 'ok':
+                svc.settle('invariant', name,
+                           note='doctor entities reports the invariant holds')
+        except Exception as e:
+            # Diagnostic path: a failure to record must not change the
+            # exit status of doctor itself. Warning, not debug — a
+            # reconciliation that silently fails to open is invisible
+            # work, which is the thing this table exists to prevent.
+            logger.warning("Could not record reconciliation for %s: %s",
+                           name, e)
 
     # Project whose revision a doctor run is about. The invariants
     # describe templedb's own database, so that is the thing a claim
