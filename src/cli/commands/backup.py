@@ -88,6 +88,92 @@ class BackupCommands(Command):
             logger.error(f"Backup failed: {e}")
             return 1
 
+    def prune(self, args) -> int:
+        """Delete old local backups under an explicit keep policy.
+
+        `backup local` creates and `restore` restores; nothing has ever
+        removed. The GCS timer calls `storage backup gcs`, which leaves
+        its local copy behind, so the directory only grows: 166 files /
+        83 GB when this was written, 87 of them from one month, still
+        adding ~0.6 GB a day.
+
+        Dry by default, and the policy is the UNION of the two keeps —
+        a file survives if it is among the newest N *or* inside the day
+        window. Intersection would let `--keep-days 7` silently discard
+        every restore point during a quiet fortnight.
+        """
+        backup_dir = Path(getattr(args, 'dir', None)
+                          or Path(DB_PATH).parent / "backups")
+        if not backup_dir.is_dir():
+            print(f"No backup directory at {backup_dir}")
+            return 0
+
+        keep_last = getattr(args, 'keep_last', 5) or 0
+        keep_days = getattr(args, 'keep_days', 30) or 0
+        if not keep_last and not keep_days:
+            logger.error("Refusing to prune with no keep policy: pass "
+                         "--keep-last and/or --keep-days")
+            return 2
+
+        import time
+        pattern = getattr(args, 'pattern', None) or 'templedb_backup_*.sqlite'
+        files = sorted((p for p in backup_dir.glob(pattern) if p.is_file()),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        if not files:
+            print(f"No files matching {pattern} in {backup_dir}")
+            return 0
+
+        cutoff = time.time() - keep_days * 86400 if keep_days else None
+        keep, drop = [], []
+        for i, p in enumerate(files):
+            # Union, deliberately: newest-N OR within-window.
+            if (keep_last and i < keep_last) or \
+               (cutoff is not None and p.stat().st_mtime >= cutoff):
+                keep.append(p)
+            else:
+                drop.append(p)
+
+        def gb(paths):
+            return sum(p.stat().st_size for p in paths) / 1073741824
+
+        print(f"{backup_dir}")
+        print(f"  {len(files)} file(s), {gb(files):.1f} GB")
+        print(f"  policy: keep newest {keep_last}"
+              f"{f' or newer than {keep_days}d' if keep_days else ''}")
+        print(f"  keep {len(keep)} ({gb(keep):.1f} GB), "
+              f"delete {len(drop)} ({gb(drop):.1f} GB)")
+        if not drop:
+            print("\nNothing to prune.")
+            return 0
+        for p in drop[:8]:
+            print(f"    - {p.name}")
+        if len(drop) > 8:
+            print(f"    … and {len(drop) - 8} more")
+
+        if not getattr(args, 'apply', False):
+            print("\nDry run. Re-run with --apply to delete these.")
+            return 0
+
+        # Never leave zero restore points, whatever the arithmetic said.
+        if not keep:
+            logger.error("Refusing to delete every backup — the policy "
+                         "kept none. Widen --keep-last/--keep-days.")
+            return 2
+
+        freed, failed = 0, 0
+        for p in drop:
+            try:
+                size = p.stat().st_size
+                p.unlink()
+                freed += size
+            except OSError as e:
+                logger.warning("Could not delete %s: %s", p.name, e)
+                failed += 1
+        print(f"\nDeleted {len(drop) - failed} file(s), "
+              f"freed {freed / 1073741824:.1f} GB."
+              + (f" {failed} could not be removed." if failed else ""))
+        return 0
+
     def restore(self, args) -> int:
         """Restore database from local backup"""
         backup_path = Path(args.path).resolve()

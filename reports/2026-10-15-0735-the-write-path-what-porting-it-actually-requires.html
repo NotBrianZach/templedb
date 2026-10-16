@@ -443,11 +443,21 @@
 <table>
   <tr><th>Cost</th><th>Detail</th></tr>
   <tr>
-    <td><strong>The schema boundary moves from 11 tables to everything</strong></td>
+    <td><strong>The schema boundary moves from 11 tables to everything</strong>
+        <br><em>&mdash; withdrawn; see</em> <em>A separate project</em>
+        <em>below</em></td>
     <td>The read subset is 11 tables and 1 view because, as the README puts
         it, the boundary follows the readers. A <em>primary</em> has no such
         luxury: it must hold everything Python writes — 164 tables, 45 views,
-        61 triggers. This, not the write code, is now the bulk of the work.</td>
+        61 triggers. This, not the write code, is now the bulk of the work.
+        <br><br><strong>This cost does not apply</strong> under the
+        arrangement decided below. While the port is a separate project
+        writing a Postgres it owns, the boundary keeps following the code —
+        one write path at a time, mirroring the tables that path touches.
+        164 tables become mandatory only at a cutover, which is now
+        explicitly deferred. This was the largest number in the document and
+        it was an artefact of assuming the port had to be a drop-in
+        replacement before it was useful.</td>
   </tr>
   <tr>
     <td><strong>cr-sqlite has no Postgres story at all</strong></td>
@@ -502,6 +512,91 @@
   whatever is written fresh.
 </p>
 
+<h2>A separate project, and two databases</h2>
+
+<div class="callout">
+  <strong>2026-10-16, and this replaces the blocking question above.</strong>
+  The port stays a <em>separate project</em> until it is ready. Data reaches
+  it by copy, not by sharing: SQLite remains Python's authoritative store and
+  the port owns a Postgres populated from it. Nothing cuts over, and cutover
+  is a later decision made against a port that already works on real data.
+</div>
+
+<p>
+  This is less a new plan than the removal of an assumption the document was
+  carrying unexamined — that the port had to be a drop-in replacement before
+  it was useful. Dropping it costs nothing and settles most of what was open.
+  It is also continuous with how the project already works: the backend split
+  exists so both implementations can run against one live database, and the
+  only write path in the binary is <code>mirror</code>, which writes solely
+  into a Postgres it owns.
+</p>
+
+<h3>What it settles</h3>
+
+<ul>
+  <li><strong>Write work starts now, incrementally.</strong> The port's
+  Postgres is disposable, so a wrong write costs a re-mirror. The
+  &ldquo;nothing is usable until nearly everything is done&rdquo; objection to
+  deferring cutover does not apply to a project that is not pretending to be
+  the primary yet.</li>
+
+  <li><strong>The schema port stops being a prerequisite</strong>, as recorded
+  in the cost table above.</li>
+
+  <li><strong>The 340 MB copy question is moot.</strong> The state-diff
+  harness no longer needs two SQLite copies: mirror at a known instant, run
+  Python's write against SQLite, run the port's against Postgres, diff the
+  resulting states.</li>
+
+  <li><strong>cr-sqlite is deferred rather than answered.</strong> Do not
+  mirror the 10 <code>sync_*</code> tables and do not implement cross-machine
+  sync. It becomes a cutover question, which is the right place for it.</li>
+</ul>
+
+<h3>Two databases, because <code>mirror</code> truncates</h3>
+
+<p>
+  The port's Postgres has to serve two roles that conflict, and the conflict
+  is not theoretical: <code>mirror</code> opens with <code>TRUNCATE</code> on
+  its target tables. Used as a read-parity target it must stay a faithful
+  copy, only ever written by <code>mirror</code>. Used as a write primary it
+  must accept the port's writes. Put both in one database and a sweep run
+  after a write test reports the port's own writes as parity failures, while
+  the next re-mirror silently destroys whatever the write tests built — and
+  both failures look like bugs in something else.
+</p>
+
+<p>
+  So: <strong>two databases</strong>, not two schemas. Isolation by
+  connection string rather than by <code>search_path</code>, because a wrong
+  database name is loud and a wrong <code>search_path</code> is silent, and
+  the operation on the other side of the mistake is <code>TRUNCATE</code>.
+</p>
+
+<p>
+  This also gives the read-only guarantee somewhere to live. The port selects
+  its target through one variable today — <code>TEMPLEDB_URL</code>, with
+  SQLite as the fallback when it is unset (<code>conn.rs</code>). That has to
+  become two, and the pairing to aim for is:
+</p>
+
+<table>
+  <tr><th>Database</th><th>Written by</th><th>Port's role</th></tr>
+  <tr>
+    <td>parity target</td>
+    <td><code>mirror</code> only</td>
+    <td><strong>read-only</strong> — so the port cannot write it by mistake,
+        server-enforced, which is the replacement for the
+        <code>SQLITE_OPEN_READ_ONLY</code> flag noted earlier</td>
+  </tr>
+  <tr>
+    <td>write scratch</td>
+    <td>the port</td>
+    <td>read-write, disposable, re-mirrored at will</td>
+  </tr>
+</table>
+
 <h2>Open questions</h2>
 
 <p>
@@ -509,28 +604,16 @@
 </p>
 
 <ul>
-  <li><strong>Who writes Postgres first — and what happens to Python in the
-  meantime?</strong> This now gates everything else, and the decision above
-  does not answer it. If Python keeps writing SQLite while Postgres is
-  primary, the data splits. The options are to port Python's write paths to
-  Postgres (433 commands, its own project), to hold Postgres as a replica
-  until the Rust port reaches write parity and cut over in one step with
-  Python retired or read-only, or to run a period where Python writes SQLite
-  and a continuous mirror feeds a read-only Postgres that Rust serves. The
-  rest of this document assumes the second, because it is the only one of the
-  three in which a wrong answer is recoverable.</li>
-
-  <li><strong>cr-sqlite: redesign the sync layer, drop it, or keep a SQLite
-  side-car for the <code>sync_*</code> tables?</strong> No longer a question
-  about loading an extension.</li>
-
-  <li><strong>May the harness copy the live database?</strong> The state-diff
-  method wants two copies at roughly 340 MB each. If that is unacceptable,
-  the alternative is a seeded fixture, which tests less.</li>
-
   <li><strong>What replaces the in-memory test fixture?</strong> An ephemeral
   Postgres per test run, a shared one in CI, or a smaller unit surface. The
-  current answer — SQLite — is no longer available.</li>
+  current answer — SQLite — is no longer available. This is now the only
+  open question that blocks work rather than a cutover.</li>
+
+  <li><strong>Does <code>mirror</code> need a known-instant snapshot
+  mode?</strong> The state-diff method depends on knowing which SQLite state
+  a Postgres was copied from. Today nothing records it, and the
+  <code>ANALYZE</code> gap in <em>Known gaps</em> belongs to the same
+  work.</li>
 </ul>
 
 <h2>What this document commits to</h2>

@@ -23,6 +23,25 @@ def register(cli):
     local_parser.add_argument('path', nargs='?', help='Backup file path (default: auto-generated)')
     cli.commands['storage.backup.local'] = backup_cmd.local_backup
 
+    # Nothing deleted local backups until this existed; the directory had
+    # reached 166 files / 83 GB. Dry by default.
+    prune_parser = backup_sub.add_parser(
+        'prune', help='Delete old local backups under a keep policy')
+    prune_parser.add_argument('--keep-last', dest='keep_last', type=int,
+                              default=5,
+                              help='Always keep the newest N (default 5)')
+    prune_parser.add_argument('--keep-days', dest='keep_days', type=int,
+                              default=30, help=(
+                                  'Also keep anything newer than N days '
+                                  '(default 30). Union with --keep-last, '
+                                  'not intersection'))
+    prune_parser.add_argument('--dir', help='Backup directory override')
+    prune_parser.add_argument('--pattern',
+                              help='Glob (default templedb_backup_*.sqlite)')
+    prune_parser.add_argument('--apply', action='store_true',
+                              help='Delete them (default: dry run)')
+    cli.commands['storage.backup.prune'] = backup_cmd.prune
+
     restore_parser = backup_sub.add_parser('restore', help='Restore database from local backup')
     restore_parser.add_argument('path', help='Backup file path')
     cli.commands['storage.backup.restore'] = backup_cmd.restore
