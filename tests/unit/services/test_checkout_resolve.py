@@ -104,6 +104,7 @@ def _session(ended=False):
 
 BUILD = 'build'
 EDIT = 'edit'
+SCAN = 'scan'
 
 
 # --- build takes canonical --------------------------------------------
@@ -990,3 +991,71 @@ def test_a_deleted_path_with_no_commit_history_is_work(
     v = r.classify_edit_tree(pid, tmp_path / 'ws')
     assert v['untracked'] == ['orphan.py']
     assert v['verdict'] == r.TREE_HAS_WORK
+
+
+# --- PURPOSE_SCAN: reachable for readers, never scanned ------------------
+#
+# The distinction the other adoption tests above do not draw. A dead
+# session's tree MUST stay reachable (test_a_dead_sessions_workspace_is_adoptable
+# pins that, and it is right) — but a whole-tree scan does not merely read it,
+# it records what it sees, and an absent file becomes a deletion. Pointed at a
+# four-day-old workspace on 2026-10-16 that produced 63 deletions for files
+# that existed, one of them live in production.
+
+
+def test_scan_refuses_a_dead_sessions_tree_and_takes_canonical(repo):
+    """The incident, in one test."""
+    r, pid = repo([('edit', 'orphan', 1, None, True), ('canonical', 'canon', 1, None, True)])
+    dead = _session(ended=True)
+    execute("UPDATE checkouts SET session_id=? WHERE checkout_path LIKE '%orphan'",
+            (dead,))
+    assert r.resolve(pid, EDIT)['checkout_path'].endswith('orphan'), \
+        "a reader must still reach it, or the work in it is stranded"
+    assert r.resolve(pid, SCAN)['checkout_path'].endswith('canon'), \
+        "a scan must not record deletions from a tree nobody owns"
+
+
+def test_scan_refuses_an_unowned_tree_too(repo):
+    """session_id IS NULL is the `templedb edit` before the session var
+    case. Safe to adopt for reading; still not something to scan, because
+    nothing establishes it is current."""
+    r, pid = repo([('edit', 'ws', 1, None, True), ('canonical', 'canon', 1, None, True)])
+    assert r.resolve(pid, EDIT)['checkout_path'].endswith('ws')
+    assert r.resolve(pid, SCAN)['checkout_path'].endswith('canon')
+
+
+def test_scan_uses_this_sessions_own_workspace(repo):
+    """The point is not to avoid edit trees — it is to avoid trees nobody
+    owns. Your own workspace is exactly what a scan should read, or
+    `vcs status --refresh` would stop showing your own work."""
+    r, pid = repo([('edit', 'mine', 1, None, True), ('canonical', 'canon', 1, None, True)])
+    live = _session()
+    execute("UPDATE checkouts SET session_id=? WHERE checkout_path LIKE '%mine'",
+            (live,))
+    import repositories.checkout_repository as cr
+    orig = cr.CheckoutRepository.current_session_id
+    cr.CheckoutRepository.current_session_id = lambda self: live
+    try:
+        assert r.resolve(pid, SCAN)['checkout_path'].endswith('mine')
+    finally:
+        cr.CheckoutRepository.current_session_id = orig
+
+
+def test_scan_warns_when_it_declines_a_tree(repo, caplog):
+    """Silently reading a different tree than the user expects is its own
+    trap; the refusal has to say which tree it skipped and why."""
+    import logging
+    r, pid = repo([('edit', 'orphan', 1, None, True), ('canonical', 'canon', 1, None, True)])
+    dead = _session(ended=True)
+    execute("UPDATE checkouts SET session_id=? WHERE checkout_path LIKE '%orphan'",
+            (dead,))
+    with caplog.at_level(logging.WARNING):
+        r.resolve(pid, SCAN)
+    assert 'not scanning' in caplog.text
+    assert 'orphan' in caplog.text
+
+
+def test_scan_falls_back_cleanly_with_no_edit_tree_at_all(repo):
+    """The ordinary case after checkout-gc has retired everything."""
+    r, pid = repo([('canonical', 'canon', 1, None, True)])
+    assert r.resolve(pid, SCAN)['checkout_path'].endswith('canon')

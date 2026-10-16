@@ -224,6 +224,29 @@ class CheckoutRepository(BaseRepository):
     # the canonical tree (`vcs status` on an unedited project reports
     # against published content, which is true), while a writer cannot.
     PURPOSE_WRITE = 'write'
+    # Whole-tree scanners that RECORD what they see. Resolves to this
+    # session's workspace if it has one and the canonical tree otherwise,
+    # and never adopts a tree belonging to an ended or absent session.
+    #
+    # EDIT adopts such a tree on purpose, and that is right for a reader:
+    # a dead session's workspace must stay reachable or the work in it is
+    # stranded (tests/unit/services/test_checkout_resolve.py pins this).
+    # Reading a stale tree is merely a stale answer.
+    #
+    # It is not merely stale for a scanner. detect_changes writes
+    # vcs_working_state from whatever tree it is handed, and an absent
+    # file there is recorded as a DELETION. Pointed at a months-old
+    # workspace it manufactures deletions for files that exist: on
+    # 2026-10-16 a `vcs status --refresh` with no owned session adopted
+    # bza/agent-bza-tuning (materialised four days earlier) and recorded
+    # 63 of them, including lib/concepts/scheduling.ts, which was live in
+    # production at the time. 63 of 354 is under the mass-delete guard, so
+    # `vcs add --all && commit` would have carried every one.
+    #
+    # So the fix is not to stop adopting -- that would strand work -- but
+    # to stop adopting FOR THIS, where the output is a durable record
+    # rather than a report somebody reads and discards.
+    PURPOSE_SCAN = 'scan'
 
     def resolve(
         self,
@@ -315,6 +338,24 @@ class CheckoutRepository(BaseRepository):
             mine = [r for r in edits if r['session_id'] == session_id]
             if mine:
                 return mine[0]
+
+        # A scanner takes the canonical tree rather than adopting. Falling
+        # through here rather than returning early, so the canonical-tree
+        # logic below stays the single place that answers "and otherwise?".
+        if purpose == self.PURPOSE_SCAN:
+            stale = [r for r in edits
+                     if r['session_id'] is None
+                     or not self._session_is_live(r['session_id'])]
+            if stale and not quiet:
+                logger.warning(
+                    "Project %s: not scanning %s — its session is ended or "
+                    "absent, and a whole-tree scan records what it sees, so a "
+                    "stale tree becomes deletions for files that still exist. "
+                    "Using the canonical tree instead. `templedb edit <slug>` "
+                    "makes a workspace this session owns; `admin checkout-gc` "
+                    "says whether that one holds work.",
+                    project_id, stale[0]['checkout_path'])
+            edits = []
 
         adoptable = [r for r in edits
                      if r['session_id'] is None

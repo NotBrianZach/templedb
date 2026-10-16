@@ -156,10 +156,19 @@ class VCSCommands(Command):
         file whose old-clone content differs from the current DB blob.
         """
         from importer import WorkingStateDetector
+        from repositories.checkout_repository import CheckoutRepository
         from sync import SyncManager
 
+        # PURPOSE_SCAN, not the default PURPOSE_EDIT. detect_changes writes
+        # vcs_working_state from whatever tree it is given, and a file absent
+        # from that tree is recorded as a deletion — so handing it an adopted
+        # workspace from an ended session manufactures deletions for files that
+        # exist. That happened: 63 of them on bza, four days stale, including a
+        # file live in production. SCAN takes this session's workspace if it has
+        # one and the canonical tree otherwise.
         try:
-            workspace = SyncManager(project['slug']).get_checkout_path()
+            workspace = SyncManager(project['slug']).get_checkout_path(
+                CheckoutRepository.PURPOSE_SCAN)
         except ValueError as e:
             print(f"   Error: {e}", file=sys.stderr)
             return
