@@ -2398,14 +2398,70 @@ Order matches `FLEET_BUCKET_ORDER' in `src/agent/store.py'.")
     (define-key map (kbd "TAB") #'templedb-agent-roster-toggle-bucket)
     (define-key map (kbd "g")   #'templedb-agent-roster-refresh)
     (define-key map (kbd "G")   #'templedb-agent-roster-toggle-auto-refresh)
+    (define-key map (kbd "C")   #'templedb-agent-roster-chat)
+    (define-key map (kbd "?")   #'templedb-agent-roster-guide)
     map)
-  "Keymap for `templedb-agent-roster-mode'.")
+  "Keymap for `templedb-agent-roster-mode'.
+Under evil these are the fallback: six of them (n k K / g G) name keys
+evil's motion state also binds, and a state map outranks the major-mode
+map, so those are dead in a vim-style config.  See
+`templedb-agent--roster-evil-setup' for the aliases that take over
+there.  Both sets stay bound: this map is what a holy-mode or
+emacs-state user gets, and it is what the mode's docstring shows.")
+
+;; Evil puts `special-mode' derivatives in motion state, whose state map
+;; sits in `emulation-mode-map-alists' and so wins over this buffer's
+;; major-mode map.  The collisions are k (previous-line), K (lookup),
+;; n (search-next), / (search-forward), g (the gg/gj/g0 prefix) and
+;; G (goto-line) — everything else in the roster map falls through,
+;; which is why RET and TAB worked while k silently moved the cursor.
+;;
+;; Vim motion wins: none of the six are stolen back.  Instead each
+;; shadowed command gets a second key that motion state leaves alone,
+;; via an auxiliary map that outranks the state maps.  The whole roster
+;; map is re-declared rather than just the six, because normal state
+;; binds c/d/r/a/p/x as operators — a roster buffer that ever lands in
+;; normal state would otherwise lose almost every binding, not six.
+(declare-function evil-define-key* "evil-core" (state keymap key def &rest bindings))
+(declare-function evil-normalize-keymaps "evil-core" (&optional state))
+
+(defun templedb-agent--roster-evil-setup ()
+  "Bind the roster's commands to keys evil's motion state leaves free."
+  (dolist (b '(("RET"  templedb-agent-roster-open)
+               ("C-n"  templedb-agent-roster-next)          ; was n
+               ("C-p"  templedb-agent-roster-previous)
+               ("p"    templedb-agent-roster-previous)
+               ("c"    templedb-agent-roster-reply)
+               ("a"    templedb-agent-roster-answer)
+               ("d"    templedb-agent-roster-dispatch)
+               ("r"    templedb-agent-roster-resume)
+               ("x"    templedb-agent-roster-kill)          ; was k
+               ("R"    templedb-agent-roster-reap)          ; was K
+               ("X"    templedb-agent-roster-expire-asks)
+               ("P"    templedb-agent-roster-filter-project)
+               ("s"    templedb-agent-roster-filter)        ; was /
+               ("TAB"  templedb-agent-roster-toggle-bucket)
+               ("g r"  templedb-agent-roster-refresh)       ; was g
+               ("g A"  templedb-agent-roster-toggle-auto-refresh) ; was G
+               ("C"    templedb-agent-roster-chat)
+               ("g ?"  templedb-agent-roster-guide)         ; ? is evil search
+               ("q"    quit-window)))
+    (evil-define-key* '(motion normal) templedb-agent-roster-mode-map
+                      (kbd (nth 0 b)) (nth 1 b))))
+
+(with-eval-after-load 'evil
+  (templedb-agent--roster-evil-setup))
 
 (define-derived-mode templedb-agent-roster-mode special-mode "TAgent-Roster"
   "Major mode for the Temple Agent roster.
 
 \\{templedb-agent-roster-mode-map}"
   (setq truncate-lines t)
+  ;; Picks up the auxiliary map above — including after a bare
+  ;; `load-file' of this file over a live roster buffer, where evil's own
+  ;; `after-change-major-mode-hook' normalisation never re-runs.
+  (when (fboundp 'evil-normalize-keymaps)
+    (evil-normalize-keymaps))
   (add-hook 'kill-buffer-hook #'templedb-agent--roster-stop-timer nil t))
 
 ;;; Data
@@ -2484,12 +2540,32 @@ and `with-temp-buffer' below would not see it."
                      (if templedb-agent--roster-filter
                          (format "  [filter: %s]" templedb-agent--roster-filter) ""))
              'face 'bold))
+    ;; Read out of the live keymaps instead of spelled out, because the
+    ;; answer differs per config: under evil the roster answers to the
+    ;; aliases in `templedb-agent--roster-evil-setup', and a hardcoded
+    ;; line would keep advertising the keys motion state eats.  No
+    ;; \\<...> prefix on purpose — that would pin the lookup to the
+    ;; major-mode map and hide evil's higher-precedence auxiliary map.
     (insert (propertize
-             (concat "RET open  c reply  a answer  d dispatch  r resume  "
-                     "k kill  K reap procs  X expire asks\n"
-                     "P project  / filter  TAB fold  g refresh  "
-                     (format "G auto-refresh (%s)  q quit\n\n"
-                             (if templedb-agent--roster-timer "on" "off")))
+             (substitute-command-keys
+              (concat "\\[templedb-agent-roster-open] open  "
+                      "\\[templedb-agent-roster-reply] reply  "
+                      "\\[templedb-agent-roster-answer] answer  "
+                      "\\[templedb-agent-roster-dispatch] dispatch  "
+                      "\\[templedb-agent-roster-resume] resume  "
+                      "\\[templedb-agent-roster-kill] kill  "
+                      "\\[templedb-agent-roster-reap] reap procs  "
+                      "\\[templedb-agent-roster-expire-asks] expire asks\n"
+                      "\\[templedb-agent-roster-chat] chat about the fleet  "
+                      "\\[templedb-agent-roster-next]/\\[templedb-agent-roster-previous] next/prev  "
+                      "\\[templedb-agent-roster-filter-project] project  "
+                      "\\[templedb-agent-roster-filter] filter  "
+                      "\\[templedb-agent-roster-toggle-bucket] fold  "
+                      "\\[templedb-agent-roster-refresh] refresh  "
+                      (format "\\[templedb-agent-roster-toggle-auto-refresh] auto-refresh (%s)  "
+                              (if templedb-agent--roster-timer "on" "off"))
+                      "\\[templedb-agent-roster-guide] guide  "
+                      "\\[quit-window] quit\n\n"))
              'face 'shadow))
     (dolist (spec templedb-agent--roster-buckets)
       (let* ((id (nth 0 spec))
@@ -2945,6 +3021,264 @@ outstanding work forever."
                   (buffer-string))))
     (message "%s" (string-trim output)))
   (templedb-agent-roster-refresh))
+
+;;; Fleet management: the documented toolset
+
+;; One list, two readers: the guide window renders it for the human and
+;; the overseer brief hands it to the agent.  They cannot drift into two
+;; different accounts of how to manage a fleet, which is the whole point
+;; of not writing the agent's prompt by hand somewhere else.
+;;
+;; Every entry is a *read* unless marked DANGER.  The roster's own keys
+;; cover the destructive actions with a confirm prompt in front of them;
+;; an agent reaching for the CLI equivalent has no such prompt, which is
+;; why the brief below tells it to ask first.
+(defconst templedb-agent--fleet-tools
+  '(("templedb --json ai agent fleet"
+     "The roster itself: every session bucketed, with `reason', a
+stall flag and F/T/Q counts. This buffer renders exactly this call,
+so it is the shared vocabulary — quote bucket and reason verbatim.")
+    ("templedb ai agent fleet --bucket needs_input"
+     "Just the sessions blocked on a human. Start here.")
+    ("templedb ai agent sessions --project SLUG --status running"
+     "Flat session list. --status running/waiting/interrupted/created/
+closed, --provider, --min-msgs N, --recent-days N, --limit N.")
+    ("templedb ai agent ask list --live"
+     "The questions agents are blocked on. --live keeps it to asks
+still inside the handler's 600s poll deadline — the only ones an
+answer can still reach. --session N to scope it.")
+    ("templedb ai agent log --project SLUG --limit N"
+     "Recent agent work log — what the fleet has actually been doing.")
+    ("templedb ai agent doctor --provider claude-code"
+     "Provider health. Run this before blaming a stalled session on
+the agent: a dead provider looks identical from the roster.")
+    ("templedb ai agent notify list --unsent"
+     "Queued email check-ins; `notify show N' for one row.")
+    ("templedb ai agent ask respond ID --answer TEXT"
+     "DANGER — answers a live question *as the user*. The ask row is
+the delivery mechanism: a real human is waiting at that prompt and
+your text is what they get. Never use it to test anything. Ask the
+user before answering on their behalf.")
+    ("templedb ai agent ask expire --dry-run"
+     "DANGER without --dry-run — writes off every ask past its
+deadline. They are already undeliverable, but this is not reversible.")
+    ("templedb ai agent stop-stale --dry-run"
+     "DANGER without --dry-run — stops stray `ai agent serve'
+processes. ALWAYS use this instead of kill/pkill on a serve PID: it
+auto-excludes its own ancestor chain, and a hand-rolled kill can take
+out the server hosting the session that issued it."))
+  "Commands for inspecting and managing the agent fleet.
+Each entry is (COMMAND DESCRIPTION). A description beginning with
+DANGER marks an action with no undo; see `templedb-agent--fleet-brief'.")
+
+(defun templedb-agent--fleet-tools-text (&optional indent)
+  "Render `templedb-agent--fleet-tools' as plain text, INDENT spaces in."
+  (let ((pad (make-string (or indent 0) ?\s)))
+    (mapconcat
+     (lambda (tool)
+       (concat pad (car tool) "\n"
+               (mapconcat (lambda (l) (concat pad "    " l))
+                          (split-string (cadr tool) "\n" t) "\n")))
+     templedb-agent--fleet-tools "\n\n")))
+
+;;; The guide window
+
+(defun templedb-agent--roster-key-lines ()
+  "Key/action lines for the guide, resolved against the live keymaps.
+Must run in the roster buffer: `substitute-command-keys' reads the
+*active* maps, which is what makes this report the evil aliases to an
+evil user and the plain bindings to everyone else."
+  (mapcar
+   (lambda (pair)
+     (cons (substitute-command-keys (format "\\[%s]" (car pair)))
+           (cdr pair)))
+   '((templedb-agent-roster-open        . "open the session in its own buffer — a full chat with that agent")
+     (templedb-agent-roster-reply       . "send one line to it without leaving the roster (queued as guidance if it is working)")
+     (templedb-agent-roster-answer      . "answer a live question inline")
+     (templedb-agent-roster-chat        . "chat with the fleet overseer about everything that is running")
+     (templedb-agent-roster-dispatch    . "start a new agent on a task (C-u first = no isolated workspace)")
+     (templedb-agent-roster-resume      . "resume an interrupted run")
+     (templedb-agent-roster-kill        . "kill this session's run")
+     (templedb-agent-roster-reap        . "reap orphaned `ai agent serve' processes")
+     (templedb-agent-roster-expire-asks . "write off asks past their deadline")
+     (templedb-agent-roster-next        . "next row")
+     (templedb-agent-roster-previous    . "previous row")
+     (templedb-agent-roster-filter-project . "filter by project")
+     (templedb-agent-roster-filter      . "filter by substring")
+     (templedb-agent-roster-toggle-bucket . "fold the bucket at point")
+     (templedb-agent-roster-refresh     . "refresh now")
+     (templedb-agent-roster-toggle-auto-refresh . "toggle auto-refresh")
+     (templedb-agent-roster-guide       . "this guide")
+     (quit-window                       . "quit"))))
+
+(defun templedb-agent-roster-guide ()
+  "Show what every roster key does, and how to manage the fleet.
+The key column is read out of the keymaps that are live *here*, so it
+shows the bindings this config actually has rather than the ones the
+source happens to list."
+  (interactive)
+  (let ((keys (templedb-agent--roster-key-lines))
+        (evil (bound-and-true-p evil-local-mode)))
+    (with-help-window "*Temple Agent Roster Guide*"
+      (with-current-buffer standard-output
+        (insert "Temple Agent Roster\n")
+        (insert "===================\n\n")
+        (insert "Every agent session you have, bucketed by who is blocked on whom.\n"
+                "The buckets come from `templedb ai agent fleet --json', so this\n"
+                "buffer, the CLI and the GUI cannot drift into three definitions.\n\n")
+        (insert "Keys\n----\n")
+        (when evil
+          (insert "(evil is on, so these are the motion-state aliases; the plain\n"
+                  "bindings k K n / g G are left to vim and still move the cursor.)\n"))
+        (dolist (k keys)
+          (insert (format "  %-8s %s\n" (car k) (cdr k))))
+        (insert "\nBuckets\n-------\n")
+        (dolist (spec templedb-agent--roster-buckets)
+          (insert (format "  %-16s %s\n" (nth 1 spec)
+                          (pcase (nth 0 spec)
+                            ("needs_input" "a live ask or an undecided decision — it is stopped, waiting on you")
+                            ("working"     "running; `⚠ stalled' when the newest event is over 180s old")
+                            ("attention"   "failed, cancelled or interrupted — interrupted is resumable, so not done")
+                            ("done"        "finished its turn; your move")
+                            ("idle"        "finished over 2d ago, or never started")
+                            (_ "")))))
+        (insert "\n  Badges on a row: F findings · T open todos · Q unanswered questions\n")
+        (insert "\nManaging the fleet from a shell\n")
+        (insert "-------------------------------\n")
+        (insert "The same toolset the overseer gets:\n\n")
+        (insert (templedb-agent--fleet-tools-text 2))
+        (insert "\n")))))
+
+;;; The overseer chat
+
+(defcustom templedb-agent-roster-overseer-project "templedb"
+  "Project slug the fleet overseer session runs on.
+The fleet lives in TempleDB's own database, so the overseer wants the
+project whose CLI it will be calling, not the project being worked on."
+  :type 'string
+  :group 'templedb-agent)
+
+(defconst templedb-agent--overseer-buffer "*Temple Agent: Fleet*")
+
+(defun templedb-agent--fleet-digest ()
+  "A compact text snapshot of the fleet, for the overseer's first prompt.
+Seeded rather than left to a tool call so the agent's first answer is
+about the fleet you are looking at, not an empty context."
+  (let* ((payload (templedb-agent--roster-fetch))
+         (rows (append (alist-get 'rows payload) nil)))
+    (if (null rows)
+        "The roster is currently empty."
+      (mapconcat
+       (lambda (r)
+         ;; `json-read-from-string' gives t / :json-false, so test with
+         ;; `eq ... t' exactly as `templedb-agent--roster-row-line' does;
+         ;; :json-false is non-nil and would mark every row stalled.
+         (format "  #%-4s %-12s %-11s %-9s %s%s — %s"
+                 (alist-get 'id r)
+                 (or (alist-get 'project_slug r) "-")
+                 (or (alist-get 'bucket r) "?")
+                 (or (alist-get 'age_label r) "")
+                 (truncate-string-to-width
+                  (replace-regexp-in-string
+                   "[\n\t]+" " " (or (alist-get 'title r) "(untitled)"))
+                  52 nil nil "…")
+                 (if (eq (alist-get 'stalled r) t) "  [STALLED]" "")
+                 (or (alist-get 'reason r) "")))
+       rows "\n"))))
+
+(defun templedb-agent--fleet-brief ()
+  "The overseer's opening prompt: its job, the fleet, and its tools."
+  (concat
+   "You are the fleet overseer for this TempleDB agent roster. I am\n"
+   "looking at the roster in Emacs and want to talk about what is\n"
+   "running — what is stuck and why, what is worth killing, what is\n"
+   "waiting on me, what to dispatch next.\n\n"
+   "Answer about the fleet, not about code. Keep it short: I am\n"
+   "triaging, not reading a report. Quote bucket names and `reason'\n"
+   "verbatim so we are describing the same rows.\n\n"
+   "Snapshot at the moment this session opened — re-read it with the\n"
+   "fleet command below rather than trusting it later in the\n"
+   "conversation, because it goes stale within seconds:\n\n"
+   (templedb-agent--fleet-digest) "\n\n"
+   "Your toolset. Read freely. Anything marked DANGER has no undo and\n"
+   "acts on sessions a human is using, so propose it and wait for me to\n"
+   "say yes — do not run it to find out what it does:\n\n"
+   (templedb-agent--fleet-tools-text 2) "\n\n"
+   "Start by telling me what actually needs me right now."))
+
+(defun templedb-agent-roster-chat (&optional restart)
+  "Chat with a fleet overseer about the sessions on this roster.
+Opens a session seeded with the current fleet snapshot and the
+documented management toolset, in a side window so the roster stays
+visible. With RESTART (a prefix argument) start a fresh overseer
+instead of returning to the running one.
+
+The overseer is dispatched *without* an isolated workspace: it reads
+the fleet and advises, so provisioning a vcs session and an edit tree
+for it would leave an unowned checkout behind for nothing."
+  (interactive "P")
+  (let ((existing (get-buffer templedb-agent--overseer-buffer)))
+    (if (and existing (not restart)
+             (buffer-live-p existing)
+             (with-current-buffer existing templedb-agent--session-id))
+        (progn (templedb-agent--roster-display-side existing)
+               (message "Overseer #%s — `g r' in the roster for a fresh snapshot"
+                        (with-current-buffer existing
+                          templedb-agent--session-id)))
+      (when (and existing (buffer-live-p existing))
+        (kill-buffer existing))
+      (let* ((brief (templedb-agent--fleet-brief))
+             (project templedb-agent-roster-overseer-project)
+             (buf (templedb-agent--overseer-start project)))
+        (templedb-agent--roster-dispatch-when-ready buf brief 0)
+        (templedb-agent--roster-display-side buf)
+        (message "Fleet overseer starting on %s…" project)))))
+
+(defun templedb-agent--overseer-start (project)
+  "Create the overseer buffer on PROJECT with a fresh session, return it.
+Deliberately not `templedb-agent-new': that offers to resume the
+project's most recent live session, and the overseer must never land in
+one.  The candidate it offers can be any running session on PROJECT, so
+accepting would inject this brief into somebody else's conversation
+mid-run — and the offer arrives from a process filter, where a modal
+prompt is already a bad place to be.  Straight to session.create."
+  (let ((buf (get-buffer-create templedb-agent--overseer-buffer)))
+    (with-current-buffer buf
+      (templedb-agent-mode)
+      (setq templedb-agent--project project)
+      (setq templedb-agent--projects (list project))
+      (setq templedb-agent--context-config nil)
+      (templedb-agent--ensure-context-config project)
+      (setq templedb-agent--provider templedb-agent-default-provider)
+      (setq templedb-agent--session-id nil)
+      (templedb-agent--render-buffer)
+      (templedb-agent--set-now "Starting fleet overseer…")
+      (templedb-agent--start-process)
+      (templedb-agent--overseer-wait-then-create buf 0))
+    buf))
+
+(defun templedb-agent--overseer-wait-then-create (buf attempts)
+  "Poll for BUF's process, then create its session. Give up after ~10s."
+  (cond
+   ((> attempts 50)
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (templedb-agent--set-now "Failed to start agent process"))))
+   ((and (buffer-live-p buf)
+         (with-current-buffer buf
+           (and templedb-agent--process
+                (process-live-p templedb-agent--process))))
+    (with-current-buffer buf
+      (templedb-agent--do-create-session buf)))
+   (t
+    (run-at-time 0.2 nil #'templedb-agent--overseer-wait-then-create
+                 buf (1+ attempts)))))
+
+(defun templedb-agent--roster-display-side (buf)
+  "Show BUF beside the roster without stealing the roster's window."
+  (display-buffer
+   buf '((display-buffer-reuse-window display-buffer-in-side-window)
+         (side . right) (slot . 0) (window-width . 0.45))))
 
 (defun templedb-agent--sql-execute (sql)
   "Execute SQL against the TempleDB SQLite database (write mode)."

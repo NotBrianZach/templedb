@@ -250,15 +250,104 @@ auto-refreshing while it is on screen.
 | `DONE · your turn` | the agent finished its turn |
 | `IDLE` | finished >2d ago, or never started |
 
-| Key | Action |
+The roster is a `special-mode` buffer, which evil puts in **motion
+state** — and a state map outranks the major-mode map. Six of the plain
+bindings name keys motion state already owns, so under evil (Spacemacs)
+they move the cursor instead. Those six get an alias on a key evil
+leaves free; vim motion is never stolen back, so `k`, `n`, `/`, `gg` and
+`G` still do what your fingers expect. The header line in the buffer is
+generated from the live keymaps, so it always shows the column that
+applies to *your* config.
+
+| Action | Vanilla / holy | Under evil |
+|---|---|---|
+| **guide — every key and the fleet toolset** | `?` | `g ?` |
+| **chat with the fleet overseer** | `C` | `C` |
+| open the session | `RET` | `RET` |
+| reply without leaving the roster | `c` | `c` |
+| answer a live question inline | `a` | `a` |
+| dispatch a new agent (`C-u` = no isolation) | `d` | `d` |
+| resume | `r` | `r` |
+| next · previous row | `n` / `p` | `C-n` / `C-p` (or `p`) |
+| kill the agent | `k` | `x` |
+| reap orphaned serve processes | `K` | `R` |
+| expire undeliverable asks | `X` | `X` |
+| filter by project | `P` | `P` |
+| filter by substring | `/` | `s` |
+| fold a bucket | `TAB` | `TAB` |
+| refresh | `g` | `g r` |
+| toggle auto-refresh | `G` | `g A` |
+| quit | `q` | `q` |
+
+Both sets stay bound at all times; the evil column only exists because
+`evil-define-key*` installs an auxiliary map that outranks the state
+maps. The wiring is `templedb-agent--roster-evil-setup`, and it declares
+the *whole* roster map rather than just the six — normal state binds
+`c`/`d`/`r`/`a`/`p`/`x` as operators, so a roster buffer that ever
+landed in normal state would otherwise lose nearly everything.
+
+### 7b. The guide (`?` / `g ?`)
+
+Don't memorise the table above — ask the buffer. `?` opens a guide
+window listing every command, the bucket meanings, the `F`/`T`/`Q` badge
+legend and the fleet toolset below. The key column is resolved with
+`substitute-command-keys` against the *live* keymaps, so it prints the
+bindings your config actually has: an evil user sees `x kill`, a holy
+user sees `k kill`, and neither can be wrong. The two-line header inside
+the roster is generated the same way.
+
+### 7c. The fleet overseer (`C`)
+
+`RET` chats *with* one agent. `C` chats *about* all of them. It opens a
+dedicated session in a side window — the roster stays visible — seeded
+with two things: a snapshot of the fleet as it stands, and the
+management toolset below. So the opening answer is about the sessions
+you are looking at, not an empty context. Ask it what is actually
+blocked, what is worth killing, what to dispatch next.
+
+Three deliberate choices:
+
+- **No isolation.** The overseer reads and advises, so it is dispatched
+  without a vcs session or edit workspace. Provisioning one would leave
+  an unowned checkout behind for nothing — see the `checkout_matches_db`
+  note in `CLAUDE.md`.
+- **Always a fresh session**, never `templedb-agent-new`'s resume offer.
+  That offer's candidate is the project's most recent *live* session,
+  which could be any running agent; accepting it would inject the
+  overseer brief into somebody else's conversation mid-run.
+- **`C` returns to the running overseer**; `C-u C` starts a new one. The
+  snapshot in the brief is a point-in-time read and says so — the agent
+  is told to re-read the fleet rather than trust it later in the
+  conversation.
+
+Its project is `templedb-agent-roster-overseer-project` (default
+`templedb`, since the fleet lives in TempleDB's own database).
+
+### 7d. The fleet toolset
+
+One list, `templedb-agent--fleet-tools`, with two readers: the guide
+window renders it for you, and the overseer brief hands it to the agent.
+They cannot drift into two accounts of how to manage a fleet.
+
+| Command | For |
 |---|---|
-| `RET` / `c` | open the session · reply to it without leaving the roster |
-| `a` | answer a live question inline |
-| `d` | dispatch a new agent (`C-u d` = no isolation) |
-| `r` / `k` / `K` | resume · kill · reap orphaned serve processes |
-| `X` | expire undeliverable asks |
-| `P` / `/` / `TAB` | filter by project · by substring · fold a bucket |
-| `g` / `G` | refresh · toggle auto-refresh |
+| `templedb --json ai agent fleet` | the roster itself — the shared vocabulary of bucket + reason |
+| `templedb ai agent fleet --bucket needs_input` | just what is blocked on a human |
+| `templedb ai agent sessions --project S --status running` | flat session list |
+| `templedb ai agent ask list --live` | questions an answer can still reach (inside the 600s deadline) |
+| `templedb ai agent log --project S` | what the fleet has been doing |
+| `templedb ai agent doctor --provider claude-code` | provider health — a dead provider looks exactly like a stalled session |
+| `templedb ai agent notify list --unsent` | queued email check-ins |
+
+Everything above reads. Three entries are marked **DANGER** in the list
+itself, and the brief tells the agent to propose them and wait rather
+than run them to see what they do:
+
+| Command | Why it is dangerous |
+|---|---|
+| `ai agent ask respond ID --answer TEXT` | answers *as you* — a human is waiting at that prompt and your text is what they get |
+| `ai agent ask expire` | writes off every past-deadline ask; not reversible |
+| `ai agent stop-stale` | stops stray `serve` processes — and is the **only** safe way: it excludes its own ancestor chain, where a hand-rolled `kill` can take out the server hosting the session that issued it |
 
 The buckets, the reasons and the stall threshold all come from `templedb ai
 agent fleet --json`, so the CLI, this buffer and the GUI cannot drift into
