@@ -27,6 +27,25 @@ from agent.service import AgentService
 logger = get_logger("AgentProtocol")
 
 
+def _close_thread_db():
+    """Close this worker thread's pooled DB connection as it exits.
+
+    Pooled connections are thread-local, so a run thread gets its own
+    and that connection's read snapshot pins WAL checkpoints for as long
+    as it is open. Letting the thread's locals fall out of scope does
+    free it, but only whenever the interpreter gets round to it — and an
+    agent run is long enough that "eventually" is the wrong guarantee
+    for the thing that bounds a 110 MB -wal. Closing here makes it
+    deterministic. Unconditional, unlike the boundary release in run():
+    the thread is finished, so there is no next request to reuse it.
+    """
+    try:
+        from db_utils import close_connection
+        close_connection()
+    except Exception:
+        logger.debug("thread DB close failed", exc_info=True)
+
+
 class ProtocolServer:
     """JSON-lines protocol server over stdio."""
 
@@ -102,6 +121,23 @@ class ProtocolServer:
                 logger.debug(traceback.format_exc())
                 if request_id is not None:
                     self._respond(request_id, error=str(e))
+            finally:
+                # Request boundary: bound the life of this thread's
+                # pooled DB connection. This process outlives every CLI
+                # invocation, so its connection is the one able to
+                # accumulate an old read snapshot — and in WAL mode a
+                # held snapshot stops a checkpoint advancing past it.
+                # `ai mcp daemon` got this bound in 2026-10; this side
+                # did not, and was still pinning the -wal at frame 21
+                # with 27,039 frames behind it on 2026-10-17. Declines
+                # on its own if a transaction is open, so a long handler
+                # that commits later is unaffected.
+                try:
+                    from db_utils import release_pooled_connection
+                    release_pooled_connection()
+                except Exception:
+                    logger.debug("pooled connection release failed",
+                                 exc_info=True)
 
         self._running = False
         logger.info("Protocol server stopped")
@@ -228,6 +264,8 @@ class ProtocolServer:
             except Exception as e:
                 logger.error(f"send_message error: {e}")
                 self._respond(request_id, error=str(e))
+            finally:
+                _close_thread_db()
 
         thread = threading.Thread(target=run_send, daemon=True)
         thread.start()
@@ -295,6 +333,8 @@ class ProtocolServer:
             except Exception as e:
                 logger.error(f"resume error: {e}")
                 self._respond(request_id, error=str(e))
+            finally:
+                _close_thread_db()
 
         thread = threading.Thread(target=run_resume, daemon=True)
         thread.start()

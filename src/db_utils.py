@@ -178,7 +178,69 @@ def get_connection() -> sqlite3.Connection:
         _thread_local.connection = sqlite3.connect(DB_PATH, timeout=30.0)
         _thread_local.connection.row_factory = sqlite3.Row
         apply_standard_pragmas(_thread_local.connection)
+        import time as _time
+        _thread_local.connection_opened_at = _time.monotonic()
     return _thread_local.connection
+
+
+# A pooled connection older than this is closed at a request boundary,
+# so the next request reopens. Same value and same reasoning as
+# MCPServer.DB_CONN_MAX_AGE_SECONDS: long enough that a burst of calls
+# shares one connection, short enough to bound a snapshot.
+POOLED_CONN_MAX_AGE_SECONDS = 60
+
+
+def release_pooled_connection() -> bool:
+    """Close this thread's pooled connection if it has outlived its bound.
+
+    Call at a REQUEST BOUNDARY, never mid-operation. Returns True if a
+    connection was actually closed.
+
+    Why a boundary and not inside get_connection(): the pooled
+    connection is handed out by reference and several callers hold it
+    across statements (`conn = get_connection()` in file_deps, nixos,
+    nix_store, new_machine and entity). Retiring inside the accessor
+    would let a nested query_all() close a connection its caller was
+    still holding, turning this into a ProgrammingError generator. At a
+    boundary nothing holds it, which is the same reason
+    mcp_server._release_db_connection() is called from a finally around
+    each request rather than from its accessor.
+
+    Why it is needed at all: in WAL mode a reader holding a snapshot
+    stops a checkpoint advancing past it, and nothing outside a process
+    can end that process's transaction -- SQLite has no server, so the
+    only lever is the holder closing its own connection. `ai mcp daemon`
+    got that bound on 2026-10-04; this connection, which is how every
+    `ai agent serve --stdio` reaches the database, never did. Measured
+    2026-10-17, an hour after the daemon side was fixed: the -wal was
+    110 MB with the checkpoint pinned at frame 21 and 27,039 frames
+    behind it, and the daemon's own maintainer reported busy=1 every
+    five minutes. Finalising cursors (2026-10-02, _pooled_cursor) removed
+    the known leak here; bounding the connection removes the class.
+
+    Declines while a transaction is open, in either sense -- an explicit
+    transaction() block or an implicit write transaction from
+    execute(commit=False). Both mean someone is mid-work, and neither
+    committing nor rolling back their data is this function's business.
+    """
+    conn = getattr(_thread_local, 'connection', None)
+    if conn is None:
+        return False
+    if _in_explicit_transaction():
+        return False
+    try:
+        if conn.in_transaction:
+            return False
+    except Exception:
+        return False
+    opened_at = getattr(_thread_local, 'connection_opened_at', None)
+    if opened_at is None:
+        return False
+    import time as _time
+    if _time.monotonic() - opened_at < POOLED_CONN_MAX_AGE_SECONDS:
+        return False
+    close_connection()
+    return True
 
 
 def get_simple_connection(db_path: str = None, row_factory: bool = False) -> sqlite3.Connection:
@@ -207,8 +269,15 @@ def get_simple_connection(db_path: str = None, row_factory: bool = False) -> sql
 def close_connection():
     """Close thread-local connection"""
     if hasattr(_thread_local, 'connection'):
-        _thread_local.connection.close()
-        delattr(_thread_local, 'connection')
+        try:
+            _thread_local.connection.close()
+        finally:
+            delattr(_thread_local, 'connection')
+            # Must go with it, or a later get_connection() opens a fresh
+            # connection that inherits the old timestamp and is retired
+            # on its first boundary, every time.
+            if hasattr(_thread_local, 'connection_opened_at'):
+                delattr(_thread_local, 'connection_opened_at')
 
 
 @contextmanager

@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>summary is not a function of the database</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1rem 0;
+          font-size: 0.89em; }
+  th, td { border: 1px solid var(--border); padding: 0.4rem 0.6rem;
+           text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase;
+       letter-spacing: 0.04em; font-size: 0.82em; }
+  td code { font-size: 0.92em; }
+</style>
+</head>
+<body>
+
+<h1>summary is not a function of the database</h1>
+<p class="lede">
+  Forty-nine invocations of templedb-rust are byte-diffed against Python on
+  every run of <code>just check</code>, and the method works because of a
+  property nobody has had to state: every implemented command is a pure
+  function of the database. <code>summary</code> is the first one that is
+  not. It has five inputs that are not rows, and the reason it has been
+  deferred for three porting steps is the same reason it cannot be stored,
+  cached, compared across the fleet, or read back out of an agent transcript
+  six hours later. This report argues the fix is not an injected clock —
+  that is just the enabling trick — but a split between observing and
+  interpreting, and it lists seven defects found by reading the command
+  closely enough to port it.
+</p>
+
+<h2>The property nobody named</h2>
+
+<p>
+  The Rust port's verification method is a byte diff: run both binaries,
+  compare stdout and the exit code. It has been applied to every command as
+  it landed, and on 2026-10-17 it covered 49 invocations with zero unexpected
+  differences. That method has a precondition, and it has been silently
+  satisfied until now: <strong>both processes must be reading the same
+  input, and the input must be the only thing they read.</strong>
+</p>
+
+<p>
+  Every command ported so far satisfies it. <code>file cat</code>,
+  <code>entity trace</code>, <code>vcs show</code>, <code>search content</code>
+  — each is a pure function from database state to bytes. Run one twice, get
+  the same answer. Run it on another machine against a copy of the database,
+  get the same answer. That is why the cross-backend diff is even meaningful:
+  asking whether SQLite and Postgres agree is only a question you can ask
+  about a function.
+</p>
+
+<div class="callout">
+  So the byte-diff harness has been doing a second job without being asked:
+  <strong>it is a purity test.</strong> A command that cannot be byte-diffed
+  against a second implementation is a command with a hidden input. The
+  README records three such commands and treats them as unrelated
+  exceptions — <code>project list</code> (different layout),
+  <code>search content</code> (different semantics), <code>summary</code>
+  (deferred). The first two are deliberate output choices. The third is a
+  different kind of thing, and conflating them hid that.
+</div>
+
+<h2>The five hidden inputs</h2>
+
+<p>
+  <code>summary</code> reads the database and then reads five other things.
+  Each one makes the output a function of something a caller cannot see:
+</p>
+
+<table>
+<tr><th>Input</th><th>Where</th><th>What it makes non-reproducible</th></tr>
+<tr>
+  <td>Wall clock</td>
+  <td><code>summary.py:457</code>, <code>_age_hint</code> via
+      <code>julianday('now')</code>; also <code>date('now')</code> in
+      <code>reconciliation_service.counts()</code></td>
+  <td>Every age string. Two runs a minute apart disagree. This is the one
+      everybody notices.</td>
+</tr>
+<tr>
+  <td>Parent process id</td>
+  <td><code>summary.py:304</code> —
+      <code>f"{socket.gethostname()}-{os.getppid()}"</code></td>
+  <td>The handoff inbox. The same database shows a different inbox depending
+      on which shell invoked the command.</td>
+</tr>
+<tr>
+  <td>Hostname</td>
+  <td>same line</td>
+  <td>Same, across machines. Two fleet members reading one database see
+      different inboxes by construction.</td>
+</tr>
+<tr>
+  <td>systemd</td>
+  <td><code>_print_systemd</code> →
+      <code>services/systemd_health.collect()</code>, which shells out to
+      <code>systemctl show</code> across two scopes</td>
+  <td>The whole pane. Not in the database at all, and correctly so — the
+      module's docstring is explicit that "a systemd unit is not a row" — but
+      it means the output describes <em>this machine</em>, not the data.</td>
+</tr>
+<tr>
+  <td>Environment</td>
+  <td><code>TEMPLEDB_SESSION_ID</code>, read directly</td>
+  <td>Overrides the inbox identity, invisibly.</td>
+</tr>
+</table>
+
+<p>
+  Four of the five concern one pane each. The clock concerns all of them.
+</p>
+
+<h2>Why this is worse here than it would be elsewhere</h2>
+
+<p>
+  A relative age is a perfectly good thing to print at a terminal. The
+  argument against it is specific to what TempleDB is.
+</p>
+
+<p>
+  <strong>TempleDB stores the absolute fact and the surface throws it
+  away.</strong> <code>ingestion_runs.started_at</code> is
+  <code>2026-10-18 18:36:57</code>. The pane renders <code>last 6min ago</code>
+  — and, to its credit, prints the timestamp beside it. The doctor and
+  reconcile panes do not: they print <code>(15h ago)</code> and
+  <code>idle 0d</code> with no absolute anywhere. Those strings are
+  undatable the moment they leave the terminal.
+</p>
+
+<p>
+  <strong>And they do leave the terminal, into the same database.</strong>
+  This is the part that makes it more than a style preference. TempleDB runs
+  agents (<code>templedb ai agent serve</code>), their tool calls are
+  ingested as <code>ToolCall</code> entities — 21,322 of them in the graph
+  right now — and the output of a command an agent ran is stored. So
+  <code>summary</code>'s output becomes a row, in a database that knows
+  exactly when that row was written, saying <code>15h ago</code> relative to
+  an instant the reader has to reconstruct. The information was in the
+  database, was converted to a relative form for a human who is no longer
+  the only reader, and the absolute form is not recoverable from the text.
+</p>
+
+<p>
+  <strong>The fleet makes it structural.</strong> There are six machines in
+  <code>fleet_machines</code>. <code>summary</code> on two of them cannot be
+  compared, because each output embeds its own now, its own hostname and its
+  own ppid. The one command that aggregates system health is the one command
+  whose output is machine-local.
+</p>
+
+<h2>Seven defects, found by reading it closely enough to port it</h2>
+
+<h3>1. It writes ANSI escapes into pipes, and has no flag to stop</h3>
+
+<p>
+  <code>_c()</code> wraps every coloured string in escape codes
+  unconditionally. There is no <code>isatty</code> check, no
+  <code>NO_COLOR</code> support and no <code>--no-color</code> — the command
+  registers with no arguments at all, so <code>templedb summary --no-color</code>
+  exits 2 with an argparse error. Piping it produces:
+</p>
+
+<pre>  Entity graph       ESC[32m70,099ESC[0m entities, ESC[32m78,296ESC[0m relations</pre>
+
+<p>
+  <code>vcs show</code> and <code>vcs diff</code> both take
+  <code>--no-color</code>; the port implements it and the sweep exercises it.
+  <code>summary</code> is the command most likely to be piped — into a log,
+  into an agent's context, into a handoff note — and it is the one that
+  cannot be.
+</p>
+
+<h3>2. <code>--json</code> is accepted and ignored</h3>
+
+<p>
+  <code>--json</code> is a global flag on the top-level parser.
+  <code>templedb --json summary</code> runs, exits 0, and prints the same
+  ANSI-coloured panes. For an agent, this is the worst of the three possible
+  behaviours: an error would say "not supported", plain text would at least
+  be honest, and silent acceptance says the output <em>is</em> JSON.
+</p>
+
+<p>
+  The two defects compound into one sentence: <strong>the command designed to
+  be read at a glance is the only one with no machine-readable form</strong>,
+  in a system whose heaviest readers are machines.
+</p>
+
+<h3>3. A pane disappears silently when it breaks</h3>
+
+<pre>    try:
+        from services import reconciliation_service as svc
+        counts = svc.counts()
+        rows = svc.listing(live_only=True, limit=50)
+    except Exception:
+        return      # table absent (DB one migration behind) — say nothing</pre>
+
+<p>
+  The comment names one cause and the handler catches every cause. A schema
+  change, a typo in the service, a locked database, a query returning an
+  unexpected shape — all of them produce a <code>summary</code> that is
+  <em>missing a section</em>, on a command whose entire job is to tell you
+  when something is wrong. The failure mode is indistinguishable from "no
+  reconciliations to report", which is the output a healthy system produces.
+  A health surface that hides its own breakage is inverted.
+</p>
+
+<h3>4. <code>ancient</code> starts at the threshold times 24</h3>
+
+<pre>    if hours &lt; threshold_hours * 24:
+        return (f"{int(hours)}h ago", 'stale')
+    return (f"{int(hours / 24)}d ago", 'ancient')</pre>
+
+<p>
+  Read with the doctor pane's threshold of 1 hour, that is 24 hours and looks
+  deliberate. The reconcile pane passes <code>threshold_hours=168</code>, so
+  its cutoff is 4,032 hours — <strong>168 days</strong>. A machine that has
+  not reconciled since July renders as <code>2184h ago</code> rather than
+  <code>91d ago</code>, and never reaches the red class until it has been
+  unreconciled for most of a year. The intent was plainly "a day's worth of
+  the threshold"; the effect is "a threshold's worth of days".
+</p>
+
+<h3>5. Exactly an hour ago renders as 59 minutes, and is classified fresh</h3>
+
+<p>
+  Not a typo — a float boundary, and it is reproducible:
+</p>
+
+<pre>(julianday('2026-10-17 12:00:00') - julianday('2026-10-17 11:00:00')) * 24
+  -> 0.9999999962747097     # 'hours &lt; 1' is TRUE  -> "59min ago", fresh
+(julianday('2026-10-17 06:30:00') - julianday('2026-10-17 05:30:00')) * 24
+  -> 1.0000000074505806     # 'hours &lt; 1' is FALSE -> "1h ago", stale</pre>
+
+<p>
+  A Julian Day is about 2.46 million, an <code>f64</code> resolves it to
+  roughly 47 microseconds, and <code>_age_hint</code> truncates with
+  <code>int()</code>. The same one-hour gap therefore lands on opposite sides
+  of the threshold depending on the time of day. A row stamped exactly one
+  minute ago renders <code>0min ago</code> for the same reason.
+</p>
+
+<p>
+  This is not worth fixing in Python and the Rust port reproduces it
+  deliberately — the point of recording it is that it is the sharpest
+  available illustration of the thesis. <em>The output depends on the clock
+  so finely that it depends on the clock's rounding.</em>
+</p>
+
+<h3>6. The doctor pane has no schedule behind it</h3>
+
+<p>
+  <code>systemctl --user list-timers</code> on zMothership2 lists five:
+  ingest, reconcile, backup, poincare-sync and tmpfiles-clean. Nothing runs
+  <code>doctor entities</code>. The pane's header says "(latest results)",
+  which reads as live and is not.
+</p>
+
+<p>
+  Python has already mitigated this twice — the pane carries the age of its
+  <em>stalest</em> check, chosen over the newest precisely because
+  <code>--check X</code> persists only X — and the output today says
+  <code>stalest 11d ago</code>. That is the right fix for a surface. It is
+  not a fix for the missing timer, and the gap between "9 violated" and
+  "9 violated, as of eleven days ago" is the difference between a health
+  check and a souvenir.
+</p>
+
+<h3>7. There is no summary in <code>summary</code></h3>
+
+<p>
+  Today's output says, across six panes: the entity graph is fine, two of
+  nine ingest adapters are 12 and 14 days stale, one systemd unit is failed,
+  nine invariants are violated with the pane eleven days old, eight
+  reconciliations are open, the one deployed machine reconciled six minutes
+  ago and is <code>ok</code>, and one project is 100% dead imports. Is the
+  system healthy?
+</p>
+
+<p>
+  The command does not say. Each pane colours itself green, yellow or red,
+  and nothing combines them into a verdict — so the reduction the command
+  exists to perform is left to the reader, which is exactly the work the
+  docstring promises to save ("would otherwise require running four commands
+  and squinting"). And the per-pane classification that <em>is</em> computed
+  is carried in ANSI colour, so it is the first thing lost to a pipe.
+</p>
+
+<h2>What the shape should be</h2>
+
+<p>
+  The clock seam built on 2026-10-17 makes <code>summary</code> portable. It
+  does not make it well-formed, and the port should not ship a faithful
+  reproduction of a command whose central problem is structural. The split
+  that falls out of the five inputs is three layers:
+</p>
+
+<table>
+<tr><th>Layer</th><th>Depends on</th><th>Verifiable by</th></tr>
+<tr>
+  <td><strong>Observation</strong> — the facts: counts, per-adapter last
+      run and tallies, per-check status and <code>ran_at</code>, per-machine
+      last reconcile, open-reconciliation rows, unacked handoff counts</td>
+  <td>The database, and nothing else</td>
+  <td>The existing method. Byte-diffable against Python, mirrorable,
+      comparable across backends and across machines.</td>
+</tr>
+<tr>
+  <td><strong>Interpretation</strong> — "6min ago", fresh/stale/ancient,
+      the colour, the verdict</td>
+  <td>The facts plus <em>an instant passed in as an argument</em></td>
+  <td>Unit tests at fixed instants, plus the CPython oracle already written
+      for the arithmetic.</td>
+</tr>
+<tr>
+  <td><strong>Environment</strong> — systemd, session identity</td>
+  <td>The machine</td>
+  <td>Nothing a database diff can reach. Should be visibly separate, not
+      interleaved between two database panes.</td>
+</tr>
+</table>
+
+<p>
+  Stated as a rule the rest of the port can use: <strong>a command should be
+  a pure function of the database, and where it cannot be, the impure inputs
+  should be arguments rather than ambient.</strong> The clock becomes a
+  parameter; the session id becomes a parameter; systemd becomes a separate
+  surface. What is left is a function, and the harness that has verified 49
+  invocations works on it unchanged.
+</p>
+
+<p>
+  This is not a new principle for this codebase — it is the same move
+  <code>search content</code> made when matching left SQL, and the same one
+  the graph walk made when sorting left <code>ORDER BY</code>. Both times the
+  reason was that an answer computed in two places by two engines is two
+  answers. An answer computed from two inputs when one of them is invisible
+  is the same problem wearing different clothes.
+</p>
+
+<h2>What the port will do</h2>
+
+<p>
+  Recommendations, in the order they should be taken. The first three are
+  the port's own business; the last three are proposals against Python.
+</p>
+
+<table>
+<tr><th>#</th><th>Action</th><th>Where</th></tr>
+<tr>
+  <td>1</td>
+  <td>Implement the observation layer as pure functions in
+      <code>templedb-db</code>, returning facts with absolute timestamps.
+      Mirror the seven tables it needs
+      (<code>ingestion_runs</code>, <code>invariant_checks</code>,
+      <code>reconcile_runs</code>, <code>fleet_machines</code>,
+      <code>handoff_notes</code>, <code>reconciliations</code>,
+      <code>reconciliation_items</code>), which also makes them available to
+      the cross-backend diff.</td>
+  <td>port</td>
+</tr>
+<tr>
+  <td>2</td>
+  <td>Render in the CLI with <code>Clock::from_env()</code> and an explicit
+      session id, so <code>TEMPLEDB_RS_NOW</code> plus a fixed session makes
+      the whole command deterministic and therefore testable against a
+      recorded expectation.</td>
+  <td>port</td>
+</tr>
+<tr>
+  <td>3</td>
+  <td>Honour <code>--no-color</code> and <code>NO_COLOR</code>, default to
+      no colour when stdout is not a terminal, and print absolute timestamps
+      beside every age rather than only in the ingest pane. These are
+      deliberate divergences and go in the README's list with the rest.</td>
+  <td>port</td>
+</tr>
+<tr>
+  <td>4</td>
+  <td>Replace the bare <code>except Exception: return</code> with a caught
+      "table absent" case that still prints the pane, saying it could not be
+      read. A health surface should fail loudly in place.</td>
+  <td>Python</td>
+</tr>
+<tr>
+  <td>5</td>
+  <td>Fix the <code>threshold_hours * 24</code> cutoff, or make the two
+      thresholds explicit arguments so the reconcile pane's
+      <code>ancient</code> boundary is stated rather than derived.</td>
+  <td>Python</td>
+</tr>
+<tr>
+  <td>6</td>
+  <td>Add a timer for <code>doctor entities</code>, or stop describing the
+      pane as "(latest results)". The stalest-check date mitigates the
+      symptom and the cause is a missing unit.</td>
+  <td>systemd</td>
+</tr>
+</table>
+
+<h2>The part that generalises to the write path</h2>
+
+<p>
+  The write-path report (2026-10-15) recommends a clock seam, an exit-code
+  fix and a state-diff harness before any write, and both of the first two
+  are now done. This report sharpens why the first one mattered, and the
+  sharpening is not about <code>summary</code>.
+</p>
+
+<p>
+  <strong>Every write is impure in exactly the way <code>summary</code>
+  is.</strong> <code>commit_hash</code> is
+  <code>sha256(f"{id}-{message}-{time.time()}")</code>; every row stamps
+  <code>datetime('now')</code>; session resolution reads the ppid and creates
+  a row if it misses. A write path built the way <code>summary</code> is
+  built — ambient clock, ambient identity, read wherever they are needed —
+  produces a database state that cannot be diffed against Python's, which is
+  precisely the problem the state-diff harness exists to solve and cannot
+  solve on its own.
+</p>
+
+<p>
+  So the rule above is not a style note for one command. It is the
+  precondition for the harness: <strong>the clock and the identity must be
+  arguments threaded from the entry point, not reads performed at the point
+  of use.</strong> <code>summary</code> is a good place to learn that,
+  because it is a read, and being wrong is free.
+</p>
+
+</body>
+</html>
