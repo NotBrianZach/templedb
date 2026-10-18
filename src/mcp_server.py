@@ -12,6 +12,7 @@ import re
 import logging
 import os
 import sqlite3
+import threading
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
@@ -103,7 +104,9 @@ class MCPServer:
         # PROJECT_ROOT is already the templeDB directory (not src/)
         self.templedb_root = PROJECT_ROOT
 
-        # SQLite connection for reuse (with thread check)
+        # SQLite connection for reuse. Per-thread, not per-instance: see
+        # _db_state below.
+        self._db_state = threading.local()
         self._db_conn = None
         self._db_cursor = None
         self._db_conn_opened_at = None
@@ -153,6 +156,58 @@ class MCPServer:
             # Read-only cross-session search over agent-owned state.
             "templedb_agent_search_sections":   self.tool_agent_search_sections,
         }
+
+    # ── Per-thread connection state ──────────────────────────────────────
+    #
+    # These three look like plain attributes and are used as such
+    # everywhere below, but they live in a threading.local(). One
+    # MCPServer instance is shared by every request in `ai mcp daemon`,
+    # and that daemon serves each request on its own thread
+    # (ThreadedHTTPServer), so a single instance-level connection meant
+    # all those threads shared one connection AND one `_db_cursor` slot.
+    # Two concrete failures followed from that:
+    #
+    #   * _fresh_cursor() closes the previously tracked cursor on every
+    #     handout, so a request on thread B closed the cursor thread A
+    #     was still iterating -- "Cannot operate on a closed cursor",
+    #     or silently truncated results.
+    #   * _retire_connection_if_old() closes the connection outright,
+    #     which thread B could do while thread A was mid-query.
+    #
+    # Keeping the state per-thread makes the two mechanisms that bound
+    # the WAL (cursor finalization and connection retirement) operate
+    # only on the calling thread's own connection, so they are safe to
+    # run in a threaded server. In stdio mode there is one thread and
+    # the behaviour is unchanged.
+    #
+    # As a bonus this is what actually releases the snapshot in the
+    # daemon: a request thread is per-request, so its connection dies
+    # with it rather than accumulating a read snapshot for the life of
+    # the process.
+
+    @property
+    def _db_conn(self):
+        return getattr(self._db_state, 'conn', None)
+
+    @_db_conn.setter
+    def _db_conn(self, value):
+        self._db_state.conn = value
+
+    @property
+    def _db_cursor(self):
+        return getattr(self._db_state, 'cursor', None)
+
+    @_db_cursor.setter
+    def _db_cursor(self, value):
+        self._db_state.cursor = value
+
+    @property
+    def _db_conn_opened_at(self):
+        return getattr(self._db_state, 'opened_at', None)
+
+    @_db_conn_opened_at.setter
+    def _db_conn_opened_at(self, value):
+        self._db_state.opened_at = value
 
     def _get_db_connection(self):
         """Get or create database connection (reusable for queries)"""
@@ -239,6 +294,12 @@ class MCPServer:
                 self._db_conn.rollback()
             except Exception:
                 pass
+        self._close_connection()
+
+    def _close_connection(self):
+        """Close this thread's connection and clear its slot. Never raises."""
+        if self._db_conn is None:
+            return
         try:
             self._db_conn.close()
         except Exception:
@@ -257,16 +318,24 @@ class MCPServer:
                 pass
 
     def _release_db_connection(self):
-        """Commit (or rollback on failure) any open transaction on the shared connection.
+        """Commit (or rollback on failure) any open transaction on this thread's connection.
 
         Called after every request handler so long-lived MCP server sessions never
         hold an uncommitted write transaction between requests — which would block
         all writers in other processes indefinitely.
+
+        On a request thread the connection is closed outright rather than
+        aged out. `ai mcp daemon` serves each request on a fresh thread,
+        so that thread's connection has no next request to be reused by:
+        leaving it to be collected when the thread's locals die makes
+        releasing the read snapshot depend on garbage collection timing,
+        and the whole point of this path is that the release be
+        deterministic. The main thread (stdio mode) keeps the 60s
+        lifetime bound instead, where reuse across requests is real.
         """
         # Before the commit, not after: a dangling read statement is what
         # pins WAL checkpoints, and commit() does not finalize one.
         self._close_cursor()
-        self._retire_connection_if_old()
         if self._db_conn is not None:
             try:
                 self._db_conn.commit()
@@ -275,6 +344,10 @@ class MCPServer:
                     self._db_conn.rollback()
                 except Exception:
                     pass
+        if threading.current_thread() is not threading.main_thread():
+            self._close_connection()
+        else:
+            self._retire_connection_if_old()
 
     def _run_templedb_cli(self, args: List[str]) -> Dict[str, Any]:
         """Run templedb CLI command and return result.

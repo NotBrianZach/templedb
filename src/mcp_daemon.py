@@ -6,7 +6,9 @@ One persistent process that serves:
 1. MCP over HTTP/SSE on port 8421 (multiple Claude instances share this)
 2. Hook queries over Unix socket at /tmp/templedb-hook.sock (instant responses)
 
-Both interfaces share a single DB connection (WAL mode, busy_timeout=30s).
+Each component opens its own DB connection with a bounded life (WAL mode,
+busy_timeout=30s) — see MCPDaemon. A third thread checkpoints the WAL
+periodically; see WalMaintainer.
 
 Usage:
     templedb ai mcp daemon          # start daemon (foreground)
@@ -70,8 +72,20 @@ class HookEngine:
         "home-manager build": "templedb nixos home-rebuild system_config",
     }
 
-    def __init__(self, db_conn: sqlite3.Connection):
-        self._db = db_conn
+    def __init__(self, conn_factory):
+        """conn_factory: callable returning a fresh, pragma-configured connection.
+
+        A factory rather than a connection, because this engine lives as
+        long as the daemon does. It was handed the daemon's single
+        process-lifetime connection, and `_refresh_cache` below is
+        reachable at runtime from the hook socket -- so every refresh
+        opened a cursor on a connection nobody would ever close, which in
+        WAL mode is how the -wal file grows without bound (a read
+        transaction pins the checkpoint). The cache is two columns of one
+        small table read a handful of times a day; owning a connection
+        for that is all cost and no benefit.
+        """
+        self._conn_factory = conn_factory
         self._lock = threading.Lock()
         self._project_cache = {}  # repo_url -> slug
         self._slug_set = set()
@@ -79,14 +93,28 @@ class HookEngine:
         self._refresh_cache()
 
     def _refresh_cache(self):
-        """Reload project data from DB into memory."""
+        """Reload project data from DB into memory.
+
+        Opens and closes its own connection: see __init__ for why this
+        engine does not hold one.
+        """
         with self._lock:
+            conn = None
             try:
-                cur = self._db.cursor()
-                cur.execute("SELECT slug, repo_url FROM projects WHERE repo_url IS NOT NULL")
+                conn = self._conn_factory()
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        "SELECT slug, repo_url FROM projects WHERE repo_url IS NOT NULL")
+                    rows = cur.fetchall()
+                finally:
+                    # Finalize the statement explicitly rather than leaving
+                    # it to refcounting -- the same fix db_utils made in
+                    # _pooled_cursor and mcp_server made in _fresh_cursor.
+                    cur.close()
                 self._project_cache = {}
                 self._slug_set = set()
-                for row in cur.fetchall():
+                for row in rows:
                     slug, repo_url = row[0], row[1]
                     self._slug_set.add(slug)
                     if repo_url:
@@ -94,6 +122,12 @@ class HookEngine:
                 logger.info(f"Hook cache refreshed: {len(self._project_cache)} projects")
             except Exception as e:
                 logger.error(f"Cache refresh failed: {e}")
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
     def _is_templedb_project(self, cwd: str) -> bool:
         if cwd in self._project_cache:
@@ -207,10 +241,21 @@ class HookEngine:
 class HookSocketServer(threading.Thread):
     """Listens on a Unix socket for hook queries from Claude Code hooks."""
 
-    def __init__(self, engine: HookEngine, socket_path: str = HOOK_SOCKET_PATH):
+    def __init__(self, engine: HookEngine, socket_path: Optional[str] = None):
+        """socket_path defaults to HOOK_SOCKET_PATH, resolved at call time.
+
+        It used to be a default *argument*, which binds at def time and
+        so ignored any later override of the module constant. run()
+        below unlinks whatever is at the path before binding, so the
+        practical effect was that a test or a smoke script could not
+        point this anywhere else and would silently take over the live
+        daemon's socket -- leaving the real daemon holding an unlinked
+        inode and every Claude Code hook failing until it restarted.
+        Done exactly that once; hence resolving late.
+        """
         super().__init__(daemon=True)
         self.engine = engine
-        self.socket_path = socket_path
+        self.socket_path = socket_path if socket_path is not None else HOOK_SOCKET_PATH
         self._running = False
 
     def run(self):
@@ -387,44 +432,163 @@ class ThreadedHTTPServer(HTTPServer):
 
 
 # ============================================================================
+# WalMaintainer — periodic TRUNCATE checkpoint
+# ============================================================================
+
+# Interval between checkpoints. The point is to bound the -wal between
+# write bursts, not to react quickly, and a TRUNCATE checkpoint takes a
+# brief exclusive lock -- so this is deliberately infrequent.
+WAL_CHECKPOINT_INTERVAL_SECONDS = 300
+
+# Short, unlike the standard 30s: if a writer holds the lock, the right
+# move is to give up and retry at the next interval rather than sit on
+# the database waiting.
+WAL_CHECKPOINT_BUSY_TIMEOUT_MS = 2000
+
+
+class WalMaintainer(threading.Thread):
+    """Checkpoint the WAL from the writer side, periodically.
+
+    Cursor finalization and bounded connection lifetimes stop *this*
+    process pinning a checkpoint. Neither helps when the holder is
+    somebody else, and neither shrinks a -wal that has already grown:
+    an automatic (PASSIVE) checkpoint never truncates the file, so a WAL
+    that spikes once stays at its high-water mark until something runs a
+    TRUNCATE. Historically nothing did, which is how this database
+    reached 9.1 GB of -wal in 2026-09 and 4.0 GB in 2026-10.
+
+    The daemon is the natural home for it: it is the only process always
+    running, and a checkpoint has to come from a process with the
+    database open.
+
+    It reports rather than just acting. A checkpoint that cannot drain
+    the log is the signature of a reader holding an old snapshot, and
+    that is a bug in whoever holds it -- the one diagnostic that names
+    the condition is the gap between `checkpointed` and `log`, which
+    only a checkpoint returns. Logging it at WARNING keeps the condition
+    visible instead of quietly papering over it; `doctor` still reports
+    the file size independently.
+    """
+
+    def __init__(self, conn_factory, interval: int = WAL_CHECKPOINT_INTERVAL_SECONDS):
+        super().__init__(daemon=True, name="wal-maintainer")
+        self._conn_factory = conn_factory
+        self._interval = interval
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        # Wait first: at startup the WAL has just been recovered by
+        # whoever opened the database, and there is nothing to reclaim.
+        while not self._stop.wait(self._interval):
+            try:
+                self.checkpoint_once()
+            except Exception as e:
+                logger.warning(f"WAL checkpoint failed: {e}")
+
+    def checkpoint_once(self) -> Optional[tuple]:
+        """Run one TRUNCATE checkpoint. Returns (busy, log, checkpointed)."""
+        conn = self._conn_factory()
+        try:
+            conn.execute(f"PRAGMA busy_timeout={WAL_CHECKPOINT_BUSY_TIMEOUT_MS}")
+            cur = conn.cursor()
+            try:
+                cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                row = cur.fetchone()
+            finally:
+                cur.close()
+            if row is None:
+                return None
+            busy, log, checkpointed = row[0], row[1], row[2]
+            if busy or checkpointed < log:
+                logger.warning(
+                    "WAL checkpoint incomplete: busy=%s, checkpointed %s of %s "
+                    "frames. A reader is holding an old snapshot; the -wal "
+                    "cannot shrink past it.", busy, checkpointed, log)
+            else:
+                logger.debug(
+                    "WAL checkpoint: %s frames reclaimed", checkpointed)
+            return (busy, log, checkpointed)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# ============================================================================
 # MCPDaemon — orchestrates everything
 # ============================================================================
 
 class MCPDaemon:
-    """Shared MCP daemon: HTTP server + hook socket, one DB connection."""
+    """Shared MCP daemon: HTTP server + hook socket + WAL maintenance.
 
-    def __init__(self, port: int = DEFAULT_PORT):
+    Deliberately owns no process-lifetime DB connection. It is the
+    longest-running process on this database, so any connection it held
+    would be the one most able to pin a WAL checkpoint; components get a
+    factory and open connections with a bounded life instead.
+    """
+
+    def __init__(self, port: int = DEFAULT_PORT,
+                 hook_socket_path: Optional[str] = None):
         self.port = port
-        self._db_conn = None
+        # Overridable so a test or smoke run can bind its own socket:
+        # HookSocketServer.run() unlinks the path before binding, so
+        # anything that cannot be redirected takes over the live one.
+        self.hook_socket_path = (
+            hook_socket_path if hook_socket_path is not None else HOOK_SOCKET_PATH)
         self._mcp_server = None
         self._hook_engine = None
         self._hook_socket = None
         self._http_server = None
+        self._wal_maintainer = None
 
-    def _get_db_connection(self) -> sqlite3.Connection:
-        if self._db_conn is None:
-            self._db_conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
-            self._db_conn.row_factory = sqlite3.Row
-            self._db_conn.execute("PRAGMA journal_mode=WAL")
-            self._db_conn.execute("PRAGMA busy_timeout=30000")
-            self._db_conn.execute("PRAGMA synchronous=NORMAL")
-            self._db_conn.execute("PRAGMA cache_size=-64000")
-            self._db_conn.execute("PRAGMA foreign_keys=ON")
-        return self._db_conn
+    def new_db_connection(self) -> sqlite3.Connection:
+        """Open a fresh connection with TempleDB's standard pragmas.
+
+        This was an inline copy of the pragma list, and it had drifted:
+        it was missing journal_size_limit, which is the pragma that
+        bounds what a checkpoint leaves behind, plus temp_store,
+        mmap_size and the cr-sqlite extension load (without which any
+        write to a sync_* table fails with the opaque "no such function:
+        crsql_internal_sync_bit"). mcp_server.py carries a comment about
+        making exactly this fix for "the longest-lived connection in the
+        system" -- this second copy, in the actual always-on daemon, was
+        missed by it.
+        """
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        from db_utils import apply_standard_pragmas
+        apply_standard_pragmas(conn)
+        return conn
 
     def run(self):
         """Start the daemon (blocking)."""
-        db = self._get_db_connection()
-
         # Import and create MCP server (reuse existing implementation)
         from mcp_server import MCPServer
         self._mcp_server = MCPServer()
-        self._mcp_server._db_conn = db
+        # No connection is injected here. It used to be handed this
+        # daemon's process-lifetime connection, and that silently
+        # disabled MCPServer's own WAL defence: _retire_connection_if_old
+        # returns early unless _db_conn_opened_at is set, and assigning
+        # _db_conn directly never set it. So the 60-second connection
+        # lifetime bound -- written, per its own docstring, *because* the
+        # daemon is "the process that outlives every CLI invocation" --
+        # was a no-op in the daemon and nowhere else. Letting MCPServer
+        # open its own connection restores it, and its state is
+        # per-thread, which the injected connection also was not.
 
         # Start hook engine + socket
-        self._hook_engine = HookEngine(db)
-        self._hook_socket = HookSocketServer(self._hook_engine)
+        self._hook_engine = HookEngine(self.new_db_connection)
+        self._hook_socket = HookSocketServer(
+            self._hook_engine, socket_path=self.hook_socket_path)
         self._hook_socket.start()
+
+        # Periodic TRUNCATE checkpoint — see WalMaintainer.
+        self._wal_maintainer = WalMaintainer(self.new_db_connection)
+        self._wal_maintainer.start()
 
         # Start HTTP server for MCP
         self._http_server = ThreadedHTTPServer(
@@ -471,32 +635,32 @@ class MCPDaemon:
         logger.info(f"TempleDB MCP Daemon starting")
         logger.info(f"  MCP HTTP: http://127.0.0.1:{self.port}/mcp")
         logger.info(f"  MCP SSE:  http://127.0.0.1:{self.port}/sse")
-        logger.info(f"  Hook socket: {HOOK_SOCKET_PATH}")
+        logger.info(f"  Hook socket: {self.hook_socket_path}")
         logger.info(f"  DB: {DB_PATH}")
 
         print(f"TempleDB MCP Daemon running", file=sys.stderr)
         print(f"  MCP:  http://127.0.0.1:{self.port}/mcp", file=sys.stderr)
-        print(f"  Hook: {HOOK_SOCKET_PATH}", file=sys.stderr)
+        print(f"  Hook: {self.hook_socket_path}", file=sys.stderr)
 
         try:
             self._http_server.serve_forever()
         finally:
             # Runs once the loop has actually stopped, so the order is
-            # real: stop accepting, release the socket, then close the DB.
+            # real: stop accepting work, then release the sockets.
             try:
                 self._hook_socket.stop()
+            except Exception:
+                pass
+            try:
+                self._wal_maintainer.stop()
             except Exception:
                 pass
             try:
                 self._http_server.server_close()
             except Exception:
                 pass
-            if self._db_conn:
-                try:
-                    self._db_conn.close()
-                except Exception:
-                    pass
-                self._db_conn = None
+            # No DB connection to close: every component here owns one
+            # with a bounded life rather than sharing the daemon's.
             logger.info("Shutdown complete")
 
 
