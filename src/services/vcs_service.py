@@ -924,6 +924,53 @@ class VCSService(BaseService):
             'reason': None,
         }
 
+    def _absence_is_trustworthy(self, project: dict, checkout) -> bool:
+        """Whether a file missing from `checkout` is evidence of a deletion.
+
+        Presence is evidence on its own: bytes on disk are bytes someone
+        wrote. Absence is only evidence if the tree is supposed to be
+        complete, and an ADOPTED edit workspace is not. resolve() hands
+        back an ended session's tree deliberately -- it must stay
+        reachable or the work in it is stranded -- but that tree can be
+        months old and missing most of the project, and recording those
+        absences as deletions manufactures them.
+
+        Says True unless it can positively identify that case. Three
+        things have to hold to decline: the resolved row is an `edit`
+        tree, it is the tree we actually read, and this session does not
+        own it. Anything else -- no checkout rows (the project's own
+        directory, via the repo_url fallback), the canonical tree, a
+        pre-migration database, an explicitly named directory, any error
+        -- keeps the old behaviour. Defaulting the other way would stop
+        recording real deletions for every project without checkout
+        rows, which is a bigger bug than the one being fixed.
+        """
+        project_id = project.get('id')
+        if project_id is None:
+            # Callers that pass only a slug cannot be checked, and some
+            # do. Not an error — just no evidence either way.
+            return True
+        try:
+            from repositories.checkout_repository import CheckoutRepository
+            repo = CheckoutRepository()
+            # quiet: the caller resolved this tree a moment ago and any
+            # adopted-a-stale-tree warning has already been printed.
+            row = repo.resolve(
+                project_id, CheckoutRepository.PURPOSE_EDIT, quiet=True)
+            if not row:
+                return True
+            if row.get('kind') != 'edit':
+                return True
+            if str(row.get('checkout_path')) != str(checkout):
+                return True
+            session_id = repo.current_session_id()
+            return session_id is not None and row.get('session_id') == session_id
+        except Exception as e:
+            self.logger.debug(
+                "Could not establish ownership of %s (%s); treating the "
+                "absence as real", checkout, e)
+            return True
+
     def _refresh_ws_row_from_disk(
         self, ws_row_id: int, project: dict, file_path: str
     ) -> Optional[str]:
@@ -962,6 +1009,38 @@ class VCSService(BaseService):
             # File removed from disk since last scan. Mark deleted,
             # clear the stale hash — next commit records a proper
             # deletion.
+            #
+            # Unless we cannot trust the absence. The guard below this
+            # one declines stale CONTENT by blob age, and the same
+            # reasoning applies to a file that is simply not there: the
+            # tree resolved here may be an edit workspace belonging to an
+            # ended session, which resolve() adopts on purpose so the
+            # work in it stays reachable. A months-old workspace is
+            # missing most of the project, and every one of those
+            # absences used to land here as a deletion -- then the
+            # stage_all caller stages everything with state !=
+            # 'unmodified' in the same breath, so `vcs add --all &&
+            # commit` carried them. 63 of these were recorded against bza
+            # on 2026-10-16, one of them a file live in production.
+            #
+            # PURPOSE_SCAN fixed this for detect_changes, which is the
+            # other half of the same command; it never reached the
+            # staging path, so `vcs status --refresh` and `vcs add` could
+            # disagree about which tree was authoritative inside one
+            # invocation.
+            if not self._absence_is_trustworthy(project, checkout):
+                prev = self.vcs_repo.query_one(
+                    "SELECT content_hash FROM vcs_working_state WHERE id = ?",
+                    (ws_row_id,))
+                self.logger.warning(
+                    "Not recording %s as deleted: it is absent from %s, but "
+                    "that tree belongs to an ended or absent session and was "
+                    "adopted rather than owned, so its absence is not "
+                    "evidence the file was deleted. Leaving the row alone. "
+                    "`templedb edit %s` makes a workspace this session owns; "
+                    "if the deletion is real, make it there.",
+                    file_path, checkout, project.get('slug', '<project>'))
+                return prev['content_hash'] if prev else None
             self.vcs_repo.execute("""
                 UPDATE vcs_working_state
                 SET state = 'deleted', content_hash = NULL,
