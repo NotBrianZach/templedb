@@ -21,7 +21,7 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, Response
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from db_utils import get_connection, query_all, query_one
+from db_utils import execute, query_all, query_one
 
 router = APIRouter()
 
@@ -43,33 +43,43 @@ def _fmt_size(n):
 @router.get("/nix-store", response_class=HTMLResponse)
 def nix_store_dashboard():
     """Nix Store Integration dashboard."""
-    conn = get_connection()
-
-    # Stats
-    stats = conn.execute("SELECT * FROM nix_store_stats").fetchone()
-    stats = dict(stats) if stats else {}
+    # query_one/query_all rather than taking the pooled connection and
+    # calling conn.execute on it.
+    #
+    # Not because these four leaked a statement. The cursor
+    # conn.execute() returns is unreferenced, so CPython frees it and
+    # finalizes the statement immediately -- measured, these left
+    # nothing pinning a checkpoint, and _pooled_cursor's own docstring
+    # says as much about short-lived frames. The reason is that this
+    # module stops HOLDING the pooled connection: a held reference is
+    # what rules out bounding that connection's life from inside
+    # get_connection(), and the GUI runs for days. The helpers also
+    # finalize deterministically rather than depending on refcount
+    # timing, which is the part that stops being true the moment
+    # something retains the frame.
+    stats = query_one("SELECT * FROM nix_store_stats") or {}
 
     # Recent generations
-    gens = conn.execute("""
+    gens = query_all("""
         SELECT * FROM nix_generation_history LIMIT 15
-    """).fetchall()
+    """)
 
     # Top packages by size
-    top_packages = conn.execute("""
+    top_packages = query_all("""
         SELECT name, nar_size, store_path, is_valid
         FROM nix_store_paths
         WHERE nar_size IS NOT NULL
         ORDER BY nar_size DESC
         LIMIT 15
-    """).fetchall()
+    """)
 
     # Cache stats
-    cache_stats = conn.execute("""
+    cache_stats = query_one("""
         SELECT COUNT(*) as entries,
                COALESCE(SUM(file_size), 0) as total_size,
                COALESCE(SUM(served_count), 0) as total_served
         FROM nix_cache_entries
-    """).fetchone()
+    """) or {}
 
     # Build stats cards
     stats_html = f"""
@@ -257,11 +267,10 @@ def nix_cache_narinfo(store_hash: str):
         return PlainTextResponse(narinfo, media_type="text/x-nix-narinfo")
 
     # Try to generate on-the-fly if path exists in our index
-    conn = get_connection()
-    path_row = conn.execute(
+    path_row = query_one(
         "SELECT store_path FROM nix_store_paths WHERE store_hash = ? AND is_valid = 1",
         (store_hash,)
-    ).fetchone()
+    )
 
     if path_row:
         entry = svc.prepare_cache_entry(path_row["store_path"])
@@ -274,13 +283,11 @@ def nix_cache_narinfo(store_hash: str):
 @router.get("/nix-cache/nar/{store_hash}.nar.zst")
 def nix_cache_nar(store_hash: str):
     """Stream a compressed NAR archive from the local nix store."""
-    conn = get_connection()
-
     # Look up the full store path
-    row = conn.execute(
+    row = query_one(
         "SELECT store_path FROM nix_store_paths WHERE store_hash = ? AND is_valid = 1",
         (store_hash,)
-    ).fetchone()
+    )
 
     if not row:
         return Response(status_code=404)
@@ -312,8 +319,17 @@ def nix_cache_nar(store_hash: str):
         zstd.wait()
         dump.wait()
 
-    # Update served count
-    conn.execute("""
+    # Update served count.
+    #
+    # Was `conn.execute(...)` on the pooled connection with no commit.
+    # Python's sqlite3 opens a transaction for DML and holds it until
+    # someone commits, so this did two things: the increment was never
+    # durable (it rolled back whenever the connection closed), and the
+    # GUI — a process that runs for days — sat on an open WRITE
+    # transaction from the first NAR served onwards. An open write
+    # transaction blocks a TRUNCATE checkpoint, which is the `busy=1`
+    # the WAL maintainer reports. execute() commits by default.
+    execute("""
         UPDATE nix_cache_entries SET served_count = served_count + 1, last_served_at = datetime('now')
         WHERE path_id = (SELECT id FROM nix_store_paths WHERE store_hash = ?)
     """, (store_hash,))
