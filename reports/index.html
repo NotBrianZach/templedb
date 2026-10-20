@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-10-20-1547-resumable-was-a-guess.html">
+  <div class="row">
+    <span class="date">2026-10-20 15:47</span>
+    <span class="title">Resumable was a guess</span>
+  </div>
+  <div class="summary">
+    The roster had been labelling sessions interrupted — resumable since it shipped. It derived that from status, while the code that performs a resume checks something else entirely, so 160 of 173 interrupted-or-failed rows claimed to be resumable when a resume would refuse. Pressing r failed, so the cheap move was always to open a new session — which is how one project accumulated seven separate &ldquo;what's next&rdquo; threads for a single unfinished port. This is that bug, the two other defects found next to it, the regression the first fix introduced, and the per-project altitude the roster never had.
+  </div>
+</a>
+
 <a class="report" href="2026-10-18-1342-summary-is-not-a-function-of-the-database.html">
   <div class="row">
     <span class="date">2026-10-18 13:42</span>
