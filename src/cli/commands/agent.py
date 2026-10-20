@@ -320,6 +320,77 @@ class AgentCommands(Command):
         service.close_session(session_id)
         return 0
 
+    def resume(self, args):
+        """Resume an interrupted run from the CLI.
+
+        The roster has labelled rows "interrupted — resumable" since it
+        shipped, but the only thing that could act on that label was the
+        Emacs `run.resume` protocol call — so an overseer working from a
+        shell could see the backlog and not touch it. This drives
+        `AgentService.resume_run` directly, the way `chat` drives
+        `send_message`, and needs no running `serve`.
+        """
+        from agent.service import AgentService
+        from agent.events import ASSISTANT_DELTA, RUN_COMPLETED, RUN_FAILED
+        from agent import store as _store
+
+        session_id = args.session_id
+        session = _store.get_session(session_id)
+        if not session:
+            print(f"error: session {session_id} not found", file=sys.stderr)
+            return 1
+
+        # Report the precondition before spawning a provider, so a refusal
+        # costs nothing and explains itself.
+        if not _store.session_resumable(session_id):
+            print(f"error: session {session_id} is not resumable — the "
+                  f"previous run already produced an answer.",
+                  file=sys.stderr)
+            print("Send a new message instead "
+                  "(`ai agent chat`, or Emacs C-c C-c).", file=sys.stderr)
+            return 1
+
+        if getattr(args, 'dry_run', False):
+            msgs = _store.get_messages(session_id)
+            tail = msgs[-1] if msgs else None
+            print(f"session #{session_id} ({session['provider_name']}) "
+                  f"— {len(msgs)} message(s)")
+            if tail:
+                body = (tail['content_text'] or '').strip()
+                shape = 'empty placeholder' if not body else 'has text'
+                print(f"  tail: {tail['role']} ({shape})")
+                if not body and tail['role'] == 'assistant':
+                    print("  would drop the placeholder and resume the "
+                          "user turn beneath it")
+            print("  would resume (no run started — this was a dry run)")
+            return 0
+
+        service = AgentService()
+        service.open_session(session_id)
+        print(f"Resuming session {session_id} "
+              f"({session['provider_name']})...\n")
+
+        failed = False
+        try:
+            for event in service.resume_run(session_id):
+                event_type = event.get("type", "")
+                if event_type == ASSISTANT_DELTA:
+                    sys.stdout.write(event.get("data", {}).get("text", ""))
+                    sys.stdout.flush()
+                elif event_type == RUN_COMPLETED:
+                    sys.stdout.write("\n")
+                elif event_type == RUN_FAILED:
+                    error = event.get("data", {}).get("error", "Unknown error")
+                    sys.stdout.write(f"\n[ERROR: {error}]\n")
+                    failed = True
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        finally:
+            service.close_session(session_id)
+
+        return 1 if failed else 0
+
     # ------------------------------------------------------------------
     # notify — autonomous-agent check-ins via email.
     # See src/services/email_service.py for the SMTP-secret setup.
@@ -677,6 +748,18 @@ def register_agent_commands(subparsers, cli):
                              help='Session ID (0 = create new)')
     chat_parser.add_argument('--provider', default='fake', help='Provider for new session')
     cli.commands['ai.agent.chat'] = cmd.chat
+
+    # resume — act on the roster's "interrupted — resumable" rows
+    resume_parser = agent_sub.add_parser(
+        'resume',
+        help='Resume an interrupted run (the CLI half of the roster\'s '
+             '"interrupted — resumable")')
+    resume_parser.add_argument('session_id', type=int, help='Session ID')
+    resume_parser.add_argument(
+        '--dry-run', action='store_true',
+        help="Show the tail and whether it would resume, without "
+             "starting a run.")
+    cli.commands['ai.agent.resume'] = cmd.resume
 
     # log
     log_parser = agent_sub.add_parser('log', help='Show agent work log')

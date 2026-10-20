@@ -10,7 +10,9 @@ import time
 import uuid
 from datetime import datetime
 
-from db_utils import query_one, query_all, execute, transaction
+from db_utils import (
+    query_one, query_all, execute, execute_rowcount, transaction,
+)
 from agent.events import (
     SESSION_CREATED, RUN_STATUS_RUNNING, RUN_STATUS_COMPLETED,
     RUN_STATUS_INTERRUPTED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED,
@@ -258,6 +260,35 @@ def get_messages(session_id, limit=200):
 def get_message(message_id):
     """Get a single message by ID."""
     return query_one("SELECT * FROM agent_messages WHERE id = ?", (message_id,))
+
+
+def discard_empty_assistant_tail(session_id):
+    """Drop a trailing empty assistant row, if that's what the tail is.
+
+    `send_message` inserts an empty assistant placeholder *before* calling
+    the provider, then streams text into it. A provider that dies first
+    (expired OAuth, killed process) leaves the placeholder behind with no
+    content — a turn that never happened.
+
+    It has to go before a resume rather than merely being tolerated: the
+    history handed to the provider is built from `get_messages`, so a
+    leftover empty assistant row would be replayed as a malformed final
+    turn. Removing it restores the pending-user-turn tail that
+    `resume_run` already knows how to handle.
+
+    Deliberately narrow — it cannot touch a row with content, a
+    non-assistant row, or anything but the tail. Returns the number of
+    rows removed (0 or 1).
+    """
+    return execute_rowcount(
+        """DELETE FROM agent_messages
+            WHERE id = (SELECT id FROM agent_messages
+                         WHERE session_id = ?
+                         ORDER BY sequence_number DESC LIMIT 1)
+              AND role = 'assistant'
+              AND COALESCE(TRIM(content_text), '') = ''""",
+        (session_id,),
+    )
 
 
 # --- Events ---
@@ -1084,7 +1115,16 @@ def fleet_rows(project_id=None, newer_than_days=None, limit=200,
                r.started_at AS run_started_at,
                r.error_text AS run_error,
                (SELECT MAX(e.created_at) FROM agent_events e
-                 WHERE e.run_id = r.id) AS last_event_at
+                 WHERE e.run_id = r.id) AS last_event_at,
+               -- Whether a resume would actually be accepted: see
+               -- `AgentService.resume_run`, which needs a pending user turn
+               -- at the tail. Classifying from `status` alone labelled 93
+               -- of 108 interrupted/failed rows "resumable" when resume
+               -- would raise, which is what pushed people into opening a
+               -- fresh session instead.
+               lm.role AS last_msg_role,
+               CASE WHEN COALESCE(TRIM(lm.content_text), '') = ''
+                    THEN 1 ELSE 0 END AS last_msg_empty
           FROM agent_sessions s
           JOIN agent_providers p ON s.provider_id = p.id
           LEFT JOIN projects pr ON pr.id = s.project_id
@@ -1130,6 +1170,10 @@ def fleet_rows(project_id=None, newer_than_days=None, limit=200,
                  ON r.id = (SELECT r2.id FROM agent_runs r2
                              WHERE r2.session_id = s.id
                              ORDER BY r2.id DESC LIMIT 1)
+          LEFT JOIN agent_messages lm
+                 ON lm.id = (SELECT m2.id FROM agent_messages m2
+                              WHERE m2.session_id = s.id
+                              ORDER BY m2.id DESC LIMIT 1)
          WHERE 1=1"""
     # The two leading params belong to the live/dead ask split inside the
     # LEFT JOIN, which is textually ahead of this WHERE clause.
@@ -1174,7 +1218,9 @@ def classify_fleet_row(row, stall_seconds=FLEET_STALL_SECONDS,
       2. 'running' with a dead heartbeat is `working` but flagged stalled,
          never silently dropped into `done`;
       3. failed/cancelled/interrupted is `attention`, not `done` — an
-         interrupted run is resumable and should not look finished;
+         interrupted run may be resumable and should not look finished.
+         Whether it *actually* is comes from `_row_resumable`, not from
+         the status: see there for why guessing was worse than useless;
       4. 'waiting' means the agent finished its turn, which is `done`
          *and* your move; it ages out to `idle`.
     """
@@ -1189,6 +1235,7 @@ def classify_fleet_row(row, stall_seconds=FLEET_STALL_SECONDS,
     dead = int(row.get("dead_asks") or 0)
     decisions = int(row.get("pending_decisions") or 0)
     msgs = int(row.get("pending_msgs") or 0)
+    resumable = _row_resumable(row)
     stalled = False
 
     if live or decisions:
@@ -1210,7 +1257,9 @@ def classify_fleet_row(row, stall_seconds=FLEET_STALL_SECONDS,
         reason = f"{status}: {_error_gist(row.get('run_error'))}" \
             if row.get("run_error") else status
     elif status == "interrupted":
-        bucket, reason = BUCKET_ATTENTION, "interrupted — resumable"
+        bucket = BUCKET_ATTENTION
+        reason = ("interrupted — resumable" if resumable is not False
+                  else "interrupted — already answered, send a new message")
     elif status == "created" and not int(row.get("msg_count") or 0):
         bucket, reason = BUCKET_IDLE, "never started"
     else:
@@ -1248,7 +1297,60 @@ def classify_fleet_row(row, stall_seconds=FLEET_STALL_SECONDS,
         "heartbeat_age": beat,
         "age_seconds": age,
         "expired_asks": dead,
+        "resumable": resumable,
     }
+
+
+def session_resumable(session_id):
+    """`_row_resumable` for one session, straight from its tail message.
+
+    Same predicate as the roster shows, so `ai agent resume` can refuse
+    before spawning a provider instead of letting `resume_run` raise after
+    the process is already up. Returns True/False.
+    """
+    tail = query_one(
+        """SELECT role, content_text FROM agent_messages
+            WHERE session_id = ?
+            ORDER BY sequence_number DESC LIMIT 1""",
+        (session_id,),
+    )
+    return bool(_row_resumable({
+        "last_msg_role": tail["role"] if tail else None,
+        "last_msg_empty": (not (tail["content_text"] or "").strip()
+                           if tail else 0),
+    }))
+
+
+def _row_resumable(row):
+    """Would `AgentService.resume_run` accept this session?
+
+    Mirrors that method's precondition deliberately rather than guessing
+    from `status`: a resume needs an unanswered user turn at the tail.
+    Three cases:
+
+      - tail is a user message      -> True, the normal resumable shape;
+      - tail is an *empty* assistant row -> True. A run that died before
+        emitting anything leaves that stub behind, and it used to block
+        resume on a question that was never answered — 6 sessions were
+        stranded that way, including #331's "do we have the option of
+        using deepseek";
+      - tail is an assistant message with text -> False. The previous run
+        did answer; what you want is a new message, not a resume.
+
+    Returns None when the caller passed a row without message columns (a
+    `list_sessions` row rather than a `fleet_rows` one) — unknown, so the
+    reason line stays optimistic rather than inventing a verdict.
+    """
+    if "last_msg_role" not in row:
+        return None
+    role = row.get("last_msg_role")
+    if role is None:
+        return False  # no messages at all — nothing to resume over
+    if role == "user":
+        return True
+    if role == "assistant":
+        return bool(row.get("last_msg_empty"))
+    return False
 
 
 def _error_gist(text):
@@ -1353,8 +1455,14 @@ def expire_stale_asks(ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS):
     these. Flipping the status stops them being counted as outstanding work
     forever, and keeps `status` honest about whether an answer was ever
     delivered. Returns the number of rows changed.
+
+    `execute_rowcount`, not `execute`: the latter returns cursor.lastrowid,
+    which after an UPDATE is a leftover rowid unrelated to how many rows
+    moved. That made this report "Expired 0 ask(s)" while correctly
+    expiring 16 — a false zero on an irreversible command, which invites
+    running it again.
     """
-    return execute(
+    return execute_rowcount(
         """UPDATE agent_pending_asks
               SET status = 'expired'
             WHERE status = 'pending'

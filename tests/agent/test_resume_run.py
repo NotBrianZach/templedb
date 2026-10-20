@@ -84,6 +84,75 @@ class TestResumeRun(unittest.TestCase):
         with self.assertRaises(ValueError):
             list(service.resume_run(session['id']))
 
+    def test_resume_drops_an_empty_assistant_placeholder(self):
+        """A provider that dies before emitting anything leaves the
+        placeholder `send_message` wrote behind. That stub used to block
+        resume on a question that was never answered — 6 sessions were
+        stranded that way, including #331's "do we have the option of
+        using deepseek".
+        """
+        from agent.service import AgentService
+        from agent import store
+
+        session = store.create_session('fake')
+        run = store.create_run(session['id'])
+        store.add_message(session['id'], 'user', 'do we have deepseek')
+        # The placeholder, never filled because the provider died.
+        store.add_message(session['id'], 'assistant', '', run_id=run['id'])
+        store.complete_run(run['id'], status='failed')
+        store.update_session_status(session['id'], 'interrupted')
+
+        service = AgentService()
+        service.open_session(session['id'])
+        list(service.resume_run(session['id']))
+
+        msgs = store.get_messages(session['id'])
+        user_msgs = [m for m in msgs if m['role'] == 'user']
+        # The question was not duplicated...
+        self.assertEqual(len(user_msgs), 1)
+        self.assertEqual(user_msgs[0]['content_text'], 'do we have deepseek')
+        # ...and it now has a real answer, not two empty stubs.
+        self.assertEqual(msgs[-1]['role'], 'assistant')
+        self.assertTrue(msgs[-1]['content_text'].strip(),
+                        "resume left an empty assistant tail behind")
+        empties = [m for m in msgs
+                   if m['role'] == 'assistant'
+                   and not (m['content_text'] or '').strip()]
+        self.assertEqual(empties, [], "stale placeholder was not discarded")
+
+    def test_discard_helper_refuses_a_tail_with_content(self):
+        """The helper must not be able to eat a real answer."""
+        from agent import store
+
+        session = store.create_session('fake')
+        store.add_message(session['id'], 'user', 'q')
+        store.add_message(session['id'], 'assistant', 'a real answer')
+        self.assertEqual(
+            store.discard_empty_assistant_tail(session['id']), 0)
+        self.assertEqual(len(store.get_messages(session['id'])), 2)
+
+    def test_discard_helper_refuses_a_user_tail(self):
+        from agent import store
+
+        session = store.create_session('fake')
+        store.add_message(session['id'], 'user', 'q')
+        self.assertEqual(
+            store.discard_empty_assistant_tail(session['id']), 0)
+        self.assertEqual(len(store.get_messages(session['id'])), 1)
+
+    def test_discard_helper_leaves_earlier_empties_alone(self):
+        """Only the tail is fair game — an empty row mid-history belongs
+        to a run that already moved on."""
+        from agent import store
+
+        session = store.create_session('fake')
+        store.add_message(session['id'], 'user', 'q1')
+        store.add_message(session['id'], 'assistant', '')
+        store.add_message(session['id'], 'user', 'q2')
+        self.assertEqual(
+            store.discard_empty_assistant_tail(session['id']), 0)
+        self.assertEqual(len(store.get_messages(session['id'])), 3)
+
     def test_send_message_with_content_still_adds_message(self):
         """The pre-existing happy path must still work: passing content
         adds a fresh user message before running."""

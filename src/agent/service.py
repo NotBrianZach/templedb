@@ -438,8 +438,12 @@ class AgentService:
         re-called send_message with the last user content, which appended a
         fresh row and left Claude looking at "hows it goin ... hows it goin").
 
-        Requires that the last message in the session is user-authored —
-        otherwise there's nothing pending to answer and we bail.
+        Requires a pending user turn at the tail — otherwise there's
+        nothing to answer and we bail. An *empty* trailing assistant row
+        does not count as an answer: that's the placeholder `send_message`
+        writes before calling the provider, so a provider that dies first
+        leaves one behind. We drop it and resume the user turn underneath,
+        which is what the author was waiting for all along.
 
         Yields events like send_message.
         """
@@ -450,6 +454,14 @@ class AgentService:
         # Reopen if needed
         if session_id not in self._providers:
             self.open_session(session_id)
+
+        # Clear a dead run's placeholder before inspecting the tail, so the
+        # check below sees the real conversation shape.
+        if store.discard_empty_assistant_tail(session_id):
+            logger.info(
+                f"resume: dropped empty assistant placeholder from a dead "
+                f"run on session {session_id}"
+            )
 
         messages = store.get_messages(session_id)
         if not messages:

@@ -361,5 +361,122 @@ class TestAskRespondCommand(unittest.TestCase):
         self.assertEqual(self.respond(ask_id='cli-twice', answer='twice'), 1)
 
 
+class TestResumableLabel(unittest.TestCase):
+    """`resumable` must mirror `resume_run`'s precondition, not `status`.
+
+    Classifying from status alone called 93 of 108 interrupted/failed rows
+    "resumable" when a resume would raise — which is what trained everyone
+    to open a fresh session instead of resuming one.
+    """
+
+    def classify(self, **overrides):
+        from agent.store import classify_fleet_row
+        return classify_fleet_row(row(**overrides), now=NOW)
+
+    def test_pending_user_turn_is_resumable(self):
+        got = self.classify(status="interrupted", last_msg_role="user",
+                            last_msg_empty=0)
+        self.assertTrue(got["resumable"])
+        self.assertIn("resumable", got["reason"])
+
+    def test_answered_tail_is_not_resumable(self):
+        """An assistant turn with text means the run did answer."""
+        got = self.classify(status="interrupted", last_msg_role="assistant",
+                            last_msg_empty=0)
+        self.assertFalse(got["resumable"])
+        self.assertIn("already answered", got["reason"])
+        self.assertEqual(got["bucket"], "attention")
+
+    def test_empty_assistant_placeholder_is_still_resumable(self):
+        """The stub a dead provider leaves behind is not an answer.
+
+        Six sessions were stranded this way, including #331's
+        "do we have the option of using deepseek".
+        """
+        got = self.classify(status="interrupted", last_msg_role="assistant",
+                            last_msg_empty=1)
+        self.assertTrue(got["resumable"])
+        self.assertIn("resumable", got["reason"])
+
+    def test_no_messages_is_not_resumable(self):
+        got = self.classify(status="interrupted", last_msg_role=None,
+                            last_msg_empty=0)
+        self.assertFalse(got["resumable"])
+
+    def test_unknown_tail_stays_optimistic(self):
+        """A `list_sessions` row has no message columns; don't invent a
+        verdict for it."""
+        got = self.classify(status="interrupted")
+        self.assertIsNone(got["resumable"])
+        self.assertIn("resumable", got["reason"])
+
+
+class TestSessionResumable(unittest.TestCase):
+    """The single-session helper `ai agent resume` checks before spawning."""
+
+    @classmethod
+    def setUpClass(cls):
+        setup_test_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        teardown_test_db()
+
+    def setUp(self):
+        setup_test_db()
+
+    def test_empty_assistant_tail_reads_as_resumable(self):
+        from agent import store
+        session = store.create_session('fake')
+        store.add_message(session['id'], 'user', 'do we have deepseek')
+        store.add_message(session['id'], 'assistant', '')
+        self.assertTrue(store.session_resumable(session['id']))
+
+    def test_answered_tail_reads_as_not_resumable(self):
+        from agent import store
+        session = store.create_session('fake')
+        store.add_message(session['id'], 'user', 'q')
+        store.add_message(session['id'], 'assistant', 'a real answer')
+        self.assertFalse(store.session_resumable(session['id']))
+
+    def test_empty_session_is_not_resumable(self):
+        from agent import store
+        session = store.create_session('fake')
+        self.assertFalse(store.session_resumable(session['id']))
+
+
+class TestExpireReturnsRowcount(unittest.TestCase):
+    """`expire_stale_asks` returned lastrowid, so it reported 0 while
+    expiring 16 — a false zero on an irreversible command."""
+
+    @classmethod
+    def setUpClass(cls):
+        setup_test_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        teardown_test_db()
+
+    def setUp(self):
+        setup_test_db()
+
+    def test_count_matches_rows_expired(self):
+        from agent import store
+        from db_utils import execute
+        session = store.create_session('fake')
+        for i in range(3):
+            store.create_pending_ask(
+                f'stale-{i}', session['id'], 'question',
+                {'questions': [{'question': f'q{i}?'}]})
+        # Backdate them past the handler deadline.
+        execute(
+            """UPDATE agent_pending_asks
+                  SET created_at = datetime('now', '-2 hours')
+                WHERE ask_id LIKE 'stale-%'""")
+        self.assertEqual(store.expire_stale_asks(), 3)
+        # And idempotent: nothing left to expire.
+        self.assertEqual(store.expire_stale_asks(), 0)
+
+
 if __name__ == '__main__':
     unittest.main()
