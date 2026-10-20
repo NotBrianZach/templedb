@@ -1353,6 +1353,73 @@ def _row_resumable(row):
     return False
 
 
+def fleet_rollup(newer_than_days=None, limit=1000,
+                 stall_seconds=FLEET_STALL_SECONDS,
+                 idle_days=FLEET_IDLE_DAYS,
+                 ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS):
+    """Per-project fleet aggregate — the 1000-foot view of the roster.
+
+    The roster answers "what is this session doing"; at 25 projects and
+    300+ sessions nothing answered "which project needs me". This rolls
+    `fleet` up by project so one line stands in for a whole column of
+    session rows.
+
+    Returns a list of dicts sorted most-urgent first (anything blocked on
+    a human, then anything stalled, then by how long the oldest waiting
+    row has waited), each carrying:
+
+      slug, sessions, needs_you, working, stalled, attention, idle,
+      resumable, todos_open, expired_asks, oldest_wait (seconds or None)
+
+    `needs_you` deliberately merges the `needs_input` and `done` buckets:
+    from a manager's altitude "an agent is blocked on a question" and
+    "an agent finished and it is your turn" are the same call to action.
+    Kept as a plain function over `fleet` rather than new SQL so the CLI,
+    Emacs and the GUI all roll up identically.
+    """
+    data = fleet(newer_than_days=newer_than_days, limit=limit,
+                 stall_seconds=stall_seconds, idle_days=idle_days,
+                 ask_deadline_seconds=ask_deadline_seconds)
+
+    by_slug = {}
+    for row in data["rows"]:
+        slug = row.get("project_slug") or "(no project)"
+        agg = by_slug.setdefault(slug, {
+            "slug": slug, "sessions": 0, "needs_you": 0, "working": 0,
+            "stalled": 0, "attention": 0, "idle": 0, "resumable": 0,
+            "todos_open": 0, "expired_asks": 0, "oldest_wait": None,
+        })
+        bucket = row.get("bucket")
+        agg["sessions"] += 1
+        agg["todos_open"] += int(row.get("todos_open") or 0)
+        agg["expired_asks"] += int(row.get("expired_asks") or 0)
+        if row.get("resumable"):
+            agg["resumable"] += 1
+        if row.get("stalled"):
+            agg["stalled"] += 1
+        if bucket in (BUCKET_NEEDS_INPUT, BUCKET_DONE):
+            agg["needs_you"] += 1
+            age = row.get("age_seconds")
+            if age is not None and (agg["oldest_wait"] is None
+                                    or age > agg["oldest_wait"]):
+                agg["oldest_wait"] = age
+        elif bucket == BUCKET_WORKING:
+            agg["working"] += 1
+        elif bucket == BUCKET_ATTENTION:
+            agg["attention"] += 1
+        else:
+            agg["idle"] += 1
+
+    return sorted(
+        by_slug.values(),
+        key=lambda a: (-(1 if a["needs_you"] else 0),
+                       -(1 if a["stalled"] else 0),
+                       -(a["oldest_wait"] or 0),
+                       -a["attention"],
+                       a["slug"]),
+    )
+
+
 def _error_gist(text):
     """First meaningful clause of a provider error, for a narrow column.
 

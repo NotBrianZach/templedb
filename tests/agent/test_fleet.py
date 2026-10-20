@@ -445,6 +445,74 @@ class TestSessionResumable(unittest.TestCase):
         self.assertFalse(store.session_resumable(session['id']))
 
 
+class TestFleetRollup(unittest.TestCase):
+    """The 1000-foot view: one line per project, not per session."""
+
+    @classmethod
+    def setUpClass(cls):
+        setup_test_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        teardown_test_db()
+
+    def setUp(self):
+        setup_test_db()
+
+    def _session(self, slug, status, tail_role='assistant', tail_text='a'):
+        from agent import store
+        from db_utils import query_one, execute
+        proj = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
+        if not proj:
+            execute("INSERT INTO projects (slug, name) VALUES (?, ?)",
+                    (slug, slug))
+            proj = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
+        session = store.create_session('fake', project_id=proj['id'])
+        store.add_message(session['id'], 'user', 'q')
+        if tail_role == 'assistant':
+            store.add_message(session['id'], 'assistant', tail_text)
+        store.update_session_status(session['id'], status)
+        return session
+
+    def test_groups_by_project_and_counts_needs_you(self):
+        from agent import store
+        self._session('alpha', 'waiting')          # done -> needs you
+        self._session('alpha', 'waiting')
+        self._session('beta', 'running')           # working
+        rollup = {a['slug']: a for a in store.fleet_rollup()}
+
+        self.assertEqual(rollup['alpha']['needs_you'], 2)
+        self.assertEqual(rollup['alpha']['sessions'], 2)
+        self.assertEqual(rollup['beta']['working'], 1)
+        self.assertEqual(rollup['beta']['needs_you'], 0)
+
+    def test_projects_needing_you_sort_first(self):
+        from agent import store
+        self._session('quiet', 'running')
+        self._session('loud', 'waiting')
+        slugs = [a['slug'] for a in store.fleet_rollup()]
+        self.assertEqual(slugs[0], 'loud')
+
+    def test_counts_resumable_sessions(self):
+        from agent import store
+        # Tail is a bare user turn -> resumable.
+        self._session('gamma', 'interrupted', tail_role='user')
+        self._session('gamma', 'interrupted')      # answered -> not
+        rollup = {a['slug']: a for a in store.fleet_rollup()}
+        self.assertEqual(rollup['gamma']['resumable'], 1)
+        self.assertEqual(rollup['gamma']['sessions'], 2)
+
+    def test_sessions_without_a_project_are_kept_not_dropped(self):
+        from agent import store
+        store.create_session('fake')               # no project_id
+        slugs = [a['slug'] for a in store.fleet_rollup()]
+        self.assertIn('(no project)', slugs)
+
+    def test_empty_fleet_is_an_empty_list(self):
+        from agent import store
+        self.assertEqual(store.fleet_rollup(), [])
+
+
 class TestExpireReturnsRowcount(unittest.TestCase):
     """`expire_stale_asks` returned lastrowid, so it reported 0 while
     expiring 16 — a false zero on an irreversible command."""

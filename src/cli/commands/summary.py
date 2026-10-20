@@ -64,6 +64,12 @@ class SummaryCommand(Command):
               f"{_c(f'{r_total:,}', 'green')} relations")
         print(f"  {'':<18} {_c('top: ' + top_kinds + ', ...', 'muted')}")
 
+        # --- Agent fleet ---
+        # Deliberately high in the output: of everything `summary` reports,
+        # this is the only part where something is actively waiting on a
+        # human. `summary` covered every authority except the agents.
+        self._print_agent_fleet()
+
         # --- Ingest freshness ---
         print()
         print(_c("── Ingestion (per adapter) ──", 'accent'))
@@ -332,6 +338,74 @@ class SummaryCommand(Command):
     # the pane above, because that pane only reports the latest result.
     # This one reports whether anybody is acting on it.
     RECONCILE_STALE_DAYS = 7
+
+    # How many project rows the fleet pane shows before collapsing the
+    # tail into a count. Projects with nothing waiting sort last, so the
+    # cut only ever hides quiet ones.
+    FLEET_MAX_ROWS = 6
+
+    def _print_agent_fleet(self):
+        """Per-project fleet rollup: which project needs you, not which
+        session. Degrades silently if the agent tables are absent, the
+        way `_print_reconciliations` does."""
+        try:
+            from agent import store as _astore
+            rollup = _astore.fleet_rollup()
+        except Exception:
+            return      # agent tables absent — say nothing
+
+        print()
+        print(_c("── Agent fleet (per project) ──", 'accent'))
+        if not rollup:
+            print(f"  {_c('(no agent sessions)', 'muted')}")
+            return
+
+        waiting = sum(a["needs_you"] for a in rollup)
+        stalled = sum(a["stalled"] for a in rollup)
+        head = (f"{waiting} session(s) waiting on you"
+                if waiting else "nothing waiting on you")
+        extra = f", {stalled} stalled" if stalled else ""
+        print(f"  {_c(head, 'yellow' if waiting else 'green')}"
+              f"{_c(extra, 'red') if stalled else ''}")
+
+        shown = [a for a in rollup if a["needs_you"] or a["stalled"]
+                 or a["attention"]][:self.FLEET_MAX_ROWS]
+        if not shown:
+            shown = rollup[:self.FLEET_MAX_ROWS]
+
+        for a in shown:
+            bits = []
+            if a["needs_you"]:
+                bits.append(_c(f"{a['needs_you']} needs you", 'yellow'))
+            if a["stalled"]:
+                bits.append(_c(f"{a['stalled']} stalled", 'red'))
+            if a["attention"]:
+                bits.append(_c(f"{a['attention']} attention", 'red'))
+            if a["working"]:
+                bits.append(_c(f"{a['working']} working", 'green'))
+            if a["resumable"]:
+                bits.append(f"{a['resumable']} resumable")
+            if not bits:
+                bits.append(_c(f"{a['idle']} idle", 'muted'))
+
+            wait = ""
+            if a["oldest_wait"]:
+                wait = _c(f"  oldest {_astore._humanize_age(a['oldest_wait'])}",
+                          'muted')
+            print(f"  {a['slug']:<20} {', '.join(bits)}{wait}")
+
+            debt = []
+            if a["todos_open"]:
+                debt.append(f"{a['todos_open']} open todo(s)")
+            if a["expired_asks"]:
+                debt.append(f"{a['expired_asks']} ask(s) expired unanswered")
+            if debt:
+                print(f"  {'':<20} {_c(' · '.join(debt), 'muted')}")
+
+        hidden = len(rollup) - len(shown)
+        if hidden > 0:
+            print(f"  {_c(f'... {hidden} quieter project(s)', 'muted')}")
+        print(f"  {_c('detail: templedb ai agent fleet', 'muted')}")
 
     def _print_reconciliations(self, max_rows=4):
         try:

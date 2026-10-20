@@ -2334,6 +2334,18 @@ Set to nil for all history — expect a long IDLE section."
   :type '(choice (const :tag "All" nil) integer)
   :group 'templedb-agent)
 
+(defcustom templedb-agent-roster-idle-days nil
+  "Days a finished session stays in DONE before ageing into IDLE.
+
+nil leaves the CLI default (2). That default means a row that is your
+turn demotes into IDLE after 48 hours, landing in the same bucket as a
+session nobody has touched in a month — so work waiting on you becomes
+indistinguishable from work abandoned, and the cheap move is to open a
+new session rather than answer the old one. Set this to 7 to give
+yourself a work week."
+  :type '(choice (const :tag "CLI default (2)" nil) integer)
+  :group 'templedb-agent)
+
 (defface templedb-agent-roster-needs-input-face
   '((t :inherit warning :weight bold))
   "Face for the NEEDS INPUT bucket."
@@ -2475,6 +2487,10 @@ and `with-temp-buffer' below would not see it."
                         (list "--recent-days"
                               (number-to-string
                                templedb-agent-roster-recent-days)))
+                      (when templedb-agent-roster-idle-days
+                        (list "--idle-days"
+                              (number-to-string
+                               templedb-agent-roster-idle-days)))
                       (when templedb-agent--roster-project
                         (list "--project" templedb-agent--roster-project)))))
     (with-temp-buffer
