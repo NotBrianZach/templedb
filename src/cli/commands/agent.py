@@ -101,8 +101,7 @@ class AgentCommands(Command):
                 return 1
             project_id = row['id']
 
-        result = _store.fleet(
-            project_id=project_id,
+        common = dict(
             newer_than_days=getattr(args, 'recent_days', None),
             limit=getattr(args, 'limit', 200) or 200,
             stall_seconds=getattr(args, 'stale_seconds', None)
@@ -110,6 +109,19 @@ class AgentCommands(Command):
             idle_days=getattr(args, 'idle_days', None)
                 or _store.FLEET_IDLE_DAYS,
         )
+
+        # --rollup: one line per project instead of per session. Same
+        # aggregation `summary` and the Emacs manager view render, so all
+        # three agree by construction rather than by coincidence.
+        if getattr(args, 'rollup', False):
+            rollup = _store.fleet_rollup(**common)
+            if getattr(args, 'json', False):
+                print(json.dumps({'projects': rollup}, indent=2,
+                                 default=str))
+                return 0
+            return self._print_rollup(rollup)
+
+        result = _store.fleet(project_id=project_id, **common)
         rows = result['rows']
         wanted = getattr(args, 'bucket', None)
         if wanted:
@@ -318,6 +330,34 @@ class AgentCommands(Command):
                     sys.stdout.write(f"\n[ERROR: {error}]\n\n")
 
         service.close_session(session_id)
+        return 0
+
+    def _print_rollup(self, rollup):
+        """Render `fleet --rollup` as text: one line per project."""
+        if not rollup:
+            print("No agent sessions.")
+            return 0
+
+        from agent import store as _store
+        waiting = sum(a['needs_you'] for a in rollup)
+        stalled = sum(a['stalled'] for a in rollup)
+        head = (f"{waiting} session(s) waiting on you"
+                if waiting else "nothing waiting on you")
+        print(f"{head}{f', {stalled} stalled' if stalled else ''}"
+              f"  —  {len(rollup)} project(s)\n")
+
+        print(f"{'project':<20} {'needs you':>9} {'working':>7} "
+              f"{'attn':>5} {'idle':>5} {'resum':>5} {'todos':>6}  oldest")
+        for a in rollup:
+            oldest = (_store._humanize_age(a['oldest_wait'])
+                      if a['oldest_wait'] else '-')
+            # Truncate rather than let a long slug shove every later
+            # column out of alignment.
+            slug = a['slug'] if len(a['slug']) <= 20 \
+                else a['slug'][:19] + '…'
+            print(f"{slug:<20} {a['needs_you']:>9} {a['working']:>7} "
+                  f"{a['attention']:>5} {a['idle']:>5} {a['resumable']:>5} "
+                  f"{a['todos_open']:>6}  {oldest}")
         return 0
 
     def resume(self, args):
@@ -705,6 +745,10 @@ def register_agent_commands(subparsers, cli):
         "(default 180)"))
     fleet_parser.add_argument('--idle-days', type=int, help=(
         "Age a finished session out of `done` after N days (default 2)"))
+    fleet_parser.add_argument('--rollup', action='store_true', help=(
+        "One line per project instead of per session — which project "
+        "needs you, rather than which session. Honours --recent-days / "
+        "--idle-days; ignores --bucket and --project."))
     fleet_parser.add_argument('--limit', type=int, default=200)
     cli.commands['ai.agent.fleet'] = cmd.fleet
 

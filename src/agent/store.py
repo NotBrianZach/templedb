@@ -262,23 +262,33 @@ def get_message(message_id):
     return query_one("SELECT * FROM agent_messages WHERE id = ?", (message_id,))
 
 
-def discard_empty_assistant_tail(session_id):
-    """Drop a trailing empty assistant row, if that's what the tail is.
+def discard_incomplete_assistant_tail(session_id):
+    """Drop a trailing assistant row left behind by a run that never
+    finished — empty placeholder or truncated mid-sentence reply.
 
     `send_message` inserts an empty assistant placeholder *before* calling
-    the provider, then streams text into it. A provider that dies first
-    (expired OAuth, killed process) leaves the placeholder behind with no
-    content — a turn that never happened.
+    the provider, then streams text into it. So a dead run leaves one of
+    two wrecks as the tail:
 
-    It has to go before a resume rather than merely being tolerated: the
-    history handed to the provider is built from `get_messages`, so a
-    leftover empty assistant row would be replayed as a malformed final
-    turn. Removing it restores the pending-user-turn tail that
-    `resume_run` already knows how to handle.
+      - no content at all, if the provider died before emitting (expired
+        OAuth, killed process);
+      - a partial sentence, if it was killed mid-stream.
 
-    Deliberately narrow — it cannot touch a row with content, a
-    non-assistant row, or anything but the tail. Returns the number of
-    rows removed (0 or 1).
+    Both have to go before a resume rather than merely being tolerated:
+    the history handed to the provider is built from `get_messages`, so
+    either would be replayed as a malformed final assistant turn.
+    Removing it restores the pending-user-turn tail that `resume_run`
+    already knows how to handle.
+
+    This does delete content in the truncated case. That is the intent —
+    a half-written reply from a process that no longer exists has no
+    reader and no value, and keeping it is what made sessions 308 and 286
+    look answered when they were not. The run row and its events survive,
+    so the attempt is still in the history.
+
+    Deliberately narrow: only the tail, only an assistant row, and only
+    when its run did not reach `completed`. It cannot touch a finished
+    answer. Returns the number of rows removed (0 or 1).
     """
     return execute_rowcount(
         """DELETE FROM agent_messages
@@ -286,8 +296,15 @@ def discard_empty_assistant_tail(session_id):
                          WHERE session_id = ?
                          ORDER BY sequence_number DESC LIMIT 1)
               AND role = 'assistant'
-              AND COALESCE(TRIM(content_text), '') = ''""",
-        (session_id,),
+              -- Mirrors `_row_resumable` exactly, including its treatment
+              -- of a NULL run_id as "trust the text": a tail with content
+              -- and no run attached is pre-run_id history, not a wreck.
+              AND (COALESCE(TRIM(content_text), '') = ''
+                   OR (run_id IS NOT NULL
+                       AND COALESCE((SELECT r.status FROM agent_runs r
+                                      WHERE r.id = agent_messages.run_id),
+                                    '') <> ?))""",
+        (session_id, RUN_STATUS_COMPLETED),
     )
 
 
@@ -1124,7 +1141,11 @@ def fleet_rows(project_id=None, newer_than_days=None, limit=200,
                -- fresh session instead.
                lm.role AS last_msg_role,
                CASE WHEN COALESCE(TRIM(lm.content_text), '') = ''
-                    THEN 1 ELSE 0 END AS last_msg_empty
+                    THEN 1 ELSE 0 END AS last_msg_empty,
+               -- The run that produced the tail. A streamed assistant
+               -- message is only a real answer if its run finished;
+               -- anything else is a reply cut off mid-sentence.
+               lmr.status AS last_msg_run_status
           FROM agent_sessions s
           JOIN agent_providers p ON s.provider_id = p.id
           LEFT JOIN projects pr ON pr.id = s.project_id
@@ -1174,6 +1195,7 @@ def fleet_rows(project_id=None, newer_than_days=None, limit=200,
                  ON lm.id = (SELECT m2.id FROM agent_messages m2
                               WHERE m2.session_id = s.id
                               ORDER BY m2.id DESC LIMIT 1)
+          LEFT JOIN agent_runs lmr ON lmr.id = lm.run_id
          WHERE 1=1"""
     # The two leading params belong to the live/dead ask split inside the
     # LEFT JOIN, which is textually ahead of this WHERE clause.
@@ -1309,15 +1331,18 @@ def session_resumable(session_id):
     the process is already up. Returns True/False.
     """
     tail = query_one(
-        """SELECT role, content_text FROM agent_messages
-            WHERE session_id = ?
-            ORDER BY sequence_number DESC LIMIT 1""",
+        """SELECT m.role, m.content_text, r.status AS run_status
+             FROM agent_messages m
+             LEFT JOIN agent_runs r ON r.id = m.run_id
+            WHERE m.session_id = ?
+            ORDER BY m.sequence_number DESC LIMIT 1""",
         (session_id,),
     )
     return bool(_row_resumable({
         "last_msg_role": tail["role"] if tail else None,
         "last_msg_empty": (not (tail["content_text"] or "").strip()
                            if tail else 0),
+        "last_msg_run_status": tail["run_status"] if tail else None,
     }))
 
 
@@ -1328,14 +1353,21 @@ def _row_resumable(row):
     from `status`: a resume needs an unanswered user turn at the tail.
     Three cases:
 
-      - tail is a user message      -> True, the normal resumable shape;
-      - tail is an *empty* assistant row -> True. A run that died before
-        emitting anything leaves that stub behind, and it used to block
-        resume on a question that was never answered — 6 sessions were
-        stranded that way, including #331's "do we have the option of
-        using deepseek";
-      - tail is an assistant message with text -> False. The previous run
-        did answer; what you want is a new message, not a resume.
+      - tail is a user message -> True, the normal resumable shape;
+      - tail is an assistant row whose run did NOT complete -> True. The
+        reply never finished, so the user's question still stands. Two
+        ways this happens: the run died before emitting anything (an
+        empty placeholder — stranded 6 sessions including #331's "do we
+        have the option of using deepseek"), or it was killed mid-stream
+        and left a truncated sentence (stranded 308 and 286, whose tails
+        read "I'll pick up where we left off. Let me find the current
+        stat");
+      - tail is an assistant message from a *completed* run -> False. That
+        is a real answer; what you want is a new message, not a resume.
+
+    Keying on the run's terminal status rather than on whether the text is
+    empty is the whole point: emptiness only catches the first failure
+    mode, and a half-written reply looks exactly like a finished one.
 
     Returns None when the caller passed a row without message columns (a
     `list_sessions` row rather than a `fleet_rows` one) — unknown, so the
@@ -1349,7 +1381,14 @@ def _row_resumable(row):
     if role == "user":
         return True
     if role == "assistant":
-        return bool(row.get("last_msg_empty"))
+        if row.get("last_msg_empty"):
+            return True
+        # No run recorded (pre-run_id history) — fall back to trusting the
+        # text, which is the old behaviour.
+        status = row.get("last_msg_run_status")
+        if status is None:
+            return False
+        return status != RUN_STATUS_COMPLETED
     return False
 
 
@@ -1410,12 +1449,16 @@ def fleet_rollup(newer_than_days=None, limit=1000,
         else:
             agg["idle"] += 1
 
+    # Urgency order: blocked on a human, then stalled, then longest wait,
+    # then anything needing attention, then live work, then alphabetical
+    # so the quiet tail is at least predictable.
     return sorted(
         by_slug.values(),
         key=lambda a: (-(1 if a["needs_you"] else 0),
                        -(1 if a["stalled"] else 0),
                        -(a["oldest_wait"] or 0),
                        -a["attention"],
+                       -a["working"],
                        a["slug"]),
     )
 

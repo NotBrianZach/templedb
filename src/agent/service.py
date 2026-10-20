@@ -439,11 +439,12 @@ class AgentService:
         fresh row and left Claude looking at "hows it goin ... hows it goin").
 
         Requires a pending user turn at the tail — otherwise there's
-        nothing to answer and we bail. An *empty* trailing assistant row
-        does not count as an answer: that's the placeholder `send_message`
-        writes before calling the provider, so a provider that dies first
-        leaves one behind. We drop it and resume the user turn underneath,
-        which is what the author was waiting for all along.
+        nothing to answer and we bail. A trailing assistant row from a run
+        that never completed does not count as an answer: either the
+        placeholder `send_message` writes before calling the provider
+        (provider died first) or a reply killed mid-sentence. We drop it
+        and resume the user turn underneath, which is what the author was
+        waiting for all along.
 
         Yields events like send_message.
         """
@@ -455,12 +456,12 @@ class AgentService:
         if session_id not in self._providers:
             self.open_session(session_id)
 
-        # Clear a dead run's placeholder before inspecting the tail, so the
+        # Clear a dead run's leftovers before inspecting the tail, so the
         # check below sees the real conversation shape.
-        if store.discard_empty_assistant_tail(session_id):
+        if store.discard_incomplete_assistant_tail(session_id):
             logger.info(
-                f"resume: dropped empty assistant placeholder from a dead "
-                f"run on session {session_id}"
+                f"resume: dropped an assistant turn from an unfinished run "
+                f"on session {session_id}"
             )
 
         messages = store.get_messages(session_id)

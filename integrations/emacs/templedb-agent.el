@@ -3305,6 +3305,197 @@ prompt is already a bad place to be.  Straight to session.create."
                       "sqlite3")))
     (call-process sqlite3 nil nil nil db-path sql)))
 
+;;;; Manager — the 1000-foot view, one line per project
+;;
+;; The roster answers "what is this session doing". At 25 projects and
+;; 300+ sessions nothing answered "which project needs me", so the only
+;; way to find that out was to read every row. This buffer sits one
+;; altitude above it: a line per project, urgent first, RET to descend
+;; into the roster already filtered to that project.
+;;
+;; It renders `templedb ai agent fleet --rollup --json', the same
+;; aggregation `templedb summary' prints, so the two cannot drift.
+
+(defvar templedb-agent--manager-buffer "*templedb-manager*"
+  "Name of the manager buffer.")
+
+(defvar-local templedb-agent--manager-projects nil
+  "Parsed `projects' list from the last `fleet --rollup' fetch.")
+
+(defvar templedb-agent-manager-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "RET") #'templedb-agent-manager-open)
+    (define-key map (kbd "n")   #'next-line)
+    (define-key map (kbd "p")   #'previous-line)
+    (define-key map (kbd "g")   #'templedb-agent-manager-refresh)
+    (define-key map (kbd "R")   #'templedb-agent-roster)
+    (define-key map (kbd "?")   #'templedb-agent-manager-guide)
+    map)
+  "Keymap for `templedb-agent-manager-mode'.")
+
+(define-derived-mode templedb-agent-manager-mode special-mode "TAgent-Manager"
+  "Per-project rollup of the agent fleet."
+  (setq truncate-lines t))
+
+(defun templedb-agent--manager-fetch ()
+  "Return the `projects' list from `fleet --rollup --json', or nil."
+  (let ((args (append (list "--json" "ai" "agent" "fleet" "--rollup")
+                      (when templedb-agent-roster-recent-days
+                        (list "--recent-days"
+                              (number-to-string
+                               templedb-agent-roster-recent-days)))
+                      (when templedb-agent-roster-idle-days
+                        (list "--idle-days"
+                              (number-to-string
+                               templedb-agent-roster-idle-days))))))
+    (with-temp-buffer
+      (when (zerop (apply #'call-process templedb-agent-executable
+                          nil t nil args))
+        (condition-case nil
+            (alist-get 'projects
+                       (let ((json-object-type 'alist)
+                             (json-array-type 'list))
+                         (goto-char (point-min))
+                         (json-read)))
+          (error nil))))))
+
+(defun templedb-agent--manager-age (secs)
+  "Humanise SECS for the oldest-wait column."
+  (cond ((null secs) "-")
+        ((< secs 3600) (format "%dm" (/ secs 60)))
+        ((< secs 86400) (format "%dh" (/ secs 3600)))
+        (t (format "%dd" (/ secs 86400)))))
+
+(defun templedb-agent--manager-insert (p)
+  "Insert one project line for rollup entry P."
+  (let* ((slug (or (alist-get 'slug p) "?"))
+         (needs (or (alist-get 'needs_you p) 0))
+         (working (or (alist-get 'working p) 0))
+         (stalled (or (alist-get 'stalled p) 0))
+         (attention (or (alist-get 'attention p) 0))
+         (idle (or (alist-get 'idle p) 0))
+         (resumable (or (alist-get 'resumable p) 0))
+         (todos (or (alist-get 'todos_open p) 0))
+         (expired (or (alist-get 'expired_asks p) 0))
+         (oldest (alist-get 'oldest_wait p))
+         (start (point))
+         ;; The face is the headline: what this project wants from you.
+         (face (cond ((> needs 0) 'templedb-agent-roster-needs-input-face)
+                     ((> stalled 0) 'templedb-agent-roster-attention-face)
+                     ((> attention 0) 'templedb-agent-roster-attention-face)
+                     ((> working 0) 'templedb-agent-roster-working-face)
+                     (t 'templedb-agent-roster-idle-face)))
+         (bits (delq nil
+                     (list
+                      (when (> needs 0) (format "%d needs you" needs))
+                      (when (> stalled 0) (format "%d stalled" stalled))
+                      (when (> attention 0) (format "%d attention" attention))
+                      (when (> working 0) (format "%d working" working))
+                      (when (> resumable 0) (format "%d resumable" resumable))
+                      (when (and (zerop needs) (zerop stalled)
+                                 (zerop attention) (zerop working))
+                        (format "%d idle" idle))))))
+    (insert (propertize (format "  %-22s" (truncate-string-to-width slug 22))
+                        'face face)
+            (propertize (mapconcat #'identity bits ", ") 'face face))
+    (when oldest
+      (insert (propertize (format "   oldest %s"
+                                  (templedb-agent--manager-age oldest))
+                          'face 'templedb-agent-roster-idle-face)))
+    (insert "\n")
+    (when (or (> todos 0) (> expired 0))
+      (insert (propertize
+               (format "  %-22s %s\n" ""
+                       (mapconcat
+                        #'identity
+                        (delq nil
+                              (list (when (> todos 0)
+                                      (format "%d open todo(s)" todos))
+                                    (when (> expired 0)
+                                      (format "%d ask(s) expired unanswered"
+                                              expired))))
+                        " · "))
+               'face 'templedb-agent-roster-idle-face)))
+    ;; Identity for RET, on every line of the entry so point anywhere works.
+    (put-text-property start (point) 'templedb-manager-project slug)))
+
+(defun templedb-agent-manager-refresh ()
+  "Re-fetch and redraw the manager buffer."
+  (interactive)
+  (let ((was (templedb-agent--manager-project-at-point))
+        (projects (templedb-agent--manager-fetch))
+        (inhibit-read-only t))
+    (setq templedb-agent--manager-projects projects)
+    (erase-buffer)
+    (if (null projects)
+        (insert "  `templedb --json ai agent fleet --rollup' failed —\n"
+                "  check that the installed templedb has the `--rollup'\n"
+                "  flag (templedb ai agent fleet --help).\n")
+      (let ((waiting (apply #'+ (mapcar (lambda (p)
+                                          (or (alist-get 'needs_you p) 0))
+                                        projects)))
+            (stalled (apply #'+ (mapcar (lambda (p)
+                                          (or (alist-get 'stalled p) 0))
+                                        projects))))
+        (insert (propertize
+                 (format "  %s%s  —  %d project(s)\n\n"
+                         (if (> waiting 0)
+                             (format "%d session(s) waiting on you" waiting)
+                           "nothing waiting on you")
+                         (if (> stalled 0)
+                             (format ", %d stalled" stalled) "")
+                         (length projects))
+                 'face (if (> waiting 0)
+                           'templedb-agent-roster-needs-input-face
+                         'templedb-agent-roster-idle-face)))
+        (dolist (p projects) (templedb-agent--manager-insert p))
+        (insert (propertize
+                 "\n  RET project roster   R full roster   g refresh   ? help\n"
+                 'face 'templedb-agent-roster-idle-face))))
+    (goto-char (point-min))
+    (when (and was (text-property-search-forward
+                    'templedb-manager-project was #'equal))
+      (beginning-of-line))))
+
+(defun templedb-agent--manager-project-at-point ()
+  "Project slug on the current line, or nil."
+  (get-text-property (line-beginning-position) 'templedb-manager-project))
+
+(defun templedb-agent-manager-open ()
+  "Open the roster filtered to the project on the current line."
+  (interactive)
+  (let ((slug (templedb-agent--manager-project-at-point)))
+    (unless slug
+      (user-error "No project on this line"))
+    (templedb-agent-roster)
+    ;; `templedb-agent-roster' has selected the roster buffer, so the
+    ;; buffer-local filter below lands in the right place.
+    (setq templedb-agent--roster-project
+          (unless (string= slug "(no project)") slug))
+    (templedb-agent-roster-refresh)))
+
+(defun templedb-agent-manager-guide ()
+  "Explain the manager buffer."
+  (interactive)
+  (message "%s" (concat
+                 "Manager: one line per project, most urgent first. "
+                 "RET descends into that project's roster. "
+                 "Colour = what the project wants: "
+                 "needs-you / stalled / working / idle. "
+                 "Counts come from `ai agent fleet --rollup'.")))
+
+;;;###autoload
+(defun templedb-agent-manager ()
+  "Show the per-project fleet rollup — which project needs you."
+  (interactive)
+  (let ((buf (get-buffer-create templedb-agent--manager-buffer)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'templedb-agent-manager-mode)
+        (templedb-agent-manager-mode))
+      (templedb-agent-manager-refresh))
+    (pop-to-buffer buf)))
+
 ;;;###autoload
 (defun templedb-agent-roster ()
   "Show the Temple Agent roster: every session bucketed by who is blocked."
