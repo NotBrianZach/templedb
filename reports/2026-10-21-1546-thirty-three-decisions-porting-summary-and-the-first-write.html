@@ -57,26 +57,109 @@
   SQL. It was choosing, repeatedly, between matching an implementation
   that is sometimes wrong and being right in a way that breaks a diff.
   Four of the thirty-three were not judgment calls at all — they were
-  mistakes, and they share a cause.
+  mistakes, and they share a cause with a fifth error this report made
+  about itself.
 </p>
 
-<h2>The rule most of them follow</h2>
+<h2>Six rules, not one</h2>
+
+<p>
+  An earlier revision of this report opened with a single rule and
+  called it "the rule most of them follow". The rule is right and the
+  claim was not. Checked against the thirty-three, it governs five rows
+  in the tables below and three cases in the prose — the output-fidelity
+  cluster — and on the rest it is either silent or actively wrong. What
+  follows is the corrected account: one rule about bytes, and five more
+  that were doing the work it was being credited for.
+</p>
+
+<h3>1. Output fidelity — and only output</h3>
 
 <div class="callout">
-  Copy Python's behaviour if it is deterministic and on stdout. Fix it
-  if copying would mean reproducing a crash or an <em>unspecified</em>
-  result — "whatever the query planner picks" is not a behaviour you can
-  be faithful to, because there is nothing there to copy.
+  For bytes on stdout: copy Python's behaviour if it is deterministic,
+  defects included. Fix it if copying would mean reproducing a crash or
+  an <em>unspecified</em> result.
 </div>
 
 <p>
-  That rule is the reason the port reproduces a misaligned column but
-  not a <code>TypeError</code>, and the reason it adds tie-breaks to
-  four <code>ORDER BY</code> clauses while changing nothing else about
-  them. The cost of following it is code that looks wrong on purpose:
-  three times today the deliverable was a test whose only job is to stop
-  a future reader from fixing something.
+  This is why the port reproduces a misaligned column, an escape pair
+  wrapping nothing, and <code>idle Noned</code>, but not
+  <code>project show</code>'s <code>TypeError</code>. The cost is code
+  that looks wrong on purpose: three times today the deliverable was a
+  test whose only job is to stop a future reader from fixing something.
 </p>
+
+<h3>2. Unspecified is not a behaviour</h3>
+
+<p>
+  Part of the first rule as originally written, and it deserves to
+  stand alone because it decided four cases by itself. An
+  <code>ORDER BY</code> with ties and a <code>LIMIT</code> does not have
+  a behaviour to be faithful to — there is nothing there to copy, so
+  "copy it" is not an available option and the only question is which
+  total order to impose. The port adds a tie-break and changes nothing
+  else. <code>entity trace</code>, <code>entity search</code>,
+  <code>invariant_results</code> and the reconciliation listing all went
+  this way.
+</p>
+
+<h3>3. Interface: accept a flag only if the thing it names exists</h3>
+
+<p>
+  Nothing to do with output, which is why the first rule could not reach
+  it. <code>vcs log --published</code> is accepted because it selects
+  behaviour the port <em>has</em>; <code>--session</code> is rejected
+  because it promises session inclusion the port cannot produce, and
+  <code>search content --no-fts</code> is rejected for the same reason.
+  A no-op flag is only harmful when the thing it names is absent.
+</p>
+
+<h3>4. On a write, diverge toward safety</h3>
+
+<p>
+  Where a reader's mistake costs a second and a writer's overwrites a
+  file, the costs are asymmetric and parity loses. Python's
+  <code>file set</code> fuzzy-matches the project; this one demands an
+  exact slug. The writer is also opt-in and points at a disposable
+  database. Each of those is a deliberate failure to match, and the
+  first rule has no opinion on any of them because none is about bytes.
+</p>
+
+<h3>5. On a write, the refusal <em>is</em> the output</h3>
+
+<p>
+  The rule that was missing, and its absence is why the first version of
+  <code>file set</code> shipped with exit 1 for every refusal where
+  Python uses 2 and 3. Exit codes are not stdout, so rule 1 said "do not
+  care" — and for a read command that is nearly true. For a write it is
+  backwards: the command prints almost nothing, so the status and the
+  message carry the whole contract. Ranking them with output rather than
+  below it is the correction.
+</p>
+
+<h3>6. Internal consistency beats external fidelity</h3>
+
+<p>
+  When copying Python would make the port inconsistent <em>with
+  itself</em>, do not copy. <code>project list</code>'s filters are the
+  clean case: Python runs a separate query under either flag, so its
+  filtered and unfiltered output disagree about the same project's file
+  count. Matching that would have meant importing a contradiction, so
+  the filters add a <code>WHERE</code> and change nothing else.
+  <code>search content</code> is the same rule at larger scale — the two
+  full-text engines disagree on a quarter of the hit set, so there was
+  no single behaviour to be faithful to and matching one backend would
+  have meant diverging from the other.
+</p>
+
+<div class="callout">
+  None of the six covers the NUL escape, and that is worth noticing: it
+  was not a parity question at all. Both implementations read the same
+  SQLite; the conflict was between two storage engines. It was decided
+  on whether the <em>verification instruments</em> survived the choice,
+  which is a seventh consideration that applies only to decisions with
+  no Python side to copy.
+</div>
 
 <h2>Output fidelity, in summary</h2>
 
@@ -543,15 +626,26 @@
 <tr><td>Recommended a <code>SqliteWriter</code>, twice</td><td>Read the README, not the design document</td></tr>
 <tr><td>Called Postgres-as-primary hypothetical</td><td>Same</td></tr>
 <tr><td>Two sweep stages that falsely accused the port</td><td>Did not test the tests first</td></tr>
+<tr><td>This report's own opening rule, which claimed to cover decisions it is silent on</td><td>Summarised thirty-three decisions into one and did not check the summary against them</td></tr>
 </table>
 
 <p>
-  The pattern in all four is the same: <strong>trusted a summary over
+  The pattern in all five is the same: <strong>trusted a summary over
   the source.</strong> The README over the design document; an earlier
   statement of my own over re-reading; a stage's output over checking the
   stage. The specific remedy was reading the primary document, where the
   <code>SqliteWriter</code> recommendation in the body had been reversed
   two sections later by the same report's own 2026-10-16 decision.
+</p>
+
+<p>
+  The fifth is the most pointed, because this report committed the error
+  it was written to diagnose. One rule was easier to state than six, so
+  it got stated — and nothing checked it against the cases it claimed to
+  govern until someone read the report and asked whether it held. It
+  mostly did not. A summary that has not been tested against its source
+  is a hypothesis, and this one was wrong in the usual direction: too
+  confident, too tidy, and silent about the places it did not reach.
 </p>
 
 <p>
