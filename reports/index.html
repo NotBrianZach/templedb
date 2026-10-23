@@ -44,13 +44,23 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-10-23-0748-sessions-the-identity-the-port-has-been-refusing-to-resolve.html">
+  <div class="row">
+    <span class="date">2026-10-23 07:48</span>
+    <span class="title">Sessions: the identity the port has been refusing to resolve</span>
+  </div>
+  <div class="summary">
+    Everything substantive left in templedb-rust sits behind one question. Three of file set's seven guards, the last read-layer divergence, edit_intents provenance and vcs commit all wait on the same thing: what "the current session" means to a port that must not create one. This is the precondition document the porting order asks for before any of them. Its conclusion is that the port should resolve sessions never, accept them always, and that this is a smaller change than it sounds — but it closes one command permanently.
+  </div>
+</a>
+
 <a class="report" href="2026-10-21-1546-thirty-three-decisions-porting-summary-and-the-first-write.html">
   <div class="row">
     <span class="date">2026-10-21 15:46</span>
     <span class="title">Thirty-three decisions: porting summary and the first write</span>
   </div>
   <div class="summary">
-    One day of work on templedb-rust, recorded as decisions rather than as a changelog. Five commits took the port from a read-only subset to one with an opt-in write path, and almost none of the interesting work was SQL. It was choosing, repeatedly, between matching an implementation that is sometimes wrong and being right in a way that breaks a diff. Four of the thirty-three were not judgment calls at all — they were mistakes, and they share a cause.
+    One day of work on templedb-rust, recorded as decisions rather than as a changelog. Five commits took the port from a read-only subset to one with an opt-in write path, and almost none of the interesting work was SQL. It was choosing, repeatedly, between matching an implementation that is sometimes wrong and being right in a way that breaks a diff. Four of the thirty-three were not judgment calls at all — they were mistakes, and they share a cause with a fifth error this report made about itself.
   </div>
 </a>
 

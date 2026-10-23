@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sessions: the identity the port has been refusing to resolve</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1rem 0;
+          font-size: 0.89em; }
+  th, td { border: 1px solid var(--border); padding: 0.4rem 0.6rem;
+           text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase;
+       letter-spacing: 0.04em; font-size: 0.82em; }
+  td code { font-size: 0.92em; }
+</style>
+</head>
+<body>
+
+<h1>Sessions: the identity the port has been refusing to resolve</h1>
+<p class="lede">
+  Everything substantive left in templedb-rust sits behind one question.
+  Three of <code>file set</code>'s seven guards, the last read-layer
+  divergence, <code>edit_intents</code> provenance and
+  <code>vcs commit</code> all wait on the same thing: what "the current
+  session" means to a port that must not create one. This is the
+  precondition document the porting order asks for before any of them.
+  Its conclusion is that the port should resolve sessions
+  <strong>never</strong>, accept them <strong>always</strong>, and that
+  this is a smaller change than it sounds — but it closes one command
+  permanently.
+</p>
+
+<h2>Why this blocks so much</h2>
+
+<p>
+  The port is at fifty invocations byte-identical against Python, a
+  write path with four of seven guards, and three sweep stages for what
+  a byte diff cannot reach. What remains is not a backlog of
+  translation. It is five items, and they are the same item:
+</p>
+
+<table>
+<tr><th>Blocked</th><th>What it needs a session for</th></tr>
+<tr><td><code>file set --stage</code></td><td><code>vcs_working_state.staged_by_session_id</code></td></tr>
+<tr><td><code>file set --session</code></td><td>the override itself</td></tr>
+<tr><td><code>file set --commit</code></td><td>needs <code>vcs commit</code>, which needs a session</td></tr>
+<tr><td><code>edit_intents</code> provenance</td><td>its <code>session_id</code> is most of the point</td></tr>
+<tr><td><code>vcs log</code>'s default view</td><td>"published plus <em>your</em> unpublished"</td></tr>
+<tr><td><code>vcs commit</code></td><td><code>session_id</code> on the commit, and <code>vcs_session_heads</code></td></tr>
+<tr><td><code>summary</code>'s handoff pane</td><td><em>already</em> solved — see below</td></tr>
+</table>
+
+<p>
+  Twelve tables in the live database carry a VCS session reference, and
+  four of them are ones the port already mirrors or will need to:
+  <code>vcs_commits.session_id</code> (1,414 rows),
+  <code>vcs_working_state.staged_by_session_id</code> (1,930),
+  <code>edit_intents.session_id</code> (1,202) and
+  <code>vcs_session_heads</code> (29). A further ten are the agent
+  tables, which are a different notion of session entirely and are out
+  of scope here.
+</p>
+
+<h2>What Python actually does</h2>
+
+<p>
+  <code>VcsService.get_current_session()</code> resolves through seven
+  steps, in order, and the last one <strong>inserts a row</strong>.
+</p>
+
+<table>
+<tr><th>#</th><th>Source</th><th>Behaviour</th></tr>
+<tr><td>0</td><td><code>--session &lt;id|name&gt;</code></td><td>Explicit pin. Outranks both env vars; when set, the environment is not consulted at all</td></tr>
+<tr><td>1</td><td><code>TEMPLEDB_SESSION_ID</code></td><td>Must reference a row with <code>ended_at IS NULL</code>. Raises if not</td></tr>
+<tr><td>2</td><td>instance cache</td><td><code>self._current_session</code> — per-process memoisation</td></tr>
+<tr><td>3</td><td><code>TEMPLEDB_SESSION</code></td><td>A declared <em>name</em>. Looks up <code>(author, host, name)</code>; <strong>creates if absent</strong></td></tr>
+<tr><td>4</td><td><code>os.getsid(0)</code></td><td>Session-leader PID, <code>(author, host, pid)</code>, started within 24 hours</td></tr>
+<tr><td>5</td><td><code>os.getppid()</code></td><td>Same lookup on the parent PID — backwards compatibility with pre-SID rows</td></tr>
+<tr><td>6</td><td>—</td><td><strong>Creates</strong> <code>&lt;host&gt;-&lt;sid&gt;-&lt;short-ts&gt;</code></td></tr>
+</table>
+
+<p>
+  Two of the seven write. That is the whole difficulty: a read command
+  calling this can <em>mutate the database</em>, which is the one thing
+  the port's architecture has been built to make impossible —
+  <code>Store</code> has no <code>execute</code>, and the SQLite handle
+  carries <code>SQLITE_OPEN_READ_ONLY</code> as a flag specifically so
+  the restriction is visible in the type.
+</p>
+
+<h3>The SID choice is not incidental, and it is instructive</h3>
+
+<p>
+  Step 4 keys on <code>os.getsid(0)</code> rather than
+  <code>os.getppid()</code>, and the reason is written into the
+  docstring: <code>os.getppid()</code> returns the immediate parent,
+  which for <code>x=$(templedb ...)</code> is a bash-forked subshell
+  with a fresh PID. A loop doing command substitution would fan out into
+  one session per iteration. The session leader is inherited from the
+  controlling terminal and is stable across <code>$(...)</code>,
+  pipelines and nested subshells.
+</p>
+
+<p>
+  And step 3 exists because even that is not enough for agents: Claude
+  Code and similar wrappers spawn each tool call under its own SID and
+  do not propagate environment variables, so a per-turn shell fans out
+  anyway. <code>TEMPLEDB_SESSION=&lt;name&gt;</code> in the launcher env
+  pins identity across those shells.
+</p>
+
+<div class="callout">
+  The lesson for the port: <strong>every automatic step here is a
+  heuristic for "same human, same terminal, recently", and each one was
+  added because the previous one fanned out.</strong> A port that
+  reimplements the heuristics inherits a tuning problem it has no way to
+  validate — there is no byte diff for "did these two invocations agree
+  about which session they were in".
+</div>
+
+<h2>The recommendation</h2>
+
+<div class="callout">
+  <strong>Resolve never. Accept always.</strong> The port reads
+  <code>TEMPLEDB_SESSION_ID</code> and validates it against a live row;
+  it accepts <code>--session &lt;id&gt;</code> as an explicit pin; and
+  it does <em>nothing else</em>. No SID lookup, no name lookup, no
+  creation. With no session identified, every session-scoped behaviour
+  falls back to the published view and says so.
+</div>
+
+<p>
+  That is steps 0 and 1 of the seven, and only the non-writing halves of
+  them. It is a deliberate decision to be <em>less capable</em> than
+  Python at the thing Python works hardest at, and the argument is that
+  the hard work is all heuristic:
+</p>
+
+<table>
+<tr><th>Step</th><th>Ported?</th><th>Why</th></tr>
+<tr><td>0 — <code>--session &lt;id&gt;</code></td><td><strong>yes</strong></td><td>An explicit integer naming a live row. No inference, no write</td></tr>
+<tr><td>0 — <code>--session &lt;name&gt;</code></td><td>no</td><td>The name path <em>creates</em> when absent. Accepting a name that resolves and refusing one that does not would be a flag that works or writes depending on data</td></tr>
+<tr><td>1 — <code>TEMPLEDB_SESSION_ID</code></td><td><strong>yes</strong></td><td>Same: explicit, validated, read-only</td></tr>
+<tr><td>2 — instance cache</td><td>n/a</td><td>A CLI that exits after one command has nothing to memoise</td></tr>
+<tr><td>3 — <code>TEMPLEDB_SESSION</code></td><td>no</td><td>Creates. And a port that read the name without creating would silently disagree with Python about which session a wrapper is in</td></tr>
+<tr><td>4 — SID lookup</td><td>no</td><td>Heuristic, unverifiable, and the one most likely to drift as Python tunes it</td></tr>
+<tr><td>5 — PPID lookup</td><td>no</td><td>Explicitly labelled backwards compatibility for rows predating the SID switch</td></tr>
+<tr><td>6 — create</td><td><strong>never</strong></td><td>A read command that inserts a row is the thing this port exists not to do</td></tr>
+</table>
+
+<h3>Why not resolve read-only — steps 4 and 5 without step 6</h3>
+
+<p>
+  This is the obvious middle option and it should be rejected
+  explicitly, because it looks free. Doing the SID and PPID lookups
+  without the creation fallback means the port finds the session when
+  one happens to exist and finds none when it does not — so the same
+  command, in the same terminal, returns a different view depending on
+  whether Python has run there in the last 24 hours. The behaviour would
+  be correct, unpredictable, and impossible to test. Refusing to
+  resolve at all is <em>worse</em> in capability and <em>better</em> in
+  every property the port is trying to hold.
+</p>
+
+<h3>What this costs, stated plainly</h3>
+
+<table>
+<tr><th>Capability</th><th>Under this decision</th></tr>
+<tr><td><code>vcs log</code> default view</td><td>Available when <code>TEMPLEDB_SESSION_ID</code> is set; otherwise the published view, as today, with the header saying which</td></tr>
+<tr><td><code>file set --stage</code></td><td>Requires an explicit session. Refuses with a usage error otherwise — never silently stages into a guessed one</td></tr>
+<tr><td><code>vcs commit</code></td><td>Requires an explicit session. This is the big one; see below</td></tr>
+<tr><td><code>edit_intents</code></td><td>Writable with a NULL <code>session_id</code> when none is given, which is what the column already permits</td></tr>
+<tr><td><code>--session &lt;name&gt;</code></td><td>Not supported. <code>--session 1163</code> works; <code>--session my-agent</code> does not</td></tr>
+</table>
+
+<p>
+  The honest version of that last row: <strong>this closes
+  <code>--session &lt;name&gt;</code> permanently</strong>, not until
+  later. Supporting it requires creating rows, and if the port ever
+  creates session rows then the read-only guarantee is gone and so is
+  the argument for the whole architecture. If name support turns out to
+  be load-bearing for how agents actually use the tool, that is an
+  argument for revisiting this document, not for quietly adding the
+  write.
+</p>
+
+<h2>The guard the design document already named</h2>
+
+<p>
+  The write-path document lists seven guards for <code>commit</code>,
+  each dated to an incident. One is specifically about sessions and it
+  is a warning for how this gets implemented, not whether:
+</p>
+
+<div class="callout">
+  <strong>Session resolution outside the transaction.</strong> Session
+  creation inserts into <code>vcs_sessions</code> with
+  <code>commit=True</code>. Called from inside the transaction, its
+  commit ended the caller's — so a later per-file failure rolled back
+  the file states but could not undo the already-committed commit row.
+  Result: a commit with zero <code>vcs_file_states</code>, listed in the
+  log, breaking the parent chain. Reproduced on demand 2026-10-03.
+</div>
+
+<p>
+  Under this recommendation the port cannot hit that bug, because it
+  never creates. But the <em>shape</em> of the fix survives and is worth
+  keeping: resolve the session before opening the transaction, pass it
+  in. That is the same rule the clock seam established — the instant and
+  the identity are arguments threaded from the entry point, not ambient
+  reads — and <code>file set</code> already follows it for the clock.
+</p>
+
+<h2>What already works, and what it proves</h2>
+
+<p>
+  <code>summary</code>'s handoff-inbox pane is session-scoped and has
+  been ported since 2026-10-21. It takes the session identity as a
+  <code>&amp;str</code> argument, resolved at the CLI entry point from
+  <code>TEMPLEDB_SESSION_ID</code> or
+  <code>(gethostname, getppid)</code>, and
+  <code>handoff_inbox(store, session_id)</code> reads no environment.
+</p>
+
+<p>
+  That pane is byte-identical with Python's on live data. It is a small
+  case — one query, two counts — but it is evidence for the shape: the
+  identity threaded as a parameter, resolved once at the edge, with the
+  query layer staying a function. <strong>The recommendation here is
+  that pane's arrangement applied to the write path</strong>, with the
+  edge resolution narrowed from "guess like Python" to "accept or
+  decline".
+</p>
+
+<p>
+  One inconsistency to fix while doing this: that pane's fallback
+  constructs <code>&lt;hostname&gt;-&lt;getppid&gt;</code>, reproducing
+  Python's <em>handoff</em> identity, which is a different scheme from
+  <code>vcs_sessions</code> entirely — handoff notes address a string,
+  VCS sessions have integer ids. The two should not share a resolver,
+  and today they nearly do.
+</p>
+
+<h2>What to build, in order</h2>
+
+<table>
+<tr><th>#</th><th>Work</th><th>Notes</th></tr>
+<tr><td>1</td><td><code>session.rs</code>: resolve-or-decline</td><td>One function, <code>Option&lt;SessionId&gt;</code>, reading <code>TEMPLEDB_SESSION_ID</code> and a <code>--session</code> integer. Validates <code>ended_at IS NULL</code>. No writes, no heuristics</td></tr>
+<tr><td>2</td><td>Mirror <code>vcs_sessions</code></td><td>836 rows, 10 columns. The eighteenth mirrored table. Needed to validate liveness at all</td></tr>
+<tr><td>3</td><td><code>vcs log</code>'s default view</td><td>Closes the last read-layer divergence. Byte-diffable the moment a session is pinned, which the sweep can do</td></tr>
+<tr><td>4</td><td>Mirror <code>edit_intents</code>, then <code>file set</code>'s intent</td><td>Fifth of seven guards. NULL session when unpinned</td></tr>
+<tr><td>5</td><td><code>--session</code> on <code>file set</code>, integer only</td><td>Sixth guard, in its reduced form</td></tr>
+<tr><td>6</td><td><code>vcs commit</code></td><td>Its own document. Six remaining guards, four tables, and the parent-chain bug</td></tr>
+</table>
+
+<p>
+  Item 3 is the one to do first after the plumbing, and not because it
+  is next in the porting order. It is the only session-dependent
+  behaviour that is <strong>byte-diffable</strong>: pin
+  <code>TEMPLEDB_SESSION_ID</code> on both implementations, run
+  <code>vcs log</code>, compare. Every other item on the list is a write
+  and falls back to cross-read. Doing the verifiable one first means the
+  session plumbing is pinned against Python before anything depends on
+  it — the same reasoning that put the clock seam behind
+  <code>summary</code> rather than behind the write path.
+</p>
+
+<h2>Open questions</h2>
+
+<p>
+  Two, and both are decisions rather than research.
+</p>
+
+<p>
+  <strong>Does an unpinned <code>file set --stage</code> refuse, or
+  stage with a NULL session?</strong> The column is
+  <code>staged_by_session_id</code> and the staging model assumes
+  ownership, so a NULL-owned staged row may be a state nothing else
+  knows how to read. Refusing is safer and narrower; staging with NULL
+  is more useful and might corrupt a concept. This needs a look at what
+  reads <code>vcs_working_state</code> before it is decided.
+</p>
+
+<p>
+  <strong>Should the port refuse to run at all when
+  <code>TEMPLEDB_SESSION</code> (the name variable) is set?</strong> It
+  is the agent wrapper's variable, so a port running under an agent will
+  routinely see it — and will ignore it, meaning it silently disagrees
+  with Python about which session it is in. Ignoring a variable that
+  changes the answer is the failure mode rule 3 of the decisions report
+  warns about. Erroring is loud and correct and would make the port
+  unusable in exactly the environment it is developed in, which is an
+  argument for a warning rather than a refusal.
+</p>
+
+<h2>What this document commits to</h2>
+
+<p>
+  Nothing is implemented. The claim is the precondition the porting order
+  asks for: the blocker is not SQL and not the seven steps, it is that
+  two of them write and the other four are unverifiable heuristics. The
+  port should take the two explicit steps, decline the rest, and say so
+  in its output rather than guessing. One capability —
+  <code>--session &lt;name&gt;</code> — closes permanently as a result,
+  and that is the price of the read-only guarantee rather than an
+  oversight to fix later.
+</p>
+
+</body>
+</html>
