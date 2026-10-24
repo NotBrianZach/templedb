@@ -431,7 +431,19 @@ def like_escape(text: str) -> str:
 
 
 def execute(sql: str, params: tuple = (), commit: bool = True) -> int:
-    """Execute statement and return lastrowid
+    """Execute statement and return lastrowid.
+
+    FOR INSERTs. The return value is `cursor.lastrowid`, which SQLite
+    defines only after an INSERT — after an UPDATE or a DELETE it is
+    whatever the last INSERT on this connection left behind, a stale
+    constant unrelated to the statement you just ran. 27 call sites want
+    exactly this and pass the result on as a new row's id.
+
+    **If you want to know how many rows changed, use
+    `execute_rowcount`.** `if execute("DELETE FROM ...")` is always-ish
+    true and says nothing; that was live in the orphan reap in
+    `vcs.py::commit` until 2026-10-23, where it logged "reaped orphaned
+    rows" on runs that reaped none.
 
     Args:
         sql: SQL statement to execute
@@ -440,7 +452,7 @@ def execute(sql: str, params: tuple = (), commit: bool = True) -> int:
                 Set to False when using transaction() context manager
 
     Returns:
-        Last inserted row ID
+        Last inserted row ID. Meaningless for UPDATE and DELETE.
     """
     try:
         conn = get_connection()

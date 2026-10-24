@@ -135,18 +135,125 @@ class ProjectRepository(BaseRepository):
         logger.info(f"Updating project {project_id} with fields: {list(kwargs.keys())}")
         self.execute(sql, tuple(values))
 
-    def delete(self, project_id: int) -> None:
-        """
-        Delete a project.
+    def detach_non_cascading_references(self, project_id: int) -> Dict[str, int]:
+        """NULL out every reference to this project the schema will not
+        cascade or null for us.
 
-        Note: CASCADE will delete related records (files, commits, etc.)
+        `delete()` used to be one `DELETE FROM projects` with a comment
+        saying "CASCADE will delete related records". 42 of the 47
+        foreign keys pointing at `projects` do carry ON DELETE CASCADE,
+        and `nix_generations` carries SET NULL — but four carry NO
+        ACTION, and `apply_standard_pragmas` sets `foreign_keys=ON`, so
+        a single row in any of them aborts the whole delete with a bare
+        `FOREIGN KEY constraint failed`:
+
+            agent_sessions.project_id      89 rows
+            agent_work_log.project_id     839 rows
+            handoff_notes.project_id       11 rows
+            prompt_usage_log.project_id     0 rows (latent)
+
+        Those are agent-activity tables, so in practice *every project
+        an agent has touched* was undeletable — 9 of 25 when this was
+        written, including `templedb` itself. The symptom was reported as
+        "project rm doesn't cascade, unusable on any project with files
+        or commits", and files and commits turn out to be innocent:
+        reproduced against the real FK edges, a project with files,
+        commits, branches, session heads, claims, test runs and applied
+        intents deletes cleanly. Those tables all reference
+        `vcs_commits`, and SQLite checks immediate constraints at the end
+        of the *statement*, by which point the cascade has removed the
+        referencing rows too. Only the four with nothing deleting them
+        survive to be checked.
+
+        NULL and not DELETE, which is the semantic question underneath.
+        An agent session that worked on a since-removed project is still
+        a true record of work; `nix_generations` already says so for the
+        same situation by declaring SET NULL. The column being NO ACTION
+        rather than SET NULL is an oversight, not an intent — there is no
+        reading of "keep this history" that also means "and make the
+        project undeletable".
+
+        Derived from the schema rather than hardcoded, so table 164 does
+        not reintroduce this. The list above is what it resolves to
+        today; it is a comment, not a constant.
+
+        Returns a table -> rows-detached map, for the caller to report.
+        """
+        blockers = self.query_all(
+            """
+            SELECT m.name AS child, fk."from" AS col
+              FROM sqlite_master m
+              JOIN pragma_foreign_key_list(m.name) fk
+             WHERE m.type = 'table'
+               AND fk."table" = 'projects'
+               AND fk.on_delete NOT IN ('CASCADE', 'SET NULL')
+             ORDER BY m.name, fk."from"
+            """
+        )
+
+        detached: Dict[str, int] = {}
+        for b in blockers:
+            child, col = b['child'], b['col']
+            # A NOT NULL column cannot be detached, and silently
+            # skipping it would put us back where we started: the delete
+            # would fail later with a bare constraint error naming
+            # nothing. Say which table needs a decision instead.
+            notnull = self.query_one(
+                """
+                SELECT i."notnull" AS nn
+                  FROM pragma_table_info(?) i
+                 WHERE i.name = ?
+                """,
+                (child, col),
+            )
+            if notnull and notnull['nn']:
+                raise RuntimeError(
+                    f"{child}.{col} references projects with NO ACTION and is "
+                    f"NOT NULL, so it can be neither cascaded nor detached. "
+                    f"Give it ON DELETE CASCADE if the rows belong to the "
+                    f"project, or make it nullable if they outlive it."
+                )
+            # `execute_rowcount`, not `execute`. The latter returns
+            # `cursor.lastrowid`, which after an UPDATE is a leftover
+            # from the connection's last INSERT — the first version of
+            # this trusted it and reported "2 rows" for every table,
+            # including one with no matching rows at all.
+            n = self.execute_rowcount(
+                f"UPDATE {child} SET {col} = NULL WHERE {col} = ?",
+                (project_id,),
+                commit=False,
+            )
+            if n:
+                detached[child] = n
+        return detached
+
+    def delete(self, project_id: int) -> Dict[str, int]:
+        """
+        Delete a project and everything the schema says belongs to it.
+
+        One transaction: the detach and the delete land together or not
+        at all. Doing the detach in its own transaction would mean a
+        failure in the delete left agent history pointing at a project
+        that still exists, which is a quieter wrong state than the one
+        this replaces.
 
         Args:
             project_id: Project ID
+
+        Returns:
+            table -> rows-detached, so the caller can say what survived
+            the project rather than leaving it to be discovered.
         """
         logger.info(f"Deleting project with ID {project_id}")
-        self.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        with self.transaction():
+            detached = self.detach_non_cascading_references(project_id)
+            for table, n in detached.items():
+                logger.info(f"Detached {n} {table} row(s) from project {project_id}")
+            self.execute(
+                "DELETE FROM projects WHERE id = ?", (project_id,), commit=False
+            )
         logger.info(f"Deleted project {project_id}")
+        return detached
 
     def get_statistics(self, project_id: int) -> Optional[Dict[str, Any]]:
         """

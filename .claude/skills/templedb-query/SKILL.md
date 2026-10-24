@@ -133,6 +133,43 @@ FROM current_file_contents_view
 WHERE file_path LIKE '%.js';
 ```
 
+## ⚠️ Never write through the `sqlite3` CLI without the FK pragma
+
+The examples below use `sqlite3` directly. That is fine for **reads**,
+which is all they are. For a **write**, the CLI is not equivalent to
+templedb:
+
+```bash
+# WRONG — the sqlite3 CLI defaults PRAGMA foreign_keys to OFF.
+sqlite3 ~/.local/share/templedb/templedb.sqlite "DELETE FROM projects WHERE slug='x'"
+
+# RIGHT — ON is what templedb's own connections use.
+sqlite3 ~/.local/share/templedb/templedb.sqlite \
+    "PRAGMA foreign_keys=ON; DELETE FROM projects WHERE slug='x'"
+```
+
+`db_utils.apply_standard_pragmas` sets `foreign_keys=ON`, so anything
+going through templedb is protected. The CLI is not, and the failure is
+silent in the worst way: the delete **succeeds**, leaves rows pointing
+at a parent that is gone, and exits **0**. Nothing is reported because
+nothing failed.
+
+`-bail` does not save you, and it is not the problem either — measured
+on SQLite 3.51.2, `-bail` exits 1 on a mid-script constraint failure
+and 19 on a single-statement one. It cannot report an error that the
+pragma prevented from happening.
+
+Two habits close it:
+
+1. Put `PRAGMA foreign_keys=ON;` first in every script that writes.
+2. Run `templedb doctor entities` afterwards. The `foreign_keys_hold`
+   check is `PRAGMA foreign_key_check` over the whole database and is
+   what catches an orphan you created this way — including one created
+   by someone else's script last week.
+
+Prefer `templedb` commands or the MCP tools for writes. The CLI is a
+read tool here.
+
 ## Common Query Patterns
 
 ### Cross-Project Analysis

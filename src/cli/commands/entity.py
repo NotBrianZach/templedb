@@ -3731,6 +3731,8 @@ WantedBy=timers.target
              self._check_no_stale_deploy_stage_runs),
             ('working_state_references_valid_files',
              self._check_working_state_files_exist),
+            ('foreign_keys_hold',
+             self._check_foreign_keys_hold),
             ('checkout_matches_db',
              self._check_checkout_matches_db),
             ('checkout_roles_are_unambiguous',
@@ -4963,6 +4965,53 @@ WantedBy=timers.target
             f"working_state #{r['id']} (project={r['project_id']}, "
             f"state={r['state']}, session={r['staged_by_session_id']}) "
             f"references missing project_files.id={r['file_id']}"
+            for r in rows
+        ]
+
+    def _check_foreign_keys_hold(self):
+        """Invariant: no row references a row that is not there.
+
+        `PRAGMA foreign_key_check` over the whole database, which is the
+        generic form of a check this file already had one table's worth
+        of. `working_state_references_valid_files` exists because
+        "sync_engine and some migrations bulk-delete with FKs disabled";
+        that is not a property of `vcs_working_state`, it is a property
+        of every table, and writing one check per table means the
+        thirteenth orphan class is found by whoever trips over it.
+
+        The hole is wider than migrations. `apply_standard_pragmas` sets
+        `foreign_keys=ON`, so everything going through `db_utils` is
+        safe — but **the sqlite3 CLI defaults the pragma OFF**, and the
+        templedb-query skill hands out `sqlite3 <db> "..."` invocations.
+        A write run that way is not refused, it silently orphans, and
+        the shell reports success because nothing failed. That was
+        reported as "sqlite3 -bail exits 0 after a runtime error"; the
+        exit code turns out to be innocent — measured on 3.51.2, -bail
+        exits 1 on a mid-script constraint failure and 19 on a
+        single-statement one. What exits 0 is the delete that *was not
+        an error*, because the pragma was off. Same pragma as the
+        `project rm` bug, read from the other side: ON made the delete
+        impossible, OFF makes it silently wrong.
+
+        Cheap enough to run every time: 0 violations over 163 tables in
+        well under the `doctor entities` budget, because the pragma
+        walks indexes rather than joining.
+
+        Capped at 50 rows like the checks above it. A violation here is
+        usually a bulk event, and 20,000 identical lines is not more
+        informative than 50.
+        """
+        from db_utils import query_all
+        rows = query_all(
+            """
+            SELECT "table" AS tbl, rowid AS rid, parent, fkid
+              FROM pragma_foreign_key_check
+             LIMIT 50
+            """
+        )
+        return [
+            f"{r['tbl']} rowid={r['rid']} references a missing "
+            f"{r['parent']} row (foreign key #{r['fkid']})"
             for r in rows
         ]
 

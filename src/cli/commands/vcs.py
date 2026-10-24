@@ -681,15 +681,22 @@ class VCSCommands(Command):
         # them in vcs_file_states, the FK there fires and the whole
         # commit aborts (session recap 2026-09-19: hit exactly this).
         # Rather than crash, reap the dangling rows and continue.
+        # execute_rowcount, not execute: the latter returns
+        # cursor.lastrowid, which after a DELETE is a leftover from the
+        # connection's last INSERT. So `if orphaned:` was true on
+        # essentially every commit and this logged "reaped orphaned
+        # working_state row(s)" on runs that reaped none — a debug line
+        # that invented the very condition it was added to observe.
         try:
-            orphaned = self.vcs_repo.execute("""
+            orphaned = self.vcs_repo.execute_rowcount("""
                 DELETE FROM vcs_working_state
                  WHERE staged_by_session_id = ?
                    AND file_id NOT IN (SELECT id FROM project_files)
             """, (sid,))
             if orphaned:
                 logger.debug(
-                    f"reaped orphaned working_state row(s) for session {sid}"
+                    f"reaped {orphaned} orphaned working_state row(s) "
+                    f"for session {sid}"
                 )
         except Exception as e:
             logger.debug(f"orphan reap skipped (non-fatal): {e}")

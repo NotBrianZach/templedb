@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db_utils import query_one as db_query_one, query_all as db_query_all
 from db_utils import execute as db_execute, transaction as db_transaction
+from db_utils import execute_rowcount as db_execute_rowcount
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -82,7 +83,20 @@ class BaseRepository:
 
     def execute(self, sql: str, params: tuple = (), commit: bool = True) -> int:
         """
-        Execute a non-query SQL statement (INSERT, UPDATE, DELETE).
+        Execute a non-query SQL statement and return the new row's id.
+
+        FOR INSERTs. The return value is `cursor.lastrowid`, which
+        SQLite defines only after an INSERT — after an UPDATE or DELETE
+        it is a leftover from the last INSERT on the connection, not a
+        count. **For UPDATE/DELETE use `execute_rowcount`.**
+
+        The docstring said "Row ID for INSERT statements, or number of
+        affected rows" and the debug line said "affected N
+        rows/returned ID", which is how the trap kept being walked into:
+        both read as though the value adapts to the statement, and it
+        does not. `db_utils.execute_rowcount` exists because four call
+        sites found that out separately; this class did not expose it
+        until 2026-10-23, so repository code had no way to ask.
 
         Args:
             sql: SQL statement string
@@ -90,7 +104,7 @@ class BaseRepository:
             commit: Whether to commit immediately (default: True)
 
         Returns:
-            Row ID for INSERT statements, or number of affected rows
+            Row ID of the inserted row. Meaningless for UPDATE/DELETE.
 
         Example:
             >>> repo = BaseRepository()
@@ -102,7 +116,39 @@ class BaseRepository:
         try:
             logger.debug(f"Executing statement: {sql[:100]}... with params: {params}")
             result = db_execute(sql, params, commit=commit)
-            logger.debug(f"Statement affected {result} rows/returned ID")
+            logger.debug(f"Statement returned row id {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Execute failed: {e}", exc_info=True)
+            raise
+
+    def execute_rowcount(self, sql: str, params: tuple = (), commit: bool = True) -> int:
+        """
+        Execute an UPDATE or DELETE and return how many rows changed.
+
+        The counterpart to `execute`, and the one to reach for whenever
+        the answer is "how many" rather than "which row". See `execute`
+        for why the two cannot be one method.
+
+        Args:
+            sql: SQL statement string
+            params: Statement parameters (optional)
+            commit: Whether to commit immediately (default: True)
+
+        Returns:
+            Rows modified by the statement (`cursor.rowcount`)
+
+        Example:
+            >>> repo = BaseRepository()
+            >>> n = repo.execute_rowcount(
+            ...     "UPDATE handoff_notes SET project_id = NULL WHERE project_id = ?",
+            ...     (project_id,)
+            ... )
+        """
+        try:
+            logger.debug(f"Executing statement: {sql[:100]}... with params: {params}")
+            result = db_execute_rowcount(sql, params, commit=commit)
+            logger.debug(f"Statement affected {result} row(s)")
             return result
         except Exception as e:
             logger.error(f"Execute failed: {e}", exc_info=True)

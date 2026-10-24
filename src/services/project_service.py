@@ -407,12 +407,17 @@ class ProjectService(BaseService):
         self.logger.info(f"Sync completed for {slug}")
         return stats
 
-    def delete_project(self, slug: str) -> None:
+    def delete_project(self, slug: str) -> Dict[str, int]:
         """
         Delete a project and all related data.
 
         Args:
             slug: Project slug
+
+        Returns:
+            table -> rows-detached for the references the schema does not
+            cascade. Agent history outlives the project it was about; see
+            `ProjectRepository.detach_non_cascading_references`.
 
         Raises:
             ResourceNotFoundError: If project not found
@@ -420,8 +425,9 @@ class ProjectService(BaseService):
         project = self.get_by_slug(slug, required=True)
         project_id = project['id']
 
-        self.project_repo.delete(project_id)
+        detached = self.project_repo.delete(project_id)
         self.logger.info(f"Deleted project: {slug}")
+        return detached
 
     def generate_envrc(
         self,

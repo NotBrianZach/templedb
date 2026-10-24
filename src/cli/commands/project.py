@@ -386,8 +386,16 @@ class ProjectCommands(Command):
                     return 0
 
             # Delete project via service
-            self.service.delete_project(args.slug)
+            detached = self.service.delete_project(args.slug)
             logger.info(f"Removed project: {args.slug}")
+            # Agent history is detached, not deleted — it is a true
+            # record of work that happened, and the schema says so for
+            # `nix_generations` already. Printed rather than logged at
+            # debug: "the project is gone but 839 work-log rows are not"
+            # is something the operator should be told once, not have to
+            # go looking for.
+            for table, n in sorted(detached.items()):
+                print(f"  kept {n} {table} row(s), detached from the project")
             return 0
 
         except ResourceNotFoundError as e:

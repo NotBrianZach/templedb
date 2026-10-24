@@ -135,7 +135,7 @@ CREATE TABLE IF NOT EXISTS agent_session_sections (
 CREATE TABLE IF NOT EXISTS agent_sessions (
     id INTEGER PRIMARY KEY,
     session_uuid TEXT NOT NULL UNIQUE,
-    project_id INTEGER REFERENCES projects(id),
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
     provider_id INTEGER NOT NULL REFERENCES agent_providers(id),
     external_session_id TEXT,
     title TEXT,
@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS agent_work_log (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES agent_sessions(id),
     run_id INTEGER REFERENCES agent_runs(id),
-    project_id INTEGER REFERENCES projects(id),
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
     -- What was asked
     user_message TEXT,
     -- What was done
@@ -1213,7 +1213,7 @@ CREATE TABLE IF NOT EXISTS handoff_notes (
     ref_report      TEXT,   -- reports/YYYY-MM-DD-HHMM-slug.html
     ref_commit      TEXT,   -- commit hash prefix or full
     ref_file        TEXT,   -- project_slug:path
-    project_id      INTEGER REFERENCES projects(id),
+    project_id      INTEGER REFERENCES projects(id) ON DELETE SET NULL,
 
     -- Lifecycle
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1811,7 +1811,7 @@ CREATE TABLE IF NOT EXISTS prompt_usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     prompt_type TEXT NOT NULL,
     prompt_id INTEGER NOT NULL,
-    project_id INTEGER REFERENCES projects(id),
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
     used_by TEXT,
     usage_context TEXT,
     rendered_prompt TEXT,
