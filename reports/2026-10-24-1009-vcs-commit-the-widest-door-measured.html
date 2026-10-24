@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>vcs commit: the widest door, measured</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1rem 0;
+          font-size: 0.89em; }
+  th, td { border: 1px solid var(--border); padding: 0.4rem 0.6rem;
+           text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase;
+       letter-spacing: 0.04em; font-size: 0.82em; }
+  td code { font-size: 0.92em; }
+</style>
+</head>
+<body>
+
+<h1>vcs commit: the widest door, measured</h1>
+<p class="lede">
+  The write-path document called <code>vcs commit</code> "the widest door
+  in the system" and left it at that. This measures the door. It is seven
+  tables, nine guards, one trigger the port has no equivalent for, and one
+  dependency — the checkout — that is not a translation problem but a
+  question about what the port is <em>for</em>. The conclusion is that
+  commit should be split: the three-quarters that is database work can be
+  ported and verified now, and the quarter that reconciles a filesystem
+  should be refused outright rather than ported badly.
+</p>
+
+<h2>Why this document exists</h2>
+
+<p>
+  The sessions report (2026-10-23) listed <code>vcs commit</code> as its
+  step 6 and said it wanted "its own document. Six remaining guards, four
+  tables, and the parent-chain bug". Both numbers were low, and one of
+  them was low in an interesting way.
+</p>
+
+<p>
+  Since that was written, commit also <em>acquired</em> scope. Porting
+  <code>file set --stage</code> turned up that <code>--stage</code> is
+  message-only in Python — the auto-stage is unconditional — and that
+  <code>vcs_working_state</code> has no reader in the port because its
+  only consumer is commit. So the auto-stage moved here, and with it the
+  table and the checkout mirror that keeps it honest.
+</p>
+
+<h2>What it actually touches</h2>
+
+<p>
+  Seven tables written, one trigger fired, and two read for guards:
+</p>
+
+<table>
+<tr><th>table</th><th>rows live</th><th>what commit does to it</th><th>mirrored?</th></tr>
+<tr><td><code>vcs_commits</code></td><td>1,423</td><td>INSERT, one per commit</td><td>yes</td></tr>
+<tr><td><code>vcs_commit_parents</code></td><td>1,161</td><td>INSERT OR IGNORE, parent edge</td><td>yes</td></tr>
+<tr><td><code>vcs_file_states</code></td><td>7,097</td><td>INSERT … ON CONFLICT, one per staged file</td><td>yes</td></tr>
+<tr><td><code>file_contents</code></td><td>2,291</td><td>INSERT … ON CONFLICT, advances <code>is_current</code></td><td>yes</td></tr>
+<tr><td><code>project_files</code></td><td>2,647</td><td><strong>DELETE</strong> for a committed deletion</td><td>yes</td></tr>
+<tr><td><code>vcs_working_state</code></td><td>1,886</td><td>UPDATE/DELETE, retires what it committed</td><td><strong>no</strong></td></tr>
+<tr><td><code>vcs_commit_metadata</code></td><td>435</td><td>INSERT, the commit's structured fields</td><td><strong>no</strong></td></tr>
+<tr><td><code>vcs_branches</code></td><td>23</td><td>head advanced <em>by a trigger</em></td><td>yes</td></tr>
+<tr><td><code>checkouts</code></td><td>140</td><td>read, to refuse</td><td><strong>no</strong></td></tr>
+<tr><td><code>vcs_session_heads</code></td><td>30</td><td>read/write for publish bookkeeping</td><td><strong>no</strong></td></tr>
+</table>
+
+<p>
+  So four new mirrored tables, not the document's "four tables" total —
+  and <code>project_files</code> is the one to notice. Commit is the only
+  path in the system that <em>hard-deletes</em> a <code>project_files</code>
+  row. Everything else soft-deletes by flipping <code>status</code>, which
+  is why <code>file set</code> needed an un-delete guard at all.
+</p>
+
+<h2>The trigger, which is the sharpest porting problem</h2>
+
+<div class="callout">
+  <code>update_branch_head_on_commit</code> is an <code>AFTER INSERT</code>
+  trigger on <code>vcs_commits</code> that sets
+  <code>vcs_branches.head_commit_id = NEW.id</code>. The port's Postgres
+  subset has no triggers at all — 61 live triggers, none translated —
+  so the branch head would simply never advance.
+</div>
+
+<p>
+  The obvious fix is to do the <code>UPDATE</code> in application code
+  instead, and Python's own comment says why that is a trap:
+</p>
+
+<pre>-- Branch head is auto-advanced by the `update_branch_head_on_commit`
+-- trigger ... so no manual UPDATE is required here. The previous
+-- app-level compare-and-swap was buggy: it always fired a
+-- false-positive HEAD_RACE error because the trigger had already set
+-- head_commit_id to the new commit id by the time the CAS's
+-- WHERE head_commit_id IS &lt;old&gt; ran.</pre>
+
+<p>
+  That is a bug <em>caused by the trigger existing</em>. A port with no
+  trigger can do the compare-and-swap correctly — it is the only
+  implementation that can, because nothing has moved the column
+  underneath it. So this is the first place the port can be
+  <strong>better</strong> rather than merely faithful, and the first
+  place "reproduce Python" and "reproduce Python's behaviour" come apart:
+  reproducing the code gives a head that never advances, and reproducing
+  the behaviour gives a CAS that Python cannot have.
+</p>
+
+<p>
+  It also means the cross-backend digest stops being free. Every
+  measurement so far has compared SQLite against Postgres after a
+  <em>copy</em>; this would be the first table whose contents are
+  produced by different mechanisms on the two sides.
+</p>
+
+<h2>The nine guards</h2>
+
+<p>
+  The write-path document's finding was that <strong>the guards are the
+  deliverable</strong> — "a port that reproduces the SQL and not these is
+  a regression even if every byte of output matches". Here they are, each
+  with what it cost to learn:
+</p>
+
+<table>
+<tr><th>#</th><th>guard</th><th>the incident behind it</th></tr>
+<tr><td>1</td><td><code>_has_write_tree</code></td><td>Committing against the materialised tree reverts whatever the DB holds that the copy does not. Refuses when the only tree is the published one</td></tr>
+<tr><td>2</td><td>orphan reap</td><td><code>sync_engine</code> and some migrations bulk-delete with FKs off, leaving <code>vcs_working_state</code> rows pointing at dead files; the <code>vcs_file_states</code> FK then aborts the whole commit (2026-09-19)</td></tr>
+<tr><td>3</td><td>content-hash refusal</td><td>A staged non-deleted file with no hash could only record the <code>'DELETED'</code> sentinel, destroying the record of what the content was. <strong>124 such rows already exist</strong> from before the guard, feeding 501 <code>source_snapshots</code> rows that point at a fabricated blob claiming 8,059 bytes and holding nothing</td></tr>
+<tr><td>4</td><td>version conflict</td><td>Another session committed while this workspace was editing</td></tr>
+<tr><td>5</td><td>intent conflict</td><td>A prior <code>file set</code> moved the DB blob; the workspace copy is stale, and the scan calls it "modified" — committing would silently overwrite the write with stale bytes (2026-09-04)</td></tr>
+<tr><td>6</td><td>snapshot refinement of 5</td><td>Consult the checkout snapshot first: if it equals the current DB hash the workspace <em>was</em> materialised with the intent and the edit is legitimate progression, not a revert (2026-09-20)</td></tr>
+<tr><td>7</td><td><code>--strategy force</code> still refuses intent conflicts</td><td>unless <code>--allow-revert-intents</code>. Force was reverting fresh <code>file set</code> writes</td></tr>
+<tr><td>8</td><td><code>--allow-mass-delete</code></td><td>"almost always means the wrong directory was passed (e.g. the PARENT)"</td></tr>
+<tr><td>9</td><td>session resolution outside the transaction</td><td>Session creation commits, which ended the caller's transaction — a later per-file failure rolled back the file states but could not undo the commit row. Result: a commit with zero <code>vcs_file_states</code>, in the log, breaking the parent chain. Reproduced on demand 2026-10-03</td></tr>
+</table>
+
+<p>
+  Guard 9 the port cannot hit, because <code>session.rs</code> never
+  creates. Guards 4, 5, 6 and 8 are all <em>filesystem</em> guards: they
+  compare a workspace against the database. Guards 1 and 2 are
+  preconditions. Only 3 and 7 are about the database alone.
+</p>
+
+<h2>The dependency that is not a translation problem</h2>
+
+<div class="callout">
+  Five of the nine guards exist to reconcile a <strong>filesystem</strong>
+  against the database. The port has no concept of a checkout, by design:
+  it reads a database and prints. Porting those guards means porting the
+  workspace scanner, the checkout-role resolver, and the mirror-to-disk
+  step — which is a different project, not a harder version of this one.
+</div>
+
+<p>
+  The mirror-to-disk step is the one that should settle it. Python writes
+  every <code>file set</code> into the active checkout, and its comment
+  records what a miss costs: the refresh classifies a staged file with no
+  file on disk as <code>deleted</code>, and the next commit
+  <em>hard-deletes</em> the <code>project_files</code> row. On 2026-09-24
+  a commit "announced Files: 2 and committed one". A port that writes
+  <code>vcs_working_state</code> without the disk half has built exactly
+  the state that produces that.
+</p>
+
+<h2>Recommendation: split the door</h2>
+
+<p>
+  Do not port <code>vcs commit</code>. Port <strong>the half that is a
+  database operation</strong>, under a name that does not promise the
+  other half, and refuse the other half explicitly.
+</p>
+
+<table>
+<tr><th>port</th><th>refuse</th></tr>
+<tr><td>Committing <em>already-staged</em> rows: the seven-table write, the parent edge, the CAS on the branch head, guards 3 and 7</td><td>Workspace scanning — there is no workspace</td></tr>
+<tr><td>Guard 9's shape, which <code>file set</code> already follows: session resolved at the edge, passed in, never created</td><td>Guards 4, 5, 6, 8 — all of them compare against a tree the port does not have</td></tr>
+<tr><td>Guard 2, the orphan reap, which is pure SQL</td><td><code>--strategy</code> and its resolution strategies, which exist to settle conflicts the port cannot detect</td></tr>
+</table>
+
+<p>
+  Concretely: <code>templedb-rs vcs commit &lt;proj&gt; -m &lt;msg&gt;
+  --session &lt;id&gt;</code> commits what the session has staged and
+  <em>refuses if anything would require consulting a tree</em>. That is
+  not a reduced <code>vcs commit</code>; it is the operation
+  <code>publish</code> already performs — its guard is
+  <code>COUNT(*) … WHERE staged_by_session_id IS NOT NULL</code>, and it
+  commits without scanning anything.
+</p>
+
+<p>
+  Which means the auto-stage question answers itself in the other
+  direction too. <code>file set --stage</code> can land <em>with</em> this
+  reduced commit, because then <code>vcs_working_state</code> has a reader
+  and the pair is verifiable end to end by cross-read: set, stage, commit,
+  then <code>vcs log</code> and <code>vcs show</code> — both already
+  byte-identical — read the result back.
+</p>
+
+<h2>What has to be built first</h2>
+
+<table>
+<tr><th>#</th><th>work</th><th>notes</th></tr>
+<tr><td>1</td><td>Mirror <code>vcs_working_state</code> and <code>vcs_commit_metadata</code></td><td>1,886 and 435 rows. The 20th and 21st tables</td></tr>
+<tr><td>2</td><td><code>file set --stage</code>, integer session required</td><td>Unblocked the moment (1) lands; the refusal for an unpinned <code>--stage</code> is already argued</td></tr>
+<tr><td>3</td><td>The branch-head CAS</td><td>The port's one chance to be correct where Python is not. Needs its own test: two commits racing on one branch</td></tr>
+<tr><td>4</td><td><code>vcs commit</code>, staged-rows only</td><td>Guards 2, 3, 7, 9. Refuses rather than scans</td></tr>
+<tr><td>5</td><td>A cross-read harness for the pair</td><td>set → stage → commit → <code>vcs log</code>/<code>vcs show</code>, which the sweep already verifies byte-for-byte against Python</td></tr>
+</table>
+
+<h2>Two things this document does not decide</h2>
+
+<p>
+  <strong>Whether the reduced command may be called <code>vcs
+  commit</code>.</strong> It accepts a narrower input than Python's and
+  refuses where Python scans. The flag-surface stage in
+  <code>parity-sweep.sh</code> will report every absent flag, which is the
+  right outcome — but a command that shares a name and refuses a workflow
+  is the <code>--no-fts</code> argument again, and it should be settled
+  before the name is used rather than after.
+</p>
+
+<p>
+  <strong>What <code>vcs_file_states</code> should hold for the 124
+  historical sentinel rows.</strong> The port mirrors them today and
+  <code>source snapshot</code> already errors on the dangling blob where
+  Python printed nothing and exited 0 — so the port is <em>already</em>
+  more honest about them than Python. Whether a ported commit should
+  refuse to mirror them, or carry them as the archaeology they are, is a
+  question about what the mirror means and not about commit.
+</p>
+
+</body>
+</html>
