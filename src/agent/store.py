@@ -1100,9 +1100,22 @@ FLEET_IDLE_DAYS = 2
 # (16 such rows, 8-27 days old, existed when this was written).
 FLEET_ASK_DEADLINE_SECONDS = 600
 
+# Provider kinds whose sessions are test leavings, not fleet work. The
+# `fake` provider writes into this same database from `tests/agent/`, and
+# nothing cleans up after it: 257 of 345 sessions were `fake` when this
+# was written, against 88 real ones. Ordering by updated_at and taking
+# the newest 200 then put 126 fake rows in the roster and pushed ~14 real
+# sessions off the bottom with nothing to say so.
+#
+# Filtered on `provider_kind`, not `name`: the kind is what makes a
+# provider a stub, while the name is free text a second test provider
+# would not share.
+FLEET_TEST_PROVIDER_KINDS = ('fake',)
+
 
 def fleet_rows(project_id=None, newer_than_days=None, limit=200,
-               ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS):
+               ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS,
+               include_test_providers=False):
     """Return one triage row per session, newest activity first.
 
     Each row is `agent_sessions.*` plus the counts a roster view needs:
@@ -1207,6 +1220,10 @@ def fleet_rows(project_id=None, newer_than_days=None, limit=200,
     if newer_than_days and newer_than_days > 0:
         sql += " AND datetime(s.updated_at) >= datetime('now', ?)"
         params.append(f"-{int(newer_than_days)} days")
+    if not include_test_providers and FLEET_TEST_PROVIDER_KINDS:
+        sql += (" AND p.provider_kind NOT IN ("
+                + ','.join('?' * len(FLEET_TEST_PROVIDER_KINDS)) + ")")
+        params.extend(FLEET_TEST_PROVIDER_KINDS)
     sql += " ORDER BY datetime(s.updated_at) DESC LIMIT ?"
     params.append(limit)
     return query_all(sql, tuple(params))
@@ -1395,7 +1412,8 @@ def _row_resumable(row):
 def fleet_rollup(newer_than_days=None, limit=1000,
                  stall_seconds=FLEET_STALL_SECONDS,
                  idle_days=FLEET_IDLE_DAYS,
-                 ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS):
+                 ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS,
+                 include_test_providers=False):
     """Per-project fleet aggregate — the 1000-foot view of the roster.
 
     The roster answers "what is this session doing"; at 25 projects and
@@ -1418,7 +1436,8 @@ def fleet_rollup(newer_than_days=None, limit=1000,
     """
     data = fleet(newer_than_days=newer_than_days, limit=limit,
                  stall_seconds=stall_seconds, idle_days=idle_days,
-                 ask_deadline_seconds=ask_deadline_seconds)
+                 ask_deadline_seconds=ask_deadline_seconds,
+                 include_test_providers=include_test_providers)
 
     by_slug = {}
     for row in data["rows"]:
@@ -1491,19 +1510,54 @@ def _humanize_age(seconds):
     return f"{seconds // 86400}d"
 
 
+def fleet_total(project_id=None, newer_than_days=None,
+                include_test_providers=False):
+    """How many sessions the roster's filters match, ignoring any limit.
+
+    Deliberately a second query rather than a window function over
+    `fleet_rows`: that query's cost is in its eight LEFT JOINs for the
+    per-session counts, none of which a total needs.
+    """
+    sql = ("SELECT COUNT(*) AS n FROM agent_sessions s"
+           " JOIN agent_providers p ON p.id = s.provider_id WHERE 1=1")
+    params = []
+    if project_id is not None:
+        sql += " AND s.project_id = ?"
+        params.append(project_id)
+    if newer_than_days and newer_than_days > 0:
+        sql += " AND datetime(s.updated_at) >= datetime('now', ?)"
+        params.append(f"-{int(newer_than_days)} days")
+    if not include_test_providers and FLEET_TEST_PROVIDER_KINDS:
+        sql += (" AND p.provider_kind NOT IN ("
+                + ','.join('?' * len(FLEET_TEST_PROVIDER_KINDS)) + ")")
+        params.extend(FLEET_TEST_PROVIDER_KINDS)
+    row = query_one(sql, tuple(params))
+    return row['n'] if row else 0
+
+
 def fleet(project_id=None, newer_than_days=None, limit=200,
           stall_seconds=FLEET_STALL_SECONDS, idle_days=FLEET_IDLE_DAYS,
-          ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS):
+          ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS,
+          include_test_providers=False):
     """`fleet_rows` + classification, grouped for display.
 
-    Returns `{"rows": [...], "counts": {bucket: n}}` with rows carrying the
-    derived fields and ordered by bucket priority, then newest activity.
+    Returns `{"rows", "counts", "total", "truncated"}` — rows carry the
+    derived fields and are ordered by bucket priority then newest
+    activity; `counts` is per bucket; `total` is every session the
+    filters match; `truncated` is how many of them the limit hid.
+
+    `truncated` exists because the roster is read as the whole fleet.
+    When 126 of the newest 200 rows were `fake`-provider test leavings,
+    14 real sessions sat below the cut with nothing on screen to suggest
+    they existed.
     """
     now = datetime.utcnow()
     rows = []
-    for row in fleet_rows(project_id=project_id, newer_than_days=newer_than_days,
+    for row in fleet_rows(project_id=project_id,
+                          newer_than_days=newer_than_days,
                           limit=limit,
-                          ask_deadline_seconds=ask_deadline_seconds):
+                          ask_deadline_seconds=ask_deadline_seconds,
+                          include_test_providers=include_test_providers):
         row = dict(row)
         row.update(classify_fleet_row(row, stall_seconds=stall_seconds,
                                       idle_days=idle_days, now=now))
@@ -1516,7 +1570,11 @@ def fleet(project_id=None, newer_than_days=None, limit=200,
     counts = {b: 0 for b in FLEET_BUCKET_ORDER}
     for row in rows:
         counts[row["bucket"]] = counts.get(row["bucket"], 0) + 1
-    return {"rows": rows, "counts": counts}
+    total = fleet_total(project_id=project_id,
+                        newer_than_days=newer_than_days,
+                        include_test_providers=include_test_providers)
+    return {"rows": rows, "counts": counts, "total": total,
+            "truncated": max(0, total - len(rows))}
 
 
 def pending_asks(session_id=None, include_messages=True, only_live=False,
@@ -1580,3 +1638,140 @@ def expire_stale_asks(ask_deadline_seconds=FLEET_ASK_DEADLINE_SECONDS):
               AND datetime(created_at) < datetime('now', ?)""",
         (f"-{int(ask_deadline_seconds)} seconds",),
     )
+
+
+# --- Session retirement ---
+
+# A session is retirable when it holds nothing a human could still want:
+# no findings / todos / open questions, no notes, no work-log entry, no
+# pending ask. Those are the only places a session's output survives the
+# run that produced it, so their absence means the row is a shell.
+#
+# Message count is capped rather than required to be zero: a session that
+# got its opening prompt and one reply has a message pair and still no
+# output of any kind. That is the exact shape the `fake` provider's tests
+# leave behind, and they account for most of what this sweeps.
+#
+# Deliberately NOT a criterion: `status`. 302 of 345 sessions sit in
+# 'interrupted' because nothing ever moves them out of it, so status says
+# almost nothing about whether a session is finished. Artifacts do.
+RETIRE_MAX_MESSAGES = 2
+RETIRE_MIN_AGE_DAYS = 7
+
+# Status values a sweep must never touch regardless of age or artifacts —
+# a live run has produced nothing *yet*, which looks identical to having
+# produced nothing ever.
+RETIRE_PROTECTED_STATUSES = ('running', 'waiting', 'created')
+
+_RETIRABLE_SQL = """
+    SELECT s.id, s.status, s.title, s.created_at, s.updated_at,
+           p.name  AS provider_name,
+           pr.slug AS project_slug,
+           (SELECT COUNT(*) FROM agent_messages m
+             WHERE m.session_id = s.id) AS msg_count
+      FROM agent_sessions s
+      JOIN agent_providers p ON p.id = s.provider_id
+      LEFT JOIN projects pr ON pr.id = s.project_id
+     WHERE datetime(s.updated_at) < datetime('now', ?)
+       AND s.status NOT IN ({protected})
+       AND (SELECT COUNT(*) FROM agent_messages m
+             WHERE m.session_id = s.id) <= ?
+       AND NOT EXISTS (SELECT 1 FROM agent_session_sections c
+                        WHERE c.session_id = s.id)
+       AND NOT EXISTS (SELECT 1 FROM agent_work_log w
+                        WHERE w.session_id = s.id)
+       AND NOT EXISTS (SELECT 1 FROM agent_pending_asks a
+                        WHERE a.session_id = s.id AND a.status = 'pending')
+       AND NOT EXISTS (SELECT 1 FROM agent_session_notes n
+                        WHERE n.session_id = s.id
+                          AND (COALESCE(n.goal_org, '')    != ''
+                            OR COALESCE(n.notes_org, '')   != ''
+                            OR COALESCE(n.scratch_org, '') != ''))
+"""
+
+
+def retirable_sessions(older_than_days=RETIRE_MIN_AGE_DAYS,
+                       provider=None,
+                       max_messages=RETIRE_MAX_MESSAGES,
+                       limit=None):
+    """Sessions holding no surviving output, oldest first.
+
+    Pure read — this is what `ai agent gc` shows you before it is allowed
+    to delete anything. Pass the same arguments to `retire_sessions` to
+    act on exactly this set.
+    """
+    sql = _RETIRABLE_SQL.format(
+        protected=','.join('?' * len(RETIRE_PROTECTED_STATUSES)))
+    params = [f"-{int(older_than_days)} days"]
+    params.extend(RETIRE_PROTECTED_STATUSES)
+    params.append(int(max_messages))
+    if provider:
+        sql += " AND p.name = ?"
+        params.append(provider)
+    sql += " ORDER BY datetime(s.updated_at)"
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    return query_all(sql, tuple(params))
+
+
+# Order matters and is not negotiable: all nine agent_* children of
+# agent_sessions are declared ON DELETE NO ACTION, so the parent row
+# cannot go first. agent_events, agent_messages and agent_work_log hang
+# off agent_runs as well as (or instead of) the session, so runs go last
+# of the children. tool_calls is the single real CASCADE (off agent_runs)
+# and so is absent here on purpose.
+_RETIRE_DELETES = (
+    ("agent_events",
+     "DELETE FROM agent_events WHERE run_id IN"
+     " (SELECT id FROM agent_runs WHERE session_id IN ({ids}))"),
+    ("agent_work_log",
+     "DELETE FROM agent_work_log WHERE session_id IN ({ids})"),
+    ("agent_messages",
+     "DELETE FROM agent_messages WHERE session_id IN ({ids})"),
+    ("agent_session_sections",
+     "DELETE FROM agent_session_sections WHERE session_id IN ({ids})"),
+    ("agent_session_notes",
+     "DELETE FROM agent_session_notes WHERE session_id IN ({ids})"),
+    ("agent_user_edits",
+     "DELETE FROM agent_user_edits WHERE session_id IN ({ids})"),
+    ("agent_pending_asks",
+     "DELETE FROM agent_pending_asks WHERE session_id IN ({ids})"),
+    ("agent_pending_events",
+     "DELETE FROM agent_pending_events WHERE session_id IN ({ids})"),
+    ("agent_notifications",
+     "DELETE FROM agent_notifications WHERE session_id IN ({ids})"),
+    ("agent_runs",
+     "DELETE FROM agent_runs WHERE session_id IN ({ids})"),
+    ("agent_sessions",
+     "DELETE FROM agent_sessions WHERE id IN ({ids})"),
+)
+
+# One statement per batch holds the id list inside SQLite's default
+# 999-parameter ceiling with room to spare for the predicate's own params.
+_RETIRE_BATCH = 400
+
+
+def retire_sessions(session_ids):
+    """Hard-delete sessions and every row that hangs off them.
+
+    Irreversible, and the caller is expected to have shown the user
+    `retirable_sessions()` first. Takes explicit ids rather than
+    re-running the predicate so that what you confirmed is what goes:
+    re-deriving the set here would let a session that became retirable
+    between the dry run and the apply get swept unseen.
+
+    Returns {table: rows_deleted}, tables in deletion order.
+    """
+    ids = [int(i) for i in session_ids]
+    if not ids:
+        return {}
+    deleted = {table: 0 for table, _ in _RETIRE_DELETES}
+    with transaction():
+        for start in range(0, len(ids), _RETIRE_BATCH):
+            batch = ids[start:start + _RETIRE_BATCH]
+            placeholders = ','.join('?' * len(batch))
+            for table, sql in _RETIRE_DELETES:
+                deleted[table] += execute_rowcount(
+                    sql.format(ids=placeholders), tuple(batch), commit=False)
+    return deleted

@@ -108,6 +108,8 @@ class AgentCommands(Command):
                 or _store.FLEET_STALL_SECONDS,
             idle_days=getattr(args, 'idle_days', None)
                 or _store.FLEET_IDLE_DAYS,
+            include_test_providers=getattr(args, 'include_test_providers',
+                                           False),
         )
 
         # --rollup: one line per project instead of per session. Same
@@ -128,7 +130,9 @@ class AgentCommands(Command):
             rows = [r for r in rows if r['bucket'] == wanted]
 
         if getattr(args, 'json', False):
-            print(json.dumps({'rows': rows, 'counts': result['counts']},
+            print(json.dumps({'rows': rows, 'counts': result['counts'],
+                              'total': result['total'],
+                              'truncated': result['truncated']},
                              default=str))
             return 0
 
@@ -162,6 +166,13 @@ class AgentCommands(Command):
                 print(f"  #{r['id']:<4} {r.get('project_slug') or '-':<14} "
                       f"{r['age_label']:>4}  {title[:44]:<44} "
                       f"{r['reason']}{stall} {' '.join(flags)}")
+        # Say so when the limit hid rows. Without this the roster reads as
+        # the whole fleet at any limit, which is how 14 real sessions sat
+        # unseen below 126 rows of test-provider leavings.
+        if result['truncated']:
+            print(f"\n  … {result['truncated']} more session(s) not shown "
+                  f"({result['total']} match, limit {common['limit']}). "
+                  f"Raise --limit to see them.")
         print()
         return 0
 
@@ -283,6 +294,61 @@ class AgentCommands(Command):
         n = _store.expire_stale_asks()
         print(f"Expired {n} ask(s) past the "
               f"{_store.FLEET_ASK_DEADLINE_SECONDS}s handler deadline.")
+        return 0
+
+    def gc(self, args):
+        """Delete sessions that hold no surviving output.
+
+        Dry-run by default — unlike `ask expire`, whose default is to
+        act. The asymmetry is deliberate: expiring an ask flips a status
+        on a row nobody can reach any more, while this drops session
+        rows and everything hanging off them, and the set is large
+        enough (hundreds) that nobody can eyeball it after the fact.
+        """
+        from agent import store as _store
+        rows = _store.retirable_sessions(
+            older_than_days=getattr(args, 'older_than_days', None)
+            or _store.RETIRE_MIN_AGE_DAYS,
+            provider=getattr(args, 'provider', None),
+            limit=getattr(args, 'limit', None),
+        )
+        apply = getattr(args, 'apply', False)
+
+        if getattr(args, 'json', False):
+            out = {'rows': rows, 'applied': apply}
+            if apply:
+                out['deleted'] = _store.retire_sessions([r['id']
+                                                         for r in rows])
+            print(json.dumps(out, default=str))
+            return 0
+
+        if not rows:
+            print("No retirable sessions.")
+            return 0
+
+        by_provider = {}
+        for r in rows:
+            by_provider.setdefault(r['provider_name'], []).append(r)
+
+        verb = "Retiring" if apply else "Would retire"
+        print(f"{verb} {len(rows)} session(s) with no findings, todos, "
+              f"questions, notes or work-log entries:\n")
+        for provider, group in sorted(by_provider.items(),
+                                      key=lambda kv: -len(kv[1])):
+            span = (f"{group[0]['updated_at'][:10]}"
+                    f" … {group[-1]['updated_at'][:10]}")
+            print(f"  {provider:<14} {len(group):>4}  last active {span}")
+        print()
+
+        if not apply:
+            print(f"Pass --apply to delete them. Nothing has changed.")
+            return 0
+
+        deleted = _store.retire_sessions([r['id'] for r in rows])
+        for table, n in deleted.items():
+            if n:
+                print(f"  {table:<26} {n:>6}")
+        print(f"\nRetired {deleted.get('agent_sessions', 0)} session(s).")
         return 0
 
     def chat(self, args):
@@ -750,6 +816,10 @@ def register_agent_commands(subparsers, cli):
         "needs you, rather than which session. Honours --recent-days / "
         "--idle-days; ignores --bucket and --project."))
     fleet_parser.add_argument('--limit', type=int, default=200)
+    fleet_parser.add_argument(
+        '--include-test-providers', action='store_true', help=(
+            "Include sessions from stub providers (the 'fake' provider the "
+            "agent tests write into this database). Excluded by default."))
     cli.commands['ai.agent.fleet'] = cmd.fleet
 
     # ask — the cross-session needs-input inbox
@@ -785,6 +855,23 @@ def register_agent_commands(subparsers, cli):
 
     # bare `ai agent ask` → list
     cli.commands['ai.agent.ask'] = cmd.ask_list
+
+    # gc — retire sessions that never produced anything
+    gc_parser = agent_sub.add_parser('gc', help=(
+        'Delete sessions holding no findings, todos, questions, notes or '
+        'work-log entries (dry-run unless --apply)'))
+    # The effective default lives in store.RETIRE_MIN_AGE_DAYS; this file
+    # imports the store lazily (per-method) so that registration stays
+    # cheap, so the number is restated here rather than read.
+    gc_parser.add_argument('--older-than-days', type=int, help=(
+        'Only sessions inactive at least this many days (default 7)'))
+    gc_parser.add_argument('--provider', help=(
+        'Only sessions from this provider, e.g. fake'))
+    gc_parser.add_argument('--limit', type=int, help='Cap rows considered')
+    gc_parser.add_argument('--apply', action='store_true', help=(
+        'Actually delete. Without this the command only reports.'))
+    gc_parser.add_argument('--json', action='store_true')
+    cli.commands['ai.agent.gc'] = cmd.gc
 
     # chat (testing)
     chat_parser = agent_sub.add_parser('chat', help='Interactive chat (for testing)')

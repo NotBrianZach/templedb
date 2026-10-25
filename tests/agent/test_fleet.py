@@ -225,7 +225,7 @@ class TestFleetQuery(unittest.TestCase):
         session = create_session('fake')
         update_session_status(session['id'], 'waiting')
 
-        result = fleet()
+        result = fleet(include_test_providers=True)
         self.assertIn('rows', result)
         self.assertIn('counts', result)
         self.assertEqual(set(result['counts']), set(FLEET_BUCKET_ORDER))
@@ -237,7 +237,8 @@ class TestFleetQuery(unittest.TestCase):
     def test_rows_are_ordered_by_bucket_priority(self):
         from agent.store import fleet, FLEET_BUCKET_ORDER
         order = {b: i for i, b in enumerate(FLEET_BUCKET_ORDER)}
-        seen = [order[r['bucket']] for r in fleet()['rows']]
+        rows = fleet(include_test_providers=True)['rows']
+        seen = [order[r['bucket']] for r in rows]
         self.assertEqual(seen, sorted(seen))
 
     def test_live_ask_lands_the_session_in_needs_input(self):
@@ -248,7 +249,8 @@ class TestFleetQuery(unittest.TestCase):
         create_pending_ask('ask-live-1', session['id'], 'question',
                            {'questions': [{'question': 'which?'}]})
 
-        hit = next(r for r in fleet()['rows'] if r['id'] == session['id'])
+        rows = fleet(include_test_providers=True)['rows']
+        hit = next(r for r in rows if r['id'] == session['id'])
         self.assertEqual(hit['bucket'], 'needs_input')
         self.assertEqual(hit['live_asks'], 1)
 
@@ -281,8 +283,123 @@ class TestFleetQuery(unittest.TestCase):
         project = query_one("SELECT id FROM projects LIMIT 1")
         if not project:
             self.skipTest("no projects in the test DB")
-        rows = fleet(project_id=project['id'])['rows']
+        rows = fleet(project_id=project['id'],
+                     include_test_providers=True)['rows']
         self.assertTrue(all(r['project_id'] == project['id'] for r in rows))
+
+
+class TestTestProviderExclusion(unittest.TestCase):
+    """Stub-provider sessions are not fleet work.
+
+    The `fake` provider writes into this same database from the agent
+    tests and nothing cleans up after it. On the live DB that reached 257
+    of 345 sessions, and since the roster takes the newest 200 it put 126
+    stub rows on screen and pushed 14 real sessions off the bottom.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db_path = setup_test_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        teardown_test_db()
+
+    def test_fake_sessions_are_hidden_by_default(self):
+        from agent.store import create_session, fleet
+        session = create_session('fake')
+        ids = [r['id'] for r in fleet()['rows']]
+        self.assertNotIn(session['id'], ids)
+
+    def test_fake_sessions_appear_when_asked_for(self):
+        from agent.store import create_session, fleet
+        session = create_session('fake')
+        ids = [r['id'] for r in fleet(include_test_providers=True)['rows']]
+        self.assertIn(session['id'], ids)
+
+    def test_exclusion_is_by_kind_not_name(self):
+        """A second stub provider under any name is excluded too."""
+        from agent.store import create_session, fleet, list_providers
+        from db_utils import execute
+        execute("INSERT INTO agent_providers (name, provider_kind) "
+                "VALUES (?, ?)", ('stub-two', 'fake'))
+        self.assertIn('stub-two', [p['name'] for p in list_providers()])
+        session = create_session('stub-two')
+        ids = [r['id'] for r in fleet()['rows']]
+        self.assertNotIn(session['id'], ids)
+
+    def test_total_and_truncated_ignore_hidden_providers(self):
+        """The count a user is shown must match the rows they can see."""
+        from agent.store import create_session, fleet
+        create_session('fake')
+        result = fleet()
+        self.assertEqual(result['total'], len(result['rows']))
+        self.assertEqual(result['truncated'], 0)
+
+
+class TestTruncationIsVisible(unittest.TestCase):
+    """A limit that hides rows has to say so.
+
+    Silent truncation is what let the stub-provider flood go unnoticed:
+    at `--limit 200` the roster looked complete at any fleet size.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db_path = setup_test_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        teardown_test_db()
+
+    # Sessions accumulate across classes in the shared test DB, so these
+    # assert on deltas and on internal consistency rather than on absolute
+    # counts — an absolute expectation here passes alone and fails in suite.
+    def make_sessions(self, n):
+        from agent.store import create_session
+        return [create_session('fake')['id'] for _ in range(n)]
+
+    def total(self):
+        from agent.store import fleet_total
+        return fleet_total(include_test_providers=True)
+
+    def test_truncated_counts_the_rows_the_limit_hid(self):
+        from agent.store import fleet
+        before = self.total()
+        self.make_sessions(5)
+        result = fleet(limit=2, include_test_providers=True)
+        self.assertEqual(result['total'], before + 5)
+        self.assertEqual(len(result['rows']), 2)
+        self.assertEqual(result['truncated'], result['total'] - 2)
+
+    def test_nothing_truncated_when_the_limit_is_generous(self):
+        from agent.store import fleet
+        self.make_sessions(3)
+        result = fleet(limit=10_000, include_test_providers=True)
+        self.assertEqual(result['truncated'], 0)
+        self.assertEqual(result['total'], len(result['rows']))
+
+    def test_truncated_is_a_count_not_a_flag(self):
+        """Regression guard: computed as len(fetched) - limit over an
+        over-fetch of one, this could only ever be 0 or 1 — a number that
+        answers a yes/no question. With many rows hidden it must exceed 1.
+        """
+        from agent.store import fleet
+        self.make_sessions(9)
+        result = fleet(limit=1, include_test_providers=True)
+        self.assertEqual(result['truncated'], result['total'] - 1)
+        self.assertGreater(result['truncated'], 1)
+
+    def test_total_respects_the_project_filter(self):
+        from agent.store import fleet, fleet_total
+        before = self.total()
+        self.make_sessions(4)
+        self.assertEqual(self.total(), before + 4)
+        # Nothing in this DB belongs to project 999999.
+        self.assertEqual(fleet_total(project_id=999999,
+                                     include_test_providers=True), 0)
+        self.assertEqual(fleet(project_id=999999,
+                               include_test_providers=True)['truncated'], 0)
 
 
 class TestAskRespondCommand(unittest.TestCase):
@@ -479,7 +596,7 @@ class TestFleetRollup(unittest.TestCase):
         self._session('alpha', 'waiting')          # done -> needs you
         self._session('alpha', 'waiting')
         self._session('beta', 'running')           # working
-        rollup = {a['slug']: a for a in store.fleet_rollup()}
+        rollup = {a['slug']: a for a in store.fleet_rollup(include_test_providers=True)}
 
         self.assertEqual(rollup['alpha']['needs_you'], 2)
         self.assertEqual(rollup['alpha']['sessions'], 2)
@@ -490,7 +607,7 @@ class TestFleetRollup(unittest.TestCase):
         from agent import store
         self._session('quiet', 'running')
         self._session('loud', 'waiting')
-        slugs = [a['slug'] for a in store.fleet_rollup()]
+        slugs = [a['slug'] for a in store.fleet_rollup(include_test_providers=True)]
         self.assertEqual(slugs[0], 'loud')
 
     def test_counts_resumable_sessions(self):
@@ -498,19 +615,19 @@ class TestFleetRollup(unittest.TestCase):
         # Tail is a bare user turn -> resumable.
         self._session('gamma', 'interrupted', tail_role='user')
         self._session('gamma', 'interrupted')      # answered -> not
-        rollup = {a['slug']: a for a in store.fleet_rollup()}
+        rollup = {a['slug']: a for a in store.fleet_rollup(include_test_providers=True)}
         self.assertEqual(rollup['gamma']['resumable'], 1)
         self.assertEqual(rollup['gamma']['sessions'], 2)
 
     def test_sessions_without_a_project_are_kept_not_dropped(self):
         from agent import store
         store.create_session('fake')               # no project_id
-        slugs = [a['slug'] for a in store.fleet_rollup()]
+        slugs = [a['slug'] for a in store.fleet_rollup(include_test_providers=True)]
         self.assertIn('(no project)', slugs)
 
     def test_empty_fleet_is_an_empty_list(self):
         from agent import store
-        self.assertEqual(store.fleet_rollup(), [])
+        self.assertEqual(store.fleet_rollup(include_test_providers=True), [])
 
 
 class TestExpireReturnsRowcount(unittest.TestCase):
