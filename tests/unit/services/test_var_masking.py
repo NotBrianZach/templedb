@@ -16,9 +16,14 @@ import pytest
 from cli.commands.var import _mask_value, _redact_url_password
 
 
-# The real value that leaked, password altered.
+# Shaped exactly like the value that leaked -- Supabase pooler DSN, dotted
+# `postgres.<project-ref>` user, `%40` in the password -- but every
+# identifying part is synthetic. The project ref and password used to be
+# the real ones with the password "altered", which left a real project ref
+# and a real-looking credential pair in a repo that is mirrored publicly.
+# Keep it fake: the masker does not care about the bytes, only the shape.
 STAGING_DSN = (
-    "postgresql://postgres.ekfffwmbeloqcflvlzsg:4Zsp3LQvNUmr4s%40"
+    "postgresql://postgres.examplerefexampleref:n0tth3r3alp%40ss"
     "@aws-0-us-east-2.pooler.supabase.com:6543/postgres"
 )
 
@@ -27,7 +32,7 @@ STAGING_DSN = (
 
 def test_connection_string_password_is_hidden():
     out = _mask_value("DATABASE_URL", STAGING_DSN)
-    assert "4Zsp3LQvNUmr4s%40" not in out
+    assert "n0tth3r3alp%40ss" not in out
     assert "****" in out
 
 
@@ -37,7 +42,7 @@ def test_connection_string_keeps_everything_that_is_not_secret():
     at."""
     out = _mask_value("DATABASE_URL", STAGING_DSN)
     assert out == (
-        "postgresql://postgres.ekfffwmbeloqcflvlzsg:****"
+        "postgresql://postgres.examplerefexampleref:****"
         "@aws-0-us-east-2.pooler.supabase.com:6543/postgres"
     )
 
@@ -46,7 +51,11 @@ def test_connection_string_keeps_everything_that_is_not_secret():
     ("postgres://u:hunter2@db.internal:5432/app", "hunter2"),
     ("mysql://root:p%40ssw0rd@10.0.0.5/shop", "p%40ssw0rd"),
     ("redis://default:abc123@cache:6379/0", "abc123"),
-    ("mongodb+srv://svc:s3cr3t@cluster0.mongodb.net/db", "s3cr3t"),
+    # Host is deliberately NOT *.mongodb.net: GitHub secret scanning
+    # matches `mongodb+srv://user:pass@<anything>.mongodb.net` and opened
+    # alert #1 on this line (false positive -- templedb stores nothing in
+    # Mongo; this row only checks the masker handles the scheme).
+    ("mongodb+srv://svc:s3cr3t@cluster0.example.net/db", "s3cr3t"),
     ("amqp://guest:guest@rabbit:5672/%2f", "guest:guest@"),
 ])
 def test_other_schemes(dsn, secret):
@@ -67,7 +76,7 @@ def test_unencoded_at_sign_in_password_still_splits_correctly():
 
 @pytest.mark.parametrize("url", [
     "https://staging.woofspetsalon.com",
-    "https://ekfffwmbeloqcflvlzsg.supabase.co",
+    "https://examplerefexampleref.supabase.co",
     "postgres://readonly@db.internal:5432/app",   # user, no password
     "localhost",
     "5432",
