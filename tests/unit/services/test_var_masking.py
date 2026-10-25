@@ -51,10 +51,12 @@ def test_connection_string_keeps_everything_that_is_not_secret():
     ("postgres://u:hunter2@db.internal:5432/app", "hunter2"),
     ("mysql://root:p%40ssw0rd@10.0.0.5/shop", "p%40ssw0rd"),
     ("redis://default:abc123@cache:6379/0", "abc123"),
-    # Host is deliberately NOT *.mongodb.net: GitHub secret scanning
-    # matches `mongodb+srv://user:pass@<anything>.mongodb.net` and opened
-    # alert #1 on this line (false positive -- templedb stores nothing in
-    # Mongo; this row only checks the masker handles the scheme).
+    # Host is deliberately an example.net one, not an Atlas host. GitHub
+    # secret scanning matches a `mongodb+srv` URI that carries credentials
+    # and an Atlas hostname, and opened alert #1 on this line when it did.
+    # False positive -- templedb stores nothing in Mongo; this row only
+    # checks the masker handles the scheme. Do not spell a matching URI
+    # out in a comment either, or the detector fires on the comment.
     ("mongodb+srv://svc:s3cr3t@cluster0.example.net/db", "s3cr3t"),
     ("amqp://guest:guest@rabbit:5672/%2f", "guest:guest@"),
 ])
