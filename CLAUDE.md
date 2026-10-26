@@ -222,22 +222,64 @@ genuinely uncommitted.
 Only `publish run` reconciles DB-vs-HEAD. For `templedb` that pushes to
 a public GitHub mirror.
 
-## Rebuilds and the `flake.lock` trap
+## Rebuilds, `flake.lock` and pinned revs
 
-`flake.lock` is gitignored in `system_config`, so every
-`nixos-rebuild --flake .` re-locks from scratch — it reads via
-`git+file://` and only sees committed files. `nix flake update <input>`
-writes a pin that nixos-rebuild then ignores. The lock is effectively
-transient.
+`flake.lock` **is tracked in git** in `system_config` as of 2026-10-24,
+and nixos-rebuild honours it. Before that it was gitignored, which was a
+trap worth understanding because the shape recurs: nixos-rebuild reads
+the flake through `git+file://` and therefore sees only *committed*
+files, so an ignored lock meant **no lock at all** and every build
+re-resolved every input from scratch. Writing the lock to the DB did
+nothing while the ignore was in place — `publish run` put it in the DB
+and on disk, materialize's `git add` skipped it, and git HEAD stayed
+empty. `git log -- flake.lock` is misleading here; it shows commits from
+before the ignore existed. Check `git cat-file -e HEAD:flake.lock`.
 
-The fix is to put the rev directly in `flake.nix`, which is what
-`--pin-input` does:
+The consequence of tracking it is that **the DB is authoritative for the
+lock**. If any nix command rewrites `flake.lock` on disk, the next
+`publish run` reverts it. Promote a deliberate re-lock back:
+
+```bash
+templedb edit system_config                  # prints the workspace path
+nix flake lock "path:<that-path>"            # relocks there, writable
+diff <(templedb file cat system_config flake.lock) <that-path>/flake.lock
+templedb source snapshot system_config flake.lock --meta   # content_hash
+templedb file set system_config flake.lock --if-match <hash12> --verify \
+  < <that-path>/flake.lock
+templedb publish run system_config -m "flake.lock: …"
+```
+
+Relock from the **deployed** lock, not an older copy — relocking off a
+stale base makes unrelated inputs move. `.authinfo.gpg` is still
+gitignored and must stay that way; the `preserved_ignored` materialize
+branch is what keeps it from being swept.
+
+For the `git://localhost:9419/<slug>` inputs, an explicit `?rev=` in
+`flake.nix` beats the lock because it holds regardless of lock state.
+`templedb`, `bza` and `math` all carry one; `--pin-input` writes it:
 
 ```bash
 templedb publish run <slug> -m "…"
 templedb publish run system_config --pin-input <slug> -m "bump <slug>"
 templedb nixos system-switch system_config --yes
 ```
+
+Adding a rev to a url whose lock node has no rev in its `original`
+forces that one input to re-lock on the next eval. Do it deliberately
+with `nix flake lock` and write the result back, or the first rebuild
+does it for you and strands the DB copy.
+
+Verify a lock is complete without mutating it:
+
+```bash
+nix flake metadata --no-update-lock-file \
+  git+file:///home/zach/.config/templedb/checkouts/system_config
+```
+
+No "updating lock file" warning means the committed lock covers every
+input. Find the system's nixpkgs via `root.inputs.nixpkgs` — node names
+in a lock are arbitrary, and the node literally named `nixpkgs` is often
+a transitive one. Cross-check against `nixos-version --json`.
 
 Only `nixos system-switch` is durable; a home-rebuild is evicted at the
 next boot. A committed fix is inert until a rebuild — use
