@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-10-27-1109-merging-agent-work-the-write-path-has-four-answers.html">
+  <div class="row">
+    <span class="date">2026-10-27 11:09</span>
+    <span class="title">merging agent work — the write path has four answers</span>
+  </div>
+  <div class="summary">
+    templedb has a real three-way merge with diff3, conflict markers, per-file decision records and an AI assist hook. Concurrent agent work never reaches it. Agents do not branch — every session writes to main — so the thing sessions isolate is staging, not content, and two agents editing one file serialise by wall clock. On 2026-10-27 that overwrote a published file with no conflict, no warning, and an audit trail naming the wrong author. It was safe only by luck.
+  </div>
+</a>
+
 <a class="report" href="2026-10-26-0921-session-recap-packaging-feedback-into-the-system-config.html">
   <div class="row">
     <span class="date">2026-10-26 09:21</span>

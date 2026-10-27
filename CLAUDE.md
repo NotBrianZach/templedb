@@ -23,7 +23,22 @@ templedb file set <slug> <path> --if-match <hash12> --verify < /tmp/f
 
 `--if-match` takes a full sha256 or any prefix of >= 8 hex chars, so the
 truncated hashes from `file where`, `source snapshot --meta` and doctor
-all work. It exits 2 on mismatch and names both hashes.
+all work.
+
+A moved base is **not** an automatic refusal. `--if-match HASH` declares
+"my content is HASH plus my changes", so when the file has moved on,
+your change is three-way merged onto what landed — base HASH, their
+current content, your version. A clean merge writes the result and says
+so, naming all three hashes; `edit_intents.base_revision` then records
+what you were actually merged onto and `patch_summary` carries
+`rebased from <HASH>`. Only a real line-level overlap exits 2.
+
+This is why passing the flag costs you nothing. The old behaviour exited
+2 on any movement, which left two bad options — redo the work, or drop
+the flag — and dropping it is exactly what reverts people silently.
+Pass `--no-rebase` for strict compare-and-swap when you need "nothing
+moved" rather than "nothing was lost". Both still exit 2 and name both
+hashes.
 
 **2. Commit the session workspace, not its parent.** Edit workspaces are
 per-session: `~/.config/templedb/edit-workspaces/<slug>/<session-name>/`.

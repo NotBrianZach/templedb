@@ -327,6 +327,9 @@ class FileCommands(Command):
             # doctor output -- so requiring 64 characters would mean
             # nobody uses the flag.
             expected = getattr(args, 'if_match', None)
+            # Set only when a stale base was successfully rebased, so the
+            # intent row can say so.
+            _rebased_from = None
             if expected:
                 exp = expected.strip().lower()
                 if len(exp) < 8 or any(c not in '0123456789abcdef' for c in exp):
@@ -344,20 +347,78 @@ class FileCommands(Command):
                     )
                     return 2
                 if not prev_hash.startswith(exp):
-                    logger.error(
-                        f"--if-match mismatch on {args.project}/"
-                        f"{args.file_path}: expected {exp[:12]}, DB currently "
-                        f"holds {prev_hash[:12]}. Something changed the file "
-                        f"since you read it, and writing now would revert it."
-                    )
-                    logger.error(
-                        f"  Re-read and re-apply:  templedb file cat "
-                        f"{args.project} {args.file_path}"
-                    )
-                    logger.error(
-                        f"  Or overwrite anyway:   drop --if-match"
-                    )
-                    return 2
+                    # The base moved. Before refusing, try to rebase this
+                    # write onto it.
+                    #
+                    # `--if-match` means "I read exp and my content is exp
+                    # plus my changes", which is a patch in everything but
+                    # shape: exp is the base, the DB's current content is
+                    # the other side, and three-way merging them is exactly
+                    # applying my hunks to what landed meanwhile. Refusing
+                    # instead was the behaviour that made the flag
+                    # expensive to use -- the caller's only options were
+                    # redo the work or drop the guard, and dropping the
+                    # guard is what silently reverts people.
+                    #
+                    # No schema or storage was needed for this.
+                    # `content_blobs` keeps superseded content inline at
+                    # reference_count 0 (2,970 of 5,104 rows on
+                    # 2026-10-27), so the base is still readable after it
+                    # stops being current, and ThreeWayMerge already
+                    # existed for `vcs merge`. It had simply never been
+                    # reachable from the write path agents actually use.
+                    #
+                    # A clean merge cannot revert anyone: diff3 only
+                    # succeeds when the two sides touched disjoint
+                    # regions. That is why this is the default rather than
+                    # another opt-in -- a caller who wants strict
+                    # compare-and-swap passes --no-rebase, but nobody is
+                    # worse off than the old unconditional exit 2.
+                    rebased = None
+                    if not getattr(args, 'no_rebase', False) \
+                            and isinstance(content, str):
+                        rebased = self._rebase_onto_current(
+                            file_path=args.file_path,
+                            base_prefix=exp,
+                            current_hash=prev_hash,
+                            incoming=content,
+                        )
+                    if rebased is not None:
+                        merged, base_hash_full = rebased
+                        content = merged
+                        _rebased_from = base_hash_full
+                        new_hash = _hashlib.sha256(
+                            content.encode('utf-8')
+                        ).hexdigest()
+                        logger.info(
+                            f"--if-match {exp[:12]} is stale (DB holds "
+                            f"{prev_hash[:12]}); rebased your change onto it"
+                        )
+                        logger.info(
+                            f"  three-way merge clean: base {base_hash_full[:12]}"
+                            f" + their {prev_hash[:12]} + yours -> "
+                            f"{new_hash[:12]}"
+                        )
+                    else:
+                        logger.error(
+                            f"--if-match mismatch on {args.project}/"
+                            f"{args.file_path}: expected {exp[:12]}, DB "
+                            f"currently holds {prev_hash[:12]}. Something "
+                            f"changed the file since you read it, and writing "
+                            f"now would revert it."
+                        )
+                        if getattr(args, 'no_rebase', False):
+                            logger.error(
+                                "  --no-rebase given, so no merge was attempted."
+                            )
+                        logger.error(
+                            f"  Re-read and re-apply:  templedb file cat "
+                            f"{args.project} {args.file_path}"
+                        )
+                        logger.error(
+                            f"  Or overwrite anyway:   drop --if-match"
+                        )
+                        return 2
             # Refuse content that newly looks double-encoded. See the
             # _MOJIBAKE_RE comment above for the failure this exists to
             # catch: valid UTF-8 all the way down, so nothing else in the
@@ -446,6 +507,7 @@ class FileCommands(Command):
                     content=content,
                     base_revision=prev_hash,
                     session_id=_session_id,
+                    rebased_from=_rebased_from,
                 )
 
             # Link the just-staged working-state row to the intent
@@ -844,7 +906,8 @@ class FileCommands(Command):
     def _record_and_apply_intent(self, project_id: int, file_path: str,
                                  content,
                                  base_revision: Optional[str] = None,
-                                 session_id: Optional[int] = None
+                                 session_id: Optional[int] = None,
+                                 rebased_from: Optional[str] = None
                                  ) -> Optional[int]:
         """Create an EditIntent row for this write and mark it applied.
 
@@ -915,9 +978,20 @@ class FileCommands(Command):
                 # trace to audit. 'new-file' rather than NULL when there
                 # is no prior content, so the two cases stay
                 # distinguishable from a column that is merely unfilled.
+                # patch_summary carries the rebase when there was one.
+                # base_revision above is the content actually merged onto,
+                # which is the honest value for "what this edit is based
+                # on" but loses the fact that the caller asked for a
+                # different base. Without that, a rebased write is
+                # indistinguishable from one that read current content --
+                # and the interesting question after a concurrent edit is
+                # precisely which it was.
                 (sid, project_id, file_path,
                  base_revision or 'new-file', new_hash,
-                 f"{len(content_bytes)} bytes", author),
+                 (f"{len(content_bytes)} bytes, rebased from "
+                  f"{rebased_from[:12]}") if rebased_from
+                 else f"{len(content_bytes)} bytes",
+                 author),
             )
             return intent_id
         except Exception as e:
@@ -1073,6 +1147,106 @@ class FileCommands(Command):
             (project_id, file_path),
         )
         return row['content_hash'] if row else None
+
+    def _blob_text(self, hash_or_prefix: str) -> Optional[str]:
+        """content_blobs text for a full hash or >= 8 hex char prefix.
+
+        Only `inline` text blobs. An externally-stored or binary blob
+        returns None, which callers must treat as "cannot rebase" rather
+        than "empty base" -- merging against an empty base is how a
+        two-way merge gets mistaken for a three-way one.
+        """
+        from db_utils import query_one
+        h = (hash_or_prefix or "").strip().lower()
+        if len(h) < 8 or any(c not in '0123456789abcdef' for c in h):
+            return None
+        row = query_one(
+            """SELECT hash_sha256, content_text
+                 FROM content_blobs
+                WHERE hash_sha256 LIKE ? || '%'
+                  AND content_text IS NOT NULL
+                  AND storage_location = 'inline'
+                LIMIT 2""",
+            (h,),
+        )
+        return row['content_text'] if row else None
+
+    def _rebase_onto_current(self, file_path: str, base_prefix: str,
+                             current_hash: str, incoming: str):
+        """Three-way merge `incoming` onto current, treating base as ancestor.
+
+        Returns (merged_text, base_hash) on a clean merge, or None when the
+        rebase cannot be done or conflicts. None is always safe: the caller
+        falls back to refusing the write.
+
+        Deliberately returns None rather than conflict-marked text on
+        conflict. `file set` writes whatever it is given straight into
+        file_contents, so handing back markers would commit `<<<<<<<`
+        into the DB as the file's current content -- the one outcome
+        worse than refusing.
+        """
+        try:
+            from db_utils import query_one
+            from merge_resolver import ThreeWayMerge, FileVersion
+
+            base_row = query_one(
+                """SELECT hash_sha256, content_text
+                     FROM content_blobs
+                    WHERE hash_sha256 LIKE ? || '%'
+                      AND content_text IS NOT NULL
+                      AND storage_location = 'inline'
+                    LIMIT 1""",
+                (base_prefix,),
+            )
+            if not base_row:
+                logger.debug(
+                    f"rebase: no inline blob for base {base_prefix[:12]}"
+                )
+                return None
+            base_text = base_row['content_text']
+            base_hash = base_row['hash_sha256']
+
+            current_text = self._blob_text(current_hash)
+            if current_text is None:
+                logger.debug(
+                    f"rebase: current {current_hash[:12]} not readable inline"
+                )
+                return None
+
+            # ours = what is in the DB now, theirs = what this call wants
+            # to write. Orientation matters only for which side a
+            # conflict names, since a clean diff3 is symmetric.
+            merger = ThreeWayMerge()
+            ok, merged, conflict = merger.merge_files(
+                file_path=file_path,
+                ours=FileVersion(content=current_text,
+                                 hash=current_hash, source='ours'),
+                theirs=FileVersion(content=incoming,
+                                   hash='incoming', source='theirs'),
+                base=FileVersion(content=base_text,
+                                 hash=base_hash, source='base'),
+            )
+            if not ok or merged is None:
+                where = ''
+                if conflict is not None and conflict.conflict_markers:
+                    n = conflict.conflict_markers.count('<<<<<<<')
+                    where = f" ({n} conflicting hunk(s))"
+                logger.error(
+                    f"--if-match base moved and the change does not rebase "
+                    f"cleanly{where}: your edit and theirs touch the same "
+                    f"lines of {file_path}."
+                )
+                return None
+            if merged == current_text:
+                # Nothing of the incoming change survived. Treat as a
+                # failed rebase: reporting success would claim the edit
+                # landed when it did not.
+                logger.debug("rebase: merge result equals current, no-op")
+                return None
+            return merged, base_hash
+        except Exception as e:
+            logger.debug(f"rebase attempt failed: {e}", exc_info=True)
+            return None
 
     def _read_content_from_db(self, file_record: dict) -> Optional[str]:
         """Read file content directly from the TempleDB database (content_blobs).
@@ -1466,14 +1640,24 @@ def register(cli):
                                  'session this process resolves — which for a '
                                  'subprocess may not be the caller\'s.')
     set_parser.add_argument('--if-match', metavar='HASH', dest='if_match',
-                            help='Refuse the write unless the file currently '
-                                 'hashes to HASH (full sha256 or a prefix of '
-                                 '>=8 hex chars). Exits 2 on mismatch. Use it '
+                            help='Treat HASH (full sha256 or a prefix of >=8 '
+                                 'hex chars) as the base this content was '
+                                 'derived from. If the file still hashes to '
+                                 'HASH the write proceeds; if it moved, your '
+                                 'change is three-way merged onto what landed '
+                                 'and only a genuine overlap exits 2. Use it '
                                  'whenever the content being written was '
                                  'derived from a copy read earlier: file set '
                                  'replaces the whole file, so a stale base '
                                  'silently reverts anything committed in '
                                  'between.')
+    set_parser.add_argument('--no-rebase', dest='no_rebase',
+                            action='store_true',
+                            help='With --if-match, do not attempt the '
+                                 'three-way merge — exit 2 on any base '
+                                 'mismatch. Strict compare-and-swap, for '
+                                 'callers that need "nothing moved" rather '
+                                 'than "nothing was lost".')
     set_parser.add_argument('--verify', action='store_true',
                             help='After write, confirm file_contents.is_current holds the written hash. '
                                  'Exits 2 on mismatch. Guards against silent revert (see docs/known-bugs).')
