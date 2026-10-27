@@ -336,7 +336,13 @@ class NixStoreService(BaseService):
             gen_num = int(m.group(1))
             target = os.readlink(str(entry))
             mtime = entry.lstat().st_mtime
-            switched_at = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+            # utcfromtimestamp, not fromtimestamp: every other write in this
+            # module goes through _now() (UTC), and the live switch path
+            # records UTC too. Using local time here made a scanned
+            # generation look hours apart from a switched one on the same
+            # timeline — gen 365 landed at 09:18 local next to gen 364's
+            # 19:00 UTC, for rebuilds a day apart.
+            switched_at = datetime.utcfromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
             generations.append((gen_num, target, switched_at))
 
         conn.execute("BEGIN")

@@ -445,6 +445,7 @@ class FileCommands(Command):
                     file_path=args.file_path,
                     content=content,
                     base_revision=prev_hash,
+                    session_id=_session_id,
                 )
 
             # Link the just-staged working-state row to the intent
@@ -813,7 +814,8 @@ class FileCommands(Command):
 
     def _record_and_apply_intent(self, project_id: int, file_path: str,
                                  content,
-                                 base_revision: Optional[str] = None
+                                 base_revision: Optional[str] = None,
+                                 session_id: Optional[int] = None
                                  ) -> Optional[int]:
         """Create an EditIntent row for this write and mark it applied.
 
@@ -832,11 +834,23 @@ class FileCommands(Command):
             new_hash = hashlib.sha256(content_bytes).hexdigest()
             author = os.environ.get('TEMPLEDB_AUTHOR') \
                 or os.environ.get('USER') or None
-            sid = os.environ.get('TEMPLEDB_SESSION_ID')
-            try:
-                sid = int(sid) if sid else None
-            except (ValueError, TypeError):
-                sid = None
+            # Prefer the session the caller already resolved for the
+            # stage. Reading TEMPLEDB_SESSION_ID alone meant one `file
+            # set` recorded two different answers to "which session is
+            # this?": the stage got get_current_session(), the intent got
+            # NULL whenever the var was unset. That is how the two
+            # system_config writes of 2026-10-25 (intents #1246/#1247)
+            # ended up unattributable, and an ordinary concurrent-agent
+            # write read as an anonymous process rewriting the flake on a
+            # timer. No new session is opened here — by this point the
+            # stage has already resolved one.
+            sid = session_id
+            if sid is None:
+                sid = os.environ.get('TEMPLEDB_SESSION_ID')
+                try:
+                    sid = int(sid) if sid else None
+                except (ValueError, TypeError):
+                    sid = None
             # Insert content_blobs so `intent apply` (if replayed
             # from CLI) could find it. Idempotent via OR IGNORE.
             #

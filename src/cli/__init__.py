@@ -64,7 +64,7 @@ from cli.commands import (
     domain, nixos, config_compiler, ast,
     file, tutorial, dev, deploy_history,
     reports, edit, source, intent, entity, handoff, tool, provenance,
-    reconcile, summary, hygiene, sync, claims, reload,
+    reconcile, summary, hygiene, sync, claims, reload, nix_store,
 )
 from cli.core import cli
 
@@ -324,6 +324,14 @@ def main():
     sync.register(cli)
     claims.register(cli)
     reload.register(cli)
+
+    # `nix` was written with a full register() and then never called from
+    # here, so the whole group (scan, generations, closure, gc-roots,
+    # stats, cache) was unreachable. That is also why a generation created
+    # by a direct `nixos-rebuild` could never be recorded: scan_generations
+    # is the only backfill and `_record_nix_generation` on the switch path
+    # was the only other writer of nix_generations.
+    nix_store.register(cli)
 
     # Lazy imports for optional modules
     try:
