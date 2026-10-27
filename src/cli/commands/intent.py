@@ -241,6 +241,81 @@ class IntentCommands(Command):
             )
             return 3
 
+        # Has the file moved since the intent was written?
+        #
+        # This check did not exist, and its absence was worse here than
+        # the same gap in `file set`. An intent is *designed* to outlive
+        # the state it was written against -- `intent create` proposes,
+        # something else applies later -- so "base_revision is stale" is
+        # the normal case over any real interval, not an edge case. The
+        # old code pointed file_contents straight at new_content_hash and
+        # retired whatever was current, which silently reverted every
+        # change landed in between.
+        current = query_one(
+            """SELECT content_hash FROM file_contents
+                WHERE file_id = ? AND is_current = 1 LIMIT 1""",
+            (pf['id'],),
+        )
+        current_hash = current['content_hash'] if current else None
+        base = intent['base_revision']
+        apply_hash = intent['new_content_hash']
+        rebased_onto = None
+
+        stale = (current_hash and base and base not in ('current', 'new-file')
+                 and not current_hash.startswith(base))
+        if stale:
+            if getattr(args, 'no_rebase', False):
+                logger.error(
+                    f"Intent #{args.id} was written against "
+                    f"{base[:12]} but {intent['file_path']} now holds "
+                    f"{current_hash[:12]}; --no-rebase given, so nothing "
+                    f"was merged."
+                )
+                return 4
+            from cli.commands.file import rebase_onto_current, blob_text
+            incoming = blob_text(apply_hash)
+            if incoming is None:
+                logger.error(
+                    f"Intent #{args.id} proposes {apply_hash[:12]}, which "
+                    f"has no inline text blob — cannot rebase it onto "
+                    f"{current_hash[:12]}."
+                )
+                return 4
+            got = rebase_onto_current(
+                file_path=intent['file_path'], base_prefix=base,
+                current_hash=current_hash, incoming=incoming,
+                what=f"intent #{args.id}",
+            )
+            if got is None:
+                logger.error(
+                    f"Intent #{args.id} does not apply cleanly: it was "
+                    f"written against {base[:12]} and "
+                    f"{intent['file_path']} now holds {current_hash[:12]}."
+                )
+                logger.error(
+                    f"  Inspect:  templedb intent show {args.id}"
+                )
+                logger.error(
+                    f"  Rewrite:  templedb file cat <slug> "
+                    f"{intent['file_path']}  # then re-propose"
+                )
+                return 4
+            merged, _base_hash = got
+            # The merged text is new content, so it needs a blob before
+            # file_contents can point at it. reference_count 0 for the
+            # same reason as the file-set path: the increment trigger is
+            # what counts file_contents rows, and seeding 1 here would
+            # double-count from birth (migration 128).
+            apply_hash = hashlib.sha256(merged.encode('utf-8')).hexdigest()
+            execute(
+                """INSERT OR IGNORE INTO content_blobs
+                       (hash_sha256, content_text, content_type, encoding,
+                        file_size_bytes, reference_count)
+                     VALUES (?, ?, 'text', 'utf-8', ?, 0)""",
+                (apply_hash, merged, len(merged.encode('utf-8'))),
+            )
+            rebased_onto = current_hash
+
         # Retire the old current row (respect UNIQUE(file_id, is_current)).
         execute(
             "DELETE FROM file_contents WHERE file_id = ? AND is_current = 1",
@@ -254,19 +329,41 @@ class IntentCommands(Command):
                          (SELECT file_size_bytes FROM content_blobs
                            WHERE hash_sha256 = ?),
                          1)""",
-            (pf['id'], intent['new_content_hash'],
-             intent['new_content_hash']),
+            (pf['id'], apply_hash, apply_hash),
         )
         # Mark the intent applied.
-        execute(
-            """UPDATE edit_intents
-                  SET status = 'applied', applied_at = datetime('now')
-                WHERE id = ?""",
-            (int(args.id),),
-        )
+        #
+        # new_content_hash keeps the hash that was *proposed*, even when a
+        # rebase means that is not what landed -- rewriting it would
+        # destroy the only record of what the author actually wrote. What
+        # landed goes in patch_summary instead, the same place `file set`
+        # records its rebases, so one grep answers "was this applied as
+        # proposed?" across both paths.
+        if rebased_onto:
+            execute(
+                """UPDATE edit_intents
+                      SET status = 'applied', applied_at = datetime('now'),
+                          patch_summary = COALESCE(patch_summary || ', ', '')
+                              || 'rebased onto ' || ? || ', applied as ' || ?
+                    WHERE id = ?""",
+                (rebased_onto[:12], apply_hash[:12], int(args.id)),
+            )
+        else:
+            execute(
+                """UPDATE edit_intents
+                      SET status = 'applied', applied_at = datetime('now')
+                    WHERE id = ?""",
+                (int(args.id),),
+            )
 
         print(f"✓ Intent #{args.id} applied")
-        print(f"  {intent['file_path']} → {intent['new_content_hash'][:12]}")
+        if rebased_onto:
+            print(f"  rebased onto {rebased_onto[:12]} "
+                  f"(was written against {base[:12]})")
+            print(f"  {intent['file_path']} → {apply_hash[:12]} "
+                  f"(proposed {intent['new_content_hash'][:12]})")
+        else:
+            print(f"  {intent['file_path']} → {apply_hash[:12]}")
         return 0
 
     def cancel(self, args) -> int:
@@ -379,6 +476,10 @@ def register(cli):
     # apply
     a = sub.add_parser('apply', help='Apply a proposed intent')
     a.add_argument('id', help='Intent id (integer)')
+    a.add_argument('--no-rebase', dest='no_rebase', action='store_true',
+                   help='Refuse (exit 4) if the file has moved since the '
+                        'intent was written, instead of three-way merging '
+                        'the proposal onto what landed.')
     cli.commands['intent.apply'] = cmd.apply
 
     # cancel

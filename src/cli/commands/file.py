@@ -90,6 +90,120 @@ def _mojibake_runs(text) -> list:
     return out
 
 
+def blob_text(hash_or_prefix) -> Optional[str]:
+    """content_blobs text for a full hash or >= 8 hex char prefix.
+
+    Only `inline` text blobs. An externally-stored or binary blob
+    returns None, which callers must treat as "cannot rebase" rather
+    than "empty base" -- merging against an empty base is how a two-way
+    merge gets mistaken for a three-way one.
+    """
+    from db_utils import query_one
+    h = (hash_or_prefix or "").strip().lower()
+    if len(h) < 8 or any(c not in '0123456789abcdef' for c in h):
+        return None
+    row = query_one(
+        """SELECT hash_sha256, content_text
+             FROM content_blobs
+            WHERE hash_sha256 LIKE ? || '%'
+              AND content_text IS NOT NULL
+              AND storage_location = 'inline'
+            LIMIT 1""",
+        (h,),
+    )
+    return row['content_text'] if row else None
+
+
+def rebase_onto_current(file_path: str, base_prefix: str,
+                        current_hash: str, incoming: str,
+                        what: str = '--if-match'):
+    """Three-way merge `incoming` onto current, treating base as ancestor.
+
+    Returns (merged_text, base_hash) on a clean merge, or None when the
+    rebase cannot be done or conflicts. None is always safe: every caller
+    falls back to refusing the write.
+
+    Module-level rather than a method because two commands need it and
+    neither owns it: `file set --if-match` rebases the content it was
+    handed, and `intent apply` rebases a proposal that has been sitting
+    in the table while the file moved. Those are the same operation --
+    base_revision is the ancestor in both -- and the second is the more
+    dangerous one, since an intent is *designed* to outlive the state it
+    was written against.
+
+    `what` only names the caller in the conflict message.
+
+    Deliberately returns None rather than conflict-marked text on
+    conflict. Both callers write the result straight into file_contents,
+    so handing back markers would commit `<<<<<<<` into the DB as the
+    file's current content -- the one outcome worse than refusing.
+    """
+    try:
+        from db_utils import query_one
+        from merge_resolver import ThreeWayMerge, FileVersion
+
+        bp = (base_prefix or "").strip().lower()
+        if len(bp) < 8 or any(c not in '0123456789abcdef' for c in bp):
+            logger.debug(f"rebase: unusable base {base_prefix!r}")
+            return None
+        base_row = query_one(
+            """SELECT hash_sha256, content_text
+                 FROM content_blobs
+                WHERE hash_sha256 LIKE ? || '%'
+                  AND content_text IS NOT NULL
+                  AND storage_location = 'inline'
+                LIMIT 1""",
+            (bp,),
+        )
+        if not base_row:
+            logger.debug(f"rebase: no inline blob for base {bp[:12]}")
+            return None
+        base_text = base_row['content_text']
+        base_hash = base_row['hash_sha256']
+
+        current_text = blob_text(current_hash)
+        if current_text is None:
+            logger.debug(
+                f"rebase: current {str(current_hash)[:12]} not readable inline"
+            )
+            return None
+
+        # ours = what is in the DB now, theirs = what the caller wants to
+        # land. Orientation matters only for which side a conflict names,
+        # since a clean diff3 is symmetric.
+        merger = ThreeWayMerge()
+        ok, merged, conflict = merger.merge_files(
+            file_path=file_path,
+            ours=FileVersion(content=current_text,
+                             hash=str(current_hash), source='ours'),
+            theirs=FileVersion(content=incoming,
+                               hash='incoming', source='theirs'),
+            base=FileVersion(content=base_text,
+                             hash=base_hash, source='base'),
+        )
+        if not ok or merged is None:
+            where = ''
+            if conflict is not None and conflict.conflict_markers:
+                n = conflict.conflict_markers.count('<<<<<<<')
+                where = f" ({n} conflicting hunk(s))"
+            logger.error(
+                f"{what} base moved and the change does not rebase "
+                f"cleanly{where}: your edit and theirs touch the same "
+                f"lines of {file_path}."
+            )
+            return None
+        if merged == current_text:
+            # Nothing of the incoming change survived. Treat as a failed
+            # rebase: reporting success would claim the edit landed when
+            # it did not.
+            logger.debug("rebase: merge result equals current, no-op")
+            return None
+        return merged, base_hash
+    except Exception as e:
+        logger.debug(f"rebase attempt failed: {e}", exc_info=True)
+        return None
+
+
 def _apply_session_override(value) -> None:
     """Pin session identity for this process from `--session <id|name>`.
 
@@ -1149,104 +1263,14 @@ class FileCommands(Command):
         return row['content_hash'] if row else None
 
     def _blob_text(self, hash_or_prefix: str) -> Optional[str]:
-        """content_blobs text for a full hash or >= 8 hex char prefix.
-
-        Only `inline` text blobs. An externally-stored or binary blob
-        returns None, which callers must treat as "cannot rebase" rather
-        than "empty base" -- merging against an empty base is how a
-        two-way merge gets mistaken for a three-way one.
-        """
-        from db_utils import query_one
-        h = (hash_or_prefix or "").strip().lower()
-        if len(h) < 8 or any(c not in '0123456789abcdef' for c in h):
-            return None
-        row = query_one(
-            """SELECT hash_sha256, content_text
-                 FROM content_blobs
-                WHERE hash_sha256 LIKE ? || '%'
-                  AND content_text IS NOT NULL
-                  AND storage_location = 'inline'
-                LIMIT 2""",
-            (h,),
-        )
-        return row['content_text'] if row else None
+        """Instance alias for `blob_text`. See that function."""
+        return blob_text(hash_or_prefix)
 
     def _rebase_onto_current(self, file_path: str, base_prefix: str,
                              current_hash: str, incoming: str):
-        """Three-way merge `incoming` onto current, treating base as ancestor.
-
-        Returns (merged_text, base_hash) on a clean merge, or None when the
-        rebase cannot be done or conflicts. None is always safe: the caller
-        falls back to refusing the write.
-
-        Deliberately returns None rather than conflict-marked text on
-        conflict. `file set` writes whatever it is given straight into
-        file_contents, so handing back markers would commit `<<<<<<<`
-        into the DB as the file's current content -- the one outcome
-        worse than refusing.
-        """
-        try:
-            from db_utils import query_one
-            from merge_resolver import ThreeWayMerge, FileVersion
-
-            base_row = query_one(
-                """SELECT hash_sha256, content_text
-                     FROM content_blobs
-                    WHERE hash_sha256 LIKE ? || '%'
-                      AND content_text IS NOT NULL
-                      AND storage_location = 'inline'
-                    LIMIT 1""",
-                (base_prefix,),
-            )
-            if not base_row:
-                logger.debug(
-                    f"rebase: no inline blob for base {base_prefix[:12]}"
-                )
-                return None
-            base_text = base_row['content_text']
-            base_hash = base_row['hash_sha256']
-
-            current_text = self._blob_text(current_hash)
-            if current_text is None:
-                logger.debug(
-                    f"rebase: current {current_hash[:12]} not readable inline"
-                )
-                return None
-
-            # ours = what is in the DB now, theirs = what this call wants
-            # to write. Orientation matters only for which side a
-            # conflict names, since a clean diff3 is symmetric.
-            merger = ThreeWayMerge()
-            ok, merged, conflict = merger.merge_files(
-                file_path=file_path,
-                ours=FileVersion(content=current_text,
-                                 hash=current_hash, source='ours'),
-                theirs=FileVersion(content=incoming,
-                                   hash='incoming', source='theirs'),
-                base=FileVersion(content=base_text,
-                                 hash=base_hash, source='base'),
-            )
-            if not ok or merged is None:
-                where = ''
-                if conflict is not None and conflict.conflict_markers:
-                    n = conflict.conflict_markers.count('<<<<<<<')
-                    where = f" ({n} conflicting hunk(s))"
-                logger.error(
-                    f"--if-match base moved and the change does not rebase "
-                    f"cleanly{where}: your edit and theirs touch the same "
-                    f"lines of {file_path}."
-                )
-                return None
-            if merged == current_text:
-                # Nothing of the incoming change survived. Treat as a
-                # failed rebase: reporting success would claim the edit
-                # landed when it did not.
-                logger.debug("rebase: merge result equals current, no-op")
-                return None
-            return merged, base_hash
-        except Exception as e:
-            logger.debug(f"rebase attempt failed: {e}", exc_info=True)
-            return None
+        """Instance alias for `rebase_onto_current`. See that function."""
+        return rebase_onto_current(file_path, base_prefix,
+                                   current_hash, incoming)
 
     def _read_content_from_db(self, file_record: dict) -> Optional[str]:
         """Read file content directly from the TempleDB database (content_blobs).

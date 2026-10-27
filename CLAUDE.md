@@ -40,6 +40,18 @@ Pass `--no-rebase` for strict compare-and-swap when you need "nothing
 moved" rather than "nothing was lost". Both still exit 2 and name both
 hashes.
 
+`templedb intent apply <id>` carries the same hazard and the same fix,
+more acutely: an intent is *meant* to outlive the state it was written
+against, so its `base_revision` is usually stale by the time anyone
+applies it. It used to point `file_contents` straight at
+`new_content_hash` with no base check at all, reverting whatever landed
+in between. It now rebases onto current content the same way, exits 4 on
+a real conflict (leaving the intent `proposed` so it stays applicable),
+and takes `--no-rebase`. `new_content_hash` always keeps the hash that
+was *proposed* even when a rebase means that is not what landed — what
+landed goes in `patch_summary` as `rebased onto X, applied as Y`, so one
+grep answers "was this applied as written?" across both paths.
+
 **2. Commit the session workspace, not its parent.** Edit workspaces are
 per-session: `~/.config/templedb/edit-workspaces/<slug>/<session-name>/`.
 The parent `<slug>/` directory may itself look like a project root while
