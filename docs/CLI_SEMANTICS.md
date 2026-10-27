@@ -474,7 +474,7 @@ It is buried in a 10-command noun and mentioned in no guidance.
 
 | command | semantics | class | verdict |
 |---|---|---|---|
-| `file set` | replace file content, routed through EditIntent; auto-stages | `W·db` | **core** — replaces the WHOLE file; `--if-match` is the guard |
+| `file set` | replace file content, routed through EditIntent; auto-stages | `W·db` | **core** — replaces the WHOLE file; `--if-match` is the guard, and since 2026-10-27 a moved base is three-way merged rather than refused (`--no-rebase` for strict CAS) |
 | `file show` | print current snapshot | `R·db` | core |
 | `file cat` | identical to `show` | `R·db` | alias |
 | `file get` | content as a string for programmatic use | `R·db` | merge → `show --raw` |
@@ -982,10 +982,36 @@ auditable. `·db` facts throughout — no upstream authority holds intents.
 | command | semantics | class | verdict |
 |---|---|---|---|
 | `intent create` | propose an edit **without applying it** | `W·db` | **core** |
-| `intent apply` | apply a proposed intent | `W·db` | core |
+| `intent apply` | apply a proposed intent, rebasing it onto current content if the file moved since it was proposed (exit 4 on a real conflict, leaving it `proposed`) | `W·db` | core |
 | `intent cancel` | abandon a proposal | `W·db` | keep |
 | `intent list` | outstanding intents by default | `R·db` | core |
 | `intent show` | one intent in full | `R·db` | keep |
+
+## `nix` — 9 commands
+
+Missing from the first pass of this document, and not because it was
+overlooked: `nix_store.py` carried a complete `register()` that
+`cli/__init__.py` never called, so the group was unreachable from
+`--help` and from `admin schema`, which are what the CLI trio measures.
+Wired in 2026-10-27. Not to be confused with `nixos` (54 commands),
+which builds and switches systems; this group indexes the store.
+
+| command | semantics | class | verdict |
+|---|---|---|---|
+| `nix scan` | index store paths from the live system closure, then record every `/nix/var/nix/profiles/system-*-link` as a generation | `W·nix` | **core** — and load-bearing in a way the name hides: `scan_generations` is the only backfill for `nix_generations`, so while this was unreachable a generation created by a direct `nixos-rebuild` could never be recorded at all |
+| `nix generations` | tracked generations with their VCS commit links | `R·db` | core — the read side of `provenance machine` |
+| `nix closure` | closure detail for a store path or generation, with diffs | `R·db` | keep |
+| `nix who-uses` | which projects depend on a **package** | `R·db` | keep — but **rename**: `graph who-uses` searches file contents and `entity search` the symbol graph, so three commands share one verb over three different nouns |
+| `nix gc-roots` | what is keeping store paths alive | `R·nix` | keep |
+| `nix stats` | store totals | `R·db` | keep |
+| `nix mark-invalid` | flag store paths that have been GC'd away | `W·db` | keep — reconciles observations against a store that moved under them |
+| `nix cache prepare` | stage a closure for binary-cache serving | `W·fs` | keep |
+| `nix cache stats` | binary cache counters | `R·db` | keep |
+
+The generations half of `scan` is worth separating from the store-path
+half eventually. They have different costs (2,515 paths vs 4 profile
+links) and different reasons to run, and today you cannot ask for the
+cheap one alone.
 
 ## `source` — 2 commands
 

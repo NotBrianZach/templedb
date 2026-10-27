@@ -253,7 +253,13 @@ def register(cli):
     schema_parser = subparsers.add_parser('schema',
         help='Show JSON schema for CLI commands (for agent/scripting use)')
     schema_parser.add_argument('command_path', nargs='*', metavar='COMMAND',
-        help='Optional command path to inspect (e.g. "vcs status"). Omit to list all commands.')
+        # Unquoted in the example on purpose. nargs='*' means the path
+        # arrives as separate words, so `admin schema vcs status` works
+        # and `admin schema "vcs status"` is one arg that matches
+        # nothing -- it returns NOT_FOUND. The old help spelled the
+        # example with the quotes, i.e. the one form that fails.
+        help='Optional command path to inspect (e.g. admin schema vcs '
+             'status). Omit to list all commands as JSON.')
     cli.commands['admin.schema'] = schema_cmd.schema
 
     # --- admin bootstrap ---

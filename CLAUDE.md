@@ -334,9 +334,15 @@ behaviour — the frozen package wins.
 A typed graph unifying facts across git, nix, agent-runtime, deployment
 and author authorities. Framing in `docs/ENTITY_GRAPH_DESIGN.md`;
 per-adapter analysis in `docs/INGEST_ADAPTERS.md`. CLI surface analysis
-(432 commands, discoverability gaps, destructive-command posture) in
-`docs/CLI_SURFACE.md` — note `admin schema` currently reports empty help
-for 422 of them, so prefer `--help` over the JSON schema for now.
+(discoverability gaps, destructive-command posture) in
+`docs/CLI_SURFACE.md`. `templedb admin schema` enumerates all 463
+commands as JSON (no flag needed) and every one carries real help text,
+so it — not `--help` in a loop — is the way to inspect the surface. To
+inspect one, pass the path as separate words:
+`templedb admin schema vcs status`. Quoting it as one argument returns
+`NOT_FOUND`. (Both that doc and this file
+used to say the opposite, back when 422 of them serialised `help: ""`.
+The `cli_help_is_populated` doctor check now guards it.)
 
 `ingest <adapter>` mostly projects TempleDB's own relational tables into
 the graph — it does **not** re-read the authority. `ingest git` reads

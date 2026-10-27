@@ -181,19 +181,21 @@ def _flatten(node: dict, acc: list | None = None) -> list:
     return acc
 
 
-def register(cli):
-    cmd = SchemaCommands()
-
-    schema_parser = cli.register_command(
-        'schema',
-        cmd.schema,
-        help_text='Show JSON schema for CLI commands (for agent/scripting use)',
-    )
-    schema_parser.add_argument(
-        'command_path',
-        nargs='*',
-        metavar='COMMAND',
-        help='Optional command path to inspect (e.g. "vcs status"). '
-             'Omit to list all commands.',
-    )
-    cli.commands['schema'] = cmd.schema
+# No register() here on purpose.
+#
+# This module used to define one, registering a top-level `templedb
+# schema`. Nothing ever called it -- `cli/__init__.py` does not import
+# this module -- so the command did not exist, while `admin.py` carried
+# its own registration of the same handler under `admin schema`, which
+# is the one that works.
+#
+# Deleted rather than wired in 2026-10-27, which is the opposite call
+# from the one made for `nix_store.register` the same day, and the
+# difference is the point: wiring `nix` added nine commands that existed
+# nowhere else, whereas wiring this would have added a second spelling
+# of a command that already works. CLI_SEMANTICS.md spends a column on
+# collapsing aliases; this would have created one.
+#
+# `SchemaCommands` and the `_parser_to_schema` / `_flatten` helpers are
+# live -- imported by admin.py and entity.py. Only the registration was
+# dead.

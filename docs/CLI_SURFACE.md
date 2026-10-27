@@ -16,10 +16,22 @@ has since regressed — see "`--examples` is dead" below.
 
 | | |
 |---|---|
-| commands (incl. subcommands) | **432** |
+| commands (incl. subcommands) | **432** → **463** (2026-10-27) |
 | parameters | **1153** |
 | commands nested 2+ levels | 419 |
 | LOC under `src/cli/commands/` | **43,742** |
+
+Part of that growth is not growth. Nine of the added commands are the
+`nix` group — `scan`, `generations`, `closure`, `who-uses`, `gc-roots`,
+`stats`, `mark-invalid`, `cache prepare|stats` — which existed in
+`src/cli/commands/nix_store.py` with a complete `register()` on the day
+this document was first measured. `cli/__init__.py` never imported or
+called it, so the group was absent from `--help`, absent from
+`admin schema`, and therefore absent from this analysis. Wired in
+2026-10-27. Worth noting as a limitation of the method: an inventory
+taken from the CLI's own surface cannot see a command group that the
+CLI forgot to register, so "what exists" and "what is reachable" are
+different questions and this document only ever answered the second.
 
 Largest groups by subcommand count: `deploy` 73, `nixos` 54, `env` 37,
 `ai` 24, `admin` 22, `vcs` 21, `storage` 20, `project` 19.
@@ -27,14 +39,26 @@ Largest groups by subcommand count: `deploy` 73, `nixos` 54, `env` 37,
 Largest modules: `entity.py` **6597**, `nixos.py` 2721, `vcs.py` 2529,
 `var.py` 1450, `file.py` 1158, `commit.py` 1112.
 
-432 commands is the headline risk. Nothing enumerates them for a human,
-and the one interface that enumerates them for a machine is broken.
+The command count is the headline risk. Nothing enumerates them for a
+human; the machine interface was broken when this was written and has
+since been fixed.
 
-## The agent-facing surface is empty
+## The agent-facing surface was empty — fixed 2026-10-27
+
+> **Resolved.** `templedb admin schema` now returns a non-empty `help`
+> for **all 463** commands (0 empty, verified 2026-10-27), and the
+> `cli_help_is_populated` doctor invariant guards against regression.
+> `admin schema | jq` is now the right way to enumerate the surface (it
+> emits JSON with no flag; `--json` is a *global* that must precede the
+> subcommand, and `admin schema --json` is an argparse error). README
+> and `CLAUDE.md` previously said to prefer `--help` instead, and both
+> have been corrected. The diagnosis below is kept
+> because the argparse behaviour that caused it is a trap worth
+> knowing, not because the symptom is live.
 
 `templedb admin schema` exists specifically to "Show JSON schema for CLI
 commands (for agent/scripting use)". It emits 270 KB of JSON. **422 of
-432 commands come back with `help: ""`.**
+432 commands came back with `help: ""`.**
 
 The help is not missing from the CLI — it is missing from the *schema*.
 `vcs add` is registered as
@@ -52,8 +76,8 @@ subparser's `.description` is populated only if you also pass
 `description=`. Ten commands do (the `deploy hooks` family); the other
 422 don't, so they serialise as empty.
 
-**Fix** is local: when recursing over subparsers
-(`schema.py:73-76`), look up the matching entry in
+**Fix** was local, and is the one that landed: when recursing over
+subparsers (`schema.py:73-76`), look up the matching entry in
 `action._choices_actions` and carry its `.help` down as a fallback.
 
 Two smaller gaps in the same file:
@@ -123,7 +147,7 @@ Known remaining members of this class:
 | staging is session-scoped | **yes**, since the `--session` flag |
 | "modified" means *differs from HEAD*, not from `file_contents` | no |
 | `ingest <adapter>` projects DB tables, not the authority ([details](INGEST_ADAPTERS.md)) | no |
-| `file set` replaces the whole file; `--verify` won't catch a stale base | partially — `--if-match` exists but nothing says why |
+| `file set` replaces the whole file; `--verify` won't catch a stale base | yes (since 2026-10-27) — `--if-match`'s help explains the stale-base revert it exists for, and a moved base is now three-way merged rather than refused |
 | `templedb edit` returns immediately; `--editor` blocks | yes |
 
 The test for this class: *if a user gets a surprising no-op or a silent
