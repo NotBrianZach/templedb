@@ -93,6 +93,26 @@ class FileRepository(BaseRepository):
         """
         Get a specific file by its path within a project.
 
+        Returns rows of ANY status, including soft-deleted ones. Callers
+        that want only live files must filter on the `status` key — and
+        that key is in the projection for a reason worth recording.
+
+        `status` was missing here until 2026-10-27, and
+        `_write_content_to_db`'s un-delete guard reads it:
+        `if file_record.get('status') != 'active'`. With the column
+        absent that test was `None != 'active'`, true on every write to
+        an existing file, so the revive UPDATE fired unconditionally.
+        The guard did its job — soft-deleted rows were revived — for a
+        reason unrelated to the one its comment gives, which is the
+        dangerous kind of working. Anyone reading that check, concluding
+        it was redundant and removing it would have restored the
+        `set bza flake.nix` bug: the blob lands, `status` stays
+        'deleted', and publish materialize ships nothing.
+
+        Found by porting the same write path to Rust, which had to read
+        the column to reproduce the behaviour and so could not inherit
+        the accident.
+
         Args:
             project_id: Project ID
             file_path: Relative file path
@@ -108,6 +128,7 @@ class FileRepository(BaseRepository):
                 pf.file_name,
                 pf.file_type_id,
                 pf.lines_of_code,
+                pf.status,
                 fc.content_hash,
                 fc.version
             FROM project_files pf

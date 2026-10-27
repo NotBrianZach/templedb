@@ -428,7 +428,7 @@ class FileCommands(Command):
                               content.encode('utf-8') if isinstance(content, str) else content
                           )},
             ) as _stage:
-                self._write_content_to_db(
+                wrote = self._write_content_to_db(
                     project['id'], args.project, args.file_path, content,
                 )
                 _stage.output_hash = new_hash
@@ -449,22 +449,51 @@ class FileCommands(Command):
                 )
 
             # Link the just-staged working-state row to the intent
-            # (migration 088 adds intent_id column). Cosmetic — the
-            # commit path doesn't need it, but downstream provenance
-            # queries do.
-            if intent_id is not None:
+            # (migration 088 adds the intent_id column). The commit path
+            # doesn't need it; downstream provenance queries do.
+            #
+            # Two bugs fixed here on 2026-10-27, both found by porting
+            # this path to Rust — where the stage and the link are one
+            # upsert, so the statement had to be written down exactly and
+            # neither could hide.
+            #
+            # 1. `AND intent_id IS NULL` meant the row kept the FIRST
+            #    intent that ever staged it. The auto-stage above updates
+            #    content_hash on every write, so after a second
+            #    `file set` the row held the new hash and a link to the
+            #    older intent — the column whose whole job is to say
+            #    which edit produced this staged content, naming an edit
+            #    that did not. 133 orphaned staged rows exist for other
+            #    reasons; this one silently mislabelled the live ones.
+            #    The link now always names the intent that wrote the
+            #    hash sitting in the row.
+            #
+            # 2. The WHERE clause was scoped by project and path and NOT
+            #    by branch, and `vcs_working_state` is
+            #    UNIQUE (project_id, branch_id, file_id) — so a project
+            #    with the same file staged on two branches had both rows
+            #    relabelled by whichever branch was written. It now
+            #    targets the row the auto-stage actually touched, by id,
+            #    which also retires the
+            #    `file_id = (SELECT ... LIMIT 1)` subquery that was
+            #    re-deriving a value the writer already had.
+            #
+            # Skipped when there is no staged row to link: no branch, or
+            # the auto-stage failed. `wrote` is None only if
+            # _write_content_to_db returned nothing, which no current
+            # path does.
+            staged_branch_id = (wrote or {}).get('staged_branch_id')
+            if intent_id is not None and staged_branch_id is not None:
                 try:
                     from db_utils import execute
                     execute(
                         """UPDATE vcs_working_state
                               SET intent_id = ?
                             WHERE project_id = ?
-                              AND file_id = (SELECT id FROM project_files
-                                              WHERE project_id = ?
-                                                AND file_path = ?
-                                              LIMIT 1)
-                              AND intent_id IS NULL""",
-                        (intent_id, project['id'], project['id'], args.file_path),
+                              AND branch_id = ?
+                              AND file_id = ?""",
+                        (intent_id, project['id'], staged_branch_id,
+                         wrote['file_id']),
                     )
                 except Exception as e:
                     logger.debug(f"intent_id link failed (non-fatal): {e}")
@@ -1145,6 +1174,17 @@ class FileCommands(Command):
             # filters on status='active' silently skips the file.
             # Discovered during the recap-11 rebuild after `set bza
             # flake.nix` looked like it succeeded but shipped nothing.
+            #
+            # This condition did not work until 2026-10-27, and it is
+            # worth knowing which way it failed: `get_file_by_path` did
+            # not select `status`, so the test was `None != 'active'` and
+            # the UPDATE ran on EVERY write to an existing file. The
+            # guard was therefore unconditional rather than broken — it
+            # revived what it had to and wasted one UPDATE on everything
+            # else. Do not "simplify" it away on the grounds that the
+            # revive seems to happen anyway; that reasoning is circular
+            # and removing the UPDATE brings the bug back. The column is
+            # in the projection now and this reads it.
             if file_record.get('status') != 'active':
                 base.execute(
                     "UPDATE project_files SET status = 'active' WHERE id = ?",
@@ -1207,16 +1247,42 @@ class FileCommands(Command):
                     updated_at = datetime('now')
             """, (file_id, content_hash, len(content_bytes), line_count))
 
-        # Auto-stage
+        # Auto-stage.
+        #
+        # The branch comes from `VCSRepository.get_active_branch`, which
+        # is the same resolution `vcs commit` uses — and that is a fix,
+        # not a refactor. This block used to read
+        # `projects.active_branch_id` on its own:
+        #
+        #     SELECT active_branch_id as id FROM projects
+        #      WHERE id = ? AND active_branch_id IS NOT NULL
+        #
+        # with no join to vcs_branches and no existence check. `commit`
+        # resolves the same question by JOINing and falling back to the
+        # default branch, so a project whose active_branch_id names a
+        # branch row that is gone resolved to two different branches in
+        # the two steps.
+        #
+        # Measured, the old path staged NOTHING in that case rather than
+        # staging in the wrong place: vcs_working_state.branch_id
+        # declares an FK, the INSERT raised IntegrityError, and the
+        # `except Exception: pass` below swallowed it to a debug line —
+        # so `file set` printed ✓ and exited 0 with no staged row, and
+        # the next `vcs commit` said "nothing to commit". Both commands
+        # reported success and the edit was never recorded. (FKs off,
+        # which the bulk paths use, gives the dangling row instead; the
+        # commit cannot see that either.)
+        #
+        # Found by porting this path to Rust, where the stage and the
+        # commit share one resolver and the divergence showed up as two
+        # functions that had to be made identical. Keep it that way: if
+        # this ever needs its own query again, `vcs commit`'s has to
+        # change in the same commit.
+        staged_branch_id = None
         try:
-            branch = base.query_one(
-                "SELECT active_branch_id as id FROM projects WHERE id = ? AND active_branch_id IS NOT NULL",
-                (project_id,))
-            if not branch:
-                branch = base.query_one(
-                    "SELECT id FROM vcs_branches WHERE project_id = ? AND is_default = 1 LIMIT 1",
-                    (project_id,))
+            branch = self.ctx.get_vcs_service().vcs_repo.get_active_branch(project_id)
             if branch:
+                staged_branch_id = branch['id']
                 change_state = "modified" if file_record else "added"
                 sid = self.ctx.get_vcs_service().get_current_session()['id']
                 # content_hash must be set here — vcs commit reads content via
@@ -1232,8 +1298,10 @@ class FileCommands(Command):
                                   state = excluded.state,
                                   staged_by_session_id = ?,
                                   last_modified = datetime('now')
-                """, (project_id, branch['id'], file_id, content_hash, change_state, sid, sid))
+                """, (project_id, staged_branch_id, file_id, content_hash,
+                      change_state, sid, sid))
         except Exception as e:
+            staged_branch_id = None
             logger.debug(f"Auto-stage failed (non-fatal): {e}")
 
         # Mirror the write to the ACTIVE checkout so a subsequent
@@ -1312,6 +1380,13 @@ class FileCommands(Command):
                 "Checkout mirror failed for %s (%s). The database write "
                 "succeeded; verify with `templedb file cat` after "
                 "committing.", file_path, e)
+
+        # What was written and where it was staged, so the caller can
+        # link the staged row to its intent without re-deriving either.
+        # `staged_branch_id` is None when the auto-stage was skipped (no
+        # branch) or failed, which is the caller's signal that there is
+        # no row to link.
+        return {'file_id': file_id, 'staged_branch_id': staged_branch_id}
 
 
 def register(cli):

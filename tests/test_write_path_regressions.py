@@ -759,3 +759,263 @@ class TestBug7UnstageSettlesUnchangedRows:
             "change is now invisible to `vcs status`")
         assert state_of('settle_new.py') == 'modified', (
             "a never-committed file was marked settled")
+
+
+class TestBug8StagedRowProvenanceAndStatus:
+    """The three bugs found by porting `file set` to Rust (2026-10-27).
+
+    All three are in `_write_content_to_db` and the statement after it,
+    and all three were invisible from this side because the code reads
+    as if it works. Writing the same path a second time, in another
+    language, is what surfaced them:
+
+    Bug 8a: `get_file_by_path` did not select `status`, so the un-delete
+            guard's `file_record.get('status') != 'active'` was
+            `None != 'active'` — true on every write. The revive fired
+            unconditionally and the guard "worked" for the wrong reason.
+    Bug 8b: the `intent_id` link was guarded by `AND intent_id IS NULL`,
+            so a staged row kept the FIRST intent forever while its
+            content_hash tracked every later write.
+    Bug 8c: that same link was scoped by project and path and not by
+            branch, so it relabelled the row on every branch.
+
+    These call `FileCommands().set` in-process rather than shelling out
+    to `templedb`, deliberately: a subprocess runs whatever is installed
+    on PATH, which is not the tree under test. The rest of this module
+    uses subprocess because it is testing behaviour that was already
+    released; these three are testing the fix in this working copy.
+    """
+
+    @staticmethod
+    def _set(slug, path, content, **kw):
+        """`templedb file set <slug> <path> --content <content>`,
+        in-process. Returns the command's exit code."""
+        from argparse import Namespace
+        from cli.commands.file import FileCommands
+        args = Namespace(
+            project=slug, file_path=path, content=content,
+            if_match=None, allow_mojibake=False, skip_intent=False,
+            verify=False, stage=False, commit=False, commit_msg=None,
+            session=None, **kw,
+        )
+        return FileCommands().set(args)
+
+    @staticmethod
+    def _staged(pid, path):
+        """The staged row for one path, or None."""
+        return query_one(
+            """SELECT ws.id, ws.branch_id, ws.state, ws.content_hash,
+                      ws.intent_id
+                 FROM vcs_working_state ws
+                 JOIN project_files pf ON pf.id = ws.file_id
+                WHERE ws.project_id = ? AND pf.file_path = ?""",
+            (pid, path),
+        )
+
+    def test_get_file_by_path_exposes_status(self, fresh_project):
+        """Bug 8a. The column the un-delete guard reads has to be in the
+        projection, or the guard is testing None against a string."""
+        pid, slug = fresh_project
+        from repositories.file_repository import FileRepository
+
+        assert self._set(slug, 'status_key.py', '# hello\n') == 0
+        row = FileRepository().get_file_by_path(pid, 'status_key.py')
+        assert row is not None
+        assert 'status' in row.keys(), (
+            "get_file_by_path must project `status`: _write_content_to_db's "
+            "un-delete guard compares it, and without the column that "
+            "comparison is None != 'active' — true on every write"
+        )
+        assert row['status'] == 'active'
+
+    def test_a_soft_deleted_row_is_still_revived(self, fresh_project):
+        """Bug 8a, the half that must not regress. The guard is
+        conditional now; the behaviour it guards is unchanged."""
+        pid, slug = fresh_project
+        assert self._set(slug, 'revive.py', '# before\n') == 0
+        execute(
+            "UPDATE project_files SET status = 'deleted' "
+            " WHERE project_id = ? AND file_path = ?",
+            (pid, 'revive.py'),
+        )
+        assert self._set(slug, 'revive.py', '# after\n') == 0
+        row = query_one(
+            "SELECT status FROM project_files "
+            " WHERE project_id = ? AND file_path = ?",
+            (pid, 'revive.py'),
+        )
+        assert row['status'] == 'active', (
+            "a soft-deleted row was not revived — the blob lands and "
+            "everything filtering on status='active' skips the file, which "
+            "is the `set bza flake.nix` bug"
+        )
+
+    def test_the_staged_row_links_the_intent_that_wrote_its_hash(
+            self, fresh_project):
+        """Bug 8b. Two writes, and the link must name the second intent —
+        the one whose hash is sitting in the row."""
+        pid, slug = fresh_project
+        path = 'provenance.py'
+
+        assert self._set(slug, path, '# one\n') == 0
+        first = self._staged(pid, path)
+        assert first is not None, "the auto-stage wrote no row"
+        assert first['intent_id'] is not None
+
+        assert self._set(slug, path, '# two\n') == 0
+        second = self._staged(pid, path)
+
+        import hashlib
+        assert second['content_hash'] == hashlib.sha256(
+            '# two\n'.encode()).hexdigest()
+        assert second['intent_id'] != first['intent_id'], (
+            "the staged row still names the first intent, so its "
+            "content_hash and its intent_id describe different writes"
+        )
+        # And it is the newest intent for this path, not merely a
+        # different one.
+        newest = query_one(
+            "SELECT id, new_content_hash FROM edit_intents "
+            " WHERE project_id = ? AND file_path = ? "
+            " ORDER BY id DESC LIMIT 1",
+            (pid, path),
+        )
+        assert second['intent_id'] == newest['id']
+        assert newest['new_content_hash'] == second['content_hash'], (
+            "the linked intent's hash disagrees with the staged hash"
+        )
+
+    def test_the_link_touches_only_the_branch_that_was_staged(
+            self, fresh_project):
+        """Bug 8c. `vcs_working_state` is UNIQUE per
+        (project, branch, file), so the same file can be staged on two
+        branches. The link must hit the one the auto-stage wrote."""
+        pid, slug = fresh_project
+        path = 'two_branches.py'
+        base = BaseRepository()
+
+        assert self._set(slug, path, '# main\n') == 0
+        staged = self._staged(pid, path)
+        active_branch = staged['branch_id']
+        file_id = query_one(
+            "SELECT id FROM project_files WHERE project_id = ? "
+            " AND file_path = ?", (pid, path))['id']
+
+        # A second branch with its own staged row for the same file,
+        # deliberately left unlinked.
+        other_branch = base.execute(
+            "INSERT INTO vcs_branches (project_id, branch_name, is_default) "
+            "VALUES (?, 'side', 0)", (pid,),
+        )
+        assert other_branch != active_branch
+        base.execute(
+            "INSERT INTO vcs_working_state "
+            "(project_id, branch_id, file_id, content_hash, state, "
+            " last_modified, staged_by_session_id, intent_id) "
+            "VALUES (?, ?, ?, 'deadbeef', 'modified', datetime('now'), "
+            "        NULL, NULL)",
+            (pid, other_branch, file_id),
+        )
+
+        assert self._set(slug, path, '# main again\n') == 0
+
+        def row_for(branch_id):
+            return query_one(
+                "SELECT content_hash, intent_id FROM vcs_working_state "
+                " WHERE project_id = ? AND branch_id = ? AND file_id = ?",
+                (pid, branch_id, file_id),
+            )
+
+        assert row_for(active_branch)['intent_id'] is not None
+        side = row_for(other_branch)
+        assert side['intent_id'] is None, (
+            "the write relabelled another branch's staged row — its "
+            "intent_id now names an intent that staged nothing on it"
+        )
+        assert side['content_hash'] == 'deadbeef', (
+            "the write also overwrote the other branch's staged hash"
+        )
+
+    def test_a_dangling_active_branch_stages_where_commit_will_look(
+            self, fresh_project):
+        """The fourth finding: `file set` and `vcs commit` resolved the
+        active branch with two different queries.
+
+        The auto-stage read `projects.active_branch_id` on its own, with
+        no join to `vcs_branches`; `vcs commit` resolves through
+        `get_active_branch`, which JOINs and falls back to the default
+        branch when the join finds nothing. So a project whose
+        active_branch_id names a branch row that is gone resolved to two
+        different branches in the two steps.
+
+        Measured here, the old code does not merely stage in the wrong
+        place — it stages **nothing**. `vcs_working_state.branch_id`
+        declares a foreign key, so the INSERT with the dangling id
+        raises IntegrityError, and the auto-stage's
+        `except Exception: pass` swallows it to a debug line. `file set`
+        then prints `✓ Set <path>` and exits 0 with no staged row
+        anywhere, and the next `vcs commit` says "nothing to commit".
+        Both commands report success and the edit is never recorded.
+        (With FK enforcement off, which several bulk paths use, the row
+        lands under the dangling branch instead and the commit still
+        cannot see it. Same outcome, different mechanism.)
+
+        Both now go through `get_active_branch`, so the stage lands
+        where the commit will look for it.
+
+        The dangling state is built the way the live database reaches
+        it, which is the only way it can be built here: `active_branch_id`
+        declares a foreign key, so the row has to be deleted with
+        enforcement off. That is not contrived — `PRAGMA foreign_keys`
+        defaults OFF in SQLite, and sync_engine and several migrations
+        bulk-delete with it off deliberately. It is the same mechanism
+        that makes `vcs commit` carry a defensive orphan reap for
+        `vcs_working_state.file_id`.
+        """
+        pid, slug = fresh_project
+        path = 'dangling.py'
+        base = BaseRepository()
+
+        default_branch = query_one(
+            "SELECT id FROM vcs_branches WHERE project_id = ? "
+            " AND is_default = 1", (pid,))['id']
+        dangling = base.execute(
+            "INSERT INTO vcs_branches (project_id, branch_name, is_default) "
+            "VALUES (?, 'about-to-vanish', 0)", (pid,),
+        )
+        execute("UPDATE projects SET active_branch_id = ? WHERE id = ?",
+                (dangling, pid))
+
+        # Delete the branch out from under the pointer, FKs off.
+        import sqlite3
+        import db_utils
+        db_utils.close_connection()
+        raw = sqlite3.connect(db_utils.DB_PATH)
+        raw.execute("PRAGMA foreign_keys = OFF")
+        raw.execute("DELETE FROM vcs_branches WHERE id = ?", (dangling,))
+        raw.commit()
+        raw.close()
+        assert query_one("SELECT 1 AS ok FROM vcs_branches WHERE id = ?",
+                         (dangling,)) is None
+        assert query_one("SELECT active_branch_id AS b FROM projects "
+                         " WHERE id = ?", (pid,))['b'] == dangling
+
+        assert self._set(slug, path, '# dangling\n') == 0
+
+        staged = self._staged(pid, path)
+        assert staged is not None, "nothing was staged at all"
+        assert staged['branch_id'] != dangling, (
+            "staged against an active_branch_id that names no branch row — "
+            "`vcs commit` joins vcs_branches, so it would fall back to the "
+            "default branch and find nothing staged there"
+        )
+        assert staged['branch_id'] == default_branch, (
+            "the stage did not fall back to the same branch "
+            "get_active_branch (and therefore vcs commit) resolves"
+        )
+
+        # And the two really do agree, asked directly.
+        from services.context import ServiceContext
+        resolved = ServiceContext().get_vcs_service().vcs_repo \
+            .get_active_branch(pid)
+        assert resolved['id'] == staged['branch_id']
