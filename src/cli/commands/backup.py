@@ -746,9 +746,46 @@ class BackupCommands(Command):
         if up.status_code == 200:
             print(f"✅ Backup uploaded to gs://{bucket}/{obj} ({size // 1024 // 1024} MB)")
             _record_backup(backup_path, f"gcs:{bucket}", size)
+
+            # Drop the local copy now that the bucket has it.
+            #
+            # Not doing this was a leak with no upper bound: the copy was
+            # removed when creation failed and when the integrity check
+            # failed, but never on the success path, so every daily run
+            # left the whole database behind. Measured 2026-10-28 before
+            # this changed: 153 files, 93.6 GB, oldest 2026-02-23 --
+            # about 10% of the root filesystem holding copies that were
+            # already in GCS.
+            #
+            # --keep-local opts out, for the case where you want a fast
+            # local restore point and will manage the directory yourself.
+            if getattr(args, 'keep_local', False):
+                print(f"   local copy kept at {backup_path}")
+            else:
+                try:
+                    backup_path.unlink(missing_ok=True)
+                    for sidecar in ("-shm", "-wal"):
+                        # sqlite's backup API leaves these next to the
+                        # file; 54 of each had accumulated alongside the
+                        # 153 .sqlite files.
+                        Path(str(backup_path) + sidecar).unlink(
+                            missing_ok=True)
+                except OSError as e:
+                    # A backup that is safely in the bucket but whose
+                    # local copy could not be removed is not a failed
+                    # backup. Say so and exit 0.
+                    print(f"   note: could not remove local copy "
+                          f"{backup_path}: {e}", file=sys.stderr)
             return 0
         else:
             print(f"GCS upload failed: HTTP {up.status_code}: {up.text[:200]}", file=sys.stderr)
+            # Deliberately keep the local copy here: the upload failed,
+            # so this file is the ONLY copy of the database at this
+            # point, and deleting it would turn a failed upload into a
+            # lost backup. `storage backup prune` is what bounds the
+            # directory over time.
+            print(f"   local copy RETAINED at {backup_path} — it is "
+                  f"currently the only copy", file=sys.stderr)
             return 1
 
 

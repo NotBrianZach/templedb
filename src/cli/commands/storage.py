@@ -118,6 +118,12 @@ def register(cli):
              'working GCS path -- `cloud push --provider gcs` needs an '
              'unpackaged dependency.')
     gcs_parser.add_argument('--bucket', help='GCS bucket name (default: from gcs.backup_bucket system var)')
+    gcs_parser.add_argument('--keep-local', action='store_true',
+        dest='keep_local',
+        help='Keep the local copy after a successful upload. Off by '
+             'default: it is already in the bucket, and leaving it was a '
+             'leak that reached 93.6 GB. A FAILED upload always keeps '
+             'its copy, since it is then the only one.')
     cli.commands['storage.backup.gcs'] = backup_cmd.gcs_push
 
     # --- storage cathedral ---
