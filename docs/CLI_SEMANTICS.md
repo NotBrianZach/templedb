@@ -35,6 +35,36 @@ policy: `·db` facts are gone if the DB is lost; the rest re-derive.
 | **gate** | destructive and lacks a guard it should have |
 | **retire?** | no evidence of use; candidate for removal |
 
+## Status of the `fix` verdicts — re-audited 2026-10-27
+
+Most of them are stale. Re-running the commands this document called
+broken: `nixos packages list`, `admin cache list`, `sync network
+status` and `validate <slug>` all return correct output now, and
+`nixos system status` no longer raises. The `ts_info` `NameError` is
+gone (the name is assigned before use), and nothing under `src/`
+references the `nixos_packages` table any more. Those were fixed
+between 2026-10-08 and now without this document being updated, which
+is worth stating plainly: **a `fix` verdict here is a claim about
+2026-10-08 and must be re-run before it is believed.**
+
+Two were real, and they split in an instructive way:
+
+- `graph overview` — **fixed 2026-10-27.** It had not merely survived,
+  it had regressed: 42s when first measured, 88s when re-measured. The
+  cause was a four-way `LEFT JOIN` over independent one-to-many tables
+  with `COUNT(DISTINCT ...)` papering over the row multiplication.
+  Rewritten as scalar subqueries: **53.3s → 0.005s** at the SQL level,
+  88s → under 1s for the whole command, byte-identical output.
+- `sync status` — still ~31s, exactly as measured. Unchanged on
+  purpose: the time is peer probes over the network, not local query
+  work, so it is a design question (cache? `--no-probe`?) rather than a
+  bug.
+
+Not re-verified, because running them mutates state or reaches other
+machines: `nixos packages add` / `remove`, `sync network setup` /
+`sync-all`. Their documented defects have no remaining trace in the
+source, but that is code reading, not a behavioural check.
+
 ---
 
 # `deploy` — 73 commands
@@ -232,8 +262,8 @@ nothing and remove a real ambiguity.
 | `nixos dotfiles list` | mappings and their on-disk status | `R·fs` | keep |
 | `nixos dotfiles apply` | materialise the symlinks | `D·fs` | keep |
 | `nixos dotfiles-*` (4) | flat spellings | — | alias |
-| `nixos packages add` / `remove` | managed-package CRUD | `W·db` | **fix** — writes to the nonexistent `nixos_packages` table |
-| `nixos packages list` | read managed packages | `R·db` | **fix** — `no such table: nixos_packages` |
+| `nixos packages add` / `remove` | managed-package CRUD | `W·db` | **fixed** — no `nixos_packages` reference remains in src/ (code read 2026-10-27; not run, it mutates) |
+| `nixos packages list` | read managed packages | `R·db` | **fixed** — returns real output (verified 2026-10-27) |
 | `nixos add-package` / `remove-package` / `list-packages` | flat spellings | — | alias (inherit the same breakage) |
 
 ### Layer 2 — generation (DB → .nix)
@@ -255,7 +285,7 @@ nothing and remove a real ambiguity.
 | `nixos system home-rebuild` | home-manager only — **evicted at next boot** | `D·nix` | keep — the help text should say it is transient |
 | `nixos system test` | activate *without* setting boot default | `D·nix` | keep — "test" understates it; this is a live activation |
 | `nixos system rollback` | revert to the previous generation | `D·nix` | core |
-| `nixos system status` | machine deployment state | `R·nix` | **fix** — `AttributeError: get_system_status` |
+| `nixos system status` | machine deployment state | `R·nix` | **fixed** — no longer raises (verified 2026-10-27) |
 | `nixos system history` | generation log | `R·db` | keep |
 | `nixos system-*` (6) | flat spellings | — | alias |
 | `nixos rebuild` / `home-rebuild` | flat spellings | — | alias |
@@ -441,7 +471,7 @@ distinguishes them at the surface.
 | `admin db integrity` | integrity only | `R·db` | **merge** → `db check` |
 | `admin db stamp` | mark all migrations applied without running | `W·db` | **gate** — same hazard as `deploy migration mark-applied`, which should move here |
 | `admin db repair` | dump/restore to fix corruption | `D·db` | keep |
-| `admin cache list` | cached deployments | `R·db` | **fix** — `AttributeError: db_utils` |
+| `admin cache list` | cached deployments | `R·db` | **fixed** — lists cached deployments (verified 2026-10-27) |
 | `admin cache stats` | cache size/hit data | `R·db` | keep |
 | `admin cache cleanup` / `clear` | evict old / all entries | `W·db` | merge — two verbs for one idea, differing only by scope |
 | `admin checkout-gc` | drop rows whose directory is gone; retire ended-session trees | `W·db` | **core** — deliberately never deletes directories |
@@ -858,7 +888,7 @@ distinction that made existing code look absent.
 | `graph importers` | what imports a file | `R·db` | core |
 | `graph build-deps` | **build** the file dependency graph | `W·db` | keep — a write dressed as a query; name suggests reading |
 | `graph deps` | read the project dependency graph | `R·db` | keep |
-| `graph overview` | cross-project analysis | `R·db` | **fix (perf)** — 42s, pure local query work |
+| `graph overview` | cross-project analysis | `R·db` | **fixed 2026-10-27** — was 42s, had regressed to 88s; four-way join replaced by scalar subqueries, 53.3s → 0.005s, identical output |
 | `graph changes` | what changed since last deploy | `R·db` | **move** → `deploy diff` / `deploy status`; it is a deploy question |
 
 ---
@@ -916,12 +946,12 @@ likely never worked in this form.
 | `sync serve` | run the sync server | `W·net` | core — long-running |
 | `sync push` / `pull` | one-directional sync with a peer | `D·net` | core |
 | `sync sync` | full bidirectional sync | `D·net` | keep — **rename**; `sync with` or `sync peer` |
-| `sync status` | sync state and peers | `R·net` | **fix (perf)** — 31s of peer probes |
+| `sync status` | sync state and peers | `R·net` | **fix (perf)** — still ~31s (re-measured 2026-10-27); the time is network peer probes, not local query work |
 | `sync peers` | discover Tailscale peers running TempleDB | `R·net` | merge → `sync status` |
 | `sync network connect` | connect to Tailscale | `W·net` | keep — the only `network` command that works |
-| `sync network status` | network + peer status | `R·net` | **fix** — `NameError: ts_info` |
-| `sync network setup` | install and configure Tailscale | `D·fs` | **fix** — same `NameError` |
-| `sync network sync-all` | sync with all online peers | `D·net` | **fix** — `NameError` fires before any sync; has never worked |
+| `sync network status` | network + peer status | `R·net` | **fixed** — real output (verified 2026-10-27) |
+| `sync network setup` | install and configure Tailscale | `D·fs` | **fixed** — `ts_info` is assigned before use (code read 2026-10-27; not run, it reaches other machines) |
+| `sync network sync-all` | sync with all online peers | `D·net` | **fixed** — `ts_info` is assigned before use (code read 2026-10-27; not run, it syncs to peers) |
 
 ---
 
@@ -1127,7 +1157,7 @@ Deliberate dual exposure, one implementation.
 | `edit` | provision a writable workspace; `--editor` opens it | `W·fs` | **core** — returns immediately by default, which is what agents need |
 | `commit` | workspace diff → DB commit | `W·db` | **core** (alias of `project commit`) |
 | `ingest` | project an authority into the entity graph | `W·derive` | **core** — mostly layer-2 projection, not re-observation |
-| `validate` | run all validators (env, nixos, deploy) | `R·db` | **fix** — reports PASS while a check errors on a missing table |
+| `validate` | run all validators (env, nixos, deploy) | `R·db` | **fixed** — reports per-check status and a real verdict (verified 2026-10-27) |
 | `gui` | launch the web GUI | `W·net` | keep — long-running; help does not say so |
 | `dev` | local dev server with the TempleDB environment | `W·fs` | keep |
 | `build` | nix build | `W·nix` | alias of `deploy nix build` |

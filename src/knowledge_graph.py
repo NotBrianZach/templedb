@@ -360,19 +360,43 @@ def cross_project_analysis() -> Dict[str, Any]:
     """Analyze relationships across all projects."""
     conn = _conn()
 
-    # Projects overview
+    # Projects overview.
+    #
+    # Scalar subqueries, not LEFT JOINs. This used to join four
+    # independent one-to-many tables in one statement and lean on
+    # COUNT(DISTINCT ...) to undo the damage:
+    #
+    #     LEFT JOIN project_files ... LEFT JOIN vcs_commits
+    #     LEFT JOIN environment_variables ... LEFT JOIN project_secret_blobs
+    #     GROUP BY p.id
+    #
+    # Each join multiplies rather than adds, so the intermediate result
+    # for one project is files x commits x vars x secrets. templedb alone
+    # is 893 active files x 1,463 commits -- 1.3M rows to produce six
+    # numbers -- and the DISTINCTs made it look correct while paying for
+    # every one. Measured on the live DB: 53.3s for the join form, 0.005s
+    # for this one, byte-identical output across all 25 projects.
+    #
+    # COUNT(*) is equivalent to the old COUNT(DISTINCT x.id) because each
+    # subquery already scopes to one project and those ids are unique.
+    # secret_count keeps its DISTINCT: project_secret_blobs can reference
+    # one blob more than once per project, so there the duplication was
+    # real rather than an artifact of the join.
     projects = conn.execute("""
         SELECT p.slug, p.project_type,
-               COUNT(DISTINCT pf.id) as file_count,
-               COUNT(DISTINCT vc.id) as commit_count,
-               COUNT(DISTINCT ev.id) as env_var_count,
-               COUNT(DISTINCT psb.secret_blob_id) as secret_count
+               (SELECT COUNT(*) FROM project_files pf
+                 WHERE pf.project_id = p.id AND pf.status = 'active')
+                 AS file_count,
+               (SELECT COUNT(*) FROM vcs_commits vc
+                 WHERE vc.project_id = p.id) AS commit_count,
+               (SELECT COUNT(*) FROM environment_variables ev
+                 WHERE ev.scope_id = p.id AND ev.scope_type = 'project')
+                 AS env_var_count,
+               (SELECT COUNT(DISTINCT psb.secret_blob_id)
+                  FROM project_secret_blobs psb
+                 WHERE psb.project_id = p.id) AS secret_count
         FROM projects p
-        LEFT JOIN project_files pf ON pf.project_id = p.id AND pf.status = 'active'
-        LEFT JOIN vcs_commits vc ON vc.project_id = p.id
-        LEFT JOIN environment_variables ev ON ev.scope_id = p.id AND ev.scope_type = 'project'
-        LEFT JOIN project_secret_blobs psb ON psb.project_id = p.id
-        GROUP BY p.id ORDER BY file_count DESC
+        ORDER BY file_count DESC
     """).fetchall()
 
     # Shared secrets (secrets used by multiple projects)
