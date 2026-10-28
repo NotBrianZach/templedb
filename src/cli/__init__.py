@@ -340,7 +340,7 @@ def main():
     except ImportError:
         pass
 
-    from cli.commands import publish, system, new_machine
+    from cli.commands import publish, system
     publish.register(cli)
     tutorial.register(cli)
     domain.register(cli)
@@ -348,7 +348,6 @@ def main():
 
     # Top-level aliases for convenience
     system.register(cli)
-    new_machine.register(cli)
 
     # Simplified top-level commands
     _register_top_level_aliases()

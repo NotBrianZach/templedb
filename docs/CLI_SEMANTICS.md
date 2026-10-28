@@ -1246,3 +1246,32 @@ caller that forgets `--yes` aborts rather than proceeding.
 
 The typed-confirmation helper is `confirm_by_typing` in
 `cli/error_handling_utils.py`, next to the existing `confirm_action`.
+
+---
+
+# Executing the plan — batch A, 2026-10-27
+
+Six commands removed outright (463 → 456): `deploy steam`,
+`env secret migrate` (and its `secret migrate` twin),
+`ai agent chat`, `ai vibe start` (the only verb under `vibe`, so the
+noun goes with it), `new-machine`, and `project checkout-cleanup`.
+
+Hard removal, no alias and no deprecation stub, by explicit decision.
+
+## Verify the premise before deleting on this document's word
+
+Five of its merge verdicts were checked against the handlers. **One
+held.** This matters more than the deletions:
+
+| verdict | claim | reality |
+|---|---|---|
+| `project checkout-cleanup` → `admin checkout-gc` | "same handler" | **true** — both bind `checkout_cmd.cleanup_checkouts`. Deleted. |
+| `nixos detect` → `env detect` | "identical handler" | **false** — `nixos detect` drives `NixOSGenerator` and prints a file-type distribution; `env detect` shells out to `nix_env_generator.py`. Different features sharing a verb. **Kept.** |
+| `nixos export` → `storage cathedral export` | "identical handler" | **false** — `NixOSGenerator` export vs `cathedral_export.export_project`. **Kept.** |
+| `provenance callers` → `graph callers` | "overlaps" | overlapping *question*, different substrate: `graph_trace` over `calls` relations vs `knowledge_graph.symbol_callers` with frecency ranking. A merge is real work; deletion would lose a capability. **Kept.** |
+| `admin db integrity` → `db check` | "merge" | partly — `check` does cover `PRAGMA integrity_check`, but `integrity` also prints size and per-table row counts, which `check` and `db status` do not. Folding those in has to come first. **Kept.** |
+
+So "identical handler" in this document means "same verb", not "same
+code", in two of the three places it appears. Treat every merge verdict
+as a hypothesis with a handler to read, exactly like the `fix` verdicts
+above.

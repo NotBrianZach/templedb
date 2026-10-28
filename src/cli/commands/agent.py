@@ -873,12 +873,6 @@ def register_agent_commands(subparsers, cli):
     gc_parser.add_argument('--json', action='store_true')
     cli.commands['ai.agent.gc'] = cmd.gc
 
-    # chat (testing)
-    chat_parser = agent_sub.add_parser('chat', help='Interactive chat (for testing)')
-    chat_parser.add_argument('session_id', nargs='?', type=int, default=0,
-                             help='Session ID (0 = create new)')
-    chat_parser.add_argument('--provider', default='fake', help='Provider for new session')
-    cli.commands['ai.agent.chat'] = cmd.chat
 
     # resume — act on the roster's "interrupted — resumable" rows
     resume_parser = agent_sub.add_parser(

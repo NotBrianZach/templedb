@@ -7,7 +7,6 @@ AI commands - consolidated group for Claude Code, vibe, prompt, MCP, and agent.
 def register(cli):
     """Register AI commands as subcommands under 'ai' top-level command."""
     from cli.commands.claude import ClaudeCommands
-    from cli.commands.vibe import VibeCommands
     from cli.commands.prompt import PromptCommands
     from cli.commands.mcp import MCPCommands
     from cli.commands.agent import register_agent_commands
@@ -43,20 +42,6 @@ def register(cli):
 
     status_parser = claude_sub.add_parser('status', help='Show integration status')
     cli.commands['ai.claude.status'] = claude_cmd.status
-
-    # --- ai vibe ---
-    vibe_cmd = VibeCommands()
-    vibe_parser = subparsers.add_parser('vibe', help='Launch Claude Code with auto-generated project context')
-    vibe_sub = vibe_parser.add_subparsers(dest='vibe_subcommand', required=True)
-
-    start_parser = vibe_sub.add_parser('start', help='Start a vibe coding session')
-    start_parser.add_argument('projects', nargs='*', help='One or more project names/slugs')
-    start_parser.add_argument('--claude-args', nargs='*', default=[], help='Additional arguments for Claude')
-    start_parser.add_argument('--tmux', action='store_true',
-                              help='Wrap Claude Code in a fresh tmux session '
-                                   'using templedb/config/tmux.conf (fixes '
-                                   'Alacritty alt-screen scrollback)')
-    cli.commands['ai.vibe.start'] = vibe_cmd.start
 
     # --- ai prompt ---
     prompt_cmd = PromptCommands()

@@ -726,7 +726,7 @@ def register(cli):
     subparsers = deploy_parser.add_subparsers(dest='deploy_subcommand', required=True)
 
     # Import deployment backend modules and consolidated subcommands
-    from cli.commands import deploy_nix, fleet as fleet_module, deploy_script, deploy_appstore, deploy_steam, deploy_blue_green
+    from cli.commands import deploy_nix, fleet as fleet_module, deploy_script, deploy_appstore, deploy_blue_green
     from cli.commands import target as target_module, migration as migration_module
 
     # deploy run command
@@ -868,8 +868,6 @@ def register(cli):
     # deploy appstore - App store and package manager deployment
     deploy_appstore.register_under_deploy(subparsers, cli)
 
-    # deploy steam - Steam platform deployment
-    deploy_steam.register_under_deploy(subparsers, cli)
 
     # Consolidated: targets and migration management under deploy
     target_module.register_subcommands(subparsers, cli, prefix='deploy')

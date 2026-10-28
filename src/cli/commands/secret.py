@@ -678,13 +678,6 @@ def register_subcommands(parent_subparsers, cli, prefix='env'):
                               help='Output format (default: yaml for backward compatibility)')
     cli.commands[f'{prefix}.secret.export'] = cmd.secret_export
 
-    migrate_parser = subparsers.add_parser('migrate',
-                                          help='Migrate YAML-based secrets to individual secrets')
-    migrate_parser.add_argument('slug', help='Project slug')
-    migrate_parser.add_argument('--profile', default='default', help='Secret profile')
-    migrate_parser.add_argument('--keys', required=True,
-                               help='Comma-separated list of encryption key names')
-    cli.commands[f'{prefix}.secret.migrate'] = cmd.secret_migrate
 
 
 def register(cli):
@@ -746,11 +739,3 @@ def register(cli):
                               help='Output format (default: yaml for backward compatibility)')
     cli.commands['secret.export'] = cmd.secret_export
 
-    # secret migrate
-    migrate_parser = subparsers.add_parser('migrate',
-                                          help='Migrate YAML-based secrets to individual secrets')
-    migrate_parser.add_argument('slug', help='Project slug')
-    migrate_parser.add_argument('--profile', default='default', help='Secret profile')
-    migrate_parser.add_argument('--keys', required=True,
-                               help='Comma-separated list of encryption key names')
-    cli.commands['secret.migrate'] = cmd.secret_migrate
