@@ -28,6 +28,7 @@
        text-transform: uppercase; letter-spacing: 0.06em;
        border-top: 1px solid var(--border); padding-top: 1.3rem; }
   h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  h4 { color: #9090b8; font-size: 0.95rem; margin: 1.3rem 0 0.4rem; }
   .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
   p { margin: 0 0 1rem; }
   code { background: var(--code-bg); color: #b0e0b0;
@@ -60,18 +61,18 @@
 <p class="lede">
   The ask was "integrate Android into TempleDB, or at minimum let me do
   agentic development from my phone." Measuring what is already built
-  changes the shape of the answer: there is a FastAPI + HTMX web GUI with
-  twenty-six pages running right now, one of which already answers an
-  agent's blocking question from a browser in 200&nbsp;ms, and
+  changes the shape of the answer twice. First: the mobile client is
+  mostly written — a FastAPI + HTMX GUI with twenty-six registered page
+  modules is running right now, one of which already answers an agent's
+  blocking question from a browser in 200&nbsp;ms, and
   <code>templedb ai agent fleet</code> already prints the exact triage
-  screen a phone wants. Nothing needs to be built to <em>see</em> the
-  fleet from a phone. Three things block it: the GUI binds
-  <code>127.0.0.1</code>, it has no authentication at all, and its
-  agent-session pages are read-only. The first two are a config change
-  and a decision; the third is one route over a method that already
-  exists. Full Android participation in the framework — a phone as a
-  <code>fleet_machines</code> row and a cr-sqlite peer — is a different
-  and much larger project, and this argues against it.
+  screen a phone wants. Three small, specific facts block it. Second, and
+  less obvious: enumerating what full framework participation would
+  actually <em>buy</em> shows that nearly all of it is offline
+  <em>origination</em> rather than <em>merge</em> — which needs an
+  append-only outbox, not a CRDT replica. The one application that
+  genuinely needs replication is the one this architecture already argues
+  against.
 </p>
 
 <h2>The two questions, separated</h2>
@@ -91,11 +92,12 @@
 </ol>
 
 <p>
-  Ask 1 is nearly free, because the substrate is built. Ask 2 is a
-  project on the scale of the Rust port, and most of what it would buy is
-  already available from ask 1. The rest of this report measures what
-  exists, names the three obstacles, and lays out four tiers with honest
-  costs.
+  Ask 1 is nearly free, because the substrate is built. Ask 2 is where
+  the interesting speculation lives, and it splits cleanly once its
+  applications are written down. This report measures what exists, names
+  the three obstacles, lays out four tiers, and then spends its second
+  half on what the top tier would be <em>for</em> — because a
+  recommendation against building something is worthless without that.
 </p>
 
 <h2>What already exists, measured</h2>
@@ -130,8 +132,8 @@
 <tr>
   <td>Web GUI</td>
   <td class="partial">running, localhost only</td>
-  <td>FastAPI + HTMX, 26 route modules in <code>src/gui_pages/</code>, all 26 registered;
-      listening on <code>127.0.0.1:8420</code>;
+  <td>FastAPI + HTMX, 26 route modules in <code>src/gui_pages/</code>,
+      all 26 registered; listening on <code>127.0.0.1:8420</code>;
       <code>curl</code> → 200 on localhost, connection refused on the
       tailnet IP</td>
 </tr>
@@ -187,6 +189,14 @@
       <code>agent_work_log</code>, <code>agent_session_sections</code></td>
 </tr>
 <tr>
+  <td>Entity graph</td>
+  <td class="yes">large</td>
+  <td><strong>80,308</strong> entities across <strong>18</strong> kinds,
+      <strong>89,013</strong> relations,
+      <strong>30,709</strong> archived observations. Every entity carries
+      <code>source_authority</code> and <code>observed_at</code></td>
+</tr>
+<tr>
   <td>Git content transport, network-exposed</td>
   <td class="yes">yes</td>
   <td><code>services.gitDaemon</code> on <code>0.0.0.0:9419</code>,
@@ -210,7 +220,7 @@
       <code>vcs_commits</code>, <code>vcs_branches</code>,
       <code>nixos_config</code>, <code>entities</code>,
       <code>relations</code>. No <code>content_blobs</code>, no
-      <code>file_contents</code></td>
+      <code>file_contents</code>, and no <code>agent_messages</code></td>
 </tr>
 <tr>
   <td>Sync transports</td>
@@ -220,6 +230,12 @@
       <code>SyncClient</code> are TCP. GCS exists as a <em>backup</em>
       path (<code>templedb backup gcs</code>), not a sync transport;
       the HTTP relay is marked "future" and is absent</td>
+</tr>
+<tr>
+  <td>Ingest adapters</td>
+  <td class="yes">nine</td>
+  <td><code>ingestion_runs</code> records 9 distinct adapters — the
+      established shape for getting outside data into the graph</td>
 </tr>
 <tr>
   <td>Android or Termux work anywhere in the corpus</td>
@@ -460,8 +476,16 @@ templedb ai agent notify decide &lt;id&gt; approve</pre>
 <h3>Tier 3 — Android as a framework participant</h3>
 
 <p>
-  This is ask 2, and it is worth being concrete about what it would mean
-  so the cost is visible:
+  This is ask 2. The first version of this report dismissed it in a
+  paragraph, which was a bad argument: a recommendation against building
+  something is worthless without an account of what it would do. The next
+  section is that account, and it changes the recommendation from "no" to
+  "yes to half of it, and the half is separable."
+</p>
+
+<p>
+  The mechanical cost, stated first so the applications can be weighed
+  against it:
 </p>
 
 <ul>
@@ -471,42 +495,283 @@ templedb ai agent notify decide &lt;id&gt; approve</pre>
   <code>system_type</code>, <code>nixos_version</code>,
   <code>system_profile</code>, <code>boot_id</code>,
   <code>deployment_status</code>. They describe a machine TempleDB
-  <em>deploys NixOS to over SSH</em>. An Android handset is none of that.
-  It would be a row whose every interesting column is NULL, which is the
-  shape the Rust port's README calls out as worse than an absent
-  row.</li>
-  <li><strong>A cr-sqlite peer.</strong> Requires an Android build of the
-  extension, a site id, and the reconcile step; and it would be the first
-  peer the replication layer has ever had. See obstacle 2.</li>
+  <em>deploys NixOS to over SSH</em>. A handset is none of that, so it
+  would be a row whose every interesting column is NULL — the shape the
+  Rust port's README calls out as worse than an absent row.</li>
+  <li><strong>A cr-sqlite peer.</strong> An Android build of the
+  extension, a site id, the reconcile step, and the distinction of being
+  the first peer the replication layer has ever had.</li>
   <li><strong>Content access.</strong> Not in the sync set. The phone
-  would need the git daemon (port 9419 is already open and
+  would need the git daemon (9419 is already open and
   <code>exportAll</code>) or the GUI to read any code — at which point it
   is a client again, which is Tier 1.</li>
-  <li><strong>Ingest from the phone.</strong> The one genuinely new
-  capability a participating handset would add: photos, location, notes,
-  health data as entities in the graph. This is interesting and is
-  completely orthogonal to agentic development. It should be its own
-  project with its own report, and it does not need a replica — an ingest
-  adapter posting to an endpoint is the shape every other adapter
-  already has (<code>ingestion_runs</code> records nine distinct adapters).</li>
 </ul>
 
+<h2>What Tier 3 would actually be for</h2>
+
 <p>
-  <strong>Recommendation: do not pursue Tier 3 for the stated goal.</strong>
-  Every capability it would deliver for agentic development is delivered
-  by Tiers 0–2 at a small fraction of the cost. Keep it on the list only
-  as "phone as an ingest <em>source</em>", which is a different feature
-  wearing the same word.
+  Six applications, ordered by whether they survive contact with the cost
+  above. The ordering is the argument.
+</p>
+
+<h3>1. A declared phone environment</h3>
+
+<p>
+  The literal reading of Tier 3 and the best entry point, because it
+  compounds with Tier 0 rather than competing with it. TempleDB already
+  declares machine configs, dotfile mappings (<code>POST /dotfiles/add</code>,
+  and <code>home.nix</code> already sources
+  <code>.config/tmux/tmux.conf</code> from the TempleDB flake) and
+  <code>environment_variables</code> scoped by
+  <code>(scope_type, scope_id, var_name)</code>.
+</p>
+
+<p>
+  nix-on-droid exists. A handset whose shell environment is
+  <em>declared</em> in TempleDB and materialized on the device gets the
+  same tmux config, the same <code>templedb</code> binary and the same
+  per-project env vars as every other machine. Tier 0's real weakness is
+  that the phone shell is hand-configured and silently drifts from
+  everything else; this is the fix for exactly that, and it needs no
+  replication at all — materialization is a one-way push, which is the
+  direction the architecture already supports.
+</p>
+
+<h3>2. Offline-originated direction</h3>
+
+<p>
+  The one application that genuinely wants replication's core property.
+  No signal — subway, plane, dead zone. You queue four prompts into
+  different sessions, mark three todos done, write a handoff note, and
+  approve a pending decision. It all lands locally and merges on
+  reconnect; the sessions pick up the queued messages and the
+  <code>pending_until</code> clock on the decision has not expired.
+</p>
+
+<p>
+  A thin client does not degrade gracefully here, it simply fails: no
+  network, no action, and the thought is gone. This is the strongest
+  argument for the whole tier — and see the reframe below, because it
+  turns out not to need a merge engine.
+</p>
+
+<h3>3. Voice capture into the graph</h3>
+
+<p>
+  The phone's actual advantage over a laptop is not the screen; it is
+  that it is always on you and has a microphone. Walking, a thought
+  arrives: <em>"the auto-stage should refuse without a session."</em>
+  Today that is either lost or it goes into a notes app TempleDB knows
+  nothing about, which is its own kind of drift.
+</p>
+
+<p>
+  A participating phone writes it straight into
+  <code>handoff_notes</code> — which <code>summary</code> already has an
+  inbox pane for, and which currently holds 22 rows — or into a session's
+  todo section via the same mechanism the agent-section MCP tools use.
+  This is probably the highest daily-use item in this list, and it is
+  almost entirely orthogonal to code: it is capture, not development.
+</p>
+
+<h3>4. Physical-world provenance in the entity graph</h3>
+
+<p>
+  The most interesting one, and the measurement makes the case better
+  than argument does. The graph holds 80,308 entities across 18 kinds:
+</p>
+
+<pre>AgentSession  AstBuild  Checkout  Claim  Commit  Deployment
+Derivation  EditIntent  File  Generation  InvariantCheck  Machine
+MirrorLocation  Report  Session  StorePath  Symbol  ToolCall</pre>
+
+<p>
+  <strong>Every one of the eighteen is a software artifact.</strong> Not
+  one node in 80,308 is a place, a person, a moment, or anything that
+  exists outside the machine. The graph has an elaborate account of what
+  the code did and no account whatsoever of where you were when you
+  decided it.
+</p>
+
+<p>
+  That is the gap a phone is uniquely able to fill, and the schema is
+  already shaped for it: every entity carries
+  <code>source_authority</code> and <code>observed_at</code>, so "the
+  phone" is a source authority that fits without schema invention, and
+  <code>observations_archive</code> (30,709 rows) already models
+  superseded observations of a changing world. Add <code>Place</code>,
+  <code>Trip</code>, <code>Person</code>, and the <em>relations</em> get
+  strange and good:
+</p>
+
+<pre>Commit --authored_at--> Place
+AgentSession --ran_while--> Trip
+Report --drafted_at--> Place</pre>
+
+<p>
+  Then <code>entity paths</code> and <code>entity trace</code> — which
+  already do multi-hop BFS over this graph — can answer questions nothing
+  in the system can answer today. "Which commits did I write at the coffee
+  shop?" "What was I doing the week the bza mojibake bug shipped?" "Show
+  me every report drafted away from home." The query engine exists; it
+  has no physical-world nodes to point at.
+</p>
+
+<p>
+  This is speculative and it is the one item here that could justify the
+  whole tier on interest alone. It is also, notably, an <em>ingest</em>
+  problem rather than a replication problem — see below.
+</p>
+
+<h3>5. The phone as a signing approval device</h3>
+
+<p>
+  This one quietly answers the report's own open question.
+  <code>agent_notifications</code> already models decisions with
+  <code>pending_until</code>, <code>decision_default</code>,
+  <code>decision</code> and <code>decided_at</code>. If the handset holds
+  a key and <em>signs</em> approvals, an approval becomes attributable to
+  a device rather than to "whoever could reach the GUI" — which is a
+  better answer to obstacle 1 than either tailnet-as-boundary or Tailscale
+  Serve, arrived at from a completely different direction.
+</p>
+
+<p>
+  The riskiest operations are the natural gate: <code>publish</code>,
+  <code>db/migrate</code>, a NixOS deploy, anything that writes the live
+  SQLite. The write-path design document's instinct — that a guard is only
+  real if a refusal is distinguishable from a crash — extends cleanly to
+  "an approval is only real if it is attributable to a device."
+</p>
+
+<h3>6. Fleet witness</h3>
+
+<p>
+  Small, cheap and real. The phone is the one machine that is always on
+  and always networked, which makes it the natural <em>prober</em> rather
+  than probe target. <code>fleet_machines.last_health_check_at</code> and
+  <code>health_status</code> exist and are NULL on five of six rows. A
+  handset noticing that zMothership2 is down is worth more than TempleDB
+  deploying NixOS to a handset — and it inverts the relationship the
+  table was designed around, which is why it is interesting rather than
+  merely useful.
+</p>
+
+<h3>Considered and dismissed</h3>
+
+<ul>
+  <li><strong>Opportunistic agent compute.</strong> Eight idle cores on a
+  charger overnight. No: the work is overwhelmingly LLM round trips, so
+  it is network-bound rather than CPU-bound, and thermal throttling on a
+  handset makes it the worst node in the fleet for the one thing it would
+  contribute.</li>
+  <li><strong>Geofenced triggers.</strong> Arriving home starts the
+  nightly sweep; leaving pauses autonomous runs. The scheduler exists, so
+  this is cheap — but it is automation looking for a problem, and a
+  misfire pauses work you wanted running.</li>
+  <li><strong>NFC or QR stickers on machines.</strong> Tap zMothership3's
+  case, the phone opens that machine's fleet page. Genuinely pleasant in a
+  multi-machine house, genuinely trivial, and it needs Tier 1 and nothing
+  else — a URL is a URL.</li>
+  <li><strong>Multi-device authorship with real merge.</strong> Two
+  desktops and a phone all editing content and merging. This is the one
+  thing only full replication delivers, and it is in direct conflict with
+  the one-writer discipline the Rust port spent four steps defending. Flag
+  as attractive and dangerous; do not build it by accident while building
+  something else.</li>
+</ul>
+
+<h2>The reframe: origination, not merge</h2>
+
+<p>
+  Writing those six out exposes something that strengthens the earlier
+  recommendation rather than contradicting it.
+</p>
+
+<div class="callout">
+  <strong>Almost all the value is offline <em>origination</em>, not
+  <em>merge</em>. That needs an append-only outbox, not a CRDT
+  replica.</strong>
+</div>
+
+<p>
+  Applications 2, 3, 5 and 6 all have the same shape: <em>capture
+  something on the phone, possibly while disconnected, deliver it when
+  connected.</em> One-way, append-only, no concurrent edits to the same
+  row, no conflict to resolve. A local queue that drains over HTTP covers
+  every one of them. No cr-sqlite on Android, no site id, no
+  <code>reconcile_to_main</code>, no being the first peer a
+  never-exercised replication layer has ever had.
+</p>
+
+<p>
+  Application 1 needs no sync whatsoever — materialization is a one-way
+  push. Application 4 is an ingest adapter, which is the shape nine
+  adapters in <code>ingestion_runs</code> already have.
+</p>
+
+<p>
+  So the merge engine earns its cost only for the dismissed item:
+  concurrent editing of the same state from several devices. Which the
+  architecture already argues against.
+</p>
+
+<p>
+  There is a practical obstacle that makes the outbox look better still.
+  <code>agent_messages</code> and <code>handoff_notes</code> are
+  <strong>not in the sync set</strong> — the eight shadow tables are
+  config, projects, env vars, commits, branches, nixos config, entities
+  and relations. So even a fully working CRDT phone could not queue a
+  prompt or a handoff note today without extending that set, with all the
+  shadow-table and reconciliation work that implies. An outbox does not
+  care: it holds an intent and replays it against whatever API or CLI
+  eventually accepts it, and the set it writes to is a detail of the
+  drain rather than a property of the device.
+</p>
+
+<p>
+  This is the same conclusion the Rust port reached about
+  <code>Store</code> and the write path, one layer out: when a general
+  mechanism has exactly one real use and a specific mechanism covers the
+  rest, build the specific one and say why.
+</p>
+
+<h2>Tier 3, split</h2>
+
+<table>
+<tr><th></th><th>What</th><th>Verdict</th></tr>
+<tr>
+  <td><strong>3a</strong></td>
+  <td>Declared phone environment (app&nbsp;1) + an append-only offline
+      outbox serving voice capture, queued prompts, signed approvals and
+      health beacons (apps&nbsp;2,&nbsp;3,&nbsp;5,&nbsp;6) + an ingest
+      adapter for physical-world entities (app&nbsp;4)</td>
+  <td class="yes">Worth doing. Moderate cost, no replication, and
+      app&nbsp;4 is the most interesting thing in this report</td>
+</tr>
+<tr>
+  <td><strong>3b</strong></td>
+  <td>The phone as a cr-sqlite peer with a real merge semantics</td>
+  <td class="no">Still argue against. What it uniquely enables is what
+      the architecture does not want</td>
+</tr>
+</table>
+
+<p>
+  Note that 3a is four separable pieces, none of which blocks another, and
+  that the ingest adapter has no dependency on the phone being a
+  participant in any deeper sense than "a thing that can POST".
 </p>
 
 <h2>What to refuse, and why</h2>
 
 <ul>
   <li><strong>The phone is never a write authority.</strong> It is a
-  client that asks a mothership to write. This is the same boundary the
-  Rust port defends — one writer owns the live SQLite — and a handset with
-  intermittent connectivity is the worst possible candidate for a second
-  one. It also means no local database to lose with the device.</li>
+  client that asks a mothership to write, or an outbox that replays
+  intents. This is the same boundary the Rust port defends — one writer
+  owns the live SQLite — and a handset with intermittent connectivity is
+  the worst possible candidate for a second one. It also means there is no
+  local database to lose with the device.</li>
   <li><strong>Do not add 8420 to the LAN firewall.</strong> The tailnet
   and the LAN are different trust sets. With no auth in the GUI, LAN
   exposure hands <code>POST /config/set</code> and
@@ -517,7 +782,11 @@ templedb ai agent notify decide &lt;id&gt; approve</pre>
   <li><strong>Do not make the phone the first cr-sqlite peer.</strong> If
   replication is worth exercising, exercise it between two desktops first
   — <code>crsql_tracked_peers</code> is empty and the Windows peer on the
-  tailnet already shows "no sync".</li>
+  tailnet already shows "no sync". Debugging a protocol and a new platform
+  simultaneously is how both get blamed for the other's faults.</li>
+  <li><strong>Do not let the outbox grow into a replica.</strong> It is
+  append-only and one-way by design. The first feature that wants it to
+  reconcile is the signal to stop and reread this section.</li>
 </ul>
 
 <h2>Recommended sequence</h2>
@@ -560,20 +829,42 @@ templedb ai agent notify decide &lt;id&gt; approve</pre>
   <td>Tailscale Serve for TLS + per-device identity; PWA manifest.</td>
   <td>Real auth rather than network-perimeter auth; home-screen icon.</td>
 </tr>
+<tr>
+  <td>7</td>
+  <td>The append-only outbox (3a), starting with voice capture into
+      <code>handoff_notes</code>.</td>
+  <td>Offline origination. The thing a thin client cannot do at all.</td>
+</tr>
+<tr>
+  <td>8</td>
+  <td>Declared phone environment via nix-on-droid.</td>
+  <td>Tier 0 stops drifting; the handset becomes a declared machine
+      without pretending to be a deploy target.</td>
+</tr>
+<tr>
+  <td>9</td>
+  <td>Physical-world ingest adapter: <code>Place</code>,
+      <code>Trip</code>, <code>Person</code>.</td>
+  <td>The first entities in the graph that exist outside a computer, and
+      the joins that follow.</td>
+</tr>
 </table>
 
 <p>
   Steps 1 and 2 are same-day. Step 3 is the one with a decision in it and
   should not be rushed past. Steps 4 and 5 are the actual feature and are
-  small because the substrate is there.
+  small because the substrate is there. Steps 7–9 are 3a, in the order
+  that delivers value soonest, and each is independently abandonable.
 </p>
 
 <h2>Open questions</h2>
 
 <ul>
   <li><strong>Which auth boundary?</strong> Tailnet-only is cheapest and
-  defensible; Serve-with-identity is better and not much more work. This
-  is a decision, not a research task, and step 3 is blocked on it.</li>
+  defensible; Serve-with-identity is better and not much more work;
+  application 5 suggests a third answer that is better than both and
+  further away. This is a decision, not a research task, and step 3 is
+  blocked on it.</li>
   <li><strong>Is email already the push channel?</strong>
   <code>agent_notifications</code> delivers over SMTP today and a phone
   already receives mail with a notification. If that is good enough, web
@@ -589,6 +880,12 @@ templedb ai agent notify decide &lt;id&gt; approve</pre>
   a sufficient transport and the protocol does not need to change —
   <code>queue_message</code> writes a row. Worth confirming before anyone
   designs a websocket.</li>
+  <li><strong>What is the outbox's replay semantics on partial
+  failure?</strong> The one genuinely hard question in 3a. If three queued
+  prompts drain and the fourth is rejected, the device needs to know
+  whether to retry, drop, or surface it — and this is the same
+  refusal-parity problem the write path solved with exit codes. Reuse that
+  answer rather than inventing one.</li>
   <li><strong>Does <code>mosh</code> earn its firewall ports?</strong>
   Only measurable by using Tier 0 on a real commute.</li>
 </ul>
