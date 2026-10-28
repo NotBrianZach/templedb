@@ -310,10 +310,6 @@ def register(cli):
     )
     cli.commands['sync.sync'] = cmd.do_sync
 
-    # sync peers
-    subparsers.add_parser('peers', help='Discover Tailscale peers running TempleDB')
-    cli.commands['sync.peers'] = cmd.peers
-
     # Consolidated: network commands under sync
     from cli.commands import network
     network.register_subcommands(subparsers, cli, prefix='sync')

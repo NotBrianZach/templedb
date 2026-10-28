@@ -1635,15 +1635,6 @@ def register(cli):
     cat_parser.add_argument('file_path', help='File path or pattern (fuzzy matching enabled)')
     cli.commands['file.cat'] = cmd.cat
 
-    # file get (programmatic alias for show)
-    get_parser = file_subparsers.add_parser(
-        'get',
-        help='Get file content as string (for programmatic use)'
-    )
-    get_parser.add_argument('project', help='Project name or pattern')
-    get_parser.add_argument('file_path', help='File path or pattern (fuzzy matching enabled)')
-    cli.commands['file.get'] = cmd.get
-
     # file set (set content from string)
     set_parser = file_subparsers.add_parser(
         'set',

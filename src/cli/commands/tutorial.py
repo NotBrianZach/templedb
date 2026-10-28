@@ -568,11 +568,5 @@ def register(cli):
     run_parser.add_argument('tutorial_name', help='Tutorial name (basics, quickstart, checkout, deployment, mcp, advanced)')
     cli.commands['tutorial.run'] = cmd.run_tutorial
 
-    # Make tutorial names work as direct subcommands
-    for name in cmd.TUTORIALS.keys():
-        tutorial_parser_sub = subparsers.add_parser(name, help=cmd.TUTORIALS[name]['description'])
-        tutorial_parser_sub.set_defaults(tutorial_name=name)
-        cli.commands[f'tutorial.{name}'] = cmd.run_tutorial
-
     # Default to list if no subcommand
     tutorial_parser.set_defaults(tutorial_subcommand='list', func=cmd.list_tutorials)

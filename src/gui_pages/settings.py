@@ -678,7 +678,7 @@ def system_page(q: str = Query(""), host: str = Query("")):
 <tr><td><strong>Nix / NixOS</strong></td><td>System config generation, flake inputs</td><td><span class="badge green">core</span></td><td><code>templedb nixos status</code></td></tr>
 <tr><td><strong>SOPS / Age</strong></td><td>Secret encryption</td><td><span class="badge blue">recommended</span></td><td><code>~/.age/key.txt</code></td></tr>
 <tr><td><strong>GCS</strong></td><td>Cloud backup</td><td><span class="badge">optional</span></td><td><code>gcs.backup_bucket</code></td></tr>
-<tr><td><strong>Tailscale</strong></td><td>Machine-to-machine sync</td><td><span class="badge">optional</span></td><td><code>templedb sync peers</code></td></tr>
+<tr><td><strong>Tailscale</strong></td><td>Machine-to-machine sync</td><td><span class="badge">optional</span></td><td><code>templedb sync status</code></td></tr>
 <tr><td><strong>GitHub</strong></td><td>Flake inputs, git-export</td><td><span class="badge">optional</span></td><td><code>gh</code> CLI</td></tr>
 <tr><td><strong>Cloudflare</strong></td><td>DNS management</td><td><span class="badge">optional</span></td><td><code>CF_API_TOKEN</code></td></tr>
 <tr><td><strong>Claude / Anthropic</strong></td><td>AI-assisted coding, MCP server</td><td><span class="badge">optional</span></td><td><code>claude</code> CLI</td></tr>

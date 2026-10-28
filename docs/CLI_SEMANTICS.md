@@ -1275,3 +1275,26 @@ So "identical handler" in this document means "same verb", not "same
 code", in two of the three places it appears. Treat every merge verdict
 as a hypothesis with a handler to read, exactly like the `fix` verdicts
 above.
+
+# Batch B-1, 2026-10-27 — 456 → 448
+
+Eight more removed, each premise checked first:
+
+- **`tutorial basics` / `quickstart` / `checkout` / `deployment` /
+  `mcp` / `advanced`** → `tutorial run <topic>`. All six were
+  `subparsers.add_parser(name)` in a loop over `cmd.TUTORIALS`, all six
+  bound to `cmd.run_tutorial`, and `run` already documents exactly those
+  six names in its own help. Output diffed byte-identical with matched
+  stdin. The cleanest case in the whole plan.
+- **`file get`** → `file show`. The plan says "merge → `show --raw`",
+  which overstates the work: `get` is literally
+  `return self.show(args)`, so there is no `--raw` behaviour to
+  preserve and no flag to add. 797 lines of identical output. Straight
+  deletion.
+- **`sync peers`** → `sync status`, which already calls
+  `discover_tailscale_peers()` and prints a "Tailscale Peers:" section.
+  The GUI settings page advertised the removed command to users and now
+  names `sync status`.
+
+Running total of verified-vs-claimed on this plan: of 8 merge/alias
+premises examined across batches A and B-1, **5 held and 3 were false**.
