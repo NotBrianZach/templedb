@@ -161,14 +161,20 @@ class ProjectCommands(Command):
         # Check for filters
         nix_only = hasattr(args, 'nix_only') and args.nix_only
         category_filter = getattr(args, 'category', None)
+        # --type replaces `nixos list-configs`, which was this query with
+        # project_type hardcoded to 'nixos-config'. Note it is a different
+        # column from --category: project_type is regular/nixos-config/
+        # service, project_category is package/home-module/nixos-module,
+        # and the live data varies them independently.
+        type_filter = getattr(args, 'type', None)
 
-        if nix_only or category_filter:
+        if nix_only or category_filter or type_filter:
             # Use custom query for filtered results
             conn = get_connection()
             cursor = conn.cursor()
 
             query = """
-                SELECT p.slug, p.name, p.project_category,
+                SELECT p.slug, p.name, p.project_category, p.project_type,
                        p.is_nix_project, p.flake_check_status,
                        COUNT(DISTINCT pf.id) as file_count,
                        SUM(pf.lines_of_code) as total_lines
@@ -185,6 +191,10 @@ class ProjectCommands(Command):
                 query += " AND p.project_category = ?"
                 params.append(category_filter)
 
+            if type_filter:
+                query += " AND p.project_type = ?"
+                params.append(type_filter)
+
             query += " GROUP BY p.id ORDER BY p.slug"
 
             cursor.execute(query, params)
@@ -194,9 +204,19 @@ class ProjectCommands(Command):
                 print("No projects found matching filters")
                 return 0
 
-            # Format as table with Nix columns
-            columns = ['slug', 'name', 'project_category', 'flake_check_status', 'file_count', 'total_lines']
-            print(self.format_table(projects, columns, title="Nix Projects"))
+            # project_type is in the table only when it was filtered on,
+            # so `--type nixos-config` shows the column it selected by.
+            # "Nix Projects" is wrong as a title for a --type filter;
+            # that heading belongs to the --nix-only/--category case.
+            if type_filter and not (nix_only or category_filter):
+                columns = ['slug', 'name', 'project_type',
+                           'project_category', 'file_count', 'total_lines']
+                title = f"Projects of type {type_filter!r}"
+            else:
+                columns = ['slug', 'name', 'project_category',
+                           'flake_check_status', 'file_count', 'total_lines']
+                title = "Nix Projects"
+            print(self.format_table(projects, columns, title=title))
 
         else:
             # Default: show all projects
@@ -589,6 +609,13 @@ def register(cli):
                             help='Show only Nix projects')
     list_parser.add_argument('--category', choices=['package', 'service', 'desktop-app', 'nixos-module', 'home-module'],
                             help='Filter by project category')
+    # Replaces `nixos list-configs`, which was `--type nixos-config`.
+    # Distinct from --category: project_type and project_category are
+    # separate columns with separate vocabularies.
+    list_parser.add_argument('--type', dest='type',
+                            choices=['regular', 'nixos-config', 'service'],
+                            help='Filter by project type (was: nixos '
+                                 'list-configs, i.e. --type nixos-config)')
     cli.commands['project.list'] = cmd.list_projects
     cli.commands['project.ls'] = cmd.list_projects
 

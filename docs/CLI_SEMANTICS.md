@@ -1330,3 +1330,29 @@ undocumented", and that *was* true. Both help strings now name the other
 command and say which job is which, which fixes the actual problem
 without manufacturing a flag collision. Verdict here revised from
 **merge** to **fix (help text)**, done.
+
+# Batch B-3, 2026-10-27 — 447 → 446
+
+**`nixos list-configs` → `project list --type nixos-config`.** Done.
+`list_configs` was this exact query with `project_type` pinned to
+`'nixos-config'`, so `--type` expresses it generally; `project list`
+already had `--nix-only` and `--category`, and this is the third filter
+on the same query. The dead `_args_list_configs` stub and the
+`list_configs` method went with it. Same project selected as before,
+and `--type regular` generalizes.
+
+**`nixos set-type` → `project set-category`: declined, wrong column.**
+They are not two spellings of one thing. `set_type` writes
+`projects.project_type`; `set_category` writes
+`projects.project_category` (plus `is_nix_project` and
+`flake_check_status`). Separate columns, separate vocabularies —
+`regular` / `nixos-config` / `service` versus `package` / `home-module`
+/ `nixos-module` — and the live data varies them independently:
+`project_type='regular'` occurs with all three categories. Moving
+`set-type` under `set-category` would silently write the wrong field.
+
+`nixos set-type` stays. If anything should move it is the *noun*: a
+command that does one `UPDATE projects SET project_type` has no business
+living under `nixos`. That is a real move with a real destination
+(`project set-type`), which is a different and better change than the
+one the verdict asked for.

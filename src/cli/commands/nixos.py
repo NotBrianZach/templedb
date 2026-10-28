@@ -973,18 +973,9 @@ class NixOSCommand(Command):
             logger.error(f"Failed to set type: {e}", exc_info=True)
             return 1
 
-    def list_configs(self, args) -> int:
-        """List all nixos-config projects"""
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT slug, name, repo_url FROM projects WHERE project_type = 'nixos-config'"
-        ).fetchall()
-        if not rows:
-            print("No nixos-config projects found.")
-            return 0
-        for row in rows:
-            print(f"  {row[0]}  {row[1] or ''}  {row[2] or ''}")
-        return 0
+    # list_configs removed 2026-10-27 -- it was this query with
+    # project_type pinned to 'nixos-config', which `project list
+    # --type nixos-config` now expresses generally.
 
     def config_get(self, args) -> int:
         """Get system configuration value"""
@@ -2503,9 +2494,6 @@ def register(cli):
         p.add_argument('slug', help='Project slug')
         p.add_argument('type', choices=['regular', 'nixos-config', 'service', 'library'])
 
-    def _args_list_configs(p):
-        pass
-
     def _args_doctor(p):
         p.add_argument('slug', nargs='?', help='Limit checks to one project slug')
 
@@ -2625,8 +2613,6 @@ def register(cli):
     _args_set_type(subparsers.add_parser('set-type', help='Set project type'))
     cli.commands['nixos.set-type'] = cmd.set_type
 
-    _args_list_configs(subparsers.add_parser('list-configs', help='List all nixos-config projects'))
-    cli.commands['nixos.list-configs'] = cmd.list_configs
 
     _args_doctor(subparsers.add_parser('doctor', help='Diagnose NixOS-config activation problems'))
     cli.commands['nixos.doctor'] = cmd.doctor
