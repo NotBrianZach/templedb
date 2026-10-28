@@ -245,14 +245,17 @@ def register(cli):
     list_parser.add_argument('--project', help='List cache for specific project')
     cli.commands['admin.cache.list'] = cache_cmd.cache_list
 
-    clear_parser = cache_sub.add_parser('clear', help='Clear deployment cache')
-    clear_parser.add_argument('--project', help='Clear cache for specific project')
-    cli.commands['admin.cache.clear'] = cache_cmd.cache_clear
-
-    cleanup_parser = cache_sub.add_parser('cleanup', help='Clean up old cache entries')
+    # `admin cache clear` folded into `cleanup --all` (2026-10-27). Two
+    # verbs that both deleted cache rows and differed only in scope.
+    cleanup_parser = cache_sub.add_parser('cleanup',
+        help='Delete cache entries past a retention bound, or all of them '
+             'with --all')
     cleanup_parser.add_argument('--project', help='Clean cache for specific project')
     cleanup_parser.add_argument('--max-age', type=int, default=30, help='Max age in days (default: 30)')
     cleanup_parser.add_argument('--max-entries', type=int, default=10, help='Max entries per project (default: 10)')
+    cleanup_parser.add_argument('--all', action='store_true', dest='all',
+        help='Delete every cache entry, ignoring the retention bounds. '
+             'Asks for confirmation (was: admin cache clear).')
     cli.commands['admin.cache.cleanup'] = cache_cmd.cache_cleanup
 
     # --- admin schema ---

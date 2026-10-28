@@ -1386,3 +1386,30 @@ deliberately unsetting.
 Verified by writing `postgres://${DB_USER}@localhost/x` to a throwaway
 target on `regr-test` and reading the column back verbatim, then
 removing the target.
+
+# Batch B-5, 2026-10-27 — 444 → 443
+
+**`admin cache clear` → `admin cache cleanup --all`.** The verdict read
+"two verbs for one idea, differing only by scope", which is true of what
+they delete and misses the one way they differed that mattered:
+`clear` asked for confirmation, `cleanup` did not. Folding them the
+obvious way would either have put a prompt on the routine retention
+command or taken it off the one that empties the table. So `--all` keeps
+the prompt and the default path stays silent, and the convenient
+`cleanup` invocation with its 30-day / 10-entry defaults is unchanged.
+
+**A seventh dead `register()`**, in `cache.py` — a classmethod
+registering a top-level `cache` group with all four subcommands.
+Nothing called it; `admin.py` imports `CacheCommands`, instantiates it
+and builds the parsers itself. It had also drifted: it still registered
+`clear`, so reviving it would have restored a command that no longer
+exists. That is the failure mode of dead registrations in general —
+they rot silently and then look authoritative.
+
+**One of the 50 bare `input()` prompts retired.** `cache_clear`'s
+confirmation printed "Error: EOF when reading a line" and exited 1 under
+a closed stdin. The outcome was safe — nothing deleted — but it read as
+a crash rather than a declined prompt, and this path is now reached by a
+flag on a routine command, so it meets automation more often. Routed
+through the existing `confirm_action`, which treats EOF and ^C as "no":
+now prints "Cancelled" and exits 0.

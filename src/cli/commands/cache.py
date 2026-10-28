@@ -119,14 +119,23 @@ class CacheCommands(Command):
                 return 1
             project_id = project['id']
 
-        # Confirm
+        # Confirm via confirm_action rather than a bare input().
+        #
+        # The bare call reported "Error: EOF when reading a line" and
+        # exited 1 under automation. The outcome was safe -- nothing was
+        # deleted -- but it read as a failure rather than a declined
+        # prompt, and this path is now reached by a flag on a routine
+        # command (`cleanup --all`), so it is more likely to meet a
+        # closed stdin. confirm_action treats EOF and ^C as "no".
+        from cli.error_handling_utils import confirm_action
+
         if project_id:
             project_slug = self.project_repo.get_by_id(project_id)['slug']
-            confirm = input(f"Clear cache for project '{project_slug}'? [y/N]: ")
+            prompt = f"Clear cache for project '{project_slug}'?"
         else:
-            confirm = input("Clear ALL deployment cache? [y/N]: ")
+            prompt = "Clear ALL deployment cache?"
 
-        if confirm.lower() != 'y':
+        if not confirm_action(prompt, default=False):
             print("Cancelled")
             return 0
 
@@ -146,7 +155,19 @@ class CacheCommands(Command):
         return 0
 
     def cache_cleanup(self, args) -> int:
-        """Clean up old cache entries"""
+        """Clean up cache entries by retention, or all of them with --all.
+
+        `--all` absorbed the former `admin cache clear` (2026-10-27).
+        Both verbs deleted cache rows and differed only in scope, but
+        they differed in one way worth preserving: clearing everything
+        asked for confirmation and retention cleanup did not. Folding
+        them naively would either have put a prompt on the routine
+        command or taken it off the destructive one, so `--all` keeps the
+        prompt and the default path stays silent.
+        """
+        if getattr(args, 'all', False):
+            return self.cache_clear(args)
+
         max_age_days = args.max_age if hasattr(args, 'max_age') else 30
         max_entries = args.max_entries if hasattr(args, 'max_entries') else 10
 
@@ -170,30 +191,16 @@ class CacheCommands(Command):
         print("✓ Cleanup complete")
         return 0
 
-    @classmethod
-    def register(cls, subparsers):
-        """Register cache commands"""
-        cache_parser = subparsers.add_parser('cache', help='Manage deployment cache')
-        cache_subparsers = cache_parser.add_subparsers(dest='cache_command', required=True)
-
-        # cache stats
-        stats_parser = cache_subparsers.add_parser('stats', help='Show cache statistics')
-        stats_parser.add_argument('--project', help='Show stats for specific project')
-        stats_parser.set_defaults(func=lambda args: cls().cache_stats(args))
-
-        # cache list
-        list_parser = cache_subparsers.add_parser('list', help='List cached deployments')
-        list_parser.add_argument('--project', help='List cache for specific project')
-        list_parser.set_defaults(func=lambda args: cls().cache_list(args))
-
-        # cache clear
-        clear_parser = cache_subparsers.add_parser('clear', help='Clear deployment cache')
-        clear_parser.add_argument('--project', help='Clear cache for specific project')
-        clear_parser.set_defaults(func=lambda args: cls().cache_clear(args))
-
-        # cache cleanup
-        cleanup_parser = cache_subparsers.add_parser('cleanup', help='Clean up old cache entries')
-        cleanup_parser.add_argument('--project', help='Clean cache for specific project')
-        cleanup_parser.add_argument('--max-age', type=int, default=30, help='Max age in days (default: 30)')
-        cleanup_parser.add_argument('--max-entries', type=int, default=10, help='Max entries per project (default: 10)')
-        cleanup_parser.set_defaults(func=lambda args: cls().cache_cleanup(args))
+    # No register() here on purpose -- the seventh dead one found in this
+    # sweep, after schema.py and query_open.py.
+    #
+    # This classmethod registered a top-level `cache` group duplicating
+    # all four subcommands. Nothing called it: admin.py imports
+    # CacheCommands, instantiates it, and builds the parsers itself under
+    # `admin cache`, and there has never been a top-level `templedb
+    # cache`. Deleted rather than wired, same reasoning as the others --
+    # wiring it would add a second spelling of a working group.
+    #
+    # It had also drifted: it still registered `clear`, which folded into
+    # `cleanup --all` on 2026-10-27, so reviving it would have brought
+    # back a command that no longer exists.
