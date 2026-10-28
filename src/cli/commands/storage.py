@@ -108,7 +108,15 @@ def register(cli):
         return 1
     cli.commands['storage.backup.cloud'] = cloud_handler
 
-    gcs_parser = backup_sub.add_parser('gcs', help='Upload backup to GCS (uses credentials from DB)')
+    # Not a duplicate of `backup cloud push --provider gcs`, despite
+    # appearances -- that provider needs google-cloud-storage, which is
+    # not packaged, so it reports "Available: No". This one hand-rolls
+    # the upload with requests + cryptography, which are. It is also the
+    # ExecStart of templedb-backup.service. See gcs_push's docstring.
+    gcs_parser = backup_sub.add_parser('gcs',
+        help='Upload backup to GCS using credentials from the DB. The '
+             'working GCS path -- `cloud push --provider gcs` needs an '
+             'unpackaged dependency.')
     gcs_parser.add_argument('--bucket', help='GCS bucket name (default: from gcs.backup_bucket system var)')
     cli.commands['storage.backup.gcs'] = backup_cmd.gcs_push
 

@@ -567,7 +567,36 @@ class BackupCommands(Command):
 
 
     def gcs_push(self, args) -> int:
-        """Upload backup to GCS using credentials stored in the DB."""
+        """Upload backup to GCS using credentials stored in the DB.
+
+        DO NOT merge this into `cloud push --provider gcs`. It looks like
+        a redundant special case of the generic provider framework and it
+        is not: the framework's `gcs` provider reports "Available: No
+        (missing dependencies)" because it needs `google-cloud-storage`,
+        which is not in the packaged python env. This function signs its
+        own JWT with `cryptography` and uploads with `requests`, both of
+        which *are* packaged — which is why it exists at all.
+
+        Checked 2026-10-27 in the deployed closure:
+
+            requests              available
+            cryptography          available
+            google.cloud.storage  MISSING
+            googleapiclient       MISSING
+
+        It also carries the live backup: templedb-backup.service's
+        ExecStart is `templedb storage backup gcs`, on a daily timer, and
+        it takes its credentials from the *global* secret_blobs row for
+        GOOGLE_APPLICATION_CREDENTIALS rather than from a --config file.
+        Renaming it would have stopped backups silently — the unit would
+        still run, the provider would fail on import, and nothing checks
+        that a backup actually landed.
+
+        To do the merge properly: package `google-cloud-storage`, confirm
+        `storage backup cloud providers` reports gcs available, port the
+        global-secret credential path into the provider, then rename and
+        update templedb-backup-service/module.nix in the same deploy.
+        """
         import os, json, base64, time, subprocess
         import sqlite3 as _sqlite3
         try:

@@ -1448,3 +1448,41 @@ false-positive rate here because registration-under-a-parent is the
 normal pattern, and of the 5 it does isolate, 3 are intentional. A
 dynamic `_load_local` call and a module whose docstring says "not
 registered on purpose" are both invisible to a grep for call sites.
+
+# `storage backup gcs` — declined, and this one would have broken production
+
+The verdict was **merge → `backup cloud push --provider gcs`**. The
+target command exists. It cannot work:
+
+```
+$ templedb storage backup cloud providers
+  ✅ filesystem            Available: Yes
+  ❌ gcs                   Available: No (missing dependencies)
+  ❌ gdrive                Available: No (missing dependencies)
+  ❌ google-cloud-storage  Available: No (missing dependencies)
+```
+
+Checked against the deployed closure: `requests` and `cryptography` are
+packaged, `google.cloud.storage` and `googleapiclient` are not. The
+generic provider needs the latter. `gcs_push` hand-rolls the upload —
+signs its own JWT with `cryptography`, posts with `requests` — which is
+*why it exists*, not an oversight to tidy away.
+
+And it is load-bearing: `templedb storage backup gcs` is the `ExecStart`
+of `templedb-backup.service`, on a daily timer, defined in a different
+project (`templedb-backup-service/module.nix`). The rename would have
+stopped backups silently — the unit would still fire, the provider would
+fail on import, and nothing in the system checks that a backup landed.
+
+A guard now lives in `gcs_push`'s docstring and on its parser, because
+the next reader will also see two GCS commands and reach for the obvious
+conclusion.
+
+**To do the merge properly:** package `google-cloud-storage`; confirm
+`storage backup cloud providers` reports gcs available; port the
+credential path (the bespoke one reads the *global* `secret_blobs` row
+for `GOOGLE_APPLICATION_CREDENTIALS`, the provider framework expects
+`--config`); then rename and update `module.nix` in the same deploy.
+
+That is four steps spanning two projects and a package set, which is a
+different proposition from "merge two commands".
