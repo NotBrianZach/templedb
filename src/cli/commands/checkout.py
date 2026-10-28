@@ -3,7 +3,7 @@
 Checkout Command - Extract project files from database to filesystem
 
 INTERNAL MODULE - Not a standalone CLI command.
-Used by: project checkout, vcs edit commands.
+Used by: project checkout.
 """
 
 import os
@@ -281,8 +281,10 @@ class CheckoutCommand:
                 print(f"   Mode: writable")
             else:
                 print(f"   Mode: read-only")
-                print(f"\n💡 To edit files:")
-                print(f"   templedb vcs edit {project_slug}")
+                print(f"\n💡 To edit files, get a workspace "
+                      f"(this tree is read-only and the next "
+                      f"publish overwrites it):")
+                print(f"   templedb edit {project_slug}")
 
             return 0
 

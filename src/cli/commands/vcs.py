@@ -318,63 +318,10 @@ class VCSCommands(Command):
             logger.debug("Full error:", exc_info=True)
             return 1
 
-    def edit(self, args) -> int:
-        """Enter edit mode (make checkout writable)"""
-        from sync import SyncManager, make_writable
-        from error_handler import ResourceNotFoundError
-
-        try:
-            # Fuzzy match project
-            project = fuzzy_match_project(args.project, show_matched=False)
-            if not project:
-                _project_not_found(args.project)
-                return 1
-
-            # Initialize sync manager
-            sync_mgr = SyncManager(project['slug'])
-
-            # Get checkout path
-            checkout_path = sync_mgr.get_checkout_path()
-            if not checkout_path.exists():
-                logger.error(f"No checkout found for {project['slug']}")
-                logger.info(f"💡 Run: templedb project checkout {project['slug']}")
-                return 1
-
-            # Check if already in edit mode
-            existing_session = sync_mgr.get_edit_session()
-            if existing_session:
-                logger.warning(f"Already in edit mode (started {existing_session['started_at']})")
-                return 0
-
-            # Make writable
-            make_writable(checkout_path)
-
-            # Start edit session
-            reason = args.reason if hasattr(args, 'reason') and args.reason else None
-            sync_mgr.start_edit_session(reason=reason)
-
-            print(f"✓ {project['slug']} is now editable")
-            print(f"  Path: {checkout_path}")
-            print(f"📝 Files are writable until you commit or discard")
-            print()
-            print("To save changes:")
-            print(f"  templedb vcs commit {project['slug']} -m 'message'")
-            print()
-            print("To discard changes:")
-            print(f"  templedb vcs discard {project['slug']}")
-
-            return 0
-
-        except ResourceNotFoundError as e:
-            logger.error(f"{e}")
-            if e.solution:
-                logger.info(f"💡 {e.solution}")
-            return 1
-
-        except Exception as e:
-            logger.error(f"Failed to enter edit mode: {e}")
-            logger.debug("Full error:", exc_info=True)
-            return 1
+    # VCSCommands.edit removed 2026-10-27 with the `vcs edit`
+    # command it served -- it made the canonical checkout
+    # writable, which is the defect checkout_files_are_mode_locked
+    # reports. `templedb edit <slug>` is the replacement.
 
     def discard(self, args) -> int:
         """Discard changes and return to read-only mode"""
@@ -3102,11 +3049,26 @@ def register(cli):
     reset_parser.add_argument('--session', metavar='ID|NAME', help=session_help)
     cli.commands['vcs.reset'] = cmd.reset
 
-    # vcs edit
-    edit_parser = subparsers.add_parser('edit', help='Enter edit mode (make checkout writable)')
-    edit_parser.add_argument('project', help='Project name or pattern (fuzzy matching enabled)')
-    edit_parser.add_argument('--reason', help='Reason for editing (optional)')
-    cli.commands['vcs.edit'] = cmd.edit
+    # `vcs edit` removed 2026-10-27. Not because it duplicated the
+    # top-level `edit` -- it did not -- but because what it did is the
+    # thing the rest of the system treats as a defect.
+    #
+    # It called make_writable() on the *canonical* checkout, recursively
+    # chmod-ing ~/.config/templedb/checkouts/<slug> to 644/755. That is
+    # precisely the state `checkout_files_are_mode_locked` reports as a
+    # violation and `admin lock-checkouts` exists to undo, and CLAUDE.md
+    # names editing that tree as a thing not to do, because the next
+    # materialise overwrites it.
+    #
+    # It then printed "To save changes: templedb vcs commit <slug>",
+    # which refuses -- CheckoutRepository raises NoEditCheckout for a
+    # caller with no edit workspace, on the grounds that committing
+    # against the published tree reverts whatever the DB holds that the
+    # tree does not. So the workflow it advertised could not complete.
+    #
+    # `templedb edit <slug>` is the replacement and always was: a
+    # per-session workspace under edit-workspaces/ that diffs against
+    # the DB at commit time.
 
     # vcs discard
     discard_parser = subparsers.add_parser('discard', help='Discard changes and return to read-only mode')

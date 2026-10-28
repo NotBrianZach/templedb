@@ -106,7 +106,7 @@ def migrate_checkouts():
     print(f"  Failed: {failed}")
     print()
     print("All checkouts are now read-only.")
-    print("To edit a project, use: templedb vcs edit <project>")
+    print("To edit a project, use: templedb edit <project>")
 
 
 if __name__ == '__main__':

@@ -1486,3 +1486,57 @@ for `GOOGLE_APPLICATION_CREDENTIALS`, the provider framework expects
 
 That is four steps spanning two projects and a package set, which is a
 different proposition from "merge two commands".
+
+# Batch B-6, 2026-10-27 — 443 → 442
+
+**`vcs edit` removed.** The verdict said "merge → top-level `edit`,
+which is the documented path". Right destination, wrong reason — these
+were never two spellings of one thing:
+
+- top-level `edit` provisions a per-session workspace under
+  `edit-workspaces/`, which is diffed against the DB at commit time;
+- `vcs edit` called `make_writable()` on the **canonical** checkout,
+  recursively chmod-ing `~/.config/templedb/checkouts/<slug>` to
+  644/755.
+
+That second thing is the state `checkout_files_are_mode_locked` reports
+as a violation and `admin lock-checkouts` exists to undo, and CLAUDE.md
+names editing that tree as a thing not to do because the next
+materialise overwrites it. It then printed "To save changes: templedb
+vcs commit <slug>", which **refuses** — `CheckoutRepository` raises
+`NoEditCheckout` for a caller with no edit workspace. The workflow it
+advertised could not complete.
+
+So this was not duplication to collapse, it was a command whose purpose
+was to create a defect, with instructions that dead-ended.
+
+**The tutorial was teaching it**, in two topics, which is how this
+turned into more than a one-line removal. While repointing those, the
+surrounding steps turned out to be stale in ways that make the Quick
+Start literally unrunnable:
+
+| claim | reality |
+|---|---|
+| `~/.local/share/templedb/checkouts/` (3 places) | checkouts live under `~/.config/templedb/` |
+| `vcs add my-project src/` | `-p` is **required**; the slug is read as a file pattern |
+| `vcs commit my-project -m …` | same — `-p` required |
+| "Returns checkout to read-only mode after commit" | describes the edit-mode model that just went |
+| "Two modes: read-only / edit mode" | there is one mode; the second was removed |
+
+All corrected, plus the checkout topic now states the
+checkout-vs-workspace distinction outright rather than implying a mode
+toggle. `checkout.py`'s module docstring ("Used by: project checkout,
+vcs edit commands") and `scripts/migrate_checkouts_readonly.py`'s
+closing hint also pointed at the removed command.
+
+`VCSCommands.edit` (58 lines) went with the command. `make_writable` now
+has no caller outside its own module; it is left in `sync/permissions.py`
+as a general helper rather than deleted.
+
+One route to the same state remains and is **deliberately kept**:
+`project checkout --writable` leaves a fresh checkout writable by
+skipping `make_readonly` rather than by chmod-ing afterwards. Unlike
+`vcs edit` it takes an arbitrary target directory, so a writable scratch
+checkout somewhere other than `checkouts/<slug>` is a legitimate thing
+to want. It is only a hazard when aimed at the canonical path, which is
+`checkout_files_are_mode_locked`'s job to notice.
