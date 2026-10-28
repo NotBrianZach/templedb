@@ -1413,3 +1413,38 @@ a crash rather than a declined prompt, and this path is now reached by a
 flag on a routine command, so it meets automation more often. Routed
 through the existing `confirm_action`, which treats EOF and ^C as "no":
 now prints "Cancelled" and exits 0.
+
+# The dead-registration sweep, 2026-10-27
+
+Seven were found one at a time while opening modules for unrelated
+reasons, so the obvious question was how many more there are. The sweep:
+67 modules under `src/cli/commands/` define a `register` entrypoint;
+`cli/__init__.py` imports 40. The 28-module gap is mostly **not** dead —
+`target.py`, `direnv.py`, `secret.py`, `key.py`, `migration.py`,
+`network.py`, the four `deploy_*` modules and the `ai` sub-modules are
+all registered under a parent by `deploy.py`, `env.py`, `sync.py` or
+`ai.py`.
+
+Five had no caller at all. **Three of those should not be deleted**, and
+that is the useful finding:
+
+| module | verdict |
+|---|---|
+| `cloud_backup.py` (491 lines) | **deleted** — `backup.py`'s own header says it "Consolidates system.py (backup/restore) and cloud_backup.py", and `storage backup cloud` covers every verb it offered (init/push/pull/status/providers/cleanup/test). |
+| `deploy_steam.py` (525 lines) | **deleted** — its only caller was the `register_under_deploy` line removed in batch A, so this sweep is just finishing that. |
+| `llm.py` | **kept** — `templedb_launcher.py` loads and registers it dynamically via `_load_local`. Absent from `--help` only because `_LOCAL` resolves to the nix store in a deployed build, where the file is not a sibling. |
+| `test.py` | **kept** — same launcher path. |
+| `code.py` | **kept** — self-documents as "NOT REGISTERED — Functionality available via MCP tools. This Click-based CLI is kept for reference". Deliberate, and its `register` calls Click's `add_command`, which the argparse CLI could not accept anyway. |
+
+`vibe.py` is an eighth: its top-level `vibe` group had `start` as its
+only verb, `ai.py` registered `ai vibe start` instead, and that was
+removed earlier today — so the registration is now dead twice over. The
+register went; the module stays because `src/agent/context.py` imports
+`VibeCommands` for context generation.
+
+**Method note.** "Defines `register` but is not imported by
+`cli/__init__.py`" is a *candidate* filter, not an answer: it has a 23/28
+false-positive rate here because registration-under-a-parent is the
+normal pattern, and of the 5 it does isolate, 3 are intentional. A
+dynamic `_load_local` call and a module whose docstring says "not
+registered on purpose" are both invisible to a grep for call sites.

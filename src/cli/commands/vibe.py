@@ -325,20 +325,14 @@ What would you like to work on?
                     pass
 
 
-def register(cli):
-    """Register vibe commands"""
-    cmd = VibeCommands()
-
-    vibe_parser = cli.register_command(
-        'vibe',
-        None,
-        help_text='Launch Claude Code with auto-generated project context'
-    )
-    subparsers = vibe_parser.add_subparsers(dest='vibe_subcommand', required=True)
-
-    start_parser = subparsers.add_parser('start', help='Start a vibe coding session')
-    start_parser.add_argument('projects', nargs='*', help='One or more project names/slugs')
-    start_parser.add_argument('--claude-args', nargs='*', default=[], help='Additional arguments for Claude')
-    start_parser.add_argument('--regenerate', action='store_true',
-                              help='Deactivate any existing autogen prompt and regenerate from the current template')
-    cli.commands['vibe.start'] = cmd.start
+# No register() here on purpose -- the eighth dead registration found in
+# the 2026-10-27 sweep.
+#
+# It registered a top-level `vibe` group whose only verb was `start`.
+# Nothing called it: `ai.py` registered `ai vibe start` instead, and that
+# was removed on 2026-10-27 (a start with no list, show or stop). So this
+# module now exposes no commands at all.
+#
+# The module stays because VibeCommands is imported by
+# src/agent/context.py for its context-generation logic, which is the
+# part that was worth keeping.
