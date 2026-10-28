@@ -3741,6 +3741,10 @@ WantedBy=timers.target
              self._check_exec_targets_are_executable),
             ('wal_within_size_budget',
              self._check_wal_within_size_budget),
+            ('offsite_backup_is_recent',
+             self._check_offsite_backup_is_recent),
+            ('local_backups_within_budget',
+             self._check_local_backups_within_budget),
             ('crsqlite_extension_loads',
              self._check_crsqlite_extension_loads),
             ('no_new_unmaintained_columns',
@@ -5095,6 +5099,171 @@ WantedBy=timers.target
                    "nothing pins it; journal_size_limit keeps it bounded "
                    "afterwards")
         return [detail]
+
+    OFFSITE_BACKUP_MAX_AGE_HOURS = 48
+
+    def _check_offsite_backup_is_recent(self):
+        """Invariant: a backup has left this machine recently.
+
+        `templedb-backup.timer` runs `storage backup gcs` daily and
+        `backup_history` gets a row per *successful* upload, so the
+        absence of a row is the whole signal. Nothing read it until
+        now, which meant a failing backup was indistinguishable from a
+        working one without going to the journal.
+
+        It had already happened. On 2026-10-25 the unit fired about a
+        minute after boot, could not resolve oauth2.googleapis.com, and
+        exited 1 -- after writing the 348 MB local copy but before
+        uploading it. `backup_history` shows a clean one-day hole
+        between 10-24 and 10-26 and nothing anywhere said so. That one
+        was transient and the next day succeeded; expired credentials
+        or a deleted bucket would look identical and would not recover.
+
+        Deliberately scoped to *remote* providers. A `local` row means a
+        file on the same disk as the database it is protecting, which is
+        not a backup against the failure mode that matters. The rows
+        record their provider as `gcs:<bucket>` / `local`, so `local` is
+        the exclusion rather than a `gcs` allowlist -- a future provider
+        should count without editing this check.
+
+        48 hours, not 24: a daily timer that slips a few hours, or a
+        machine that was off overnight, is not a fault. Two missed
+        firings is.
+
+        Passive by design -- reads `backup_history` and nothing else. It
+        cannot tell you the object is still in the bucket; that is a
+        network question and belongs in `reconcile`.
+        """
+        from db_utils import query_one
+
+        row = query_one(
+            """SELECT backed_up_at, provider,
+                      size_bytes,
+                      CAST((julianday('now') - julianday(backed_up_at))
+                           * 24 AS INTEGER) AS age_hours
+                 FROM backup_history
+                WHERE provider IS NOT NULL
+                  AND provider <> 'local'
+                ORDER BY backed_up_at DESC
+                LIMIT 1"""
+        )
+
+        if not row:
+            # Empty history is "nothing to assert", not a violation --
+            # the same shape as wal_within_size_budget returning [] when
+            # there is no -wal, and ingested_authorities_not_emptied only
+            # complaining about an authority that *once* had rows. A
+            # fresh database has never been backed up and telling it so
+            # would make every new install and every test fixture red.
+            #
+            # The failure this guards is "backups were working and
+            # stopped", which the staleness branch below covers.
+            return []
+
+        age = row['age_hours'] or 0
+        if age <= self.OFFSITE_BACKUP_MAX_AGE_HOURS:
+            return []
+
+        mb = (row['size_bytes'] or 0) / 1e6
+        return [
+            f"last off-machine backup was {age}h ago "
+            f"({row['backed_up_at']}, {row['provider']}, {mb:.0f} MB) — "
+            f"over the {self.OFFSITE_BACKUP_MAX_AGE_HOURS}h budget, so at "
+            f"least two daily firings produced no upload. The local copy "
+            f"may still be being written while the upload fails, which "
+            f"looks like success in `ls`. Check "
+            f"`journalctl --user -u templedb-backup.service -n 50`; "
+            f"`templedb storage backup gcs` runs it by hand"
+        ]
+
+    LOCAL_BACKUP_BUDGET_BYTES = 20 * 1024 * 1024 * 1024  # 20 GB
+
+    @staticmethod
+    def _local_backup_dir():
+        """Where `storage backup gcs` writes its local copy.
+
+        Derived from DB_PATH, not from $HOME: the backups directory is a
+        *sibling of the database* it protects, and that is the actual
+        relationship. Keying off the home directory instead meant this
+        check read ~/.local/share/templedb/backups no matter which
+        database was open, so against a test fixture it reported the
+        live machine's 93 GB and made
+        `test_doctor_entities_clean_on_populated` fail.
+
+        A method rather than inline so tests retain a seam. Note that
+        patching `Path.home` is not a safe way to isolate this: modules
+        deriving DB_PATH from home cache it at import, so a global home
+        patch live across an import leaks a tmpdir into everything
+        imported afterwards -- that produced a failure in
+        tests/agent/test_fleet.py reproducible only in a full-suite run.
+        """
+        from pathlib import Path
+        from config import DB_PATH
+        return Path(DB_PATH).parent / "backups"
+
+    def _check_local_backups_within_budget(self):
+        """Invariant: the local backup directory is not unbounded.
+
+        `storage backup gcs` copies the DB to
+        ~/.local/share/templedb/backups/ and uploads it. It unlinks that
+        copy when creation fails and when the integrity check fails --
+        but **not after a successful upload, and not when the upload
+        fails**. So every daily run leaves ~350 MB behind permanently.
+
+        Measured 2026-10-27: 153 files, 93.6 GB, oldest 2026-02-23. That
+        is ~10% of the root filesystem spent on copies that already exist
+        in the bucket. The 2026-10-25 failed run's 349 MB is in there
+        too, which is the second leak -- an upload that dies leaves its
+        local copy exactly like one that succeeds.
+
+        `storage backup prune` already exists to fix this and is well
+        built: --keep-last 5, --keep-days 30 as a union not an
+        intersection, and dry-run unless --apply. Nothing invokes it.
+        That is the actual defect; this check is how you find out.
+
+        Reports total and count rather than naming files, because the
+        remedy is one command and the file list is 153 lines long.
+        """
+        import os
+
+        d = self._local_backup_dir()
+        if not d.is_dir():
+            return []
+
+        total = 0
+        count = 0
+        try:
+            for f in d.iterdir():
+                if f.is_file():
+                    try:
+                        total += f.stat().st_size
+                    except OSError:
+                        continue
+                    if f.suffix == ".sqlite":
+                        count += 1
+        except OSError:
+            return []
+
+        if total <= self.LOCAL_BACKUP_BUDGET_BYTES:
+            return []
+
+        free = ""
+        try:
+            st = os.statvfs(str(d))
+            free_gb = st.f_bavail * st.f_frsize / 1e9
+            free = f", {free_gb:.0f} GB free on the filesystem"
+        except OSError:
+            pass
+
+        return [
+            f"{d} holds {total / 1e9:.1f} GB across {count} .sqlite "
+            f"backup(s) (budget "
+            f"{self.LOCAL_BACKUP_BUDGET_BYTES / 1e9:.0f} GB){free}. "
+            f"`storage backup gcs` does not remove its local copy after "
+            f"a successful upload, so this grows by the database size "
+            f"every day. Preview the fix with `templedb storage backup "
+            f"prune` (dry-run by default) and apply with `--apply`"
+        ]
 
     def _check_ingested_authorities_not_emptied(self):
         """Invariant: an authority that once had entities still has some,
