@@ -2579,7 +2579,16 @@ def register(cli):
     _args_detect(subparsers.add_parser('detect', help='Detect dependencies'))
     cli.commands['nixos.detect'] = cmd.detect
 
-    _args_generate(subparsers.add_parser('generate', help='Generate NixOS modules'))
+    # The boundary with `generate-all` is the thing people get wrong, so
+    # both help strings now name the other command. CLI_SEMANTICS asked
+    # for these to become `generate --all`; see the note there for why
+    # they stayed separate — their flag sets barely intersect and `slug`
+    # has different arity, so one command would need a --help that lies
+    # about which combinations are valid.
+    _args_generate(subparsers.add_parser('generate',
+        help='Generate NixOS modules for ONE project (needs a slug). For a '
+             'whole system_config — templates, managed modules and flake '
+             'inputs — use `nixos generate-all`.'))
     cli.commands['nixos.generate'] = cmd.generate
 
     _args_export(subparsers.add_parser('export', help='Export Cathedral package with NixOS modules'))
@@ -2664,7 +2673,11 @@ def register(cli):
     _args_import_config(subparsers.add_parser('import-config', help='Import existing NixOS config into DB'))
     cli.commands['nixos.import-config'] = cmd.import_config
 
-    _args_generate_all(subparsers.add_parser('generate-all', help='Generate all NixOS config from DB (templates + modules + inputs)'))
+    _args_generate_all(subparsers.add_parser('generate-all',
+        help='Generate a whole nixos-config project from the DB: rendered '
+             'templates + managed modules + flake inputs. Slug is optional '
+             '(resolves the active config). Not a bulk form of `nixos '
+             'generate`, which builds modules for one ordinary project.'))
     cli.commands['nixos.generate-all'] = cmd.generate_all
 
     # ── Nested groups (new, preferred form) ───────────────────────────────────

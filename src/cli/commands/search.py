@@ -232,18 +232,26 @@ def register(cli):
     from cli.commands.query_open import QueryOpenCommands
     qo_cmd = QueryOpenCommands()
 
+    # `--open` replaces the former `search query-open`, which was the
+    # same search with the results handed to an editor. Two spellings of
+    # one question is the thing CLI_SEMANTICS asks to collapse, and
+    # "open the results" is a flag on a search, not a different search.
+    #
+    # The editor flags only mean anything with --open, but they are
+    # declared unconditionally because argparse cannot express
+    # "only valid alongside"; query_files ignores them otherwise.
     query_parser = subparsers.add_parser('query', help='Query files using natural language')
     query_parser.add_argument('project', help='Project slug')
     query_parser.add_argument('query', help='Natural language query')
     query_parser.add_argument('-l', '--limit', type=int, default=20, help='Maximum number of results')
     query_parser.add_argument('--json', action='store_true', help='Output as JSON')
+    query_parser.add_argument('--open', action='store_true', dest='open',
+                              help='Open the matched files in an editor '
+                                   '(was: search query-open)')
+    query_parser.add_argument('-e', '--editor',
+                              help='Editor command for --open (default: auto-detect)')
+    query_parser.add_argument('-n', '--no-select', action='store_true',
+                              help="With --open: don't select the Emacs frame")
+    query_parser.add_argument('--dry-run', action='store_true',
+                              help='With --open: list the files without opening them')
     cli.commands['search.query'] = qo_cmd.query_files
-
-    query_open_parser = subparsers.add_parser('query-open', help='Query and open files using natural language')
-    query_open_parser.add_argument('project', help='Project slug')
-    query_open_parser.add_argument('query', help='Natural language query')
-    query_open_parser.add_argument('-l', '--limit', type=int, default=10, help='Maximum number of files to open')
-    query_open_parser.add_argument('-e', '--editor', help='Editor command (default: auto-detect)')
-    query_open_parser.add_argument('-n', '--no-select', action='store_true', help="Don't select Emacs frame")
-    query_open_parser.add_argument('--dry-run', action='store_true', help='Show files without opening')
-    cli.commands['search.query-open'] = qo_cmd.query_open

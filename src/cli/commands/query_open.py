@@ -162,11 +162,14 @@ class QueryOpenCommands(Command):
     @handle_errors("query and open files")
     def query_open(self, args) -> int:
         """
-        Query files using natural language and open them in editor
+        Query files using natural language and open them in editor.
+
+        Reached via `search query --open`; the `search query-open`
+        spelling was removed 2026-10-27.
 
         Examples:
-          templedb search query-open bza "prompts that do character analysis"
-          templedb search query-open myproject "authentication code" --limit 3
+          templedb search query bza "prompts that do character analysis" --open
+          templedb search query myproject "authentication code" --open --limit 3
         """
         project_slug = args.project
         query = args.query
@@ -226,12 +229,27 @@ class QueryOpenCommands(Command):
     @handle_errors("query files")
     def query_files(self, args) -> int:
         """
-        Query files using natural language (without opening them)
+        Query files using natural language.
 
         Examples:
           templedb search query bza "authentication functions"
           templedb search query myproject "config files" --json
+          templedb search query bza "auth code" --open
+
+        `--open` is the former `search query-open`: the same search, with
+        the results handed to an editor. Delegated rather than
+        reimplemented so the two cannot drift -- the limit defaults
+        differ between the modes (20 listing, 10 opening) and that is
+        the only intentional difference.
         """
+        if getattr(args, 'open', False):
+            if getattr(args, 'limit', None) == 20:
+                # 20 is `query`'s listing default; the opening path has
+                # always used 10, and opening 20 buffers is not what
+                # anyone means by "open the results".
+                args.limit = 10
+            return self.query_open(args)
+
         project_slug = args.project
         query = args.query
         limit = args.limit if hasattr(args, 'limit') else 20
@@ -277,30 +295,19 @@ class QueryOpenCommands(Command):
         return 0
 
 
-def register(cli):
-    """Register query-open commands"""
-    cmd = QueryOpenCommands()
-
-    # Main parser for query-open
-    query_open_parser = cli.register_command(
-        'query-open',
-        cmd.query_open,
-        help_text='Query and open files using natural language'
-    )
-    query_open_parser.add_argument('project', help='Project slug')
-    query_open_parser.add_argument('query', help='Natural language query (e.g., "authentication code", "config files")')
-    query_open_parser.add_argument('-l', '--limit', type=int, default=10, help='Maximum number of files to open')
-    query_open_parser.add_argument('-e', '--editor', help='Editor command (default: auto-detect)')
-    query_open_parser.add_argument('-n', '--no-select', action='store_true', help='Don\'t select Emacs frame')
-    query_open_parser.add_argument('--dry-run', action='store_true', help='Show files without opening')
-
-    # Shorter alias: just query (without opening)
-    query_parser = cli.register_command(
-        'query',
-        cmd.query_files,
-        help_text='Query files using natural language'
-    )
-    query_parser.add_argument('project', help='Project slug')
-    query_parser.add_argument('query', help='Natural language query')
-    query_parser.add_argument('-l', '--limit', type=int, default=20, help='Maximum number of results')
-    query_parser.add_argument('--json', action='store_true', help='Output as JSON')
+# No register() here on purpose.
+#
+# This module used to define one, registering top-level `query-open` and
+# `query`. Nothing called it -- `cli/__init__.py` does not import this
+# module -- so neither command existed, while `search.py` registered the
+# same two handlers as `search query-open` and `search query`, which are
+# the ones that worked.
+#
+# Deleted rather than wired for the same reason as the dead register in
+# schema.py: wiring it would add second top-level spellings of commands
+# that already work, which is the duplication CLI_SEMANTICS exists to
+# collapse. `search query-open` has since folded into
+# `search query --open`, so QueryOpenCommands.query_open is now reached
+# only through that flag.
+#
+# QueryOpenCommands itself is live -- search.py instantiates it.

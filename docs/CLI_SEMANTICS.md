@@ -1298,3 +1298,35 @@ Eight more removed, each premise checked first:
 
 Running total of verified-vs-claimed on this plan: of 8 merge/alias
 premises examined across batches A and B-1, **5 held and 3 were false**.
+
+# Batch B-2, 2026-10-27 — 448 → 447
+
+**`search query-open` → `search query --open`.** Done. Same search, the
+results handed to an editor; "open the results" is a flag on a search,
+not a different search. `query_files` delegates to `query_open` rather
+than reimplementing it, so the two cannot drift. One intentional
+difference preserved: the listing default limit is 20 and the opening
+default is 10, because opening 20 buffers is not what anyone means.
+
+**A sixth unreachable `register()`**, in `query_open.py`, registering
+top-level `query-open` and `query`. Nothing imported the module, so
+neither existed; `search.py` registered the same handlers under `search`
+and those are the ones that worked. Deleted rather than wired, as with
+`schema.py`.
+
+**`nixos generate-all` → `generate --all`: declined, premise too thin.**
+Their flag sets barely intersect — `generate` takes a required slug,
+`-o/--output`, `--cathedral-path`, `--no-home-manager`,
+`--include-templedb`; `generate-all` takes an *optional* slug, `--host`
+and `--dry-run`. One command would need a `--help` that lies about which
+combinations are valid, because argparse cannot express "only alongside
+`--all`", and `slug` would have to change arity based on a flag. They
+are also not the same operation: `generate` builds modules for one
+ordinary project, `generate-all` renders a whole nixos-config —
+templates, managed modules, flake inputs.
+
+The verdict's stated complaint was that "the boundary with `generate` is
+undocumented", and that *was* true. Both help strings now name the other
+command and say which job is which, which fixes the actual problem
+without manufacturing a flag collision. Verdict here revised from
+**merge** to **fix (help text)**, done.
