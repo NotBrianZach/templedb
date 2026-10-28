@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mobile agentic development: the client already exists</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+    --ok: #7ec77e;
+    --warn: #e8c547;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1rem 0;
+          font-size: 0.89em; }
+  th, td { border: 1px solid var(--border); padding: 0.4rem 0.6rem;
+           text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase;
+       letter-spacing: 0.04em; font-size: 0.82em; }
+  td code { font-size: 0.92em; }
+  .yes { color: var(--ok); }
+  .no { color: var(--accent); }
+  .partial { color: var(--warn); }
+  ul, ol { margin: 0 0 1rem; padding-left: 1.5rem; }
+  li { margin-bottom: 0.35rem; }
+</style>
+</head>
+<body>
+
+<h1>Mobile agentic development: the client already exists</h1>
+<p class="lede">
+  The ask was "integrate Android into TempleDB, or at minimum let me do
+  agentic development from my phone." Measuring what is already built
+  changes the shape of the answer: there is a FastAPI + HTMX web GUI with
+  twenty-six pages running right now, one of which already answers an
+  agent's blocking question from a browser in 200&nbsp;ms, and
+  <code>templedb ai agent fleet</code> already prints the exact triage
+  screen a phone wants. Nothing needs to be built to <em>see</em> the
+  fleet from a phone. Three things block it: the GUI binds
+  <code>127.0.0.1</code>, it has no authentication at all, and its
+  agent-session pages are read-only. The first two are a config change
+  and a decision; the third is one route over a method that already
+  exists. Full Android participation in the framework — a phone as a
+  <code>fleet_machines</code> row and a cr-sqlite peer — is a different
+  and much larger project, and this argues against it.
+</p>
+
+<h2>The two questions, separated</h2>
+
+<p>
+  The request contains two asks that look adjacent and are not:
+</p>
+
+<ol>
+  <li><strong>Agentic development from the phone.</strong> Start, steer,
+  unblock and review agent work on the projects, from a handset, wherever
+  it is. The phone is a <em>client</em>; the work happens on a
+  mothership.</li>
+  <li><strong>Android inside the framework.</strong> The phone becomes a
+  participant — a machine TempleDB knows about, deploys to, syncs with,
+  and perhaps ingests from.</li>
+</ol>
+
+<p>
+  Ask 1 is nearly free, because the substrate is built. Ask 2 is a
+  project on the scale of the Rust port, and most of what it would buy is
+  already available from ask 1. The rest of this report measures what
+  exists, names the three obstacles, and lays out four tiers with honest
+  costs.
+</p>
+
+<h2>What already exists, measured</h2>
+
+<p>
+  Every row below was checked against the live system on 2026-10-27, not
+  recalled from the code's intentions.
+</p>
+
+<table>
+<tr><th>Capability</th><th>State</th><th>Evidence</th></tr>
+<tr>
+  <td>Tailnet across machines</td>
+  <td class="yes">live</td>
+  <td><code>templedb sync network status</code>: zMothership2 at
+      <code>100.75.210.3</code>, online, 1 peer
+      (zachGigaMothers, <code>100.73.163.35</code>)</td>
+</tr>
+<tr>
+  <td>Tailscale declared in the system config</td>
+  <td class="yes">yes</td>
+  <td><code>services.tailscale.enable = true</code> in
+      <code>system_config/configuration.nix</code></td>
+</tr>
+<tr>
+  <td>SSH into the mothership</td>
+  <td class="yes">yes, key-only</td>
+  <td><code>services.openssh</code> with
+      <code>PasswordAuthentication = false</code>,
+      <code>PermitRootLogin = "no"</code></td>
+</tr>
+<tr>
+  <td>Web GUI</td>
+  <td class="partial">running, localhost only</td>
+  <td>FastAPI + HTMX, 26 route modules in <code>src/gui_pages/</code>, all 26 registered;
+      listening on <code>127.0.0.1:8420</code>;
+      <code>curl</code> → 200 on localhost, connection refused on the
+      tailnet IP</td>
+</tr>
+<tr>
+  <td>GUI authentication</td>
+  <td class="no">none</td>
+  <td>no auth, login, token or cookie handling anywhere in
+      <code>gui_helpers.py</code></td>
+</tr>
+<tr>
+  <td>Answer an agent's blocking question from a browser</td>
+  <td class="yes">yes</td>
+  <td><code>gui_pages/pending_asks.py</code>:
+      <code>POST /pending-asks/{id}/respond</code>. The MCP poller reads
+      <code>agent_pending_asks</code> every 0.2&nbsp;s, so this unblocks
+      the running subprocess as fast as Emacs does — it was built after
+      an ask sat unanswered for its full 600&nbsp;s timeout on
+      2026-09-13</td>
+</tr>
+<tr>
+  <td>Start or steer an agent run from the GUI</td>
+  <td class="no">no</td>
+  <td><code>gui_pages/agent_sessions.py</code> declares three routes, all
+      <code>GET</code></td>
+</tr>
+<tr>
+  <td>Triage roster</td>
+  <td class="yes">yes</td>
+  <td><code>templedb ai agent fleet</code> →
+      WORKING / NEEDS ATTENTION / DONE (your turn) / IDLE, with per-session
+      finding, todo and question counts</td>
+</tr>
+<tr>
+  <td>Out-of-band question/answer</td>
+  <td class="yes">yes</td>
+  <td><code>templedb ai agent ask list|respond|expire</code>;
+      <strong>68</strong> rows in <code>agent_pending_asks</code></td>
+</tr>
+<tr>
+  <td>Out-of-band approve/deny with timeout</td>
+  <td class="yes">yes</td>
+  <td><code>agent_notifications</code> carries <code>pending_until</code>,
+      <code>decision_default</code>, <code>decision</code>,
+      <code>decided_at</code>; driven by
+      <code>templedb ai agent notify decide &lt;id&gt; approve|deny</code>,
+      delivered over SMTP</td>
+</tr>
+<tr>
+  <td>Agent session history</td>
+  <td class="yes">substantial</td>
+  <td><strong>348</strong> rows in <code>agent_sessions</code>, plus
+      <code>agent_runs</code>, <code>agent_events</code>,
+      <code>agent_work_log</code>, <code>agent_session_sections</code></td>
+</tr>
+<tr>
+  <td>Git content transport, network-exposed</td>
+  <td class="yes">yes</td>
+  <td><code>services.gitDaemon</code> on <code>0.0.0.0:9419</code>,
+      <code>exportAll</code>, serving
+      <code>~/.config/templedb/checkouts</code>; 9419 is in
+      <code>allowedTCPPorts</code></td>
+</tr>
+<tr>
+  <td>cr-sqlite CRDT replication</td>
+  <td class="partial">built, never used with a peer</td>
+  <td>8 shadow tables with <code>__crsql_clock</code> /
+      <code>__crsql_pks</code> present and populated (33 projects, 1,491
+      commits, 6,778 entities) — and
+      <code>crsql_tracked_peers</code> is <strong>empty</strong></td>
+</tr>
+<tr>
+  <td>File <em>content</em> in the sync set</td>
+  <td class="no">no</td>
+  <td>the 8 shadow tables are <code>system_config</code>,
+      <code>projects</code>, <code>environment_variables</code>,
+      <code>vcs_commits</code>, <code>vcs_branches</code>,
+      <code>nixos_config</code>, <code>entities</code>,
+      <code>relations</code>. No <code>content_blobs</code>, no
+      <code>file_contents</code></td>
+</tr>
+<tr>
+  <td>Sync transports</td>
+  <td class="partial">one of three</td>
+  <td><code>sync_engine.py</code>'s header advertises direct TCP, GCS
+      bucket and HTTP relay. Measured: <code>SyncServer</code> and
+      <code>SyncClient</code> are TCP. GCS exists as a <em>backup</em>
+      path (<code>templedb backup gcs</code>), not a sync transport;
+      the HTTP relay is marked "future" and is absent</td>
+</tr>
+<tr>
+  <td>Android or Termux work anywhere in the corpus</td>
+  <td class="no">none</td>
+  <td>full-text sweep for <code>termux</code> / <code>android</code> over
+      all active file content: hits are JavaScript bundles and unrelated
+      deployment docs</td>
+</tr>
+</table>
+
+<div class="callout">
+  <strong>The headline.</strong> The mobile client is mostly written. It
+  is a server-rendered HTMX app — no build step, no JS framework, no app
+  store — which is the easiest possible thing to put on a phone. The
+  reason it is not on a phone today is three specific, small facts, not a
+  missing component.
+</div>
+
+<h2>The three obstacles, in the order they bite</h2>
+
+<h3>1. The GUI has no authentication, and that governs everything</h3>
+
+<p>
+  There is no auth in the GUI. Not a weak scheme — none. It also exposes
+  <code>POST /config/set</code>, <code>POST /db/migrate</code>,
+  <code>POST /backup/gcs</code> and the woofs Supabase sync routes. On
+  <code>127.0.0.1</code> that is a reasonable design: the trust boundary
+  is "has a shell on this box", and anyone with a shell can run
+  <code>templedb</code> anyway. The moment the bind address changes, that
+  reasoning expires.
+</p>
+
+<p>
+  So the first decision is not "how do we make a mobile UI" but
+  <strong>what is the authentication boundary</strong>. Three candidates,
+  and they are not equal:
+</p>
+
+<ul>
+  <li><strong>The tailnet is the boundary.</strong> Bind to the Tailscale
+  interface only, leave 8420 out of the LAN firewall, and let device
+  authorisation in the tailnet be the auth. This is the cheapest honest
+  answer and it is genuinely defensible: the tailnet already gates SSH to
+  this machine. The cost is that <em>every</em> device on the tailnet is
+  fully privileged, so a compromised or careless peer is a compromised
+  TempleDB. There is already one Windows peer on it.</li>
+  <li><strong>Tailscale Serve with its identity headers.</strong> Serve
+  terminates TLS and passes the authenticated tailnet identity to the app,
+  so the GUI can check <em>which</em> device and user rather than merely
+  "someone on the tailnet". Slightly more work, materially better, and it
+  removes the certificate problem from the phone.</li>
+  <li><strong>App-level auth in the GUI.</strong> A token or a session
+  cookie. The most work, the most to get wrong, and it duplicates
+  something the network layer already does properly. Worth doing only if
+  the GUI ever needs to be reachable from off-tailnet, which is not the
+  ask.</li>
+</ul>
+
+<p>
+  Recommendation: the tailnet boundary to start, Tailscale Serve as the
+  first upgrade. <strong>Do not add 8420 to
+  <code>allowedTCPPorts</code></strong> — that opens it to the whole LAN,
+  which is a different and much larger set of devices than the tailnet,
+  and the existing firewall block already carries a comment about an edit
+  that "said the opposite of what the let block reads like."
+</p>
+
+<h3>2. The sync layer carries no file content</h3>
+
+<p>
+  If the plan were "put TempleDB on the phone", this is the wall. The
+  eight cr-sqlite shadow tables replicate <em>metadata</em>: project
+  rows, env vars, commit and branch rows, entities and relations. A phone
+  holding a full replica of that still could not display a single line of
+  any file, because <code>content_blobs</code> and
+  <code>file_contents</code> are not in the set — and they are the
+  overwhelming majority of the bytes (the Rust port measures the live
+  database at 776&nbsp;MB, with <code>content_blobs</code> alone at
+  104&nbsp;MB in its Postgres mirror).
+</p>
+
+<p>
+  There is a second, sharper reason not to go that way, and the Rust port
+  found it independently: 58 of the live database's 61 triggers are
+  cr-sqlite's own, calling into an extension that has to be loaded for the
+  schema to behave correctly. A replica is not a file you copy; it is a
+  participant in a replication protocol with a loadable extension, a site
+  id, and a merge semantics. Putting that on Android means an Android
+  build of cr-sqlite and a reconciliation step
+  (<code>reconcile_to_main</code>) that today only ever runs on a desktop.
+</p>
+
+<p>
+  And <code>crsql_tracked_peers</code> is empty. The replication layer has
+  never completed an exchange with another machine. Making a phone the
+  first peer means debugging the protocol and the mobile platform at the
+  same time, which is the kind of coupling this codebase's own reports
+  keep concluding against.
+</p>
+
+<h3>3. The GUI can answer an agent, but cannot start or steer one</h3>
+
+<p>
+  This is the real functional gap for ask 1, and it is the smallest of the
+  three. The agent-session pages are three <code>GET</code> routes. What
+  is missing is a way to send a message into a session.
+</p>
+
+<p>
+  The method already exists: <code>AgentService.queue_message(session_id,
+  content, context=None)</code> in <code>src/agent/service.py</code>,
+  which is what the Emacs client calls. So the work is a
+  <code>POST /agent-sessions/{sid}/message</code> that calls it, plus a
+  textarea in the existing detail template. The same pattern
+  <code>pending_asks.py</code> already demonstrates end to end, including
+  the redirect-back.
+</p>
+
+<div class="callout">
+  Worth stating plainly because it inverts the intuition: <strong>the
+  hard-looking part (a mobile agent console) is one route and a
+  textarea. The easy-looking part (exposing a web app) is the one with a
+  security decision in it.</strong>
+</div>
+
+<h2>Four tiers</h2>
+
+<h3>Tier 0 — SSH from the phone. Today, zero code.</h3>
+
+<p>
+  Termux plus the Tailscale Android client plus an SSH key. The tailnet
+  exists, <code>sshd</code> is up and key-only, and <code>tmux</code> is
+  already installed and configured from the TempleDB flake
+  (<code>config/tmux.conf</code>, also used by
+  <code>templedb ai vibe start --tmux</code>). Once there, the entire
+  system is available, because the agentic loop is a CLI:
+</p>
+
+<pre>templedb ai agent fleet                    # triage roster
+templedb ai agent ask list                 # what is blocking
+templedb ai agent ask respond &lt;id&gt; "..."   # unblock it
+templedb ai agent resume &lt;id&gt;              # restart an interrupted run
+templedb ai agent log                      # what it did
+templedb ai vibe                           # launch Claude Code with project context
+templedb ai agent notify decide &lt;id&gt; approve</pre>
+
+<p>
+  What this buys: everything, immediately, with no new attack surface and
+  nothing to maintain. A <code>tmux</code> session on the mothership
+  survives the phone losing signal, which matters more on a handset than
+  anywhere else.
+</p>
+
+<p>
+  What it costs: typing on a phone keyboard into a TUI. This is a real
+  cost and should not be minimised — it is fine for "unblock, approve,
+  check" and unpleasant for composing a paragraph of instructions. No
+  <code>mosh</code> is installed, so a dropped connection means
+  reconnecting and reattaching rather than resuming mid-keystroke; adding
+  <code>mosh</code> to the system config and opening its UDP range would
+  help, and is a two-line change.
+</p>
+
+<p>
+  <strong>Do this first regardless of what else gets built.</strong> It is
+  the fallback for every other tier, and it is the thing that makes the
+  phone useful this week.
+</p>
+
+<h3>Tier 1 — the existing GUI, reachable over the tailnet</h3>
+
+<p>
+  Bind the GUI to the Tailscale interface instead of localhost and decide
+  the auth boundary (above). Today <code>templedb gui</code> takes
+  <code>--port</code> and nothing else, so this needs a
+  <code>--host</code> flag or a <code>system_config</code> key — a small
+  change in one place.
+</p>
+
+<p>
+  What this buys, with no further work, on a phone browser:
+</p>
+
+<ul>
+  <li>The pending-asks page — <em>answering a blocked agent from the
+  phone</em>, which is the single highest-value mobile action in the
+  system, because it is the one where latency is the whole cost.</li>
+  <li>Agent sessions, runs, and the event timeline — reading what an
+  agent did.</li>
+  <li>The agent work log and session sections (findings / todos /
+  questions).</li>
+  <li>Projects, code browsing, entities, graph, handoffs, deploy status,
+  nix store, audit — twenty-six pages of read surface.</li>
+</ul>
+
+<p>
+  The honest caveat: those pages were laid out for a desktop. HTMX and
+  server-rendered HTML degrade gracefully, so they will be <em>usable</em>
+  rather than <em>good</em> on a 390&nbsp;px viewport. Wide tables are the
+  main offender. The report you are reading has
+  <code>&lt;meta name="viewport"&gt;</code> and the GUI's
+  <code>_base</code> should get the same, which is a one-line fix with an
+  outsized effect.
+</p>
+
+<h3>Tier 2 — make it a console, not a dashboard</h3>
+
+<p>
+  Three pieces of work, in value order:
+</p>
+
+<ol>
+  <li><strong><code>POST /agent-sessions/{sid}/message</code></strong>
+  over the existing <code>queue_message</code>. This is the line between
+  "I can watch and unblock" and "I can direct work." Highest value of
+  anything in this report.</li>
+  <li><strong>A mobile-first roster route.</strong>
+  <code>templedb ai agent fleet</code>'s four buckets, rendered as cards
+  with a tap target per session. The query behind it already exists; this
+  is a presentation of data the CLI already assembles.</li>
+  <li><strong>Push instead of polling.</strong> The notification channel
+  already models everything needed — <code>agent_notifications</code> with
+  <code>pending_until</code> and <code>decision_default</code> — and
+  currently delivers over SMTP. Email to a phone is already a working
+  push channel and may be sufficient. If it is not, a web-push
+  subscription against the same table is the natural second drain
+  alongside <code>notify drain</code>, not a new mechanism.</li>
+</ol>
+
+<p>
+  Note what is <em>not</em> on this list: a native app, a React client, an
+  API layer. The GUI is HTMX; adding a JSON API and a separate client
+  would be building a second front end for the sake of being an app. A
+  PWA manifest over the existing pages gets the home-screen icon and
+  offline shell for a fraction of the cost.
+</p>
+
+<h3>Tier 3 — Android as a framework participant</h3>
+
+<p>
+  This is ask 2, and it is worth being concrete about what it would mean
+  so the cost is visible:
+</p>
+
+<ul>
+  <li><strong>A <code>fleet_machines</code> row.</strong> The cheap part,
+  and partly dishonest: the table's columns are
+  <code>target_host</code>/<code>target_user</code>/<code>target_port</code>,
+  <code>system_type</code>, <code>nixos_version</code>,
+  <code>system_profile</code>, <code>boot_id</code>,
+  <code>deployment_status</code>. They describe a machine TempleDB
+  <em>deploys NixOS to over SSH</em>. An Android handset is none of that.
+  It would be a row whose every interesting column is NULL, which is the
+  shape the Rust port's README calls out as worse than an absent
+  row.</li>
+  <li><strong>A cr-sqlite peer.</strong> Requires an Android build of the
+  extension, a site id, and the reconcile step; and it would be the first
+  peer the replication layer has ever had. See obstacle 2.</li>
+  <li><strong>Content access.</strong> Not in the sync set. The phone
+  would need the git daemon (port 9419 is already open and
+  <code>exportAll</code>) or the GUI to read any code — at which point it
+  is a client again, which is Tier 1.</li>
+  <li><strong>Ingest from the phone.</strong> The one genuinely new
+  capability a participating handset would add: photos, location, notes,
+  health data as entities in the graph. This is interesting and is
+  completely orthogonal to agentic development. It should be its own
+  project with its own report, and it does not need a replica — an ingest
+  adapter posting to an endpoint is the shape every other adapter
+  already has (<code>ingestion_runs</code> records nine distinct adapters).</li>
+</ul>
+
+<p>
+  <strong>Recommendation: do not pursue Tier 3 for the stated goal.</strong>
+  Every capability it would deliver for agentic development is delivered
+  by Tiers 0–2 at a small fraction of the cost. Keep it on the list only
+  as "phone as an ingest <em>source</em>", which is a different feature
+  wearing the same word.
+</p>
+
+<h2>What to refuse, and why</h2>
+
+<ul>
+  <li><strong>The phone is never a write authority.</strong> It is a
+  client that asks a mothership to write. This is the same boundary the
+  Rust port defends — one writer owns the live SQLite — and a handset with
+  intermittent connectivity is the worst possible candidate for a second
+  one. It also means no local database to lose with the device.</li>
+  <li><strong>Do not add 8420 to the LAN firewall.</strong> The tailnet
+  and the LAN are different trust sets. With no auth in the GUI, LAN
+  exposure hands <code>POST /config/set</code> and
+  <code>POST /db/migrate</code> to anything on the network.</li>
+  <li><strong>Do not build a JSON API and a native client.</strong> It
+  duplicates a working server-rendered surface to gain an app icon that a
+  PWA manifest provides.</li>
+  <li><strong>Do not make the phone the first cr-sqlite peer.</strong> If
+  replication is worth exercising, exercise it between two desktops first
+  — <code>crsql_tracked_peers</code> is empty and the Windows peer on the
+  tailnet already shows "no sync".</li>
+</ul>
+
+<h2>Recommended sequence</h2>
+
+<table>
+<tr><th>Step</th><th>Work</th><th>Buys</th></tr>
+<tr>
+  <td>1</td>
+  <td>Termux + Tailscale + SSH key on the handset. No code.</td>
+  <td>The entire CLI loop, today. The permanent fallback.</td>
+</tr>
+<tr>
+  <td>2</td>
+  <td><code>&lt;meta viewport&gt;</code> in <code>gui_helpers._base</code>.
+      One line.</td>
+  <td>Every one of the 26 GUI pages stops rendering at desktop width on
+      the phone.</td>
+</tr>
+<tr>
+  <td>3</td>
+  <td><code>--host</code> for <code>templedb gui</code>; bind the
+      Tailscale interface; decide the auth boundary.</td>
+  <td>Pending-asks, sessions, runs, work log, projects — read and
+      unblock from the phone browser.</td>
+</tr>
+<tr>
+  <td>4</td>
+  <td><code>POST /agent-sessions/{sid}/message</code> over the existing
+      <code>queue_message</code>.</td>
+  <td>Directing work, not just watching it. The actual ask.</td>
+</tr>
+<tr>
+  <td>5</td>
+  <td>Mobile-first roster route mirroring
+      <code>ai agent fleet</code>'s four buckets.</td>
+  <td>One screen that answers "what needs me".</td>
+</tr>
+<tr>
+  <td>6</td>
+  <td>Tailscale Serve for TLS + per-device identity; PWA manifest.</td>
+  <td>Real auth rather than network-perimeter auth; home-screen icon.</td>
+</tr>
+</table>
+
+<p>
+  Steps 1 and 2 are same-day. Step 3 is the one with a decision in it and
+  should not be rushed past. Steps 4 and 5 are the actual feature and are
+  small because the substrate is there.
+</p>
+
+<h2>Open questions</h2>
+
+<ul>
+  <li><strong>Which auth boundary?</strong> Tailnet-only is cheapest and
+  defensible; Serve-with-identity is better and not much more work. This
+  is a decision, not a research task, and step 3 is blocked on it.</li>
+  <li><strong>Is email already the push channel?</strong>
+  <code>agent_notifications</code> delivers over SMTP today and a phone
+  already receives mail with a notification. If that is good enough, web
+  push is unnecessary and step 4's third piece disappears. Worth trying
+  before building anything: <code>templedb ai agent notify test</code>.</li>
+  <li><strong>Does <code>ai agent serve</code> need a non-stdio
+  transport?</strong> It is stdio-only, which is why the agent protocol is
+  reachable from Emacs and from a shell but not from a browser. The GUI
+  reaches agent state through the <em>database</em> instead
+  (<code>agent_pending_asks</code>, <code>agent_events</code>), which is
+  why the ask-answering route works without touching the protocol. If the
+  GUI only ever needs to queue messages and read events, the database is
+  a sufficient transport and the protocol does not need to change —
+  <code>queue_message</code> writes a row. Worth confirming before anyone
+  designs a websocket.</li>
+  <li><strong>Does <code>mosh</code> earn its firewall ports?</strong>
+  Only measurable by using Tier 0 on a real commute.</li>
+</ul>
+
+</body>
+</html>

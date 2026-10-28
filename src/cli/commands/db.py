@@ -111,6 +111,53 @@ class DBCommands(Command):
             return 1
 
         m = Migrator(db_path)
+
+        # Gated, and gated by typing rather than y/N.
+        #
+        # This is the "lie to the migrator" button: it writes
+        # schema_version rows for migrations it does not run, so
+        # afterwards nothing in the system can tell that their schema
+        # changes were skipped -- `admin db status` reports them applied
+        # and `migrate` will never pick them up. On a database that
+        # genuinely predates the framework that is exactly right; on any
+        # other it is unrecoverable without knowing which versions were
+        # really in the file when you pressed it.
+        #
+        # So: show the list first, require the DB's filename typed back,
+        # and offer --dry-run for the common case of just wanting to
+        # know. --yes exists because bootstrap paths legitimately need
+        # this unattended; see confirm_by_typing for why EOF is a
+        # refusal rather than a default.
+        pending = [e for e in m.status() if not e["applied"]]
+
+        if not pending:
+            print("All migrations already tracked — nothing to stamp")
+            return 0
+
+        print(f"Database: {db_path}")
+        print(f"\nWould mark {len(pending)} migration(s) as applied "
+              f"WITHOUT running them:")
+        for e in pending[:15]:
+            print(f"    {e['filename']}")
+        if len(pending) > 15:
+            print(f"    ... and {len(pending) - 15} more")
+        print("\nTheir schema changes will not be applied, and afterwards "
+              "nothing\ncan tell they were skipped.")
+
+        if getattr(args, 'dry_run', False):
+            print("\n--dry-run: nothing written.")
+            return 0
+
+        if not getattr(args, 'yes', False):
+            from cli.error_handling_utils import confirm_by_typing
+            expected = Path(db_path).name
+            print()
+            if not confirm_by_typing(
+                    expected,
+                    f"Type the database filename ({expected}) to confirm:"):
+                print("Aborted — nothing written.")
+                return 1
+
         stamped = m.stamp_existing()
 
         if stamped > 0:

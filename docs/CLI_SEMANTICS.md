@@ -1224,3 +1224,25 @@ top-level `edit`. That is why the deregister gap survived: no single
 - **`report confirm` / `reject`** — human adjudication of inference,
   with the negative recorded
 - **`provenance`** — help text citing the design workflow it implements
+
+---
+
+# Gate verdicts — resolved 2026-10-27
+
+`deploy fleet destroy` — **stale.** This document calls it "the single
+most destructive command in the CLI". It cannot destroy anything: fleet
+deployment was retired in migration 130 and the verb now prints an
+explanation and exits. `templedb deploy fleet destroy <proj> <net>`
+returns the retirement notice. No gate needed on a command that refuses.
+
+`admin db stamp` — **real, gated 2026-10-27.** It had no guard of any
+kind. It writes `schema_version` rows for migrations it does not run, so
+afterwards `admin db status` reports them applied and `migrate` will
+never pick them up — the skipped schema changes become invisible. Now:
+lists what it would stamp, requires the database *filename* typed back
+(not y/N, which a reflex can supply), takes `--dry-run` to preview, and
+`--yes` for bootstrap automation. Refuses on EOF, so an unattended
+caller that forgets `--yes` aborts rather than proceeding.
+
+The typed-confirmation helper is `confirm_by_typing` in
+`cli/error_handling_utils.py`, next to the existing `confirm_action`.

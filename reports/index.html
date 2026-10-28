@@ -44,6 +44,16 @@
 
 <h2>Reports</h2>
 
+<a class="report" href="2026-10-27-1952-mobile-agentic-development-the-client-already-exists.html">
+  <div class="row">
+    <span class="date">2026-10-27 19:52</span>
+    <span class="title">Mobile agentic development: the client already exists</span>
+  </div>
+  <div class="summary">
+    The ask was "integrate Android into TempleDB, or at minimum let me do agentic development from my phone." Measuring what is already built changes the shape of the answer: there is a FastAPI + HTMX web GUI with twenty-six pages running right now, one of which already answers an agent's blocking question from a browser in 200&nbsp;ms, and templedb ai agent fleet already prints the exact triage screen a phone wants. Nothing needs to be built to see the fleet from a phone. Three things block it: the GUI binds 127.0.0.1, it has no authentication at all, and its agent-session pages are read-only. The first two are a config change and a decision; the third is one route over a method that already exists. Full Android participation in the framework — a phone as a fleet_machines row and a cr-sqlite peer — is a different and much larger project, and this argues against it.
+  </div>
+</a>
+
 <a class="report" href="2026-10-27-1109-merging-agent-work-the-write-path-has-four-answers.html">
   <div class="row">
     <span class="date">2026-10-27 11:09</span>

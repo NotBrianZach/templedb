@@ -227,6 +227,29 @@ def confirm_action(prompt: str, default: bool = False) -> bool:
         return False
 
 
+def confirm_by_typing(expected: str, prompt: str = None) -> bool:
+    """Require the user to type `expected` exactly. No default.
+
+    For the handful of commands where a y/N is too cheap --
+    `confirm_action` is one keystroke away from "yes" and a reflex can
+    supply it. Typing a name cannot be done by reflex, which is the
+    entire mechanism.
+
+    Returns False on EOF and on ^C, deliberately and like
+    `confirm_action`: under automation there is no one to answer, and
+    the safe reading of "no answer" for a command that reaches this code
+    path is "do not proceed". Callers that need to run unattended must
+    pass an explicit --yes rather than relying on the pipe being closed.
+    """
+    label = prompt or f"Type {expected!r} to confirm:"
+    try:
+        response = input(f"{label} ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return False
+    return response == expected
+
+
 # Export all error classes for convenience
 __all__ = [
     'handle_errors',
@@ -234,6 +257,7 @@ __all__ = [
     'validate_path_exists',
     'print_error',
     'print_warning',
+    'confirm_by_typing',
     'print_success',
     'confirm_action',
     'TempleDBError',

@@ -208,8 +208,15 @@ def register(cli):
     status_p.add_argument('--db-path', help='Database path (default: auto)')
     cli.commands['admin.db.status'] = db_cmd.status
 
-    stamp_p = db_sub.add_parser('stamp', help='Mark all migrations as applied (for pre-existing DBs)')
+    stamp_p = db_sub.add_parser('stamp',
+        help='Mark all migrations as applied WITHOUT running them '
+             '(for pre-existing DBs). Lists them and requires the DB '
+             'filename typed back.')
     stamp_p.add_argument('--db-path', help='Database path (default: auto)')
+    stamp_p.add_argument('--dry-run', action='store_true',
+        help='List what would be stamped and exit without writing.')
+    stamp_p.add_argument('--yes', action='store_true',
+        help='Skip the typed confirmation (for bootstrap automation).')
     cli.commands['admin.db.stamp'] = db_cmd.stamp
 
     integrity_p = db_sub.add_parser('integrity', help='Check database integrity')
