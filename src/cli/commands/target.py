@@ -205,6 +205,17 @@ class TargetCommands(Command):
             updates.append("access_url = ?")
             params.append(args.url)
 
+        # --connection absorbs the former `deploy target --set-connection`,
+        # which was the only way to write this column. Checked for None
+        # rather than truthiness so an empty string can clear it; every
+        # other field above treats "" as "not supplied", which is right
+        # for a hostname and wrong for a connection string you are trying
+        # to unset.
+        connection = getattr(args, 'connection', None)
+        if connection is not None:
+            updates.append("connection_string = ?")
+            params.append(connection)
+
         if not updates:
             raise ValidationError(
                 "No updates specified\n"
@@ -217,6 +228,13 @@ class TargetCommands(Command):
         self.execute(update_sql, tuple(params))
 
         print_success(f"Updated deployment target: {target_name}")
+        # Carried over from the command this replaced: a connection string
+        # with ${VAR} in it is resolved at deployment time, not now, and
+        # people who do not know that file bugs about it not working.
+        if connection and ('${' in connection or connection.startswith('$')):
+            print("📝 Connection string contains environment variable "
+                  "references; these resolve from the environment at "
+                  "deployment time, not now")
         return 0
 
     @handle_errors("target remove")
@@ -352,6 +370,9 @@ def register_subcommands(parent_subparsers, cli, prefix='deploy'):
     update_parser.add_argument('--region', help='New region')
     update_parser.add_argument('--provider', help='New provider')
     update_parser.add_argument('--url', help='New access URL')
+    update_parser.add_argument('--connection',
+        help='New connection string; supports ${ENV_VAR}, resolved at '
+             'deployment time (was: deploy target --set-connection)')
     cli.commands[f'{prefix}.targets.update'] = target_handler.update
 
     remove_parser = subparsers.add_parser('remove', help='Remove deployment target', aliases=['rm'])

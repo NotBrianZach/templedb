@@ -1356,3 +1356,33 @@ command that does one `UPDATE projects SET project_type` has no business
 living under `nixos`. That is a real move with a real destination
 (`project set-type`), which is a different and better change than the
 one the verdict asked for.
+
+# Batch B-4, 2026-10-27 — 446 → 444
+
+**`deploy init` → `deploy config --init`.** Done, and this one the
+verdict got exactly right. Both took nothing but a slug and both act on
+one object — the project's deployment config — so creating it is a third
+verb beside `--show` and `--validate`. `config_command` delegates to
+`init` rather than inlining it. Two in-code hint strings that told users
+to run `deploy init` now say `deploy config <slug> --init`.
+
+**`deploy target` → `deploy targets`.** Done, but *not* as a plain
+deletion. The plural group already had add/list/show/update/remove, and
+the singular form offered only `--show` and `--set-connection` — but
+`--set-connection` was **the only writer anywhere of
+`deployment_targets.connection_string`**. `targets update` had
+`--host/--region/--provider/--url` and no way to set it. So the
+capability moved to `deploy targets update --connection` first, and the
+singular command (plus its 118-line orphaned handler) went after.
+
+Two details carried across rather than lost: the `${ENV_VAR}` notice,
+because a connection string containing `${…}` resolves at deployment
+time and people who do not know that report it as broken; and
+`--connection` tests `is not None` instead of truthiness, so an empty
+string clears the column. Every neighbouring field treats `""` as "not
+supplied", which is right for a hostname and wrong for a value you are
+deliberately unsetting.
+
+Verified by writing `postgres://${DB_USER}@localhost/x` to a throwaway
+target on `regr-test` and reading the column back verbatim, then
+removing the target.
