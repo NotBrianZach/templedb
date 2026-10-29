@@ -22,7 +22,17 @@ class DeployOpsMixin:
     """Mixin providing operational deploy commands. Mixed into DeployCommands."""
 
     def history(self, args) -> int:
-        """Show deployment history with timestamps and health checks"""
+        """Show deployment history with timestamps and health checks.
+
+        `--compact` is the former `deploy project-history`, which ran
+        the same query against the same `deployment_history` rows and
+        differed only in rendering -- one line per deploy instead of a
+        six-line block. It was a strict subset otherwise (no
+        `--target`), so the rendering is the only thing worth carrying
+        across, and it is the better default for scanning. Compact also
+        skips the per-deployment health-check lookup, which is one
+        query per row.
+        """
         try:
             from services.deployment_tracking_service import DeploymentTrackingService
 
@@ -39,6 +49,20 @@ class DeployOpsMixin:
                 print(f"\nNo deployments found for {project_slug}")
                 if target:
                     print(f"(filtered by target: {target})")
+                return 0
+
+            if getattr(args, 'compact', False):
+                print(f"\nDeploy history for {project_slug} (last {len(deployments)}):\n")
+                for d in deployments:
+                    icon = {'success': '✓', 'failed': '✗'}.get(d.get('status'), '…')
+                    secs = d.get('duration_seconds')
+                    duration = f"{secs:.1f}s" if secs else '?'
+                    ts = (d.get('deployed_at') or '?')[:16]
+                    line = (f"  {icon} {ts}  {str(d.get('target') or ''):12s}  "
+                            f"{duration:>8s}  {d.get('deployed_by') or ''}")
+                    if d.get('notes'):
+                        line += f"  ({str(d['notes'])[:50]})"
+                    print(line)
                 return 0
 
             print(f"\nDeployment History: {project_slug}")

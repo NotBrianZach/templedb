@@ -503,7 +503,8 @@ templedb deploy rollback &lt;proj&gt;           # rollback deploy</pre>
 <h3 style="margin-top:1rem">Database &amp; Backup</h3>
 <pre style="font-size:0.75rem">templedb admin db status                    # migration status
 templedb admin db migrate                   # apply migrations
-templedb admin db integrity                 # integrity check
+templedb admin db check                     # integrity, locks, WAL, processes
+templedb admin db check --tables            # + per-table row counts
 templedb storage backup local               # local backup
 templedb storage backup gcs                 # backup to GCS
 templedb storage backup restore &lt;path&gt;     # restore from backup</pre>

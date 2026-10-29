@@ -219,12 +219,13 @@ def register(cli):
         help='Skip the typed confirmation (for bootstrap automation).')
     cli.commands['admin.db.stamp'] = db_cmd.stamp
 
-    integrity_p = db_sub.add_parser('integrity', help='Check database integrity')
-    integrity_p.add_argument('--db-path', help='Database path (default: auto)')
-    cli.commands['admin.db.integrity'] = db_cmd.integrity
-
+    # `integrity` removed 2026-10-29 -- folded into `check`, which
+    # already ran PRAGMA integrity_check and printed the file size.
+    # Its row counts live on as `check --tables`.
     check_p = db_sub.add_parser('check', help='Comprehensive DB health check (integrity, locks, WAL, processes)')
     check_p.add_argument('--db-path', help='Database path (default: auto)')
+    check_p.add_argument('--tables', action='store_true',
+                         help='Also print per-table row counts (was `admin db integrity`)')
     cli.commands['admin.db.check'] = db_cmd.check
 
     repair_p = db_sub.add_parser('repair', help='Repair database via dump/restore (fixes corruption)')

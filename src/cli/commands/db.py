@@ -167,28 +167,13 @@ class DBCommands(Command):
 
         return 0
 
-    def integrity(self, args) -> int:
-        """Check database integrity."""
-        from db_utils import DB_PATH, check_integrity, get_db_stats
-
-        db_path = args.db_path or DB_PATH
-
-        if not Path(db_path).exists():
-            print(f"Database not found: {db_path}")
-            return 1
-
-        print(f"Database: {db_path}")
-
-        ok = check_integrity()
-        print(f"Integrity: {'OK' if ok else 'FAILED'}")
-
-        stats = get_db_stats()
-        print(f"Size: {stats['size_mb']:.1f} MB")
-        print(f"Tables:")
-        for table, count in stats['tables'].items():
-            print(f"  {table}: {count} rows")
-
-        return 0 if ok else 1
+    # `integrity` removed 2026-10-29, folded into `check`. It ran
+    # PRAGMA integrity_check (which `check` already does), printed the
+    # file size (likewise) and printed row counts -- for five
+    # hardcoded tables out of 168, a subset chosen long enough ago
+    # that `entities`, `relations` and `edit_intents` are all absent
+    # from it. `check --tables` replaces that with every table, by row
+    # count descending, which is the question the five were a guess at.
 
     def _probe_checkpoint(self, db_path):
         """(pinned, log_frames, checkpointed_frames) via a PASSIVE checkpoint.
@@ -368,6 +353,47 @@ class DBCommands(Command):
         except Exception as e:
             print(f"  Integrity: ERROR ({e})")
             problems.append(f"Integrity check error: {e}")
+
+        # 4b. Row counts, opt-in.
+        #
+        # Inherited from the retired `admin db integrity`, which
+        # printed five hardcoded tables. Every table instead, ordered
+        # by count, because the interesting ones change over time and a
+        # frozen list goes stale silently -- the old five predate the
+        # entity graph entirely. Opt-in because 168 lines would bury
+        # the health output this command exists to show.
+        if getattr(args, 'tables', False):
+            print(f"\nRow counts (largest first):")
+            try:
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+                names = [r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                ).fetchall()]
+                counts = []
+                for name in names:
+                    try:
+                        n = conn.execute(
+                            f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+                    except sqlite3.Error as e:
+                        # A FK pointing at a dropped table raises here
+                        # rather than at schema load, so a table that
+                        # cannot be counted is itself worth reporting.
+                        counts.append((-1, name, str(e)))
+                        continue
+                    counts.append((n, name, None))
+                conn.close()
+                counts.sort(key=lambda t: (-t[0], t[1]))
+                for n, name, err in counts:
+                    if err:
+                        print(f"  {name:<40} ERROR ({err})")
+                        problems.append(f"Cannot count {name}: {err}")
+                    else:
+                        print(f"  {name:<40} {n:>10,}")
+                print(f"  ({len(counts)} table(s))")
+            except Exception as e:
+                print(f"  ERROR ({e})")
+                problems.append(f"Row counts failed: {e}")
 
         # 5. Processes using the DB
         #

@@ -45,15 +45,11 @@ def register_under_deploy(subparsers, cli):
                                help='Set config from JSON string')
     cli.commands['deploy.project-config'] = _config
 
-    # deploy project-history <slug>
-    history_parser = subparsers.add_parser(
-        'project-history',
-        help='Show app deploy history',
-    )
-    history_parser.add_argument('slug', nargs='?', help='Project slug')
-    history_parser.add_argument('-n', '--limit', type=int, default=10,
-                                help='Number of entries to show')
-    cli.commands['deploy.project-history'] = _history
+    # `project-history` removed 2026-10-29. It ran the same query
+    # against the same deployment_history rows as `deploy history`,
+    # which also has --target; the only thing it had that the survivor
+    # did not was the one-line rendering, now `deploy history
+    # --compact`.
 
 
 def _deploy_or_init(args) -> int:
@@ -196,41 +192,6 @@ def _config(args) -> int:
         print(f"No deploy config for '{slug}'.")
         return 1
     print(json.dumps(config.to_dict(), indent=2))
-    return 0
-
-
-def _history(args) -> int:
-    import db_utils
-
-    slug = getattr(args, 'slug', None)
-    if not slug:
-        print("Usage: templedb deploy project-history <slug>", file=sys.stderr)
-        return 1
-
-    limit = getattr(args, 'limit', 10)
-    rows = db_utils.query_all("""
-        SELECT dh.id, dh.target_name, dh.status, dh.started_at,
-               dh.duration_ms, dh.error_message, dh.deployed_by
-        FROM deployment_history dh
-        JOIN projects p ON dh.project_id = p.id
-        WHERE p.slug = ?
-        ORDER BY dh.started_at DESC
-        LIMIT ?
-    """, (slug, limit))
-
-    if not rows:
-        print(f"No deploy history for '{slug}'.")
-        return 0
-
-    print(f"Deploy history for {slug} (last {limit}):\n")
-    for row in rows:
-        status_icon = '✓' if row['status'] == 'success' else '✗' if row['status'] == 'failed' else '…'
-        duration = f"{row['duration_ms'] / 1000:.1f}s" if row['duration_ms'] else '?'
-        ts = row['started_at'][:16] if row['started_at'] else '?'
-        line = f"  {status_icon} {ts}  {row['target_name']:12s}  {duration:>8s}  {row['deployed_by'] or ''}"
-        if row['error_message']:
-            line += f"  ({row['error_message'][:50]})"
-        print(line)
     return 0
 
 

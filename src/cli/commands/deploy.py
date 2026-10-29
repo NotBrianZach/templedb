@@ -678,7 +678,9 @@ def register(cli):
     history_parser = subparsers.add_parser('history', help='Show deployment history with timestamps and health checks')
     history_parser.add_argument('slug', help='Project slug')
     history_parser.add_argument('--target', help='Filter by target')
-    history_parser.add_argument('--limit', type=int, default=10, help='Number of deployments to show (default: 10)')
+    history_parser.add_argument('--limit', '-n', type=int, default=10, help='Number of deployments to show (default: 10)')
+    history_parser.add_argument('--compact', action='store_true',
+                                help='One line per deploy (was `deploy project-history`)')
     cli.commands['deploy.history'] = deploy_handler.history
 
     # deploy stats command

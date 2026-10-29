@@ -1719,3 +1719,104 @@ restored the command this batch removed.
 
 Count: 442 → 441 for `verify`. The dead registration removes nothing,
 because nothing it bound was reachable.
+
+# Batch B-9, 2026-10-29 — 441 → 439, the last of the open verdicts
+
+The four `deploy`/`graph`/`admin` verdicts this document still listed.
+Two held, two did not, and in both of the ones that held the document
+understated what was there.
+
+**`deploy project-history` → `deploy history`: done, and no scope flag
+was needed.** The verdict asked for "`deploy config` / `deploy history`
+with a scope flag", which assumes the two look at different scopes.
+They do not. Both run the same query — `deployment_history` joined to
+`projects` on slug, `ORDER BY started_at DESC LIMIT ?` — and
+`project-history` was otherwise a strict subset, with no `--target`.
+Confirmed by running both against `system_config`: same rows, same
+order.
+
+The one thing it had that the survivor did not was the **rendering**:
+one line per deploy against `history`'s six-line block, which is
+better for scanning a history and is what anyone reaching for this
+command wants. So the capability moved first, as with
+`deploy targets --connection` in B-4 — `deploy history --compact`
+reproduces the old output byte-for-byte — and then the command went.
+`--limit` also gained `-n`, which `project-history` had and `history`
+did not.
+
+Compact additionally skips the per-deployment health-check lookup,
+which was one query per row.
+
+**`deploy project-config` → `deploy config`: declined, different
+schema and the only writer.** Both read `projects.deployment_config`,
+but not the same thing inside it: `project-config` reads the
+`app_deploy` key through `AppDeployService` / `AppDeployConfig`, while
+`deploy config` reads `config.groups` through
+`DeploymentConfigManager`. Two different config shapes sharing one JSON
+column, with different managers and different validators. A flag that
+switched between them would be `prompt list --project` again — one name
+over two output schemas.
+
+It is also the **only writer** of the `app_deploy` config anywhere:
+`--set JSON` has no counterpart under `deploy config`, whose verbs are
+`--show`, `--validate` and `--init`. Deleting it before porting that
+would have lost the capability, which is the `deploy target
+--set-connection` trap from B-4 exactly.
+
+**`admin db integrity` → `check`: done, and "per-table row counts" was
+five tables.** The earlier note here said the merge needed `integrity`'s
+"size and per-table row counts" folded in first. Size was already in
+`check` (`DB size:`). And the row counts were not per-table — they came
+from `get_db_stats()`, which has a hardcoded list of five:
+`projects`, `project_files`, `nix_environments`, `vcs_commits`,
+`vcs_branches`. Out of 168 tables, and chosen long enough ago that
+`entities`, `relations` and `edit_intents` — the three largest things
+in the database after `nix_closure_paths` — are all absent.
+
+So rather than preserve the five, `check --tables` counts every table
+and orders by count descending, which is the question the five were a
+guess at. It is opt-in because 167 lines would bury the health output
+the command exists to print. A table that cannot be counted is
+reported as a problem rather than skipped: a foreign key pointing at a
+dropped table raises at DML time, not schema load, so "COUNT(*) fails
+here" is a real finding.
+
+Measured on the live database: `nix_closure_paths` 499,158, `relations`
+90,774, `checkout_snapshots` 84,225, `entities` 82,159 — none of which
+the retired command could show.
+
+**`graph changes` → `deploy diff` / `deploy status`: declined, the
+destination is occupied and means something else.** `graph changes`
+reads `deployment_history` for the last success, then `vcs_commits`
+after that timestamp and `vcs_working_state` for uncommitted files —
+all TempleDB tables, answering "what source has changed since the last
+deploy". `deploy fleet diff` shells out through `NixDeployBackend` to
+compare *system closures* on remote machines over SSH. Same English
+word, nothing in common: one is a source report from the database, the
+other is a nix closure diff over the network.
+
+The verdict's underlying complaint is still right, and worth leaving on
+the record: `graph changes` touches no graph substrate at all — no
+`entities`, no `relations`, no traversal — so `graph` is the wrong
+noun. But the honest destination is a new `deploy changes`, not the two
+named here, and that is a pure rename: no surface reduction, breakage
+for anything scripted against it, and it would have to keep or abandon
+its `graph.changes` frecency key. Recorded as a real move with a real
+destination, deliberately not taken as part of a reduction pass.
+
+**The GUI was advertising the removed command.** `gui_helpers.py`'s
+Database & Backup panel listed `templedb admin db integrity` as the
+integrity check, which would now print `Unknown command` for anyone
+who copied it out of the browser. Now names `admin db check` and
+`check --tables`. Third time a removal in this plan has turned up a
+live reference outside the CLI — `sync peers` in B-1 and `vcs edit`'s
+tutorial in B-6 were the others — so "grep the GUI and the tutorial"
+belongs in the checklist, not just "grep src/".
+
+`docs/SECURITY_THREAT_MODEL.md` mentions `templedb integrity check`,
+which is **not** this command: it is an unchecked box in a proposal for
+a content-addressable integrity framework. Left alone.
+
+Count: 441 → 439. Final tally on this document's merge/move verdicts —
+**of 15 examined, 7 held and 8 were false.** A verdict here is a
+hypothesis with a handler to read.
