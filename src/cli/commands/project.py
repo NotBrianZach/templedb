@@ -555,11 +555,22 @@ class ProjectCommands(Command):
             logger.info("  Use --force to overwrite")
             return 0
 
-        # Standard .envrc content that calls templedb env direnv
-        # Use absolute path to templedb for reliability
-        import os
-        templedb_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'templedb'))
-        envrc_content = f'eval "$({templedb_path} env direnv)"\n'
+        # Standard .envrc content that calls templedb env direnv.
+        #
+        # Resolved off PATH deliberately, not as an absolute path. This
+        # used to derive one from __file__ ('../../../templedb'), which
+        # was wrong twice over: in a deployed build it computes
+        # <store>/lib/python3.13/templedb -- the package keeps its
+        # entrypoint in <store>/bin -- so the generated .envrc named a
+        # file that has never existed and direnv failed on every cd
+        # into the project. And even the corrected store path would be
+        # wrong to write down, because it rotates on every rebuild and
+        # is garbage-collectable: a committed .envrc pinning one breaks
+        # as soon as the generation that produced it is collected.
+        #
+        # `templedb` on PATH is what every other generated artifact and
+        # every doc already assumes, and it survives rebuilds.
+        envrc_content = 'eval "$(templedb env direnv)"\n'
 
         envrc_path.write_text(envrc_content)
         logger.info(f"✅ Generated .envrc at {envrc_path}")

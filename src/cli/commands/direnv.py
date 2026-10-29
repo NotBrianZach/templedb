@@ -19,12 +19,55 @@ class DirenvCommand(Command):
     def __init__(self):
         super().__init__()
 
+    @staticmethod
+    def _comparable(content: str):
+        """Lines of an .envrc with the volatile header line removed.
+
+        `# Generated: <wall clock>` changes on every call, so comparing
+        it answers "was this generated in the same second" rather than
+        "is this up to date". Dropped here so both sides of the
+        comparison and the rendered diff agree on what counts.
+        """
+        return [
+            line + '\n'
+            for line in content.strip().splitlines()
+            if not line.startswith('# Generated:')
+        ]
+
     def diff(self, args) -> int:
-        """Show diff between current .envrc and what would be generated"""
+        """Show diff between current .envrc and what would be generated.
+
+        Absorbed `env direnv verify`, which asked the same question and
+        differed only in what it did with the answer: verify printed a
+        verdict and exited 1 on a difference, diff rendered the hunks
+        and exited 0 either way. That is one comparison with two front
+        ends, so the verdict is now `--exit-code`, following git's
+        convention that a diff is not an error unless you ask for it.
+
+        The comparison keeps `verify`'s `.strip()` tolerance -- the
+        generator does not commit to a trailing newline, and reporting
+        drift over one is the false positive that makes a checker
+        useless in a hook -- and adds one the old command needed and
+        did not have: the `# Generated:` line is excluded.
+
+        That line carries a wall-clock timestamp, so a `.envrc` written
+        by `generate --write` stopped matching the generator one second
+        later. `verify` therefore answered "differs from TempleDB
+        state" for every project unconditionally, including one whose
+        file had just been generated from the same data -- a checker
+        that cannot pass. Excluding the one volatile line is what makes
+        `--exit-code` mean something. Everything else the header
+        carries (project, profile, environment) is real state and still
+        compared.
+
+        The rendered hunks come from the same normalized comparison, so
+        output and exit status cannot disagree.
+        """
         try:
             from pathlib import Path
-            import tempfile
-            import subprocess
+            import difflib
+            import io
+            import sys
 
             cwd = Path.cwd()
             envrc_path = cwd / ".envrc"
@@ -34,108 +77,51 @@ class DirenvCommand(Command):
                 print("Run 'templedb env direnv --write' to create one")
                 return 1
 
-            # Generate new content to temp file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.envrc', delete=False) as tmp:
-                tmp_path = Path(tmp.name)
-
-            try:
-                # Generate to temp file
-                from direnv_generator import cmd_direnv
-                conn = self.get_connection()
-                try:
-                    # Redirect stdout to temp file
-                    import sys
-                    old_stdout = sys.stdout
-                    with open(tmp_path, 'w') as f:
-                        sys.stdout = f
-                        cmd_direnv(
-                            conn,
-                            args.slug,
-                            args.profile,
-                            args.load_nix,
-                            None, None,
-                            getattr(args, 'environment', 'default'),
-                            False,  # Don't write
-                            True,   # auto_reload
-                            False   # Don't validate for diff
-                        )
-                    sys.stdout = old_stdout
-                finally:
-                    conn.close()
-
-                # Show diff
-                result = subprocess.run(
-                    ['diff', '-u', str(envrc_path), str(tmp_path)],
-                    capture_output=True,
-                    text=True
-                )
-
-                if result.returncode == 0:
-                    print("✓ .envrc is up-to-date (no changes)")
-                    return 0
-                else:
-                    print(result.stdout)
-                    return 0
-
-            finally:
-                tmp_path.unlink()
-
-        except Exception as e:
-            logger.error(f"diff failed: {e}", exc_info=True)
-            return 1
-
-    def verify(self, args) -> int:
-        """Verify .envrc matches TempleDB state"""
-        try:
-            from pathlib import Path
-            cwd = Path.cwd()
-            envrc_path = cwd / ".envrc"
-
-            if not envrc_path.exists():
-                print("✗ No .envrc file found")
-                print("  Run 'templedb env direnv --write' to create one")
-                return 1
-
-            # Read current file
             current_content = envrc_path.read_text()
 
-            # Generate expected content
             from direnv_generator import cmd_direnv
-            import io
-            import sys
-
             conn = self.get_connection()
             try:
                 old_stdout = sys.stdout
-                sys.stdout = buffer = io.StringIO()
-                cmd_direnv(
-                    conn,
-                    args.slug,
-                    args.profile,
-                    args.load_nix,
-                    None, None,
-                    getattr(args, 'environment', 'default'),
-                    False,
-                    True,
-                    False
-                )
-                sys.stdout = old_stdout
+                try:
+                    sys.stdout = buffer = io.StringIO()
+                    cmd_direnv(
+                        conn,
+                        args.slug,
+                        args.profile,
+                        args.load_nix,
+                        None, None,
+                        getattr(args, 'environment', 'default'),
+                        False,  # Don't write
+                        True,   # auto_reload
+                        False   # Don't validate for a comparison
+                    )
+                finally:
+                    sys.stdout = old_stdout
                 expected_content = buffer.getvalue()
             finally:
                 conn.close()
 
-            # Compare (ignoring whitespace differences)
-            if current_content.strip() == expected_content.strip():
-                print("✓ .envrc is valid and up-to-date")
+            current_lines = self._comparable(current_content)
+            expected_lines = self._comparable(expected_content)
+
+            if current_lines == expected_lines:
+                print("✓ .envrc is up-to-date (no changes)")
                 return 0
-            else:
-                print("⚠️  .envrc differs from TempleDB state")
-                print("   Run 'templedb env direnv diff' to see changes")
-                print("   Run 'templedb env direnv --write' to update")
+
+            sys.stdout.writelines(difflib.unified_diff(
+                current_lines,
+                expected_lines,
+                fromfile=str(envrc_path),
+                tofile='(generated)',
+            ))
+
+            if getattr(args, 'exit_code', False):
                 return 1
+            return 0
 
         except Exception as e:
-            logger.error(f"verify failed: {e}", exc_info=True)
+            logger.error(f"diff failed: {e}", exc_info=True)
             return 1
 
     def generate(self, args) -> int:
@@ -213,82 +199,15 @@ def register_subcommands(parent_subparsers, cli, prefix='env'):
     cli.commands[f'{prefix}.direnv.generate'] = cmd.generate
     cli.commands[f'{prefix}.direnv.gen'] = cmd.generate
 
-    diff_parser = subparsers.add_parser('diff', help='Show diff between current .envrc and TempleDB state')
+    diff_parser = subparsers.add_parser(
+        'diff',
+        help='Show diff between current .envrc and TempleDB state '
+             '(--exit-code to fail on drift; absorbed `verify`)')
     diff_parser.add_argument('slug', nargs='?', help='Project slug (auto-detected)')
     diff_parser.add_argument('--profile', default='default', help='Secret profile')
     diff_parser.add_argument('--environment', '--env', default='default', help='Environment name')
     diff_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True)
+    diff_parser.add_argument('--exit-code', action='store_true',
+                             help='Exit 1 when .envrc differs (was `direnv verify`)')
     cli.commands[f'{prefix}.direnv.diff'] = cmd.diff
 
-    verify_parser = subparsers.add_parser('verify', help='Verify .envrc matches TempleDB state')
-    verify_parser.add_argument('slug', nargs='?', help='Project slug (auto-detected)')
-    verify_parser.add_argument('--profile', default='default', help='Secret profile')
-    verify_parser.add_argument('--environment', '--env', default='default', help='Environment name')
-    verify_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True)
-    cli.commands[f'{prefix}.direnv.verify'] = cmd.verify
-
-
-def register(cli):
-    """Register direnv command with CLI"""
-    cmd = DirenvCommand()
-
-    # Create direnv command group (generate is the default handler)
-    direnv_parser = cli.register_command('direnv', cmd.generate, help_text='Direnv integration and .envrc management')
-
-    # Add optional arguments that apply to all subcommands
-    direnv_parser.add_argument('--profile', default='default',
-                               help='Secret profile (default/staging/production, auto-detected from git branch)')
-    direnv_parser.add_argument('--environment', '--env', default='default',
-                               help='Environment for env_vars (default/development/production)')
-    direnv_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True,
-                               help="Don't emit 'use nix' directive")
-    direnv_parser.add_argument('--branch', help='Override git branch detection')
-    direnv_parser.add_argument('--ref', help='Override git ref/commit detection')
-    direnv_parser.add_argument('--write', '-w', action='store_true',
-                               help='Write output to .envrc file (instead of stdout)')
-    direnv_parser.add_argument('--no-auto-reload', dest='auto_reload', action='store_false', default=True,
-                               help="Don't add watch_file directive for auto-reload")
-    direnv_parser.add_argument('--no-validate', dest='validate', action='store_false', default=True,
-                               help='Skip validation of generated .envrc')
-
-    subparsers = direnv_parser.add_subparsers(dest='direnv_subcommand')
-
-    # When no subcommand is given, the slug argument should come from args (will be None by default)
-    # We'll set slug=None as attribute if not present
-    direnv_parser.set_defaults(slug=None)
-
-    # Generate subcommand (default behavior)
-    gen_parser = subparsers.add_parser('generate', help='Generate .envrc (default if no subcommand)', aliases=['gen'])
-    gen_parser.add_argument('slug', nargs='?', help='Project slug (auto-detected from .templedb/ or cwd)')
-    gen_parser.add_argument('--profile', default='default',
-                           help='Secret profile (default/staging/production, auto-detected from git branch)')
-    gen_parser.add_argument('--environment', '--env', default='default',
-                           help='Environment for env_vars (default/development/production)')
-    gen_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True,
-                           help="Don't emit 'use nix' directive")
-    gen_parser.add_argument('--branch', help='Override git branch detection')
-    gen_parser.add_argument('--ref', help='Override git ref/commit detection')
-    gen_parser.add_argument('--write', '-w', action='store_true',
-                           help='Write output to .envrc file (instead of stdout)')
-    gen_parser.add_argument('--no-auto-reload', dest='auto_reload', action='store_false', default=True,
-                           help="Don't add watch_file directive for auto-reload")
-    gen_parser.add_argument('--no-validate', dest='validate', action='store_false', default=True,
-                           help='Skip validation of generated .envrc')
-    cli.commands['direnv.generate'] = cmd.generate
-    cli.commands['direnv.gen'] = cmd.generate
-
-    # Diff subcommand
-    diff_parser = subparsers.add_parser('diff', help='Show diff between current .envrc and TempleDB state')
-    diff_parser.add_argument('slug', nargs='?', help='Project slug (auto-detected)')
-    diff_parser.add_argument('--profile', default='default', help='Secret profile')
-    diff_parser.add_argument('--environment', '--env', default='default', help='Environment name')
-    diff_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True)
-    cli.commands['direnv.diff'] = cmd.diff
-
-    # Verify subcommand
-    verify_parser = subparsers.add_parser('verify', help='Verify .envrc matches TempleDB state')
-    verify_parser.add_argument('slug', nargs='?', help='Project slug (auto-detected)')
-    verify_parser.add_argument('--profile', default='default', help='Secret profile')
-    verify_parser.add_argument('--environment', '--env', default='default', help='Environment name')
-    verify_parser.add_argument('--no-nix', dest='load_nix', action='store_false', default=True)
-    cli.commands['direnv.verify'] = cmd.verify

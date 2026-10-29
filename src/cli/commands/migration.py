@@ -197,6 +197,46 @@ class MigrationCommands(Command):
                 f"Use: ./templedb deploy migration list {project_slug}"
             )
 
+        # Gated, and gated by typing rather than y/N -- the same hazard
+        # as `admin db stamp`, on a different substrate.
+        #
+        # This writes a migration_history row saying the migration ran
+        # when it did not. Afterwards `status` reports it applied and
+        # `get_pending_migrations` will never return it again, so the
+        # skipped schema change becomes invisible for that
+        # (project, target) pair. Unlike `stamp`, which acts on
+        # TempleDB's own schema_version, this lies about a *deployed
+        # project's* database -- the damage shows up the next time
+        # something assumes that schema exists.
+        #
+        # Show which migration against which target first, require the
+        # migration's filename typed back, and offer --dry-run. --yes
+        # exists for the legitimate unattended case: adopting a
+        # database whose migrations really were applied out of band.
+        if getattr(args, 'dry_run', False):
+            print(f"Would mark as applied WITHOUT running it:")
+            print(f"    migration: {migration.file_path}")
+            print(f"    project:   {project_slug}")
+            print(f"    target:    {target_name}")
+            print("\n--dry-run: nothing written.")
+            return 0
+
+        if not getattr(args, 'yes', False):
+            from cli.error_handling_utils import confirm_by_typing
+            expected = Path(migration.file_path).name
+            print(f"Marking as applied WITHOUT running it:")
+            print(f"    migration: {migration.file_path}")
+            print(f"    project:   {project_slug}")
+            print(f"    target:    {target_name}")
+            print("\nIts schema changes will not be applied, and afterwards "
+                  "nothing\ncan tell they were skipped.")
+            print()
+            if not confirm_by_typing(
+                    expected,
+                    f"Type the migration filename ({expected}) to confirm:"):
+                print("Aborted — nothing written.")
+                return 1
+
         # Mark as applied
         tracker.mark_migration_applied(
             project['id'],
@@ -238,49 +278,14 @@ def register_subcommands(parent_subparsers, cli, prefix='deploy'):
     history_parser.add_argument('--limit', type=int, default=20, help='Limit number of results (default: 20)')
     cli.commands[f'{prefix}.migration.history'] = migration_handler.history
 
-    mark_parser = subparsers.add_parser('mark-applied', help='Mark migration as applied without running')
+    mark_parser = subparsers.add_parser(
+        'mark-applied',
+        help='Mark migration as applied without running it (gated: type the filename)')
     mark_parser.add_argument('slug', help='Project slug')
     mark_parser.add_argument('migration', help='Migration file path or name')
     mark_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
+    mark_parser.add_argument('--dry-run', action='store_true',
+                             help='Show what would be marked, write nothing')
+    mark_parser.add_argument('--yes', action='store_true',
+                             help='Skip the typed confirmation (for unattended adoption)')
     cli.commands[f'{prefix}.migration.mark-applied'] = migration_handler.mark_applied
-
-
-def register(cli):
-    """Register migration commands with CLI"""
-    migration_handler = MigrationCommands()
-
-    # Create migration command group
-    migration_parser = cli.register_command('migration', None, help_text='Manage database migrations')
-    subparsers = migration_parser.add_subparsers(dest='migration_subcommand', required=True)
-
-    # list command
-    list_parser = subparsers.add_parser('list', help='List all migrations')
-    list_parser.add_argument('slug', help='Project slug')
-    cli.commands['migration.list'] = migration_handler.list
-
-    # show command
-    show_parser = subparsers.add_parser('show', help='Show migration content')
-    show_parser.add_argument('slug', help='Project slug')
-    show_parser.add_argument('migration', help='Migration file path or name')
-    cli.commands['migration.show'] = migration_handler.show
-
-    # status command
-    status_parser = subparsers.add_parser('status', help='Show migration status (applied vs pending)')
-    status_parser.add_argument('slug', help='Project slug')
-    status_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
-    status_parser.add_argument('--show-applied', action='store_true', help='Show applied migrations')
-    cli.commands['migration.status'] = migration_handler.status
-
-    # history command
-    history_parser = subparsers.add_parser('history', help='Show migration history')
-    history_parser.add_argument('slug', help='Project slug')
-    history_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
-    history_parser.add_argument('--limit', type=int, default=20, help='Limit number of results (default: 20)')
-    cli.commands['migration.history'] = migration_handler.history
-
-    # mark-applied command
-    mark_parser = subparsers.add_parser('mark-applied', help='Mark migration as applied without running')
-    mark_parser.add_argument('slug', help='Project slug')
-    mark_parser.add_argument('migration', help='Migration file path or name')
-    mark_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
-    cli.commands['migration.mark-applied'] = migration_handler.mark_applied

@@ -1540,3 +1540,182 @@ skipping `make_readonly` rather than by chmod-ing afterwards. Unlike
 checkout somewhere other than `checkouts/<slug>` is a legitimate thing
 to want. It is only a hazard when aimed at the canonical path, which is
 `checkout_files_are_mode_locked`'s job to notice.
+
+# Batch B-7, 2026-10-29 — 442 commands, two declines and a gate
+
+Picked up the three verdicts this document still listed as open for
+`deploy`. Two of them were wrong, in the two different ways the rest of
+this file keeps warning about.
+
+**`deploy fleet destroy` → gate: void, the command is already inert.**
+The verdict calls it "the single most destructive command in the CLI"
+and asks for confirm-by-typing. It cannot destroy anything.
+`FleetCommands.destroy` returns `self._retired()`, which prints the
+shared `_RETIRED` message and exits 1 before reading an argument or
+opening the database — fleet deployment went in migration 130, and
+`fleet deploy` and `fleet deploy-status` are retired the same way.
+Verified against the deployed binary, not just the source.
+
+So the dangerous-looking command was the safe one, and putting a
+confirmation prompt on it would have been pure ceremony — worse than
+nothing, because a gate implies there is something behind it. The three
+parsers stay registered on purpose: `_RETIRED` names
+`nixos system-switch` as the replacement, which is a better answer to
+`deploy fleet destroy` than `Unknown command`.
+
+**`deploy migration *` → move to `admin db`: declined, different
+object.** The verdict reads "Five commands about *database* migrations,
+while `admin db migrate` also exists. Migrations are a schema concern,
+not a deployment concern." The first sentence is true and the inference
+does not follow, because the two sets do not act on the same database:
+
+| | `deploy migration *` | `admin db *` |
+|---|---|---|
+| migrations come from | `project_files` typed `sql_migration`, per project | the `migrations/` directory in this repo |
+| applied-state lives in | `migration_history`, keyed `(project_id, target_name)` | `schema_version` |
+| the database acted on | a **tracked project's** database, per deploy target | **TempleDB's own** sqlite file |
+
+`migration_history` holds 21 rows across 2 projects and 3 targets
+(2026-02-23 to 2026-07-04), so this is a used feature and not a
+vestige. "Which migrations has this project had applied on
+*production* versus *staging*" is a deploy question; `--target` is on
+every one of the five commands and has no meaning under `admin db`,
+where there is one database and no targets. `admin db migration list
+<slug>` would be a command whose noun promises the local schema and
+whose argument asks about somebody else's.
+
+This is the same shape as the `nixos set-type` decline above — one verb,
+two columns — and the running tally is now **of 11 merge/move premises
+examined, 6 held and 5 were false.**
+
+**`deploy migration mark-applied` → gate: done, and this one was
+real.** It wrote a `migration_history` row claiming a migration ran
+when it did not, with no prompt, no `--yes` and no `--dry-run`. After
+it, `status` reports the migration applied and `get_pending_migrations`
+never returns it again, so the skipped schema change is invisible for
+that `(project, target)` pair.
+
+It is `admin db stamp`'s hazard on a worse substrate. `stamp` lies
+about TempleDB's own `schema_version`, where the lie is at least local
+to the machine you typed it on; this lies about a *deployed project's*
+database, and surfaces later as the next thing that assumes a column
+exists. Gated the same way, for the same reason — `confirm_by_typing`
+with the migration's filename, `--dry-run` to preview, `--yes` for the
+one legitimate unattended case (adopting a database whose migrations
+really were applied out of band). EOF and ^C are refusals.
+
+Verified all four branches with the tracker write stubbed: correct
+filename writes once, wrong filename writes nothing and exits 1,
+`--yes` skips the prompt and writes, `--dry-run` writes nothing. The
+two refusal paths were also exercised end-to-end through the real CLI.
+
+Deliberately *not* verified by running the accept path for real: doing
+so means writing a true "this migration was applied" row for a target
+that does not exist, which is the exact falsehood the gate exists to
+prevent, and nothing in the CLI can delete a `migration_history` row
+afterwards. The throwaway-project route does not work either —
+`file set` types a new `migrations/*.sql` as `sql_file`, not
+`sql_migration`, so `get_project_migrations` cannot see it and there is
+no rescan command that reclassifies.
+
+**A ninth dead `register()`**, in `migration.py` — a 38-line
+near-duplicate of `register_subcommands` binding a top-level
+`migration` group. `templedb migration list` answers
+`Unknown command: 'migration'`; `deploy.py` calls
+`register_subcommands` and that is the live path. Deleted.
+
+It illustrates the B-5 point about dead registrations rotting
+concretely: had it been left in place, the next person to wire it up
+would have restored `mark-applied` **without** the gate added above,
+since the gate's flags only exist in the live registration. A dead
+`register()` is not inert, it is a stale copy of the surface that
+looks authoritative.
+
+Command count unchanged at 442 — nothing this registration bound was
+ever reachable, so deleting it removes no command.
+
+# Batch B-8, 2026-10-29 — 442 → 441, and two bugs the verdicts were hiding
+
+Four more verdicts. One merge was right, one was false, and the two
+commands involved both turned out to be broken in ways this document
+never mentions — which is the pattern worth naming: a verdict that
+argues about where a command should live has usually not checked
+whether it works.
+
+**`ai prompt project-list` → `prompt list --project`: declined,
+different tables.** `list_templates` queries `prompt_templates`
+(name, category, version, is_active) and filters on `--category` /
+`--active-only`. `list_project_prompts` queries the
+`active_project_prompts_view` by `project_id`, ordered by priority.
+Different relation, different columns, different output. `--project`
+would not be a filter on the existing query, it would be a switch to a
+different one — the `nixos set-type` shape again. Tally: of 13
+merge/move premises examined, 6 held and 7 were false.
+
+**`project generate-envrc` → `env direnv generate`: declined, and it
+emitted a path that cannot exist.** The two commands write different
+things. `env direnv generate --write` writes the *expanded*
+environment — secrets, vars, the `use nix` directive — as a snapshot.
+`project generate-envrc` writes a one-line *shim* that delegates at
+shell-entry time, so the values are re-resolved on every `cd`. Static
+bake versus dynamic hook; collapsing them would lose the distinction
+that makes the shim useful.
+
+The command was broken anyway. It derived an absolute interpreter path
+from `__file__`:
+
+```python
+templedb_path = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), '..', '..', '..', 'templedb'))
+```
+
+In the deployed build that resolves to
+`<store>/lib/python3.13/templedb`. The package keeps its entrypoint in
+`<store>/bin`, so the generated `.envrc` named a file that has never
+existed and direnv failed on every `cd` into the project. Verified
+against the live closure.
+
+Writing *any* absolute store path there is wrong even corrected: the
+path rotates on every rebuild and is garbage-collectable, so a
+committed `.envrc` pinning one breaks as soon as its generation is
+collected. Now emits `eval "$(templedb env direnv)"` and resolves off
+PATH, which is what every doc and every other generated artifact
+already assumes. The comment that said "use absolute path to templedb
+for reliability" had it exactly backwards.
+
+**`env direnv verify` → `diff --exit-code`: done, and the checker could
+never pass.** The verdict is right — one comparison with two front
+ends. `verify` printed a verdict and exited 1 on a difference; `diff`
+rendered hunks and exited 0 either way. So the verdict became a flag,
+following git: a diff is not an error unless you ask for it.
+
+Folding them exposed why nobody missed `verify`. The generated `.envrc`
+carries a `# Generated: <wall clock>` header, so a file written by
+`generate --write` stopped matching the generator **one second later**.
+`verify` compared with `.strip()`, which does nothing for a line in the
+middle, and therefore answered "differs from TempleDB state" for every
+project unconditionally — including one generated moments earlier from
+identical data. A checker whose answer does not depend on its input.
+
+So `--exit-code` is only meaningful with the volatile line excluded,
+and `_comparable()` drops it. Everything else the header carries
+(project, profile, environment) is real state and still compared. The
+rendered hunks now come from the same normalized line lists as the
+exit status, so output and exit code cannot disagree — the old `diff`
+shelled out to `/usr/bin/diff` against a tempfile while `verify`
+compared in-process, which is how the two drifted apart in the first
+place. `difflib` replaces the subprocess and the tempfile.
+
+Verified: a freshly generated `.envrc` now reports up-to-date and exits
+0 where it previously always failed; appending one `export` line gives
+exit 1 and a hunk naming it; a missing `.envrc` still exits 1.
+
+**A tenth dead `register()`**, in `direnv.py` — a top-level `direnv`
+group with the full generate/diff/verify set. `templedb direnv` answers
+`Unknown command: 'direnv'`; `env.py` calls `register_subcommands` and
+that is the live path. Deleted. Like `migration.py`'s, it had already
+rotted: it still bound `cmd.verify`, so wiring it up would have
+restored the command this batch removed.
+
+Count: 442 → 441 for `verify`. The dead registration removes nothing,
+because nothing it bound was reachable.

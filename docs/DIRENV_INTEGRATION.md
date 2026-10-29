@@ -20,7 +20,7 @@ TempleDB's direnv integration automatically loads your development environment w
 - ✅ Profile auto-detection from git branch
 - ✅ Environment-specific configuration
 - ✅ Security validation
-- ✅ `diff`/`verify` subcommands
+- ✅ `diff` subcommand (with `--exit-code`)
 - ✅ Direct `.envrc` writing
 
 ---
@@ -103,7 +103,9 @@ templedb env direnv generate --no-nix --write
 
 ### `templedb env direnv diff`
 
-Show diff between current `.envrc` and what would be generated
+Show diff between current `.envrc` and what would be generated, and
+optionally fail when they differ. Absorbed `env direnv verify`, which
+asked the same question with a different front end.
 
 **Syntax:**
 ```bash
@@ -117,7 +119,20 @@ templedb env direnv diff
 
 # Check diff for production profile
 templedb env direnv diff --profile production
+
+# Fail if .envrc is out of sync (for hooks and CI)
+templedb env direnv diff --exit-code
 ```
+
+**Exit codes:** 0 unless `--exit-code` is passed, following git's
+convention that a diff is not an error unless you ask for it. With
+`--exit-code`: 0 when up-to-date, 1 when it differs or `.envrc` is
+missing.
+
+The comparison ignores the `# Generated:` header line, which carries a
+wall-clock timestamp. Without that exclusion a `.envrc` stopped
+matching the generator one second after it was written, which is why
+the old `verify` reported every project as out of sync.
 
 **Output:**
 ```diff
@@ -130,38 +145,6 @@ templedb env direnv diff --profile production
  export API_KEY='sk-...'
 ```
 
-### `templedb env direnv verify`
-
-Verify `.envrc` matches current TempleDB state
-
-**Syntax:**
-```bash
-templedb env direnv verify [OPTIONS] [PROJECT_SLUG]
-```
-
-**Examples:**
-```bash
-# Check if .envrc is up-to-date
-templedb env direnv verify
-
-# Exit codes:
-#   0 = up-to-date
-#   1 = out of sync or missing
-```
-
-**Output:**
-```
-✓ .envrc is valid and up-to-date
-```
-
-Or:
-```
-⚠️  .envrc differs from TempleDB state
-   Run 'templedb env direnv diff' to see changes
-   Run 'templedb env direnv --write' to update
-```
-
----
 
 ## Features
 
@@ -404,7 +387,7 @@ templedb env direnv generate --env production --write
 
 ```bash
 # See if .envrc is out of date
-templedb env direnv verify
+templedb env direnv diff --exit-code
 
 # See what changed
 templedb env direnv diff
@@ -615,7 +598,7 @@ esac
 
 ```bash
 # In CI/CD or pre-deploy check
-templedb env direnv verify --profile production
+templedb env direnv diff --exit-code --profile production
 if [ $? -ne 0 ]; then
   echo "ERROR: .envrc out of sync with TempleDB"
   exit 1
@@ -651,7 +634,7 @@ templedb env direnv > .envrc
 templedb env secret edit myproject
 templedb env direnv > .envrc  # Manual step!
 
-# No diff/verify
+# No diff
 # Can't see what changed
 
 # Hardcoded environment
@@ -671,9 +654,9 @@ templedb env direnv generate --write
 templedb env secret edit myproject
 cd ~/myproject  # Auto-reloads!
 
-# Diff and verify
-templedb env direnv diff    # See changes
-templedb env direnv verify  # Check sync
+# Diff, and fail on drift
+templedb env direnv diff              # See changes
+templedb env direnv diff --exit-code  # Check sync (exit 1 if stale)
 
 # Environment selection
 templedb env direnv generate --env production --write
@@ -695,7 +678,7 @@ templedb env direnv generate --env production --write
 | `--write` flag | ✅ | Direct .envrc writing |
 | `watch_file` directive | ✅ | Auto-reload on changes |
 | Improved error handling | ✅ | Better compound value errors |
-| `diff`/`verify` commands | ✅ | Check .envrc sync |
+| `diff --exit-code` | ✅ | Check .envrc sync |
 | Profile auto-detection | ✅ | From git branch |
 | Security validation | ✅ | Injection detection |
 | Backup on overwrite | ✅ | `.envrc.backup` created |
