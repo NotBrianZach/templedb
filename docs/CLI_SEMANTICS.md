@@ -1820,3 +1820,53 @@ a content-addressable integrity framework. Left alone.
 Count: 441 → 439. Final tally on this document's merge/move verdicts —
 **of 15 examined, 7 held and 8 were false.** A verdict here is a
 hypothesis with a handler to read.
+
+# Batch B-10, 2026-10-29 — `config-ast host`, and the corrected tally
+
+The last open verdict, and the one with the largest thing hiding behind
+it.
+
+**`config-ast host add` / `list` → `nixos host`: declined. Merging them
+means deciding the config migration, not tidying a surface.** The
+verdict reads "merge → `nixos host` (or vice versa; pick one)", and
+"pick one" is doing a great deal of work in that sentence. The two
+commands do not share a substrate:
+
+| | `config-ast host` | `nixos host` |
+|---|---|---|
+| stores hosts in | `config_hosts` (5 rows) | `system_config` keys `nixos.host.%` (6 keys) |
+| structure | hierarchical — `parent_id`, walked for resolution | flat key/value |
+| belongs to | the `config_nodes` AST model (1,390 nodes) | the live `system_config` path |
+| generates the machine? | **no** | yes |
+
+`config-ast`'s own registration already says why, and it was written
+before this verdict: `config_nodes` was last written 2026-08-05,
+nothing generates from it, only 2 of 27 `ast_builds` were ever
+promoted, and `config-ast set` succeeds while having no effect on the
+machine. It is explicitly **not deprecated** — 1,390 nodes and a
+working build pipeline are real work — but it is not the live path
+either.
+
+So "pick one" is a choice between abandoning the AST model and
+finishing its migration. Either is a legitimate project; neither is a
+command merge. The hierarchy is the concrete obstacle: `nixos host`
+has no notion of a parent host, so folding `config-ast host` into it
+would drop inheritance, and folding the other way would move the live
+path onto a model nothing generates from. Left as-is, which is what
+the incomplete-migration note already prescribes.
+
+**Corrected tally.** B-9 closed at "of 15 examined, 7 held and 8 were
+false". With this one: **of 16 merge/move verdicts examined, 7 held and
+9 were false.** Slightly worse than a coin flip, which is the number to
+carry forward — every remaining verdict in the tables above is a
+hypothesis with a handler to read, and the failure mode is not a bad
+merge but a *plausible* one that quietly drops a capability
+(`deploy target --set-connection`, `deploy project-config --set`) or
+breaks something off-CLI (`storage backup gcs`'s systemd timer, the
+GUI panel in B-9, the tutorial in B-6).
+
+The reduction pass ends here at **439 commands**, down from 463: 24
+removed, every premise checked first, with three bugs found along the
+way that the verdicts were standing on top of — `graph overview`'s
+88s join, `project generate-envrc`'s nonexistent interpreter path, and
+`env direnv verify`'s comparison that could never succeed.
