@@ -674,6 +674,14 @@ def register(cli):
     # `deploy targets update --connection` before this went, rather than
     # being dropped with it.
 
+    # deploy changes command (was `graph changes` until 2026-10-29)
+    changes_parser = subparsers.add_parser(
+        'changes', help='What source changed since the last successful deploy')
+    changes_parser.add_argument('project', nargs='?',
+                                help='Project slug (omit for top candidates)')
+    changes_parser.add_argument('--json', action='store_true')
+    cli.commands['deploy.changes'] = deploy_handler.changes
+
     # deploy history command
     history_parser = subparsers.add_parser('history', help='Show deployment history with timestamps and health checks')
     history_parser.add_argument('slug', help='Project slug')

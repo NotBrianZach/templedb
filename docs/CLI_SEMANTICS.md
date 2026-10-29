@@ -1870,3 +1870,54 @@ removed, every premise checked first, with three bugs found along the
 way that the verdicts were standing on top of — `graph overview`'s
 88s join, `project generate-envrc`'s nonexistent interpreter path, and
 `env direnv verify`'s comparison that could never succeed.
+
+# Batch B-11, 2026-10-29 — `graph changes` → `deploy changes`
+
+B-10 closed the reduction pass and left this one on the record as "a
+real move with a real destination, deliberately not taken". Taken now,
+on the grounds that a surface which files a command under a noun it
+does not use is a navigation bug even when the count does not move.
+
+**What was wrong with the old name.** `graph changes` read
+`deployment_history` for the last success, `vcs_commits` after that
+timestamp, and `vcs_working_state` for uncommitted files. No
+`entities`, no `relations`, no traversal — none of the graph substrate
+the noun advertises. Someone asking "what have I changed since I last
+deployed" has no reason to look under `graph`, and someone browsing
+`graph --help` for graph queries finds one command that is not.
+
+**Why `deploy changes` and not `deploy diff` or `deploy status`**, which
+is what the verdict asked for: `deploy fleet diff` already exists and
+compares *built system closures* on remote machines over SSH, and
+`deploy status` reports the current deployment state. This command
+never leaves the database. Folding it into either would have been the
+same false-equivalence this plan kept catching — same English word,
+different substrate. A third verb under the right noun is the honest
+answer. Both docstrings now say which is which.
+
+**Two things moved with it.**
+
+`_print_candidates` went from `cli/commands/graph.py` to
+`graph_frecency.py` as `print_candidates`, because a second module
+needed it. It belongs there regardless: it renders exactly what
+`rank_candidates` returns and nothing about it is graph-specific.
+`graph.py` imports it under the old private name, so its ten other
+call sites are untouched.
+
+The frecency key became `deploy.changes`, which **orphans 5 rows** of
+`graph.changes` history in `graph_query_log`. Left rather than
+rewritten, and worth stating as a decision rather than an oversight:
+the key is an opaque grouping label feeding a candidate-ranking boost,
+`rank_candidates("project", ...)` builds its base list without
+reference to it, and five rows of boost does not justify a data
+migration. Checked before deciding — `graph.who-uses` has 382 rows and
+`graph.search` 142, so a rename there would be a different
+conversation.
+
+Verified: `deploy changes <slug>`, the bare candidate-list form, and
+`--json` all reproduce the old output; `graph changes` is gone; the
+other nine `graph` subcommands still render through the aliased
+import. 22 tests pass.
+
+Count unchanged at **439** — this is a rename, which is the point. The
+reduction pass ended at B-10; this is the coherence fix it deferred.

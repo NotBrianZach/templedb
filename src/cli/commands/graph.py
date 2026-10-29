@@ -13,21 +13,10 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
-def _print_candidates(header: str, rows, cols, usage_hint: str) -> None:
-    """Pretty-print a ranked candidate list with a usage hint."""
-    if not rows:
-        print(f"\n{header}\n  (no candidates found)\n\n  {usage_hint}\n")
-        return
-    print(f"\n{header}\n")
-    widths = [max(len(c[0]), max((len(str(r.get(c[1], ''))) for r in rows), default=0))
-              for c in cols]
-    header_row = "  " + "  ".join(f"{c[0]:<{w}}" for c, w in zip(cols, widths))
-    print(header_row)
-    print("  " + "  ".join("-" * w for w in widths))
-    for r in rows:
-        print("  " + "  ".join(f"{str(r.get(c[1], '')):<{w}}"
-                                for c, w in zip(cols, widths)))
-    print(f"\n  {usage_hint}\n")
+# Moved to graph_frecency beside `rank_candidates`, whose output it
+# renders, when `deploy changes` came to need it too. Aliased rather
+# than renamed at the ten call sites below.
+from graph_frecency import print_candidates as _print_candidates
 
 
 class GraphCommands(Command):
@@ -147,53 +136,10 @@ class GraphCommands(Command):
             print()
         return 0
 
-    def changes(self, args) -> int:
-        """Show what changed since last deploy."""
-        from knowledge_graph import changes_since_deploy
-        from graph_frecency import log_query, rank_candidates
-
-        if not args.project:
-            log_query("graph.changes")
-            cands = rank_candidates("project", "graph.changes", limit=12)
-            _print_candidates(
-                "graph changes — show commits & uncommitted files since last deploy.\n"
-                "  Recently updated projects:",
-                cands, [("project", "name"), ("full name", "project_name")],
-                "Usage: templedb graph changes <PROJECT>")
-            return 0
-
-        log_query("graph.changes", target_kind="project", target_key=args.project,
-                  args={"project": args.project})
-        results = changes_since_deploy(args.project)
-
-        if args.json:
-            print(json.dumps(results, indent=2, default=str))
-            return 0
-
-        if "error" in results:
-            print(f"Error: {results['error']}")
-            return 1
-
-        print(f"\nChanges for {args.project} since last deploy")
-        print(f"  Last deploy: {results['last_deploy'] or 'never'}\n")
-
-        commits = results.get("commits_since", [])
-        if commits:
-            print(f"  Commits ({len(commits)}):")
-            for c in commits[:10]:
-                print(f"    {c['commit_hash'][:8]} {c.get('commit_message', '')[:60]} ({c['author']})")
-        else:
-            print("  No new commits")
-
-        changes = results.get("uncommitted_changes", [])
-        if changes:
-            print(f"\n  Uncommitted ({len(changes)}):")
-            for w in changes:
-                staged = "+" if w.get("staged") else " "
-                print(f"    {staged} [{w['state']:8s}] {w['file_path']}")
-
-        print()
-        return 0
+    # `changes` moved to `deploy changes` on 2026-10-29. It read
+    # deployment_history, vcs_commits and vcs_working_state and touched
+    # no graph substrate -- no entities, no relations, no traversal --
+    # so `graph` was never its noun. See deploy_ops.DeployOpsMixin.
 
     def deps(self, args) -> int:
         """Show project dependency graph."""
@@ -440,11 +386,7 @@ def register(cli):
     w.add_argument('--json', action='store_true')
     cli.commands['graph.who-uses'] = cmd.who_uses
 
-    # graph changes
-    c = subparsers.add_parser('changes', help='What changed since last deploy')
-    c.add_argument('project', nargs='?', help='Project slug (omit for top candidates)')
-    c.add_argument('--json', action='store_true')
-    cli.commands['graph.changes'] = cmd.changes
+    # `changes` is now `deploy changes` (2026-10-29).
 
     # graph deps
     d = subparsers.add_parser('deps', help='Project dependency graph')

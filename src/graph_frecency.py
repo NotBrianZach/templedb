@@ -242,3 +242,27 @@ def rank_candidates(
 
     base.sort(key=lambda r: (-r["score"], r["name"]))
     return base[:limit]
+
+
+def print_candidates(header: str, rows, cols, usage_hint: str) -> None:
+    """Pretty-print a ranked candidate list with a usage hint.
+
+    Lived in `cli/commands/graph.py` as `_print_candidates` until
+    2026-10-29, when `graph changes` moved to `deploy changes` and a
+    second module needed it. It belongs next to `rank_candidates`
+    anyway: it renders exactly what that returns, and nothing about it
+    is specific to the `graph` noun.
+    """
+    if not rows:
+        print(f"\n{header}\n  (no candidates found)\n\n  {usage_hint}\n")
+        return
+    print(f"\n{header}\n")
+    widths = [max(len(c[0]), max((len(str(r.get(c[1], ''))) for r in rows), default=0))
+              for c in cols]
+    header_row = "  " + "  ".join(f"{c[0]:<{w}}" for c, w in zip(cols, widths))
+    print(header_row)
+    print("  " + "  ".join("-" * w for w in widths))
+    for r in rows:
+        print("  " + "  ".join(f"{str(r.get(c[1], '')):<{w}}"
+                                for c, w in zip(cols, widths)))
+    print(f"\n  {usage_hint}\n")

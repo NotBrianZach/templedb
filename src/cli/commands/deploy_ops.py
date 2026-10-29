@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Deployment operational commands: history, stats, health checks, rollback,
-list, path, shell, exec, nixos-install.
+Deployment operational commands: changes, history, stats, health checks,
+rollback, list, path, shell, exec, nixos-install.
 
 Split from deploy.py to reduce file size. These are mixed into DeployCommands
 via inheritance.
 """
 import sys
+import json
 import subprocess
 import re
 from pathlib import Path
@@ -20,6 +21,71 @@ logger = get_logger(__name__)
 
 class DeployOpsMixin:
     """Mixin providing operational deploy commands. Mixed into DeployCommands."""
+
+    def changes(self, args) -> int:
+        """Show what changed since the last successful deploy.
+
+        Was `graph changes` until 2026-10-29. It reads
+        deployment_history for the last success, then vcs_commits after
+        that timestamp and vcs_working_state for uncommitted files --
+        no entities, no relations, no traversal, so it never used the
+        graph substrate its noun advertised. "What has changed since I
+        last deployed" is a deploy question.
+
+        Not to be confused with `deploy fleet diff`, which compares
+        built system closures on remote machines over SSH. This one
+        never leaves the database.
+
+        The frecency key moved with the command, orphaning 5 rows of
+        `graph.changes` history in graph_query_log. Left rather than
+        rewritten: the key is an opaque grouping label, and five rows
+        of candidate-ranking boost is not worth a data migration.
+        """
+        from knowledge_graph import changes_since_deploy
+        from graph_frecency import log_query, rank_candidates, print_candidates
+
+        if not args.project:
+            log_query("deploy.changes")
+            cands = rank_candidates("project", "deploy.changes", limit=12)
+            print_candidates(
+                "deploy changes — show commits & uncommitted files since last deploy.\n"
+                "  Recently updated projects:",
+                cands, [("project", "name"), ("full name", "project_name")],
+                "Usage: templedb deploy changes <PROJECT>")
+            return 0
+
+        log_query("deploy.changes", target_kind="project", target_key=args.project,
+                  args={"project": args.project})
+        results = changes_since_deploy(args.project)
+
+        if args.json:
+            print(json.dumps(results, indent=2, default=str))
+            return 0
+
+        if "error" in results:
+            print(f"Error: {results['error']}")
+            return 1
+
+        print(f"\nChanges for {args.project} since last deploy")
+        print(f"  Last deploy: {results['last_deploy'] or 'never'}\n")
+
+        commits = results.get("commits_since", [])
+        if commits:
+            print(f"  Commits ({len(commits)}):")
+            for c in commits[:10]:
+                print(f"    {c['commit_hash'][:8]} {c.get('commit_message', '')[:60]} ({c['author']})")
+        else:
+            print("  No new commits")
+
+        changes = results.get("uncommitted_changes", [])
+        if changes:
+            print(f"\n  Uncommitted ({len(changes)}):")
+            for w in changes:
+                staged = "+" if w.get("staged") else " "
+                print(f"    {staged} [{w['state']:8s}] {w['file_path']}")
+
+        print()
+        return 0
 
     def history(self, args) -> int:
         """Show deployment history with timestamps and health checks.
