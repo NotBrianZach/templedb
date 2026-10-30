@@ -209,6 +209,78 @@ class DBCommands(Command):
         # "pinned" would make the check cry wolf on a busy database.
         return (ckpt < log_frames - 2, log_frames, ckpt)
 
+    # Key under which the last pin observation is kept, so consecutive
+    # runs can tell a frozen snapshot from an advancing one.
+    _PIN_PROBE_KEY = 'admin.db.check.last_pin_probe'
+
+    def _pin_is_frozen(self, ckpt_frames, log_frames):
+        """Describe whether the pinned frame has moved since the last run.
+
+        This is the distinction that matters and that a single probe
+        cannot make. A live reader doing periodic work holds a snapshot
+        that *advances*: it finishes a query, takes a newer one, and the
+        reclaimable point moves up behind it. An abandoned read
+        transaction -- a cursor nobody finalized, a BEGIN nobody ended --
+        holds one frame forever while the log runs away from it.
+
+        Both look identical in one sample, and the remedies differ: an
+        advancing pin is normal operation and the WAL will drain on its
+        own, while a frozen one will never release until its holder
+        exits, so waiting is the wrong move.
+
+        Measured here rather than in `doctor` for the same reason the
+        PASSIVE probe is: doctor is read-only, and this records what it
+        saw so the next run has something to compare against.
+        """
+        import json
+        import time as _time
+        now = _time.time()
+        prev = None
+        try:
+            from db_utils import query_one
+            row = query_one("SELECT value FROM system_config WHERE key = ?",
+                            (self._PIN_PROBE_KEY,))
+            if row and row.get('value'):
+                prev = json.loads(row['value'])
+        except Exception:
+            prev = None
+
+        note = ""
+        if prev and prev.get('ckpt') == ckpt_frames:
+            held = now - float(prev.get('at', now))
+            grew = log_frames - int(prev.get('log', log_frames))
+            if held >= 60 and grew > 0:
+                note = (
+                    f" FROZEN: still frame {ckpt_frames:,} after "
+                    f"{held / 60:.0f} min, while the log grew {grew:,} "
+                    f"frames. An advancing snapshot would have moved, so "
+                    f"this is an abandoned read transaction, not a busy "
+                    f"reader — it will not release on its own. Restart the "
+                    f"holder, then PRAGMA wal_checkpoint(TRUNCATE). To "
+                    f"identify it for certain, stop one candidate at a "
+                    f"time and re-run this command: the frame jumps for "
+                    f"the one that owned it."
+                )
+        if not note:
+            note = (" TRUNCATE returns busy while it is held; re-run this "
+                    "command to see whether the frame advances (a busy "
+                    "reader) or stays put (an abandoned transaction).")
+
+        try:
+            from db_utils import execute
+            execute(
+                "INSERT INTO system_config (key, value, updated_at) "
+                "VALUES (?, ?, datetime('now')) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (self._PIN_PROBE_KEY,
+                 json.dumps({'ckpt': ckpt_frames, 'log': log_frames,
+                             'at': now})),
+            )
+        except Exception:
+            pass          # a health check never fails on its own bookkeeping
+        return note
+
     def _db_holders(self, db_path):
         """[(pid, short-name, start-time)] holding the DB open, oldest first.
 
@@ -301,13 +373,16 @@ class DBCommands(Command):
             elif pinned_at:
                 holders = self._db_holders(db_path)
                 oldest = holders[0] if holders else None
-                who = (f"; oldest holder is pid {oldest[0]} {oldest[1]} "
-                       f"(since {oldest[2]})" if oldest else "")
+                who = (f" Oldest holder is pid {oldest[0]} {oldest[1]} "
+                       f"(since {oldest[2]}) — an inference from open file "
+                       f"handles, NOT a measurement: SQLite keeps read "
+                       f"marks in the -shm index and exposes no way to ask "
+                       f"which connection owns one." if oldest else "")
+                frozen = self._pin_is_frozen(ckpt_frames, log_frames)
                 problems.append(
                     f"WAL is {mb:.0f} MB and PINNED: a reader holds a "
                     f"snapshot at frame {ckpt_frames:,} of {log_frames:,}, "
-                    f"so nothing can reclaim it{who}. It releases when that "
-                    f"process exits; TRUNCATE will return busy until then"
+                    f"so nothing can reclaim it.{who}{frozen}"
                 )
             else:
                 problems.append(
