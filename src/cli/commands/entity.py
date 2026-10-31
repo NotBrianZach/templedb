@@ -6801,17 +6801,58 @@ WantedBy=timers.target
     def _upsert_entity(self, kind: str, external_ref: str,
                        authority: str, label: Optional[str] = None) -> bool:
         """Insert-or-refresh an entity. Returns True if a new row was
-        inserted, False on update. Refreshes observed_at either way.
+        inserted, False otherwise.
+
+        **`observed_at` means last-CHANGED, not last-seen** (since
+        2026-10-31). This used to refresh it unconditionally, which made
+        every ingest run rewrite every row it looked at, and since
+        `ingest` mostly projects TempleDB's own tables into the graph
+        rather than re-reading the authority, almost none of those rows
+        had changed. Measured before this change: 61,563 of 83,951
+        entities and 58,541 of 92,618 relations all carried an
+        `observed_at` inside the single minute of the last run, while
+        every other timestamp in the table's history had 1-98 rows.
+
+        The cost was not one write per row. `entities_sync_fleet_upd`
+        fires on ANY update of a fleet-scoped row and upserts into
+        `sync_entities`, which is a cr-sqlite table, so each no-op
+        re-stamp also wrote a `sync_entities` row and bumped its CRDT
+        clock -- and then shipped that to every peer as a change. One
+        logical no-op, four physical writes, times ~120,000 rows, times
+        13 runs a day.
+
+        Batching already fixed the worst of it: wrapping each adapter
+        run in one `transaction()` took a no-op `ingest all` from 509 MB
+        of WAL to 11 MB. This removes the remainder by not writing at
+        all when nothing differs.
+
+        Checked before changing the meaning: nothing deletes or expires
+        an entity by `observed_at` age. The two age-based sweeps
+        (`graph gc`, `graph observations`) read `observations_archive`,
+        whose own trigger is already guarded on a real value change, and
+        every entity-removal path (`forget`, `forget_authority`,
+        `prune-orphans`) is explicit or orphan-based. Per-adapter
+        freshness -- the thing "last seen" was wanted for -- lives in
+        `ingestion_runs`, which is what `summary` and `ingest history`
+        read.
 
         Sets sync_scope on insert per _SYNC_SCOPES table (Q5). Does
         NOT overwrite existing scope on update — allows manual
         overrides via SQL to survive re-ingest."""
         from db_utils import execute, query_one
         existing = query_one(
-            "SELECT id FROM entities WHERE kind=? AND external_ref=?",
+            "SELECT id, label, source_authority FROM entities "
+            "WHERE kind=? AND external_ref=?",
             (kind, external_ref),
         )
         if existing:
+            # COALESCE semantics: a None label means "leave it alone",
+            # so the comparison has to be against what COALESCE would
+            # actually write, not against the argument.
+            effective_label = existing['label'] if label is None else label
+            if (effective_label == existing['label']
+                    and authority == existing['source_authority']):
+                return False
             execute(
                 """UPDATE entities SET label = COALESCE(?, label),
                                         observed_at = datetime('now'),
@@ -6838,16 +6879,25 @@ WantedBy=timers.target
         AND on refresh -- an edge whose character changed (a type-only
         import that gained a runtime reference) must not keep the stale
         annotation, or the first ingest would pin it forever.
+
+        Like `_upsert_entity`, skips the write entirely when nothing
+        differs: `observed_at` here is last-CHANGED, not last-seen. See
+        that method for the measurement and for why no consumer needed
+        last-seen. `relations_sync_fleet_upd` has no column restriction
+        and joins `entities` twice on every update, so a no-op re-stamp
+        here cost even more than on the entity side.
         """
         import json
         from db_utils import execute, query_one
         attrs_json = json.dumps(attributes) if attributes else None
         existing = query_one(
-            """SELECT id FROM relations
+            """SELECT id, attributes_json FROM relations
                 WHERE from_entity_id=? AND kind=? AND to_entity_id=?""",
             (from_id, kind, to_id),
         )
         if existing:
+            if attrs_json == existing['attributes_json']:
+                return False
             execute(
                 """UPDATE relations
                       SET observed_at = datetime('now'),
