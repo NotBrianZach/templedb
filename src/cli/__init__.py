@@ -65,6 +65,7 @@ from cli.commands import (
     file, tutorial, dev, deploy_history,
     reports, edit, source, intent, entity, handoff, tool, provenance,
     reconcile, summary, hygiene, sync, claims, reload, nix_store,
+    device,
 )
 from cli.core import cli
 
@@ -316,6 +317,7 @@ def main():
     intent.register(cli)
     entity.register(cli)
     handoff.register(cli)
+    device.register(cli)
     tool.register(cli)
     provenance.register(cli)
     reconcile.register(cli)
