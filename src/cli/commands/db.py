@@ -2,6 +2,8 @@
 """
 Database management commands: migrate, status, stamp, integrity checks.
 """
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -213,6 +215,100 @@ class DBCommands(Command):
     # runs can tell a frozen snapshot from an advancing one.
     _PIN_PROBE_KEY = 'admin.db.check.last_pin_probe'
 
+    def _pin_holders(self, db_path):
+        """Name the processes actually holding a WAL read mark.
+
+        This is a measurement, not the open-file-handle guess it
+        replaces. The guess was wrong here in the way that matters: it
+        blamed the oldest process with the database open, which was an
+        `ai mcp daemon` holding only the lock byte that *every*
+        connection holds, while the real pin belonged to two
+        `ai agent serve --stdio` processes further down the list.
+
+        Two sources, joined:
+
+        * The -shm file's WalCkptInfo. Two 48-byte WalIndexHdr copies
+          come first, so nBackfill sits at offset 96 and aReadMark[0..4]
+          at 100..119. A mark of 0xFFFFFFFF is an unused slot; anything
+          below mxFrame is a snapshot holding the checkpoint there.
+        * /proc/locks. SQLite takes a POSIX read lock on one byte per
+          read mark -- aLock[3+i], i.e. byte 123+i -- and the kernel
+          records the owning pid. Fields are 1-indexed as
+          `id: POSIX ADVISORY READ <pid> <maj>:<min>:<inode> <start> <end>`,
+          so the pid is field 5 and dev:inode is field 6. Getting those
+          two transposed is why this looked impossible at first.
+
+        Returns [(frame, pid, cmdline)] for marks below mxFrame, lowest
+        frame first -- the lowest is the one holding the line. Empty on
+        any failure: a health check reports less rather than breaking.
+        """
+        import struct
+        marks = []
+        try:
+            with open(str(db_path) + "-shm", "rb") as fh:
+                b = fh.read(160)
+            if len(b) < 132:
+                return []
+            mx, = struct.unpack_from("<I", b, 16)
+            read_marks = struct.unpack_from("<5I", b, 100)
+        except Exception:
+            return []
+
+        try:
+            shm_ino = str(os.stat(str(db_path) + "-shm").st_ino)
+        except Exception:
+            return []
+
+        by_byte = {}
+        try:
+            with open("/proc/locks") as fh:
+                for line in fh:
+                    f = line.split()
+                    if len(f) < 8:
+                        continue
+                    if f[5].rsplit(":", 1)[-1] != shm_ino:
+                        continue
+                    try:
+                        start = int(f[6])
+                    except ValueError:
+                        continue
+                    by_byte.setdefault(start, []).append(f[4])
+        except Exception:
+            return []
+
+        for i, frame in enumerate(read_marks):
+            if frame == 0xFFFFFFFF or frame == 0 or frame >= mx:
+                continue
+            for pid in by_byte.get(123 + i, []):
+                marks.append((frame, pid, self._cmdline(pid)))
+        marks.sort(key=lambda t: t[0])
+        return marks
+
+    @staticmethod
+    def _cmdline(pid):
+        """The templedb subcommand a pid is running, or '?' if unreadable.
+
+        Everything before the arguments is noise here: every one of
+        these processes is the same interpreter running the same
+        launcher out of the same store path, so a prefix-truncated
+        cmdline printed six identical-looking lines. The role
+        (`ai agent serve --stdio`, `gui`, `ai mcp daemon`) is the whole
+        point, so drop the interpreter and script and keep the rest.
+        """
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                parts = [p for p in fh.read().split(b"\0") if p]
+        except Exception:
+            return "?"
+        argv = [p.decode(errors="replace") for p in parts]
+        for i, a in enumerate(argv):
+            if a.endswith(".py") or a.endswith("templedb"):
+                argv = argv[i + 1:]
+                break
+        else:
+            argv = argv[1:]
+        return " ".join(argv)[:60] or "?"
+
     def _pin_is_frozen(self, ckpt_frames, log_frames):
         """Describe whether the pinned frame has moved since the last run.
 
@@ -256,10 +352,8 @@ class DBCommands(Command):
                     f"frames. An advancing snapshot would have moved, so "
                     f"this is an abandoned read transaction, not a busy "
                     f"reader — it will not release on its own. Restart the "
-                    f"holder, then PRAGMA wal_checkpoint(TRUNCATE). To "
-                    f"identify it for certain, stop one candidate at a "
-                    f"time and re-run this command: the frame jumps for "
-                    f"the one that owned it."
+                    f"holder named above, then PRAGMA "
+                    f"wal_checkpoint(TRUNCATE)."
                 )
         if not note:
             note = (" TRUNCATE returns busy while it is held; re-run this "
@@ -371,13 +465,26 @@ class DBCommands(Command):
                     f"failed — cannot tell pinned from un-truncated"
                 )
             elif pinned_at:
-                holders = self._db_holders(db_path)
-                oldest = holders[0] if holders else None
-                who = (f" Oldest holder is pid {oldest[0]} {oldest[1]} "
-                       f"(since {oldest[2]}) — an inference from open file "
-                       f"handles, NOT a measurement: SQLite keeps read "
-                       f"marks in the -shm index and exposes no way to ask "
-                       f"which connection owns one." if oldest else "")
+                pinners = self._pin_holders(db_path)
+                if pinners:
+                    who = " Holding it:"
+                    for frame, pid, cmd in pinners:
+                        who += f"\n      frame {frame:,}  pid {pid}  {cmd}"
+                    who += ("\n    Read from the -shm read marks joined to "
+                            "/proc/locks, so these are the owners, not the "
+                            "oldest process with the file open. Every "
+                            "connection holds the shared lock byte; only "
+                            "these hold a read mark. The lowest frame is the "
+                            "one holding the line — releasing a higher one "
+                            "moves the limit up to the next.")
+                else:
+                    holders = self._db_holders(db_path)
+                    oldest = holders[0] if holders else None
+                    who = (f" Could not read the -shm read marks; oldest "
+                           f"holder is pid {oldest[0]} {oldest[1]} (since "
+                           f"{oldest[2]}), which is a guess from open file "
+                           f"handles and has been wrong before."
+                           if oldest else "")
                 frozen = self._pin_is_frozen(ckpt_frames, log_frames)
                 problems.append(
                     f"WAL is {mb:.0f} MB and PINNED: a reader holds a "
