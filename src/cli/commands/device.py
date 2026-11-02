@@ -42,6 +42,12 @@ logger = get_logger(__name__)
 # it swallowed.
 KNOWN_KINDS = ('agent_message', 'handoff_note')
 
+# Marker written into apply_result by `outbox discard`. A discarded
+# event leaves the pending queue without its applier ever running, and
+# this prefix is what keeps that distinguishable from a real apply --
+# the alternative, a bare applied_at, would record a lie.
+DISCARD_PREFIX = 'discarded: '
+
 
 class DeviceCommands(Command):
     """Device outbox handlers."""
@@ -154,7 +160,16 @@ class DeviceCommands(Command):
         if status == 'pending':
             where.append("applied_at IS NULL AND apply_error IS NULL")
         elif status == 'applied':
+            # Excludes discarded: both carry an applied_at, but
+            # "applied" has to mean the applier actually ran, or the
+            # filter quietly reports retired junk as work done.
             where.append("applied_at IS NOT NULL")
+            where.append("COALESCE(apply_result, '') NOT LIKE ?")
+            params.append(DISCARD_PREFIX + '%')
+        elif status == 'discarded':
+            where.append("applied_at IS NOT NULL")
+            where.append("apply_result LIKE ?")
+            params.append(DISCARD_PREFIX + '%')
         elif status == 'failed':
             where.append("applied_at IS NULL AND apply_error IS NOT NULL")
         if getattr(args, 'device', None):
@@ -177,7 +192,9 @@ class DeviceCommands(Command):
         print(f"{len(rows)} event(s):\n")
         for r in rows:
             if r['applied_at']:
-                state = 'applied'
+                state = ('discarded'
+                         if (r['apply_result'] or '').startswith(DISCARD_PREFIX)
+                         else 'applied')
             elif r['apply_error']:
                 state = f"FAILED x{r['apply_attempts']}"
             else:
@@ -221,6 +238,63 @@ class DeviceCommands(Command):
         return 0
 
     # ---- apply ------------------------------------------------------
+
+    def outbox_discard(self, args) -> int:
+        """Retire an event without running its applier.
+
+        The missing third option. Until this existed an event had two
+        fates -- apply it or leave it pending forever -- and neither is
+        right for one that should not run: a mistyped prompt, a test
+        capture, an event aimed at a session that has moved on. Leaving
+        it pending means every future `apply` retries it, so the queue
+        never reaches empty and a real backlog is hidden behind junk.
+
+        Found the hard way. Two test captures made while building this
+        were left pending, and one of them was an `agent_message` for
+        session 42 -- a real, interrupted session. Applying it would
+        have queued junk text AND started a run, because
+        `queue_message` starts one when none is active. There was no
+        way to stop that except never running apply again.
+
+        Deliberately not a DELETE. The table is the record of what a
+        device originated; erasing a capture because it was unwanted
+        loses the fact that it happened. The row stays, applied_at
+        marks it as handled, and apply_result carries DISCARD_PREFIX
+        plus the reason, so `list` can show it as 'discarded' rather
+        than claim it was applied. A reason is required for the same
+        reason the deletion tables record one: a retired event with no
+        account of why is indistinguishable from a bug.
+        """
+        from db_utils import execute, query_one
+
+        r = query_one(
+            "SELECT * FROM origination_events WHERE event_uuid LIKE ?",
+            (args.event_uuid + '%',),
+        )
+        if not r:
+            logger.error(f"No event matching {args.event_uuid!r}")
+            return 1
+        if r['applied_at']:
+            already = ('discarded'
+                       if (r['apply_result'] or '').startswith(DISCARD_PREFIX)
+                       else 'applied')
+            logger.error(
+                f"Event {r['event_uuid'][:8]} is already {already} "
+                f"({r['applied_at']}) — nothing to discard")
+            return 1
+
+        execute(
+            """UPDATE origination_events
+                  SET applied_at = datetime('now'),
+                      apply_result = ?,
+                      apply_error = NULL
+                WHERE id = ?""",
+            (DISCARD_PREFIX + args.reason, r['id']),
+        )
+        print(f"✓ discarded {r['kind']} {r['event_uuid'][:8]} "
+              f"from {r['device_id']}: {args.reason}")
+        print("  the event row is kept; it will not be applied or retried")
+        return 0
 
     def outbox_apply(self, args) -> int:
         """Apply pending events, oldest device-clock first.
@@ -412,7 +486,7 @@ def register(cli):
 
     p = osub.add_parser('list', help='List captured events')
     p.add_argument('--status', default='all',
-                   choices=['all', 'pending', 'applied', 'failed'])
+                   choices=['all', 'pending', 'applied', 'failed', 'discarded'])
     p.add_argument('--device', help='Filter by device id')
     p.add_argument('--kind', help='Filter by event kind')
     p.add_argument('--limit', type=int, default=20)
@@ -421,6 +495,14 @@ def register(cli):
     p = osub.add_parser('show', help='Show one event with its payload')
     p.add_argument('event_uuid', help='Full uuid or a unique prefix')
     cli.commands['device.outbox.show'] = cmd.outbox_show
+
+    p = osub.add_parser(
+        'discard',
+        help='Retire an event without applying it (keeps the row)')
+    p.add_argument('event_uuid', help='Full uuid or a unique prefix')
+    p.add_argument('-m', '--reason', required=True,
+                   help='Why it should not run — recorded on the event')
+    cli.commands['device.outbox.discard'] = cmd.outbox_discard
 
     p = osub.add_parser('apply', help='Apply pending events to the database')
     p.add_argument('--kind', help='Only this kind')
