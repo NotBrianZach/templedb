@@ -100,6 +100,53 @@ marked `DEPRECATED ... kept only for legacy callers`. If you extend this,
 use the anchor API — regex matching breaks the moment a tool result contains
 a line starting with `* `.
 
+### 3a. One buffer, three windows (`C-c C-3`)
+
+`templedb-agent-layout` shows the same session as three windows: session
+state (`Guide`/`Now`/`Goal`/`Context`) in a sidebar, the conversation top
+right, and `Next Prompt` — with `Findings`, `Todo` and `Open Questions`
+beside it — in a short window underneath. Pulling a todo into the next
+message is then a yank inside one window. `C-c C-3` toggles;
+`templedb-agent-layout-quit` restores the single buffer.
+
+It is still **one buffer**. Each pane is an *indirect buffer*
+(`make-indirect-buffer`) narrowed to a contiguous span of the base. That
+matters because the alternative — three real buffers — means re-homing
+thirty-odd buffer-local variables, the process, the ewoc and the
+pending-request table into some new owner, and splitting the Notes
+persistence path across them. An indirect buffer shares the base's text
+*and its text properties*, so the anchor API, the ewoc's in-place
+rendering and `templedb-agent-save-user-sections` all work untouched;
+what it does not share is narrowing, point, window and
+`buffer-read-only`, which is exactly the list of things a pane needs to
+differ on.
+
+Consequences worth knowing:
+
+- Editing a pane edits the base and flips the base's modification flag,
+  so idle autosave still fires for text typed in a pane.
+- Killing the base kills every pane. Emacs does that itself — there is
+  no cleanup hook to forget.
+- A pane has no buffer-local session state, so `C-c C-c` and friends go
+  through `templedb-agent-view-*` wrappers that run in the base.
+  Positions need no translation: it is the same text.
+- **Overlays are not shared.** The fading highlight on a fresh agent
+  write is drawn in the base and is invisible in the panes; the text
+  still updates.
+- A narrowing's bounds absorb text inserted *at* them, so an insert on
+  the Conversation/`Next Prompt` boundary briefly shows up in the prompt
+  pane. `templedb-agent--layout-refresh` re-narrows every pane after
+  anything structural — each event, each section re-render, each full
+  render, each new exchange — and is a no-op when no panes are open.
+
+Panes are configurable via `templedb-agent-layout-panes`, but a pane's
+sections must be **contiguous** in `templedb-agent--section-order`: a
+window shows one span, not a selection. Sections in no pane are absorbed
+by the pane in front of them, which is what keeps agent-created
+`dynamic:*` sections (rendered after every fixed section) in the last
+pane instead of off the layout. Also
+`templedb-agent-layout-{sidebar-width,prompt-height,read-only-panes,follow-conversation}`.
+
 ### Reading the markers
 
 | Marker | Where | Meaning |
@@ -306,6 +353,7 @@ therefore not only *what Claude is told* but *where Claude stands*.
 | `C-c C-q` | Close session |
 | `C-c C-s` | Save user-owned sections |
 | `C-c C-l` | Reload from checkout |
+| `C-c C-3` | Toggle the three-window pane layout (§3a) |
 | `C-c u` | Remove agent entry at point |
 | `, i` | Send guidance *while Claude works* |
 | `, g` | Refresh buffer from DB |
@@ -320,6 +368,12 @@ therefore not only *what Claude is told* but *where Claude stands*.
 
 `, i` is worth internalising — mid-run steering without cancelling is the
 main ergonomic advantage over a terminal.
+
+**In a pane** (§3a) the same `C-c` chords work — `C-c C-c`, `C-c C-k`,
+`C-c C-r`, `C-c C-s`, `C-c u` — plus `C-c C-n` (jump to the prompt pane),
+`C-c C-b` (show the whole buffer in this window) and `C-c C-w` (close the
+layout). The `,` major-mode leader is not rebound in panes; use `C-c C-b`
+for those.
 
 ---
 

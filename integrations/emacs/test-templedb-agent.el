@@ -585,5 +585,256 @@ invisible to the watcher."
         (should (string-match-p "Done · session #1" text))))
     (kill-buffer "*Temple Agent Alerts*")))
 
+;;;; Multi-pane layout
+;;
+;; Window geometry is not exercised — batch has no usable frame — so
+;; `--layout-windows' is stubbed where a test drives the whole command.
+;; Everything else (bounds arithmetic, indirect-buffer wiring, re-narrow
+;; after a full render, command delegation to the base) runs for real.
+
+(defmacro templedb-agent-test--with-views (&rest body)
+  "Run BODY in a rendered agent buffer with pane views created.
+Binds `views' to the alist and kills the views afterwards."
+  (declare (indent 0) (debug (body)))
+  `(templedb-agent-test--in-buffer
+     (let ((views (mapcar (lambda (k)
+                            (cons k (templedb-agent--layout-ensure-view k)))
+                          (templedb-agent--layout-pane-keys))))
+       (templedb-agent--layout-refresh)
+       (unwind-protect (progn ,@body)
+         (dolist (cell views)
+           (when (buffer-live-p (cdr cell)) (kill-buffer (cdr cell))))))))
+
+(defun templedb-agent-test--view-text (views key)
+  "Accessible text of pane KEY's view in VIEWS."
+  (with-current-buffer (cdr (assq key views))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(ert-deftest templedb-agent-test/layout-panes-cover-every-fixed-section ()
+  "A section in no pane is invisible in the layout. The default panes
+must account for all of `templedb-agent--section-order'."
+  (let ((covered (apply #'append
+                        (mapcar (lambda (p) (plist-get p :sections))
+                                templedb-agent-layout-panes))))
+    (dolist (id templedb-agent--section-order)
+      (should (memq id covered)))))
+
+(ert-deftest templedb-agent-test/layout-pane-sections-are-contiguous ()
+  "A window shows one span, so each pane's sections must be adjacent in
+`templedb-agent--section-order' and the panes must be in buffer order."
+  (let ((flat (apply #'append
+                     (mapcar (lambda (p) (plist-get p :sections))
+                             templedb-agent-layout-panes))))
+    (should (equal flat
+                   (cl-remove-if-not (lambda (id) (memq id flat))
+                                     templedb-agent--section-order)))))
+
+(ert-deftest templedb-agent-test/layout-bounds-match-section-anchors ()
+  (templedb-agent-test--in-buffer
+    (let ((state (templedb-agent--layout-bounds 'state))
+          (conv (templedb-agent--layout-bounds 'conversation))
+          (prompt (templedb-agent--layout-bounds 'prompt)))
+      (should (= (car state) (templedb-agent--find-section 'guide)))
+      (should (= (cdr state) (templedb-agent--find-section 'conversation)))
+      (should (= (car conv) (templedb-agent--find-section 'conversation)))
+      (should (= (cdr conv) (templedb-agent--find-section 'next-prompt)))
+      (should (= (car prompt) (templedb-agent--find-section 'next-prompt)))
+      ;; Last pane runs to the end of the buffer.
+      (should (= (cdr prompt) (point-max)))
+      ;; Panes tile the buffer with no gap and no overlap.
+      (should (= (cdr state) (car conv)))
+      (should (= (cdr conv) (car prompt))))))
+
+(ert-deftest templedb-agent-test/layout-last-pane-absorbs-dynamic-sections ()
+  "Dynamic sections render after every fixed one, so they belong to
+whichever pane is last — otherwise an agent-created section would
+vanish from the layout."
+  (templedb-agent-test--in-buffer
+    (templedb-agent--handle-event
+     '((type . "agent.section.dynamic.write")
+       (data . ((section . "Blockers") (id . "b1") (text . "waiting on CI")))))
+    (let ((prompt (templedb-agent--layout-bounds 'prompt))
+          (dyn (templedb-agent--find-section
+                (templedb-agent--dynamic-section-id "Blockers"))))
+      (should dyn)
+      (should (> dyn (car prompt)))
+      (should (= (cdr prompt) (point-max)))
+      (should (< dyn (cdr prompt))))))
+
+(ert-deftest templedb-agent-test/layout-views-are-indirect-and-narrowed ()
+  (templedb-agent-test--with-views
+    (dolist (cell views)
+      (should (buffer-live-p (cdr cell)))
+      (should (eq (buffer-base-buffer (cdr cell)) (current-buffer))))
+    (let ((conv (templedb-agent-test--view-text views 'conversation)))
+      (should (string-match-p "^\\* Conversation" conv))
+      (should-not (string-match-p "Next Prompt" conv))
+      (should-not (string-match-p "^\\* Goal" conv)))
+    (let ((state (templedb-agent-test--view-text views 'state)))
+      (should (string-match-p "^\\* Goal" state))
+      (should (string-match-p "^\\* Context" state))
+      (should-not (string-match-p "^\\* Conversation" state)))
+    (let ((prompt (templedb-agent-test--view-text views 'prompt)))
+      (should (string-match-p "^\\* Next Prompt" prompt))
+      (should (string-match-p "^\\* Todo" prompt))
+      (should-not (string-match-p "^\\* Conversation" prompt)))))
+
+(ert-deftest templedb-agent-test/layout-view-sees-streamed-output ()
+  "The conversation pane must grow as the agent appends, without a
+re-narrow — insertion at the end of a restriction extends it."
+  (templedb-agent-test--with-views
+    (templedb-agent--enter-exchange "what is this")
+    (templedb-agent--handle-event
+     '((type . "assistant.delta") (data . ((text . "streamed-answer")))))
+    (should (string-match-p "streamed-answer"
+                            (templedb-agent-test--view-text views 'conversation)))
+    (should (string-match-p "what is this"
+                            (templedb-agent-test--view-text views 'conversation)))))
+
+(ert-deftest templedb-agent-test/layout-refresh-survives-a-full-rerender ()
+  "`--render-buffer' erases the buffer, which collapses every view's
+restriction. The refresh at its tail has to put them back."
+  (templedb-agent-test--with-views
+    (templedb-agent--render-buffer)
+    (let ((conv (templedb-agent-test--view-text views 'conversation)))
+      (should (string-match-p "^\\* Conversation" conv))
+      (should-not (string-match-p "Next Prompt" conv)))
+    (should (string-match-p "^\\* Next Prompt"
+                            (templedb-agent-test--view-text views 'prompt)))))
+
+(ert-deftest templedb-agent-test/layout-refresh-tracks-a-growing-section ()
+  "A finding lands above Todo; the prompt pane's span must still end at
+the buffer end and still contain both."
+  (templedb-agent-test--with-views
+    (templedb-agent--handle-event
+     '((type . "agent.section.finding.add")
+       (data . ((id . "f1") (text . "cookie is SameSite=None in prod")))))
+    (let ((prompt (templedb-agent-test--view-text views 'prompt)))
+      (should (string-match-p "SameSite=None" prompt))
+      (should (string-match-p "^\\* Todo" prompt)))
+    (with-current-buffer (cdr (assq 'prompt views))
+      (should (= (point-max)
+                 (with-current-buffer (buffer-base-buffer) (point-max)))))))
+
+(ert-deftest templedb-agent-test/layout-conversation-view-is-read-only ()
+  "The ewoc owns the conversation text, so the pane refuses typing —
+copying out of it still works."
+  (templedb-agent-test--with-views
+    (with-current-buffer (cdr (assq 'conversation views))
+      (should buffer-read-only))
+    (with-current-buffer (cdr (assq 'prompt views))
+      (should-not buffer-read-only))
+    (with-current-buffer (cdr (assq 'state views))
+      (should-not buffer-read-only))
+    ;; ...and the base stays writable regardless.
+    (should-not buffer-read-only)))
+
+(ert-deftest templedb-agent-test/layout-edit-in-a-view-marks-the-base-modified ()
+  "Idle autosave is gated on the base buffer's modification flag, so
+text typed in a pane has to flip it."
+  (templedb-agent-test--with-views
+    (set-buffer-modified-p nil)
+    (should-not (buffer-modified-p))
+    (with-current-buffer (cdr (assq 'prompt views))
+      (goto-char (point-max))
+      (let ((inhibit-read-only t))
+        (insert "typed in the pane\n")))
+    (should (buffer-modified-p))
+    (should (string-match-p "typed in the pane"
+                            (buffer-substring-no-properties (point-min) (point-max))))))
+
+(ert-deftest templedb-agent-test/layout-view-send-reads-the-prompt ()
+  (templedb-agent-test--with-views
+    (let ((sent nil))
+      (with-current-buffer (cdr (assq 'prompt views))
+        (goto-char (templedb-agent--layout-prompt-point))
+        (insert "ship it"))
+      (cl-letf (((symbol-function 'templedb-agent--send)
+                 (lambda (method params &optional _cb)
+                   (push (cons method params) sent))))
+        (with-current-buffer (cdr (assq 'prompt views))
+          (templedb-agent-view-send)))
+      (let ((msg (assoc "message.send" sent)))
+        (should msg)
+        (should (equal (alist-get 'content (cdr msg)) "ship it")))
+      ;; Sending clears the prompt in the base, which the pane shows.
+      (should-not (string-match-p
+                   "ship it"
+                   (templedb-agent-test--view-text views 'prompt))))))
+
+(ert-deftest templedb-agent-test/layout-prompt-point-lands-in-the-body ()
+  "An empty Next Prompt must put the cursor past BOTH the heading and
+the blank line under it: `--get-prompt-text' matches
+`^* Next Prompt\\n\\n', so text typed any earlier makes `send' report an
+empty prompt."
+  (templedb-agent-test--in-buffer
+    (let* ((anchor (templedb-agent--find-section 'next-prompt))
+           (pos (templedb-agent--layout-prompt-point)))
+      (should pos)
+      (should (> pos anchor))
+      (should (save-excursion (goto-char pos) (not (org-at-heading-p))))
+      ;; Typing there has to leave the body findable.
+      (save-excursion (goto-char pos) (insert "drafted"))
+      (should (equal (templedb-agent--get-prompt-text) "drafted")))))
+
+(ert-deftest templedb-agent-test/layout-quit-kills-views-and-clears-state ()
+  (templedb-agent-test--in-buffer
+    (let ((views (mapcar (lambda (k)
+                           (cons k (templedb-agent--layout-ensure-view k)))
+                         (templedb-agent--layout-pane-keys))))
+      (should templedb-agent--layout-views)
+      (cl-letf (((symbol-function 'switch-to-buffer) #'ignore)
+                ((symbol-function 'delete-other-windows) #'ignore))
+        (templedb-agent-layout-quit))
+      (should (null templedb-agent--layout-views))
+      (dolist (cell views)
+        (should-not (buffer-live-p (cdr cell)))))))
+
+(ert-deftest templedb-agent-test/layout-ensure-view-is-idempotent ()
+  (templedb-agent-test--with-views
+    (let ((again (templedb-agent--layout-ensure-view 'conversation)))
+      (should (eq again (cdr (assq 'conversation views))))
+      (should (= (length templedb-agent--layout-views) 3)))))
+
+(ert-deftest templedb-agent-test/layout-refresh-prunes-a-killed-view ()
+  (templedb-agent-test--with-views
+    (kill-buffer (cdr (assq 'state views)))
+    (templedb-agent--layout-refresh)
+    (should (null (assq 'state templedb-agent--layout-views)))
+    (should (assq 'conversation templedb-agent--layout-views))))
+
+(ert-deftest templedb-agent-test/layout-command-builds-every-pane ()
+  (templedb-agent-test--in-buffer
+    (cl-letf (((symbol-function 'templedb-agent--layout-windows) #'ignore))
+      (let ((views (templedb-agent-layout)))
+        (unwind-protect
+            (progn
+              (should (= (length views) 3))
+              (should (templedb-agent-layout-active-p))
+              (dolist (cell views)
+                (should (eq (buffer-base-buffer (cdr cell)) (current-buffer)))))
+          (dolist (cell views)
+            (when (buffer-live-p (cdr cell)) (kill-buffer (cdr cell)))))))))
+
+(ert-deftest templedb-agent-test/layout-refresh-is-a-noop-without-views ()
+  "The refresh runs on every event, so it must cost nothing and signal
+nothing when the layout was never opened."
+  (templedb-agent-test--in-buffer
+    (should (null templedb-agent--layout-views))
+    (should-not (templedb-agent-layout-active-p))
+    (templedb-agent--layout-refresh)
+    (templedb-agent--handle-event '((type . "run.completed")))
+    (should (null templedb-agent--layout-views))))
+
+(ert-deftest templedb-agent-test/layout-view-mode-binds-the-session-keys ()
+  (should (eq (lookup-key templedb-agent-view-mode-map (kbd "C-c C-c"))
+              'templedb-agent-view-send))
+  (should (eq (lookup-key templedb-agent-view-mode-map (kbd "C-c C-k"))
+              'templedb-agent-view-cancel))
+  (should (eq (lookup-key templedb-agent-view-mode-map (kbd "C-c C-s"))
+              'templedb-agent-view-save))
+  (should (eq (lookup-key templedb-agent-mode-map (kbd "C-c C-3"))
+              'templedb-agent-layout-toggle)))
+
 (provide 'test-templedb-agent)
 ;;; test-templedb-agent.el ends here
