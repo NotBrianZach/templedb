@@ -16,6 +16,20 @@
 (require 'org)
 (require 'ewoc)
 (require 'cl-lib)
+(require 'filenotify)
+
+;; Forward declaration: `templedb-agent-mode' turns the alert watcher on
+;; at buffer setup, but the "Filesystem alerts" section that defines it
+;; sits further down the file. Declaring the variable here keeps the
+;; byte-compiler quiet without reordering the file. (No
+;; `declare-function' for the mode itself — it is defined in this file,
+;; so the compiler resolves the call, and declaring it as well reads as
+;; a second definition.)
+(defvar templedb-agent-alerts-mode)
+
+;; Loaded on demand inside `templedb-agent--alert-desktop' because D-Bus
+;; is not always present (a TTY Emacs, a build host).
+(declare-function notifications-notify "notifications")
 
 ;;;; Configuration
 
@@ -4044,7 +4058,15 @@ Optionally filter by PROJECT slug."
   (use-local-map (make-composed-keymap
                   templedb-agent-mode-map org-mode-map))
   ;; User sections auto-save on idle + kill-buffer, never on run events.
-  (templedb-agent--install-autosave))
+  (templedb-agent--install-autosave)
+  ;; Alerts are about runs you are NOT watching, so the watcher starts
+  ;; the first time an agent buffer exists rather than at load time —
+  ;; loading this file should not spawn a file-notify watch. Skipped
+  ;; under `noninteractive' so the ERT suite, which activates this mode
+  ;; in a temp buffer, neither watches a directory nor fires a desktop
+  ;; notification.
+  (unless (or noninteractive templedb-agent-alerts-mode)
+    (templedb-agent-alerts-mode 1)))
 
 ;;;; Timer
 
@@ -4083,6 +4105,285 @@ Optionally filter by PROJECT slug."
   (unless (get-buffer-window (current-buffer))
     (message "Temple Agent: %s (session #%s)"
              message (or templedb-agent--session-id "?"))))
+
+;;;; Filesystem alerts
+
+;; TempleDB drops one JSON file per terminal/blocked agent event into
+;; `templedb-agent-alert-dir' (producer: src/agent/alerts.py). This
+;; watcher turns each new file into a desktop notification.
+;;
+;; Why not key off the event stream we already receive: that stream only
+;; exists while this Emacs owns the agent process. A run launched from a
+;; shell, from cron, or before the last Emacs restart finishes with
+;; nobody listening — and "the agent is done" is exactly the message you
+;; want once you have walked away from the buffer. The directory is the
+;; shared channel. `templedb-agent--notify-if-hidden' above is
+;; independent of it and stays: that one is an in-buffer courtesy for a
+;; session this Emacs is running.
+;;
+;; The watcher rescans the directory on any notification rather than
+;; trusting the reported action. The producer writes a tempfile and
+;; renames it, which surfaces as `created', `changed' or `renamed'
+;; depending on the backend (inotify reports the rename pair,
+;; gfilenotify does not); a rescan keyed on a seen-table is immune to
+;; the difference.
+
+(defcustom templedb-agent-alert-dir
+  (expand-file-name "~/.local/share/templedb/alerts")
+  "Directory watched for agent alert drop-files.
+Must match `AGENT_ALERT_DIR' on the TempleDB side, which
+`TEMPLEDB_AGENT_ALERT_DIR' overrides."
+  :type 'directory
+  :group 'templedb-agent)
+
+(defcustom templedb-agent-alert-method 'desktop
+  "How to deliver an agent alert.
+- `desktop': an OS notification via D-Bus, falling back to
+  `notify-send', falling back to the echo area.
+- `echo': echo area only.
+- nil: deliver nothing — alerts are still collected for
+  `templedb-agent-alerts-show'."
+  :type '(choice (const :tag "Desktop notification" desktop)
+                 (const :tag "Echo area" echo)
+                 (const :tag "Silent" nil))
+  :group 'templedb-agent)
+
+(defcustom templedb-agent-alert-kinds '("done" "failed" "ask" "login")
+  "Alert kinds that get delivered. Others are collected only.
+The producer writes `done', `failed', `interrupted', `ask', `login' and
+`rate_limited'."
+  :type '(repeat string)
+  :group 'templedb-agent)
+
+(defcustom templedb-agent-alert-replay-on-start nil
+  "If non-nil, deliver alerts already on disk when the watch starts.
+Off by default: the directory keeps a window of recent alerts, so
+replaying it at every Emacs start is noise rather than news."
+  :type 'boolean
+  :group 'templedb-agent)
+
+(defcustom templedb-agent-alert-poll-interval nil
+  "Seconds between fallback directory polls, or nil for notify-only.
+Set this when file notification is unavailable — some network and FUSE
+filesystems — and the watch will also rescan on a timer."
+  :type '(choice (const :tag "Notify only" nil) (number :tag "Seconds"))
+  :group 'templedb-agent)
+
+(defconst templedb-agent--alert-schema 1
+  "Highest payload schema this client understands.
+A file declaring a newer one is skipped rather than guessed at.")
+
+(defconst templedb-agent--alert-log-max 200
+  "How many delivered alerts `templedb-agent--alert-log' retains.")
+
+(defvar templedb-agent--alert-watch nil
+  "File-notify descriptor for the alert directory, or nil.")
+
+(defvar templedb-agent--alert-timer nil
+  "Fallback poll timer for the alert directory, or nil.")
+
+(defvar templedb-agent--alert-debounce nil
+  "Pending debounce timer, or nil. One write can fire several events.")
+
+(defvar templedb-agent--alert-seen (make-hash-table :test 'equal)
+  "Alert basenames already handled, so a rescan never repeats one.")
+
+(defvar templedb-agent--alert-log nil
+  "Alerts seen this session, newest first.")
+
+(defun templedb-agent--alert-files ()
+  "Alert files in `templedb-agent-alert-dir', oldest first.
+Names are timestamp-prefixed by the producer, so string order is time
+order."
+  (when (file-directory-p templedb-agent-alert-dir)
+    (sort (directory-files templedb-agent-alert-dir t "\\.json\\'" t)
+          #'string<)))
+
+(defun templedb-agent--alert-read (path)
+  "Parse the alert at PATH. Returns an alist, or nil if unusable."
+  (condition-case err
+      (let* ((json-object-type 'alist)
+             (json-array-type 'list)
+             (payload (with-temp-buffer
+                        (insert-file-contents path)
+                        (goto-char (point-min))
+                        (json-read))))
+        (if (> (or (alist-get 'schema payload) 0) templedb-agent--alert-schema)
+            (progn
+              (message "Temple Agent: alert %s has schema %s (we speak %s); skipped"
+                       (file-name-nondirectory path)
+                       (alist-get 'schema payload)
+                       templedb-agent--alert-schema)
+              nil)
+          payload))
+    (error
+     (message "Temple Agent: unreadable alert %s: %s"
+              (file-name-nondirectory path) (error-message-string err))
+     nil)))
+
+(defun templedb-agent--alert-desktop (title body urgency)
+  "Raise an OS notification for TITLE/BODY at URGENCY.
+Returns non-nil if something was actually delivered, so the caller can
+fall back to the echo area."
+  (or (and (fboundp 'dbus-get-unique-name)
+           (require 'notifications nil t)
+           (ignore-errors
+             (notifications-notify :title title
+                                   :body body
+                                   :app-name "Temple Agent"
+                                   :urgency (intern urgency))
+             t))
+      (and (executable-find "notify-send")
+           (ignore-errors
+             ;; Destination 0: discard output and do not wait. A
+             ;; notification daemon that hangs must not hang Emacs.
+             (call-process "notify-send" nil 0 nil
+                           "--app-name" "Temple Agent"
+                           "--urgency" urgency
+                           title body)
+             t))))
+
+(defun templedb-agent--alert-deliver (alert)
+  "Collect ALERT and deliver it per `templedb-agent-alert-method'."
+  (let* ((kind (or (alist-get 'kind alert) "done"))
+         (title (or (alist-get 'title alert) "Temple Agent"))
+         (body (or (alist-get 'body alert) ""))
+         (urgency (or (alist-get 'urgency alert) "normal"))
+         (one-line (car (split-string body "\n"))))
+    (push alert templedb-agent--alert-log)
+    (when (> (length templedb-agent--alert-log) templedb-agent--alert-log-max)
+      (setcdr (nthcdr (1- templedb-agent--alert-log-max)
+                      templedb-agent--alert-log)
+              nil))
+    (when (member kind templedb-agent-alert-kinds)
+      (pcase templedb-agent-alert-method
+        ('desktop (or (templedb-agent--alert-desktop title body urgency)
+                      (message "Temple Agent: %s — %s" title one-line)))
+        ('echo (message "Temple Agent: %s — %s" title one-line))
+        (_ nil)))))
+
+(defun templedb-agent--alert-scan (&optional deliver)
+  "Mark every alert file seen, delivering the new ones when DELIVER.
+With DELIVER nil this is a seed: it establishes \"already handled\" for
+what is on disk without notifying about any of it."
+  (dolist (path (templedb-agent--alert-files))
+    (let ((name (file-name-nondirectory path)))
+      (unless (gethash name templedb-agent--alert-seen)
+        ;; Marked seen before the read, not after: the write is atomic,
+        ;; so a parse failure is a genuinely bad file and retrying it on
+        ;; every future scan would warn forever.
+        (puthash name t templedb-agent--alert-seen)
+        (when deliver
+          (when-let ((alert (templedb-agent--alert-read path)))
+            (templedb-agent--alert-deliver alert)))))))
+
+(defun templedb-agent--alert-forget-missing ()
+  "Drop seen-table entries whose file the producer has pruned.
+Safe because alert names are unique — a pruned name never returns."
+  (let ((live (mapcar #'file-name-nondirectory
+                      (templedb-agent--alert-files))))
+    (maphash (lambda (name _v)
+               (unless (member name live)
+                 (remhash name templedb-agent--alert-seen)))
+             templedb-agent--alert-seen)))
+
+(defun templedb-agent--alert-flush ()
+  "Deliver pending alerts and tidy the seen-table."
+  (setq templedb-agent--alert-debounce nil)
+  (templedb-agent--alert-scan t)
+  (templedb-agent--alert-forget-missing))
+
+(defun templedb-agent--alert-fs-callback (_event)
+  "Schedule a rescan. EVENT's action is deliberately ignored."
+  (unless templedb-agent--alert-debounce
+    (setq templedb-agent--alert-debounce
+          (run-with-timer 0.2 nil #'templedb-agent--alert-flush))))
+
+(defun templedb-agent--alert-watch-stop ()
+  "Tear down the alert watch, timers included."
+  (when templedb-agent--alert-watch
+    (ignore-errors (file-notify-rm-watch templedb-agent--alert-watch))
+    (setq templedb-agent--alert-watch nil))
+  (when templedb-agent--alert-timer
+    (cancel-timer templedb-agent--alert-timer)
+    (setq templedb-agent--alert-timer nil))
+  (when templedb-agent--alert-debounce
+    (cancel-timer templedb-agent--alert-debounce)
+    (setq templedb-agent--alert-debounce nil)))
+
+(defun templedb-agent--alert-watch-start ()
+  "Start watching `templedb-agent-alert-dir'."
+  (templedb-agent--alert-watch-stop)
+  (unless (file-directory-p templedb-agent-alert-dir)
+    (ignore-errors (make-directory templedb-agent-alert-dir t)))
+  (if (not (file-directory-p templedb-agent-alert-dir))
+      (message "Temple Agent: alert dir %s unavailable; alerts off"
+               templedb-agent-alert-dir)
+    (clrhash templedb-agent--alert-seen)
+    (templedb-agent--alert-scan templedb-agent-alert-replay-on-start)
+    (setq templedb-agent--alert-watch
+          (ignore-errors
+            (file-notify-add-watch templedb-agent-alert-dir '(change)
+                                   #'templedb-agent--alert-fs-callback)))
+    (when templedb-agent-alert-poll-interval
+      (setq templedb-agent--alert-timer
+            (run-with-timer templedb-agent-alert-poll-interval
+                            templedb-agent-alert-poll-interval
+                            #'templedb-agent--alert-flush)))
+    (unless (or templedb-agent--alert-watch templedb-agent-alert-poll-interval)
+      (message "Temple Agent: file notification unavailable for %s; set `templedb-agent-alert-poll-interval'"
+               templedb-agent-alert-dir))))
+
+;;;###autoload
+(define-minor-mode templedb-agent-alerts-mode
+  "Notify when a TempleDB agent finishes or gets stuck.
+
+Watches `templedb-agent-alert-dir' for drop-files written by any
+TempleDB agent run — including runs this Emacs did not launch — and
+delivers each via `templedb-agent-alert-method'.
+
+Enabled automatically the first time an agent buffer opens. Enable it
+from your init file to catch alerts from the moment Emacs starts."
+  :global t
+  :group 'templedb-agent
+  :lighter ""
+  (if templedb-agent-alerts-mode
+      (templedb-agent--alert-watch-start)
+    (templedb-agent--alert-watch-stop)))
+
+(defun templedb-agent-alerts-show ()
+  "Show the alerts currently on disk, newest first."
+  (interactive)
+  (let ((alerts (nreverse
+                 (delq nil (mapcar #'templedb-agent--alert-read
+                                   (templedb-agent--alert-files))))))
+    (with-current-buffer (get-buffer-create "*Temple Agent Alerts*")
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Alerts in %s  (watch %s)\n\n"
+                        templedb-agent-alert-dir
+                        (if templedb-agent--alert-watch "active" "inactive")))
+        (if (null alerts)
+            (insert "No alerts on disk.\n")
+          (dolist (a alerts)
+            (insert (format "%s  [%s]  %s\n    %s\n\n"
+                            (or (alist-get 'created_at a) "?")
+                            (or (alist-get 'kind a) "?")
+                            (or (alist-get 'title a) "")
+                            (string-replace
+                             "\n" " · " (or (alist-get 'body a) ""))))))
+        (goto-char (point-min)))
+      (special-mode)
+      (display-buffer (current-buffer)))))
+
+(defun templedb-agent-alerts-clear ()
+  "Delete every alert file on disk."
+  (interactive)
+  (let ((n 0))
+    (dolist (path (templedb-agent--alert-files))
+      (when (ignore-errors (delete-file path) t) (setq n (1+ n))))
+    (templedb-agent--alert-forget-missing)
+    (message "Temple Agent: cleared %d alert%s" n (if (= n 1) "" "s"))))
 
 ;;;; Notes persistence
 

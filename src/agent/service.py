@@ -22,6 +22,7 @@ from agent.events import (
     RUN_STATUS_INTERRUPTED, RUN_STATUS_CANCELLED,
     ROLE_USER, ROLE_ASSISTANT,
 )
+from agent import alerts
 from agent import store
 from agent.providers.fake import FakeProvider
 from db_utils import query_one
@@ -87,6 +88,12 @@ class AgentService:
         self._ask_poll_thread = None
         self._ask_poll_stop = threading.Event()
         self._active_sessions = set()   # session_ids currently expecting asks
+        # Filesystem alerts for terminal/blocked events. Registered here
+        # rather than in ProtocolServer so a CLI or cron run alerts too —
+        # the stdio stream only reaches whoever launched the run, and a
+        # finished run is precisely what someone who walked away wants
+        # to hear about.
+        alerts.install(self)
 
     def add_event_callback(self, callback):
         """Register a callback that receives every event as it happens.

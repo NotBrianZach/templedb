@@ -48,13 +48,11 @@ since been fixed.
 > **Resolved.** `templedb admin schema` now returns a non-empty `help`
 > for **all 463** commands (0 empty, verified 2026-10-27), and the
 > `cli_help_is_populated` doctor invariant guards against regression.
-> `admin schema | jq` is now the right way to enumerate the surface (it
+> `admin schema | jq` is the right way to enumerate the surface (it
 > emits JSON with no flag; `--json` is a *global* that must precede the
-> subcommand, and `admin schema --json` is an argparse error). README
-> and `CLAUDE.md` previously said to prefer `--help` instead, and both
-> have been corrected. The diagnosis below is kept
-> because the argparse behaviour that caused it is a trap worth
-> knowing, not because the symptom is live.
+> subcommand, and `admin schema --json` is an argparse error). The
+> diagnosis below is kept because the argparse behaviour that caused it
+> is a trap worth knowing, not because the symptom is live.
 
 `templedb admin schema` exists specifically to "Show JSON schema for CLI
 commands (for agent/scripting use)". It emits 270 KB of JSON. **422 of

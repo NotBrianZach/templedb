@@ -111,17 +111,11 @@ counts — in [`docs/INGEST_ADAPTERS.md`](docs/INGEST_ADAPTERS.md).
 
 The CLI that drives all this is large: **463 commands across ~44k LOC**,
 with `deploy` (73) and `nixos` (54) the biggest groups.
+`templedb admin schema | jq` enumerates the whole surface as JSON.
 [`docs/CLI_SURFACE.md`](docs/CLI_SURFACE.md) maps it, and is candid
 about the rough edges — 50 of 53 interactive prompts are bare `input()`
 whose EOF behaviour under automation is per-call-site, and which
 destructive commands are safe-by-default versus not.
-
-`admin schema` is now a usable inventory: every one of the 463 commands
-serialises a non-empty `help`, and the `cli_help_is_populated` doctor
-check keeps it that way. It used to return empty help for 422 of them,
-which is why older text here and in `docs/` told you to prefer `--help`
-— that advice is obsolete, and `admin schema | jq` is the fastest way
-to enumerate the surface.
 
 You interact with the graph through several surfaces:
 

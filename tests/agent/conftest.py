@@ -36,6 +36,7 @@ now just ensure the DB is initialised (first call migrates) and
 unlink on shutdown (last call)."""
 import atexit
 import os
+import shutil
 import sys
 import sqlite3
 import tempfile
@@ -132,9 +133,27 @@ def _agent_db():
         db_utils.close_connection()
         db_utils.DB_PATH = _test_db_path
 
+    # Agent alerts are a side effect OUTSIDE the DB: AgentService
+    # installs a callback that drops a file for every terminal event, so
+    # without this any test that completes a run litters the developer's
+    # real ~/.local/share/templedb/alerts -- and, once Emacs is watching
+    # that directory, fires a desktop notification per test.
+    alert_dir = tempfile.mkdtemp(prefix='templedb-agent-tests-alerts-')
+    try:
+        import config as _cfg
+    except ImportError:
+        _cfg = None
+        prev_alert_dir = None
+    else:
+        prev_alert_dir = getattr(_cfg, 'AGENT_ALERT_DIR', None)
+        _cfg.AGENT_ALERT_DIR = alert_dir
+
     try:
         yield _test_db_path
     finally:
+        if _cfg is not None and prev_alert_dir is not None:
+            _cfg.AGENT_ALERT_DIR = prev_alert_dir
+        shutil.rmtree(alert_dir, ignore_errors=True)
         if db_utils is not None:
             db_utils.close_connection()
             if prev_db_path is not None:

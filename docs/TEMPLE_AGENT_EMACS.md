@@ -137,6 +137,93 @@ stays responsive during long outputs.
 
 ---
 
+## 4a. Filesystem alerts — being told the agent is done
+
+The event stream above only reaches whoever launched the run. An Emacs
+restarted mid-run, a second frame on another workspace, a
+`templedb ai agent` invocation from cron — none of them see
+`run.completed`, which is exactly the moment someone who walked away
+wants to hear about. In-buffer, a finished run with its buffer hidden
+gets `templedb-agent--notify-if-hidden`, which is an echo-area
+`message`: gone the instant anything else prints.
+
+So terminal and blocked events also get written to disk, and Emacs
+watches the directory.
+
+**Producer** — `src/agent/alerts.py`, registered on
+`AgentService.__init__` (not on `ProtocolServer`, so a CLI or cron run
+alerts too). Six event types drop a file; the rest are ignored, because
+`tool.started` fires hundreds of times a run and alerting on that
+trains you to ignore the channel:
+
+| event | kind | urgency |
+|---|---|---|
+| `run.completed` | `done` | normal |
+| `run.failed` | `failed` | critical |
+| `run.interrupted` | `interrupted` | low |
+| `agent.ask.question` | `ask` | critical |
+| `provider.login_required` | `login` | critical |
+| `provider.rate_limited` | `rate_limited` | normal |
+
+One JSON file per alert in `~/.local/share/templedb/alerts`
+(`TEMPLEDB_AGENT_ALERT_DIR`), named so that string order is time order.
+Written to a tempfile and `os.replace`d, because a watcher fires on
+*create* and would otherwise race a half-written buffer. The payload is
+pre-rendered — `title`, `body`, `urgency` are ready to hand to libnotify
+— so a consumer needs no knowledge of TempleDB event types:
+
+```json
+{"schema": 1, "kind": "ask", "urgency": "critical",
+ "title": "Agent needs you — templedb",
+ "body": "Ship it or hold?\nFix the thing\nsession #412 · templedb",
+ "event_type": "agent.ask.question", "session_id": 412, "run_id": 931,
+ "ask_id": "a42", "project_slug": "templedb", "created_at": "..."}
+```
+
+Writes never raise into the event path: an alert is a courtesy, and
+losing one must not fail the run that produced it. `AGENT_ALERT_KEEP`
+(default 200) bounds the directory — nothing acknowledges an alert, so
+a newest-N window is what stops it growing, and a window rather than
+delete-on-read means a consumer that starts late still sees what it
+missed. `TEMPLEDB_AGENT_ALERTS=false` turns the whole thing off.
+
+**Consumer** — `templedb-agent-alerts-mode`, a global minor mode in
+`templedb-agent.el`. It enables itself the first time an agent buffer
+opens; enable it from your init file to catch alerts from the moment
+Emacs starts. Delivery is a D-Bus notification, falling back to
+`notify-send`, falling back to the echo area.
+
+```elisp
+(setq templedb-agent-alert-method 'desktop)        ; or 'echo, or nil
+(setq templedb-agent-alert-kinds '("done" "failed" "ask" "login"))
+(templedb-agent-alerts-mode 1)
+```
+
+- `M-x templedb-agent-alerts-show` — what is on disk right now
+- `M-x templedb-agent-alerts-clear` — delete it all
+- `templedb-agent-alert-replay-on-start` (default nil) — alerts already
+  on disk when the watch starts are history, not news, so they are
+  marked seen rather than announced
+- `templedb-agent-alert-poll-interval` — set it when file notification
+  is unavailable (some network and FUSE filesystems) and the watch also
+  rescans on a timer
+
+The watcher **rescans the directory** on any notification rather than
+trusting the reported action: the producer's write-then-rename surfaces
+as `created`, `changed` or `renamed` depending on the backend (inotify
+reports the rename pair, gfilenotify does not), and a rescan keyed on a
+seen-table is immune to the difference. The seen-table is also what
+makes repeated scans idempotent, and it drops entries whose file the
+producer has pruned — safe because alert names are unique, so a pruned
+name never returns.
+
+Note for debugging under `emacs --batch`: `sit-for` does not dispatch
+file-notify events, so a batch harness that sleeps will see the watch
+descriptor exist and nothing ever arrive. Pump with
+`(read-event nil nil 0.1)` in a loop, as `filenotify-tests.el` does.
+
+---
+
 ## 5. The MCP bridge — the non-obvious part
 
 When Claude calls `templedb_agent_note_finding`, that tool executes in the
@@ -476,6 +563,7 @@ still used.
 | Session/run lifecycle, recovery, the poll loop | `src/agent/service.py` |
 | Any DB write | `src/agent/store.py` |
 | Event vocabulary | `src/agent/events.py` |
+| Alert drop-files (done/failed/blocked) | `src/agent/alerts.py` |
 | Context basket items | `src/agent/context.py` |
 | Adding a provider | `src/agent/providers/base.py` |
 | MCP tools | `src/mcp_server.py` |

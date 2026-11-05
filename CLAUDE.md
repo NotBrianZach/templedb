@@ -340,9 +340,7 @@ commands as JSON (no flag needed) and every one carries real help text,
 so it — not `--help` in a loop — is the way to inspect the surface. To
 inspect one, pass the path as separate words:
 `templedb admin schema vcs status`. Quoting it as one argument returns
-`NOT_FOUND`. (Both that doc and this file
-used to say the opposite, back when 422 of them serialised `help: ""`.
-The `cli_help_is_populated` doctor check now guards it.)
+`NOT_FOUND`.
 
 `ingest <adapter>` mostly projects TempleDB's own relational tables into
 the graph — it does **not** re-read the authority. `ingest git` reads

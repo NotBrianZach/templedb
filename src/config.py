@@ -141,6 +141,26 @@ LOG_LEVEL = os.environ.get('TEMPLEDB_LOG_LEVEL', 'INFO')
 LOG_FILE = os.path.join(DB_DIR, "templedb.log")
 LOG_TO_FILE = os.environ.get('TEMPLEDB_LOG_TO_FILE', 'false').lower() in ('true', '1', 'yes')
 
+# Agent alerts (see src/agent/alerts.py)
+# Terminal and blocked agent events drop one JSON file here so a
+# consumer that did not launch the run -- a restarted Emacs, a second
+# frame, a shell watcher -- can still be told the agent is done or
+# stuck. NOT created at import time: unlike the blob dirs, nothing
+# reads this path unless the agent runs, so alerts.alert_dir() makes it
+# on first write instead.
+AGENT_ALERTS_ENABLED = os.environ.get(
+    'TEMPLEDB_AGENT_ALERTS', 'true'
+).lower() in ('true', '1', 'yes')
+AGENT_ALERT_DIR = os.environ.get(
+    'TEMPLEDB_AGENT_ALERT_DIR',
+    os.path.join(DB_DIR, "alerts")
+)
+# Newest-N window kept on disk. Nothing acknowledges an alert, so this
+# is what stops the directory growing without bound; a window rather
+# than delete-on-read means a consumer starting late still sees what it
+# missed.
+AGENT_ALERT_KEEP = int(os.environ.get('TEMPLEDB_AGENT_ALERT_KEEP', '200'))
+
 # Deployment Configuration
 DEPLOYMENT_USE_FHS = os.environ.get('TEMPLEDB_DEPLOYMENT_USE_FHS', 'true').lower() in ('true', '1', 'yes')
 

@@ -400,5 +400,190 @@ signal an error. Dev-mode should never crash Emacs."
     (should (string-match-p "checkout not found" msg))))
 
 
+;;;; Filesystem alerts
+;;
+;; These drive the parse/deliver path over a temp directory with
+;; `templedb-agent-alert-method' forced to nil, so nothing reaches a
+;; notification daemon and the suite stays headless.
+
+(defmacro templedb-agent-test--with-alert-dir (&rest body)
+  "Run BODY with a fresh empty alert dir and clean watcher state."
+  (declare (indent 0) (debug (body)))
+  `(let* ((dir (make-temp-file "templedb-alerts-test-" t))
+          (templedb-agent-alert-dir dir)
+          (templedb-agent-alert-method nil)
+          (templedb-agent-alert-kinds '("done" "failed" "ask" "login"))
+          (templedb-agent--alert-seen (make-hash-table :test 'equal))
+          (templedb-agent--alert-log nil))
+     (unwind-protect (progn ,@body)
+       (delete-directory dir t))))
+
+(defun templedb-agent-test--drop-alert (name payload)
+  "Write PAYLOAD (an alist) as alert file NAME in the current alert dir."
+  (let ((path (expand-file-name name templedb-agent-alert-dir)))
+    (with-temp-file path
+      (insert (json-encode payload)))
+    path))
+
+(ert-deftest templedb-agent-test/alert-scan-delivers-new-files-once ()
+  (templedb-agent-test--with-alert-dir
+    (templedb-agent-test--drop-alert
+     "20260101T000001.0-s1-done-1-0.json"
+     '((schema . 1) (kind . "done") (urgency . "normal")
+       (title . "Agent finished — templedb") (body . "Done\nsession #1")))
+    (templedb-agent--alert-scan t)
+    (should (= 1 (length templedb-agent--alert-log)))
+    ;; A second scan must not re-deliver the same file.
+    (templedb-agent--alert-scan t)
+    (should (= 1 (length templedb-agent--alert-log)))))
+
+(ert-deftest templedb-agent-test/alert-seed-scan-delivers-nothing ()
+  "Starting the watch must not replay history."
+  (templedb-agent-test--with-alert-dir
+    (templedb-agent-test--drop-alert
+     "20260101T000001.0-s1-done-1-0.json"
+     '((schema . 1) (kind . "done") (title . "t") (body . "b")))
+    (templedb-agent--alert-scan nil)
+    (should (null templedb-agent--alert-log))
+    ;; ...and the seeded file is not delivered by a later scan either.
+    (templedb-agent--alert-scan t)
+    (should (null templedb-agent--alert-log))))
+
+(ert-deftest templedb-agent-test/alert-files-are-time-ordered ()
+  (templedb-agent-test--with-alert-dir
+    (dolist (n '("20260101T000003.0-s1-done-1-2.json"
+                 "20260101T000001.0-s1-done-1-0.json"
+                 "20260101T000002.0-s1-done-1-1.json"))
+      (templedb-agent-test--drop-alert n '((schema . 1) (kind . "done"))))
+    (should (equal (mapcar #'file-name-nondirectory
+                           (templedb-agent--alert-files))
+                   '("20260101T000001.0-s1-done-1-0.json"
+                     "20260101T000002.0-s1-done-1-1.json"
+                     "20260101T000003.0-s1-done-1-2.json")))))
+
+(ert-deftest templedb-agent-test/alert-ignores-producer-tempfiles ()
+  "The producer's in-flight tempfile has no .json suffix and must be
+invisible to the watcher."
+  (templedb-agent-test--with-alert-dir
+    (with-temp-file (expand-file-name ".tmp-alert-abc123"
+                                      templedb-agent-alert-dir)
+      (insert "{\"half\": "))
+    (should (null (templedb-agent--alert-files)))
+    (templedb-agent--alert-scan t)
+    (should (null templedb-agent--alert-log))))
+
+(ert-deftest templedb-agent-test/alert-future-schema-is-skipped ()
+  (templedb-agent-test--with-alert-dir
+    (templedb-agent-test--drop-alert
+     "20260101T000001.0-s1-done-1-0.json"
+     `((schema . ,(1+ templedb-agent--alert-schema))
+       (kind . "done") (title . "t") (body . "b")))
+    (cl-letf (((symbol-function 'message) #'ignore))
+      (templedb-agent--alert-scan t))
+    (should (null templedb-agent--alert-log))))
+
+(ert-deftest templedb-agent-test/alert-garbage-file-does-not-break-the-scan ()
+  (templedb-agent-test--with-alert-dir
+    (with-temp-file (expand-file-name "20260101T000001.0-bad.json"
+                                      templedb-agent-alert-dir)
+      (insert "{not json"))
+    (templedb-agent-test--drop-alert
+     "20260101T000002.0-s1-done-1-0.json"
+     '((schema . 1) (kind . "done") (title . "t") (body . "b")))
+    (cl-letf (((symbol-function 'message) #'ignore))
+      (templedb-agent--alert-scan t))
+    (should (= 1 (length templedb-agent--alert-log)))))
+
+(ert-deftest templedb-agent-test/alert-kind-filter-applies-to-delivery-only ()
+  "An out-of-filter kind is still collected, just not announced."
+  (templedb-agent-test--with-alert-dir
+    (let ((templedb-agent-alert-kinds '("failed"))
+          (templedb-agent-alert-method 'echo)
+          (said nil))
+      (templedb-agent-test--drop-alert
+       "20260101T000001.0-s1-done-1-0.json"
+       '((schema . 1) (kind . "done") (title . "t") (body . "b")))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (setq said (apply #'format args)))))
+        (templedb-agent--alert-scan t))
+      (should (= 1 (length templedb-agent--alert-log)))
+      (should (null said)))))
+
+(ert-deftest templedb-agent-test/alert-echo-method-announces ()
+  (templedb-agent-test--with-alert-dir
+    (let ((templedb-agent-alert-method 'echo)
+          (said nil))
+      (templedb-agent-test--drop-alert
+       "20260101T000001.0-s1-failed-1-0.json"
+       '((schema . 1) (kind . "failed") (urgency . "critical")
+         (title . "Agent failed — templedb")
+         (body . "exit 1\nsession #1 · templedb")))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (setq said (apply #'format args)))))
+        (templedb-agent--alert-scan t))
+      (should said)
+      (should (string-match-p "Agent failed" said))
+      ;; Only the first body line goes in the echo area.
+      (should-not (string-match-p "\n" said)))))
+
+(ert-deftest templedb-agent-test/alert-desktop-falls-back-to-echo ()
+  "When no notification transport works, the user still gets told."
+  (templedb-agent-test--with-alert-dir
+    (let ((templedb-agent-alert-method 'desktop)
+          (said nil))
+      (templedb-agent-test--drop-alert
+       "20260101T000001.0-s1-ask-1-0.json"
+       '((schema . 1) (kind . "ask") (urgency . "critical")
+         (title . "Agent needs you — templedb") (body . "Ship it or hold?")))
+      (cl-letf (((symbol-function 'templedb-agent--alert-desktop)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq said (apply #'format args)))))
+        (templedb-agent--alert-scan t))
+      (should said)
+      (should (string-match-p "Agent needs you" said)))))
+
+(ert-deftest templedb-agent-test/alert-forget-missing-prunes-seen-table ()
+  "The producer deletes old alerts; the seen-table must not grow forever."
+  (templedb-agent-test--with-alert-dir
+    (let ((path (templedb-agent-test--drop-alert
+                 "20260101T000001.0-s1-done-1-0.json"
+                 '((schema . 1) (kind . "done")))))
+      (templedb-agent--alert-scan t)
+      (should (= 1 (hash-table-count templedb-agent--alert-seen)))
+      (delete-file path)
+      (templedb-agent--alert-forget-missing)
+      (should (= 0 (hash-table-count templedb-agent--alert-seen))))))
+
+(ert-deftest templedb-agent-test/alert-missing-dir-is-not-an-error ()
+  (let ((templedb-agent-alert-dir "/nonexistent/templedb-alerts-nope"))
+    (should (null (templedb-agent--alert-files)))
+    (should (null (templedb-agent--alert-scan t)))))
+
+(ert-deftest templedb-agent-test/alerts-mode-and-commands-exist ()
+  (should (fboundp 'templedb-agent-alerts-mode))
+  (should (commandp 'templedb-agent-alerts-mode))
+  (should (boundp 'templedb-agent-alerts-mode))
+  ;; Global, not buffer-local: one watcher serves every session.
+  (should-not (local-variable-if-set-p 'templedb-agent-alerts-mode))
+  (should (commandp 'templedb-agent-alerts-show))
+  (should (commandp 'templedb-agent-alerts-clear)))
+
+(ert-deftest templedb-agent-test/alerts-show-renders-without-a-watch ()
+  (templedb-agent-test--with-alert-dir
+    (templedb-agent-test--drop-alert
+     "20260101T000001.0-s1-done-1-0.json"
+     '((schema . 1) (kind . "done") (created_at . "2026-01-01T00:00:01")
+       (title . "Agent finished — templedb") (body . "Done\nsession #1")))
+    (cl-letf (((symbol-function 'display-buffer) #'ignore))
+      (templedb-agent-alerts-show))
+    (with-current-buffer "*Temple Agent Alerts*"
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (should (string-match-p "Agent finished" text))
+        (should (string-match-p "\\[done\\]" text))
+        ;; Multi-line bodies are flattened so one alert is one entry.
+        (should (string-match-p "Done · session #1" text))))
+    (kill-buffer "*Temple Agent Alerts*")))
+
 (provide 'test-templedb-agent)
 ;;; test-templedb-agent.el ends here
