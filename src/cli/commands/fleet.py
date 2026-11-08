@@ -528,7 +528,7 @@ class FleetCommands(Command):
                 health = 'healthy' if reachable else 'unreachable'
                 db_utils.execute("""
                     UPDATE fleet_machines
-                    SET health_status = ?, health_check_at = ?, nixos_version = ?
+                    SET health_status = ?, last_health_check_at = ?, nixos_version = ?
                     WHERE id = ?
                 """, (health, now, version if reachable else None, target.machine_id))
 
@@ -542,6 +542,217 @@ class FleetCommands(Command):
             logger.error(f"Error checking network: {e}")
             print(f"❌ Health check error: {e}")
             return 1
+
+    # ── Fleet-wide sweep ──────────────────────────────────────────────
+    #
+    # `check` needs a project and a network, and the six machines here sit
+    # in five different networks — so keeping the table honest meant five
+    # invocations with the right argument pairs, and nobody ran any of
+    # them. Every machine row but one was still `deployment_status='new'`
+    # months after it was added, and the inventory is what every other
+    # fleet feature reads. So: one argumentless command that refreshes
+    # everything, suitable for a timer.
+    #
+    # Two things it does that `check` does not:
+    #
+    # 1. The local machine is read locally, not over SSH. zMothership2's
+    #    row claimed the 2026-10-06 system profile on 2026-11-08 because
+    #    `nixos-rebuild switch` run by hand never writes back, and
+    #    `templedb nixos system rebuild` is the only path that records.
+    #    A sweep that reads /run/current-system cannot drift that way,
+    #    whichever tool did the deploy.
+    #
+    # 2. It reports inventory drift against `config_hosts` — the host
+    #    configs `nixos host list` shows. The two lists had four names
+    #    each that the other had never heard of, which makes "the fleet"
+    #    mean two different things depending on which command you ask.
+
+    LOCAL_HOSTS = ('localhost', '127.0.0.1', '::1', '')
+
+    def _local_hostname(self) -> str:
+        import socket
+        return socket.gethostname()
+
+    def _is_local_machine(self, machine: Dict[str, Any],
+                          hostname: Optional[str] = None) -> bool:
+        """True if MACHINE is the machine we are running on.
+
+        Three ways to be local, because the rows disagree: an explicit
+        `is_local` flag, a loopback target_host, or a machine_name that
+        matches this host (how zMothership2 is recorded — `is_local=0`
+        and `target_host='localhost'`, which is only coherent read as
+        "this machine").
+        """
+        if machine.get('is_local'):
+            return True
+        host = (machine.get('target_host') or '').strip().lower()
+        if host in self.LOCAL_HOSTS:
+            return True
+        return (machine.get('machine_name') or '') == (
+            hostname if hostname is not None else self._local_hostname())
+
+    def _local_machine_facts(self) -> Dict[str, Any]:
+        """System facts for this machine, read off the running system."""
+        def _read(path: str) -> Optional[str]:
+            try:
+                return Path(path).read_text().strip()
+            except OSError:
+                return None
+
+        profile = None
+        try:
+            profile = str(Path('/run/current-system').resolve())
+        except OSError:
+            pass
+
+        return {
+            'reachable': True,
+            'profile': profile,
+            'nixos_version': _read('/run/current-system/nixos-version'),
+            'boot_id': _read('/proc/sys/kernel/random/boot_id'),
+        }
+
+    def _inventory_drift(self) -> Dict[str, List[str]]:
+        """Names known to only one of the two inventories."""
+        fleet = {m['machine_name'] for m in db_utils.query_all(
+            "SELECT machine_name FROM fleet_machines") or []}
+        try:
+            hosts = {h['name'] for h in db_utils.query_all(
+                "SELECT name FROM config_hosts") or []}
+        except Exception:
+            # config_hosts is part of the nixos config compiler; a DB
+            # without it still deserves a working sweep.
+            hosts = set()
+        # Pseudo-machines are local execution contexts for `deploy run`,
+        # not hosts anyone deploys NixOS to, so they are not drift.
+        pseudo = {m['machine_name'] for m in db_utils.query_all(
+            "SELECT machine_name FROM fleet_machines "
+            "WHERE system_type != 'nixos'") or []}
+        return {
+            'only_in_fleet': sorted(fleet - hosts - pseudo),
+            'only_in_host_configs': sorted(hosts - fleet),
+        }
+
+    def _stamp_machine(self, machine_id: int, info: Dict[str, Any]) -> str:
+        """Write one machine's observed state back. Returns the health value."""
+        reachable = bool(info.get('reachable'))
+        health = 'healthy' if reachable else 'unreachable'
+        now = datetime.now().isoformat()
+        profile = info.get('profile')
+
+        previous = db_utils.query_one(
+            "SELECT system_profile FROM fleet_machines WHERE id = ?",
+            (machine_id,)) or {}
+        # last_deployed_at tracks the profile changing, so a deploy made
+        # by any tool — or by hand — is still visible as a deploy.
+        deployed_clause = ''
+        extra: List[Any] = []
+        if reachable and profile and profile != previous.get('system_profile'):
+            deployed_clause = ', last_deployed_at = ?, deployment_status = ?'
+            extra = [now, 'deployed']
+
+        db_utils.execute(f"""
+            UPDATE fleet_machines
+               SET health_status = ?, last_health_check_at = ?,
+                   nixos_version = COALESCE(?, nixos_version),
+                   system_profile = COALESCE(?, system_profile),
+                   boot_id = COALESCE(?, boot_id),
+                   updated_at = ?
+                   {deployed_clause}
+             WHERE id = ?
+        """, (health, now, info.get('nixos_version'), profile,
+              info.get('boot_id'), now, *extra, machine_id))
+        return health
+
+    def sweep(self, args) -> int:
+        """Refresh health and system state for every machine, then report drift.
+
+        Exit status is 0 even when machines are unreachable: a laptop
+        being off is the normal state of a fleet, not a failure of the
+        sweep, and a timer that goes red for it trains you to ignore it.
+        A sweep that cannot run at all still returns 1.
+        """
+        try:
+            machines = db_utils.query_all("""
+                SELECT fm.*, fn.network_name
+                  FROM fleet_machines fm
+                  LEFT JOIN fleet_networks fn ON fn.id = fm.network_id
+                 ORDER BY fm.machine_name
+            """) or []
+        except Exception as e:
+            logger.error(f"Fleet sweep could not read fleet_machines: {e}")
+            print(f"❌ Sweep failed: {e}")
+            return 1
+
+        if not machines:
+            print("No machines in fleet_machines — nothing to sweep.")
+            return 0
+
+        backend = None
+        hostname = self._local_hostname()
+        results: List[Dict[str, Any]] = []
+
+        for m in machines:
+            local = self._is_local_machine(m, hostname)
+            if (m['system_type'] or 'nixos') != 'nixos':
+                # `localhost` / `bza-localhost` are execution contexts for
+                # `deploy run`, not systems anyone deploys NixOS to.
+                # Stamping them with this machine's profile and version
+                # would make two more rows claim to be zMothership2.
+                info = {'reachable': True}
+            elif local:
+                info = self._local_machine_facts()
+            else:
+                if backend is None:
+                    from services.nix_deploy_backend import NixDeployBackend
+                    backend = NixDeployBackend()
+                targets = [t for t in backend.machines_from_db(m['network_id'])
+                           if t.machine_id == m['id']]
+                info = backend.check_machine(targets[0]) if targets else {
+                    'reachable': False}
+
+            health = self._stamp_machine(m['id'], info)
+            results.append({
+                'machine': m['machine_name'],
+                'network': m['network_name'],
+                'host': m['target_host'],
+                'local': local,
+                'health': health,
+                'nixos_version': info.get('nixos_version'),
+                'profile': info.get('profile'),
+            })
+
+        drift = self._inventory_drift()
+
+        if getattr(args, 'as_json', False):
+            print(json.dumps({'machines': results, 'drift': drift}, indent=2))
+            return 0
+
+        print(f"\nSwept {len(results)} machine(s)\n")
+        print(f"{'Machine':<20} {'Network':<14} {'Host':<22} {'Health':<12} {'Version':<26}")
+        print("=" * 96)
+        for r in results:
+            icon = '✅' if r['health'] == 'healthy' else '❌'
+            tag = ' (local)' if r['local'] else ''
+            print(f"{r['machine']:<20} {(r['network'] or '-'):<14} "
+                  f"{(r['host'] or '-'):<22} {icon} {r['health']:<9} "
+                  f"{(r['nixos_version'] or '-'):<26}{tag}")
+
+        healthy = sum(1 for r in results if r['health'] == 'healthy')
+        print(f"\n  {healthy} reachable, {len(results) - healthy} unreachable")
+
+        if drift['only_in_fleet'] or drift['only_in_host_configs']:
+            print("\n⚠ Inventory drift — these two lists disagree:")
+            if drift['only_in_fleet']:
+                print(f"    in fleet_machines, no host config: "
+                      f"{', '.join(drift['only_in_fleet'])}")
+            if drift['only_in_host_configs']:
+                print(f"    has a host config, not in fleet_machines: "
+                      f"{', '.join(drift['only_in_host_configs'])}")
+            print("    Add the missing rows, or delete the dead ones — every "
+                  "fleet feature reads fleet_machines.")
+
+        return 0
 
     def ssh(self, args) -> int:
         """SSH into a machine in a fleet network"""
@@ -1023,6 +1234,14 @@ def _register_fleet_commands(handler, subparsers, cli, prefix='fleet'):
     check_parser.add_argument('project', help='Project slug')
     check_parser.add_argument('network', help='Network name')
     cli.commands[f'{prefix}.check'] = handler.check
+
+    # sweep
+    sweep_parser = subparsers.add_parser(
+        'sweep',
+        help='Refresh every machine in every network (no arguments needed)')
+    sweep_parser.add_argument('--json', action='store_true', dest='as_json',
+                              help='Machine-readable output')
+    cli.commands[f'{prefix}.sweep'] = handler.sweep
 
     # ssh
     ssh_parser = subparsers.add_parser('ssh', help='SSH into a machine')

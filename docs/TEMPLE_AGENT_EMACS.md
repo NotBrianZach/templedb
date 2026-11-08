@@ -147,8 +147,7 @@ the project when you pick it, the id when `session.create` answers, the
 title the first time you send anything (`templedb-agent-send` derives it
 locally with the same rule `Service._run` uses server-side, rather than
 waiting for a reopen to learn it). `templedb-agent--retitle-buffer` is
-idempotent and runs on all of those paths. Panes are renamed with it:
-`*TAgent woofs_projects #357 Conversation*`.
+idempotent and runs on all of those paths.
 
 Two consequences. Nothing may find a session buffer by guessing its
 name — use `templedb-agent--session-buffer`, which matches on
