@@ -339,14 +339,7 @@ FN is called with the plist and should mutate it in place (via
   "Push a new exchange (with USER-TEXT) as the last ewoc node."
   (when templedb-agent--conv-ewoc
     (ewoc-enter-last templedb-agent--conv-ewoc
-                     (templedb-agent--make-exchange :user-text user-text))
-    ;; This insert lands exactly on the Conversation/Next Prompt
-    ;; boundary, and a narrowing's lower bound absorbs text inserted at
-    ;; it — so without this the prompt pane briefly displays the new
-    ;; exchange above its own heading. Agent-driven inserts get the same
-    ;; treatment from `--handle-event'; this covers the user-driven path
-    ;; (`templedb-agent-send'), which is not an event.
-    (templedb-agent--layout-refresh)))
+                     (templedb-agent--make-exchange :user-text user-text))))
 
 (defun templedb-agent--append-assistant-delta (text)
   "Append TEXT to the last exchange's assistant-text and re-render."
@@ -650,10 +643,7 @@ when the agent has written new state into the section."
       ;; Remember what we just rendered so the NEXT rerender can diff.
       (if prev-pair
           (setcdr prev-pair current-ids)
-        (push (cons id current-ids) templedb-agent--previous-entry-ids))
-      ;; The body just changed size, so every pane boundary after this
-      ;; section moved. No-op when no panes are open.
-      (templedb-agent--layout-refresh))))
+        (push (cons id current-ids) templedb-agent--previous-entry-ids)))))
 
 (defun templedb-agent--rerender-findings ()
   (templedb-agent--rerender-section
@@ -1140,10 +1130,7 @@ project's repo path.")
        ;; Payload: {suggestions: ["text 1", "text 2", ...]}. Attaches to
        ;; the last (current) exchange as a "Try next" block below Assistant.
        (let ((suggestions (append (alist-get 'suggestions data) nil)))
-         (templedb-agent--set-suggestions suggestions))))
-    ;; Every event above can move a section boundary. No-op unless
-    ;; `templedb-agent-layout' is showing panes over this buffer.
-    (templedb-agent--layout-refresh)))
+         (templedb-agent--set-suggestions suggestions))))))
 
 ;;;; Agent-to-user asks (mcp__templedb__templedb_ask_user)
 
@@ -1398,10 +1385,7 @@ Must be called from the command loop, never from a process filter."
     ;; Collapse the Guide section by default
     (goto-char (point-min))
     (when (re-search-forward "^\\* Guide" nil t)
-      (org-cycle))
-    ;; A full render erases the buffer, which collapses every pane view's
-    ;; narrowing to nothing. Re-narrow before anyone sees it.
-    (templedb-agent--layout-refresh)))
+      (org-cycle))))
 
 (defun templedb-agent--set-now (text)
   "Update the Now section."
@@ -2123,13 +2107,10 @@ Bound to \\[templedb-agent-reload-from-checkout] in
 ;; on, and on a `condition-case' around the calls. A perspective is a
 ;; convenience; failing to get one must never stop a session opening.
 
-;; Both are defined further down the file, with the roster and with the
-;; pane layout. Declared here so the `let' below binds the defcustom
-;; dynamically rather than quietly making a lexical variable of the same
-;; name, and so the view lookups do not read as free variables.
+;; Both are defined further down the file, with the roster. Declared here
+;; so the `let' below binds the defcustom dynamically rather than quietly
+;; making a lexical variable of the same name.
 (defvar templedb-agent-roster-recent-days)
-(defvar templedb-agent--layout-views)
-(defvar templedb-agent--layout-key)
 (defvar templedb-agent--overseer-buffer)
 
 ;; persp-mode is optional: these are only ever called behind
@@ -2230,8 +2211,8 @@ the session is first given work."
 
 (defun templedb-agent--retitle-buffer (&optional buf)
   "Rename BUF (default current) to match its session, and re-home it.
-Also renames the session's pane views and re-checks its layout, so the
-whole set of buffers for one session stays consistent. Idempotent."
+Also re-checks its layout, so the buffer's name and the layout holding it
+stay consistent. Idempotent."
   (with-current-buffer (or buf (current-buffer))
     (when (and (derived-mode-p 'templedb-agent-mode)
                (not templedb-agent--buffer-name-pinned))
@@ -2243,33 +2224,7 @@ whole set of buffers for one session stays consistent. Idempotent."
           ;; same first message is unlikely but not impossible, and a
           ;; `<2>' suffix beats refusing to open the buffer.
           (rename-buffer want t)))
-      (templedb-agent--retitle-views)
       (templedb-agent--perspective-sync))))
-
-(defun templedb-agent--session-views (&optional base)
-  "Live pane views of BASE (default current buffer).
-
-Found by scanning for indirect buffers rather than by reading
-`templedb-agent--layout-views', because re-running the major mode in the
-base — which `templedb-agent-open' does on an existing buffer — wipes
-that alist via `kill-all-local-variables' while the view buffers live on.
-An orphaned pane still shows this session's text, so it still needs its
-name and its layout fixed."
-  (let ((base (or base (current-buffer))))
-    (cl-remove-if-not
-     (lambda (buf)
-       (and (eq (buffer-base-buffer buf) base)
-            (buffer-local-value 'templedb-agent--layout-key buf)))
-     (buffer-list))))
-
-(defun templedb-agent--retitle-views ()
-  "Rename this session's live pane views to match the base buffer."
-  (dolist (view (templedb-agent--session-views))
-    (with-current-buffer view
-      (let ((want (templedb-agent--layout-view-name
-                   templedb-agent--layout-key)))
-        (unless (equal want (buffer-name))
-          (rename-buffer want t))))))
 
 ;;; Layouts (persp-mode perspectives)
 
@@ -2367,10 +2322,7 @@ project on open, an id from `session.create' — costs at most one claim."
     (let ((name (templedb-agent--perspective-name
                  templedb-agent--project templedb-agent--session-id)))
       (when (and name (not (equal name templedb-agent--perspective)))
-        (templedb-agent--perspective-claim (current-buffer) name)
-        ;; The views live in the same layout as the session they show.
-        (dolist (view (templedb-agent--session-views))
-          (templedb-agent--perspective-claim view name))))))
+        (templedb-agent--perspective-claim (current-buffer) name)))))
 
 (defun templedb-agent--perspective-fleet-view (buf)
   "File a fleet view — roster, manager, overseer — into the agents layout.
@@ -4434,7 +4386,7 @@ Optionally filter by PROJECT slug."
     (define-key map (kbd "C-c C-s") #'templedb-agent-save-user-sections)
     (define-key map (kbd "C-c u")   #'templedb-agent-remove-entry-at-point)
     (define-key map (kbd "C-c C-l") #'templedb-agent-reload-from-checkout)
-    (define-key map (kbd "C-c C-3") #'templedb-agent-layout-toggle)
+    (define-key map (kbd "C-c C-n") #'templedb-agent-focus-prompt)
     map)
   "Keymap for `templedb-agent-mode'.")
 
@@ -4501,350 +4453,22 @@ Optionally filter by PROJECT slug."
     (setq templedb-agent--run-timer nil))
   (setq templedb-agent--run-start-time nil))
 
-;;;; Multi-pane layout
+;;;; Prompt navigation
 
-;; One session is still one buffer. This is a *view* layer on top of it:
-;; indirect buffers (`make-indirect-buffer'), each narrowed to a
-;; contiguous span of the base buffer's sections, each in its own window.
-;;
-;; Indirect buffers rather than three real buffers, because real buffers
-;; would mean re-homing thirty-odd buffer-local variables — the process,
-;; the ewoc, the pending-request table, the section state — into some new
-;; owner, and splitting the Notes persistence path across it. An indirect
-;; buffer shares the base's text AND text properties, so the
-;; `templedb-section' anchors, the ewoc's rendering and
-;; `templedb-agent-save-user-sections' all keep working untouched. What
-;; it does NOT share is narrowing, point, window and `buffer-read-only',
-;; which is exactly the list of things that need to differ per pane.
-;;
-;; Two consequences worth knowing. Editing a view edits the base and
-;; flips the base's modification flag with it, so idle autosave still
-;; fires for text typed in a pane. And killing the base kills every view
-;; automatically — Emacs does that for us, so there is no cleanup hook.
-;;
-;; Overlays are the one thing not shared: the fading-highlight flash on a
-;; fresh agent write is drawn in the base buffer and is invisible in the
-;; panes. The text still updates; only the highlight is missing.
+;; A session is one buffer: one org file, one window, the whole thing in
+;; `templedb-agent--section-order' from Guide down to Scratch. There used
+;; to be a `templedb-agent-layout' on top of this — indirect buffers
+;; narrowed to spans of sections, laid out as three windows — and it is
+;; gone deliberately. Panes bought a split view at the price of a view
+;; layer: every section re-render had to re-narrow every pane, a full
+;; `--render-buffer' collapsed all of them, the fresh-write highlight was
+;; invisible in them, and each one needed a parallel keymap whose commands
+;; delegated back to the base. Use `C-x 3` and `C-c C-n` instead — Emacs
+;; already splits windows, and the one thing the layout gave that plain
+;; windows do not is "put point where I type", which is below.
 
-(defcustom templedb-agent-layout-panes
-  '((:key state :title "State"
-     :sections (guide now goal context))
-    (:key conversation :title "Conversation"
-     :sections (conversation))
-    (:key prompt :title "Prompt"
-     :sections (next-prompt findings todo open-questions notes scratch)))
-  "Panes shown by `templedb-agent-layout', in buffer order.
-
-Each entry is a plist with `:key' (a symbol), `:title' (shown in the
-pane's buffer name) and `:sections' (anchor symbols from
-`templedb-agent--section-order').
-
-A pane's `:sections' must be CONTIGUOUS in that order — a window shows
-one span of the buffer, not an arbitrary selection. Sections belonging
-to no pane are absorbed by the pane in front of them, which is what
-keeps agent-created dynamic sections (rendered after every fixed one)
-visible in the last pane instead of falling off the layout.
-
-The default puts Todo one section from Next Prompt in the same pane, so
-copying a todo into the next message is a yank inside one window. Move
-`findings' and `open-questions' into the `state' pane if you would
-rather have Todo directly under the prompt — that needs a matching
-reorder of `templedb-agent--section-order', since panes cannot
-reorder the buffer."
-  :type '(repeat sexp)
-  :group 'templedb-agent)
-
-(defcustom templedb-agent-layout-sidebar-width 0.3
-  "Width of the first pane. A float is a fraction of the frame, an
-integer is columns."
-  :type '(choice (float :tag "Fraction of frame") (integer :tag "Columns"))
-  :group 'templedb-agent)
-
-(defcustom templedb-agent-layout-prompt-height 0.3
-  "Height of the last pane. A float is a fraction of the column it
-splits, an integer is lines."
-  :type '(choice (float :tag "Fraction") (integer :tag "Lines"))
-  :group 'templedb-agent)
-
-(defcustom templedb-agent-layout-read-only-panes '(conversation)
-  "Pane keys whose view refuses typing.
-The agent owns the Conversation text — the ewoc rewrites it in place —
-so editing there corrupts the render. Read-only costs nothing: copying
-out of a read-only buffer works exactly the same."
-  :type '(repeat symbol)
-  :group 'templedb-agent)
-
-(defcustom templedb-agent-layout-follow-conversation t
-  "If non-nil, the conversation pane sticks to the newest output.
-Only while its point is already at the end — scroll up to read and it
-stops chasing, like a terminal."
-  :type 'boolean
-  :group 'templedb-agent)
-
-(defvar-local templedb-agent--layout-views nil
-  "Alist of (PANE-KEY . VIEW-BUFFER). Buffer-local to the BASE buffer.")
-
-(defvar-local templedb-agent--layout-key nil
-  "Pane key this view buffer shows. Buffer-local to a VIEW buffer.")
-
-(defun templedb-agent--layout-base ()
-  "Return the base agent buffer, whether called from it or from a view."
-  (or (buffer-base-buffer) (current-buffer)))
-
-(defun templedb-agent--layout-pane (key)
-  "Return the pane plist for KEY."
-  (cl-find key templedb-agent-layout-panes
-           :key (lambda (p) (plist-get p :key))))
-
-(defun templedb-agent--layout-pane-keys ()
-  "Pane keys in layout order."
-  (mapcar (lambda (p) (plist-get p :key)) templedb-agent-layout-panes))
-
-(defun templedb-agent--layout-sections-after (key)
-  "Sections owned by panes that come after KEY."
-  (let* ((keys (templedb-agent--layout-pane-keys))
-         (idx (cl-position key keys)))
-    (when idx
-      (cl-loop for pane in (nthcdr (1+ idx) templedb-agent-layout-panes)
-               append (plist-get pane :sections)))))
-
-(defun templedb-agent--layout-bounds (key)
-  "Return (START . END) in the base buffer for pane KEY, or nil.
-
-START is the first of the pane's sections that is actually rendered, so
-a pane survives a section that has not been created yet. END is the
-earliest rendered section owned by a LATER pane, or `point-max' — which
-is what quietly hands the dynamic sections to the last pane."
-  (with-current-buffer (templedb-agent--layout-base)
-    (save-restriction
-      (widen)
-      (let* ((pane (templedb-agent--layout-pane key))
-             (start (cl-loop for id in (plist-get pane :sections)
-                             for pos = (templedb-agent--find-section id)
-                             when pos return pos)))
-        (when start
-          (let* ((after (delq nil (mapcar #'templedb-agent--find-section
-                                          (templedb-agent--layout-sections-after key))))
-                 (later (cl-remove-if (lambda (p) (<= p start)) after)))
-            (cons start (if later (apply #'min later) (point-max)))))))))
-
-(defun templedb-agent--layout-view-name (key)
-  "Buffer name for pane KEY's view.
-Carries the project as well as the id — three panes per session times
-several sessions is where a bare number stops identifying anything. The
-title is left out on purpose: it is already in the base buffer's name,
-and repeating it three times per session buys nothing."
-  (let* ((base (templedb-agent--layout-base))
-         (pane (templedb-agent--layout-pane key))
-         (sid (buffer-local-value 'templedb-agent--session-id base))
-         (project (buffer-local-value 'templedb-agent--project base)))
-    (format "*TAgent %s#%s %s*"
-            (if (and (stringp project) (not (string-empty-p project)))
-                (concat project " ")
-              "")
-            (or sid "?")
-            (or (plist-get pane :title) (symbol-name key)))))
-
-(defun templedb-agent--layout-ensure-view (key)
-  "Return the live view buffer for pane KEY, creating it if needed."
-  (with-current-buffer (templedb-agent--layout-base)
-    (let ((existing (cdr (assq key templedb-agent--layout-views))))
-      (if (buffer-live-p existing)
-          existing
-        (let* ((base (current-buffer))
-               (view (make-indirect-buffer
-                      base
-                      (generate-new-buffer-name
-                       (templedb-agent--layout-view-name key)))))
-          ;; CLONE is nil deliberately: cloning would copy
-          ;; `templedb-agent-mode' into the view, and with it a second
-          ;; autosave timer and a mode line claiming buffer-local state
-          ;; the view does not have. The view gets plain `org-mode' for
-          ;; folding and fontification, plus `templedb-agent-view-mode'
-          ;; for the keys that matter.
-          (with-current-buffer view
-            (org-mode)
-            (templedb-agent-view-mode 1)
-            (setq templedb-agent--layout-key key)
-            (visual-line-mode 1)
-            (setq-local word-wrap t)
-            (setq-local truncate-lines nil)
-            (setq-local mode-line-buffer-identification
-                        '(:eval (templedb-agent--layout-view-mode-line)))
-            (when (memq key templedb-agent-layout-read-only-panes)
-              (setq buffer-read-only t)))
-          (setf (alist-get key templedb-agent--layout-views) view)
-          ;; A pane belongs to the same spacemacs layout as the session it
-          ;; is a window onto.
-          (templedb-agent--perspective-claim
-           view (templedb-agent--perspective-name
-                 templedb-agent--project templedb-agent--session-id))
-          view)))))
-
-(defun templedb-agent--layout-view-mode-line ()
-  "Mode-line identification for a view buffer.
-Reads session state out of the base, since buffer-local variables are
-the one thing an indirect buffer does not inherit."
-  (let ((base (templedb-agent--layout-base)))
-    (format "TAgent #%s %s [%s] %s"
-            (or (buffer-local-value 'templedb-agent--session-id base) "?")
-            (or (buffer-local-value 'templedb-agent--project base) "")
-            (or (buffer-local-value 'templedb-agent--status base) "?")
-            (or (plist-get (templedb-agent--layout-pane
-                            templedb-agent--layout-key)
-                           :title)
-                ""))))
-
-(defun templedb-agent--layout-follow-p (key)
-  "Non-nil if pane KEY should stick to the end of its span.
-True for whichever pane holds the Conversation, since that is the one
-the agent appends to."
-  (and templedb-agent-layout-follow-conversation
-       (memq 'conversation
-             (plist-get (templedb-agent--layout-pane key) :sections))
-       t))
-
-(defun templedb-agent--layout-goto-end (key)
-  "Put pane KEY's view and windows at the end of its span."
-  (let ((view (cdr (assq key (buffer-local-value
-                              'templedb-agent--layout-views
-                              (templedb-agent--layout-base))))))
-    (when (buffer-live-p view)
-      (with-current-buffer view
-        (goto-char (point-max))
-        (dolist (win (get-buffer-window-list view nil t))
-          (set-window-point win (point-max)))))))
-
-(defun templedb-agent--layout-refresh ()
-  "Re-narrow every live view to its pane's current bounds.
-
-Called after anything that can move a section boundary: a full
-`--render-buffer' (which erases the text and so collapses every view's
-restriction), each agent event, and each section re-render. Cheap and
-idempotent — it does nothing at all when no views exist, which is the
-common case."
-  (let ((base (templedb-agent--layout-base)))
-    (when (buffer-live-p base)
-      (let ((views (buffer-local-value 'templedb-agent--layout-views base))
-            (dead nil))
-        (dolist (cell views)
-          (let ((key (car cell))
-                (view (cdr cell)))
-            (if (not (buffer-live-p view))
-                (push key dead)
-              (when-let ((bounds (templedb-agent--layout-bounds key)))
-                (with-current-buffer view
-                  ;; "Was at the end" has to be sampled BEFORE re-narrowing,
-                  ;; because widening the restriction moves point-max.
-                  (let ((at-end (>= (point) (point-max))))
-                    (unless (and (= (point-min) (car bounds))
-                                 (= (point-max) (cdr bounds)))
-                      (narrow-to-region (car bounds) (cdr bounds)))
-                    (when (and at-end (templedb-agent--layout-follow-p key))
-                      (goto-char (point-max))
-                      (dolist (win (get-buffer-window-list view nil t))
-                        (set-window-point win (point-max))))))))))
-        (when dead
-          (with-current-buffer base
-            (setq templedb-agent--layout-views
-                  (cl-remove-if (lambda (c) (memq (car c) dead))
-                                templedb-agent--layout-views))))))))
-
-(defun templedb-agent--layout-size (spec total)
-  "Resolve SPEC against TOTAL: a float is a fraction, an integer is absolute."
-  (max 4 (if (floatp spec) (round (* spec total)) spec)))
-
-(defun templedb-agent--layout-windows (views)
-  "Lay VIEWS out: first pane as a left sidebar, the rest stacked right.
-
-With the default three panes that is State on the left, Conversation
-top right and Prompt short underneath it. Degrades sanely: two panes
-give sidebar plus one, one pane gives a single window."
-  (delete-other-windows)
-  (let ((root (selected-window)))
-    (cond
-     ((null views) nil)
-     ((= (length views) 1)
-      (set-window-buffer root (cdr (car views))))
-     (t
-      (set-window-buffer root (cdr (car views)))
-      (let* ((width (templedb-agent--layout-size
-                     templedb-agent-layout-sidebar-width
-                     (window-total-width root)))
-             (win (split-window root width 'right))
-             (rest (cdr views)))
-        (while (cdr rest)
-          (set-window-buffer win (cdr (car rest)))
-          (setq rest (cdr rest))
-          (let ((keep (- (window-total-height win)
-                         (templedb-agent--layout-size
-                          templedb-agent-layout-prompt-height
-                          (window-total-height win)))))
-            (setq win (split-window win keep 'below))))
-        (set-window-buffer win (cdr (car rest)))
-        (select-window win))))))
-
-;;;###autoload
-(defun templedb-agent-layout ()
-  "Show this agent session as panes in separate windows.
-
-Three windows over one buffer: session state on the left, the
-conversation top right, and your next prompt — with Todo and Findings
-beside it — in a short window underneath, so pulling a todo into the
-next message is a yank within one window.
-
-Configure with `templedb-agent-layout-panes',
-`templedb-agent-layout-sidebar-width' and
-`templedb-agent-layout-prompt-height'. `templedb-agent-layout-quit'
-puts the single buffer back."
-  (interactive)
-  (let ((base (templedb-agent--layout-base)))
-    (unless (eq (buffer-local-value 'major-mode base) 'templedb-agent-mode)
-      (user-error "Not a Temple Agent buffer"))
-    (let ((views (mapcar (lambda (key)
-                           (cons key (templedb-agent--layout-ensure-view key)))
-                         (templedb-agent--layout-pane-keys))))
-      (templedb-agent--layout-refresh)
-      (templedb-agent--layout-windows views)
-      ;; Open on the newest output, not the oldest: the refresh above
-      ;; only follows a pane whose point was ALREADY at the end, which a
-      ;; just-created view's never is.
-      (dolist (key (templedb-agent--layout-pane-keys))
-        (when (templedb-agent--layout-follow-p key)
-          (templedb-agent--layout-goto-end key)))
-      (templedb-agent-layout-focus-prompt)
-      views)))
-
-(defun templedb-agent-layout-quit ()
-  "Kill the pane views and go back to the single agent buffer."
-  (interactive)
-  (let ((base (templedb-agent--layout-base)))
-    (dolist (cell (buffer-local-value 'templedb-agent--layout-views base))
-      ;; Not touching the modification flag on the way out: it is shared
-      ;; with the base, and clearing it here would discard a pending
-      ;; autosave of text the user typed in a pane.
-      (when (buffer-live-p (cdr cell))
-        (kill-buffer (cdr cell))))
-    (with-current-buffer base
-      (setq templedb-agent--layout-views nil))
-    (switch-to-buffer base)
-    (delete-other-windows)))
-
-(defun templedb-agent-layout-active-p ()
-  "Non-nil if any pane view for this session is live."
-  (cl-some (lambda (cell) (buffer-live-p (cdr cell)))
-           (buffer-local-value 'templedb-agent--layout-views
-                               (templedb-agent--layout-base))))
-
-(defun templedb-agent-layout-toggle ()
-  "Open the pane layout, or close it if it is already open."
-  (interactive)
-  (if (templedb-agent-layout-active-p)
-      (templedb-agent-layout-quit)
-    (templedb-agent-layout)))
-
-(defun templedb-agent--layout-prompt-point ()
-  "Position in the base buffer where typing a prompt should start.
+(defun templedb-agent--prompt-point ()
+  "Position in this buffer where typing a prompt should start.
 
 The end of the Next Prompt body, clamped to the start of the body
 proper. The clamp is not cosmetic: `templedb-agent--get-prompt-text'
@@ -4852,112 +4476,29 @@ finds the body with `^\\* Next Prompt\\n\\n', so text typed on the
 heading line or on the blank line under it leaves that regex unmatched
 and `templedb-agent-send' reports an empty prompt. Skipping the blank
 line here is the same step `--set-now' takes for the same reason."
-  (with-current-buffer (templedb-agent--layout-base)
-    (save-restriction
-      (widen)
-      (when-let ((start (templedb-agent--find-section 'next-prompt)))
-        (save-excursion
-          (goto-char start)
-          (forward-line 1)                           ; past the heading
-          (when (looking-at "\n") (forward-char 1))  ; past the blank line
-          (let ((body-start (point)))
-            (goto-char (templedb-agent--section-end 'next-prompt))
-            (skip-chars-backward " \t\n")
-            (max (point) body-start)))))))
-
-(defun templedb-agent-layout-focus-prompt ()
-  "Select the prompt pane with point where you type."
-  (interactive)
-  (let* ((base (templedb-agent--layout-base))
-         (key (car (last (templedb-agent--layout-pane-keys))))
-         (view (cdr (assq key (buffer-local-value
-                               'templedb-agent--layout-views base))))
-         (pos (templedb-agent--layout-prompt-point)))
-    (when (buffer-live-p view)
-      (let ((win (car (get-buffer-window-list view nil t))))
-        (when win (select-window win)))
-      (with-current-buffer view
-        (when (and pos (>= pos (point-min)) (<= pos (point-max)))
-          (goto-char pos)
-          (dolist (w (get-buffer-window-list view nil t))
-            (set-window-point w pos)))))))
-
-(defun templedb-agent-layout-switch-to-base ()
-  "Show the whole single-buffer view in this window."
-  (interactive)
-  (switch-to-buffer (templedb-agent--layout-base)))
-
-;;; View-buffer commands
-;;
-;; A view has no buffer-local session state — that lives in the base —
-;; so every command that touches the session runs there. Text positions
-;; need no translation: the two buffers share one piece of text.
-
-(defmacro templedb-agent-view--in-base (&rest body)
-  "Run BODY in the base agent buffer, widened."
-  (declare (indent 0) (debug (body)))
-  `(let ((base (templedb-agent--layout-base)))
-     (unless (buffer-live-p base)
-       (user-error "The agent buffer this pane belongs to is gone"))
-     (with-current-buffer base
-       (save-restriction
-         (widen)
-         ,@body))))
-
-(defun templedb-agent-view-send ()
-  "Send the Next Prompt text, from a pane."
-  (interactive)
-  (templedb-agent-view--in-base (templedb-agent-send))
-  (templedb-agent-layout-focus-prompt))
-
-(defun templedb-agent-view-cancel ()
-  "Cancel the current run, from a pane."
-  (interactive)
-  (templedb-agent-view--in-base (templedb-agent-cancel)))
-
-(defun templedb-agent-view-resume ()
-  "Resume an interrupted run, from a pane."
-  (interactive)
-  (templedb-agent-view--in-base (templedb-agent-resume)))
-
-(defun templedb-agent-view-save ()
-  "Persist Goal/Notes/Scratch, from a pane."
-  (interactive)
-  (templedb-agent-view--in-base (templedb-agent-save-user-sections)))
-
-(defun templedb-agent-view-remove-entry-at-point ()
-  "Delete the agent-owned entry at point and tell the agent.
-
-Point is handed through unchanged: the view and the base are the same
-text, so the position means the same thing in both."
-  (interactive)
-  (let ((pos (point)))
-    (templedb-agent-view--in-base
+  (save-restriction
+    (widen)
+    (when-let ((start (templedb-agent--find-section 'next-prompt)))
       (save-excursion
-        (goto-char pos)
-        (templedb-agent-remove-entry-at-point)))))
+        (goto-char start)
+        (forward-line 1)                           ; past the heading
+        (when (looking-at "\n") (forward-char 1))  ; past the blank line
+        (let ((body-start (point)))
+          (goto-char (templedb-agent--section-end 'next-prompt))
+          (skip-chars-backward " \t\n")
+          (max (point) body-start))))))
 
-(defvar templedb-agent-view-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'templedb-agent-view-send)
-    (define-key map (kbd "C-c C-k") #'templedb-agent-view-cancel)
-    (define-key map (kbd "C-c C-r") #'templedb-agent-view-resume)
-    (define-key map (kbd "C-c C-s") #'templedb-agent-view-save)
-    (define-key map (kbd "C-c u")   #'templedb-agent-view-remove-entry-at-point)
-    (define-key map (kbd "C-c C-n") #'templedb-agent-layout-focus-prompt)
-    (define-key map (kbd "C-c C-b") #'templedb-agent-layout-switch-to-base)
-    (define-key map (kbd "C-c C-w") #'templedb-agent-layout-quit)
-    map)
-  "Keymap for `templedb-agent-view-mode'.")
+;;;###autoload
+(defun templedb-agent-focus-prompt ()
+  "Move point to the end of the Next Prompt body, ready to type."
+  (interactive)
+  (unless (derived-mode-p 'templedb-agent-mode)
+    (user-error "Not a Temple Agent buffer"))
+  (when-let ((pos (templedb-agent--prompt-point)))
+    (goto-char pos)
+    (when-let ((win (get-buffer-window (current-buffer))))
+      (set-window-point win pos))))
 
-(define-minor-mode templedb-agent-view-mode
-  "Minor mode for a `templedb-agent-layout' pane.
-
-Keeps the session keybindings working in a window that holds only part
-of the buffer. Each command runs in the base buffer."
-  :lighter " TAgentView"
-  :keymap templedb-agent-view-mode-map
-  :group 'templedb-agent)
 
 ;;;; Notifications
 

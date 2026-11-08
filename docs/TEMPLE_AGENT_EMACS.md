@@ -5,8 +5,10 @@ pane, what each moving part is responsible for, and the workflows the design
 is actually built around.
 
 Written 2026-10-01 against `integrations/emacs/templedb-agent.el` and
-`src/agent/`; §7a added 2026-10-15 when the session list became the roster.
-Line numbers are indicative; the structure is the durable part.
+`src/agent/`; §7a added 2026-10-15 when the session list became the roster;
+§3a rewritten 2026-11-08 when the multi-pane layout was removed in favour of
+a strictly single-buffer interface. Line numbers are indicative; the
+structure is the durable part.
 
 ---
 
@@ -100,52 +102,37 @@ marked `DEPRECATED ... kept only for legacy callers`. If you extend this,
 use the anchor API — regex matching breaks the moment a tool result contains
 a line starting with `* `.
 
-### 3a. One buffer, three windows (`C-c C-3`)
+### 3a. One session, one buffer
 
-`templedb-agent-layout` shows the same session as three windows: session
-state (`Guide`/`Now`/`Goal`/`Context`) in a sidebar, the conversation top
-right, and `Next Prompt` — with `Findings`, `Todo` and `Open Questions`
-beside it — in a short window underneath. Pulling a todo into the next
-message is then a yank inside one window. `C-c C-3` toggles;
-`templedb-agent-layout-quit` restores the single buffer.
+A session is exactly one buffer: one org file, one window, every section
+from `Guide` down to `Scratch` in `templedb-agent--section-order`. There
+is no pane layer, no sidebar and no split to configure, and that is a
+deliberate choice rather than a thing not built yet.
 
-It is still **one buffer**. Each pane is an *indirect buffer*
-(`make-indirect-buffer`) narrowed to a contiguous span of the base. That
-matters because the alternative — three real buffers — means re-homing
-thirty-odd buffer-local variables, the process, the ewoc and the
-pending-request table into some new owner, and splitting the Notes
-persistence path across them. An indirect buffer shares the base's text
-*and its text properties*, so the anchor API, the ewoc's in-place
-rendering and `templedb-agent-save-user-sections` all work untouched;
-what it does not share is narrowing, point, window and
-`buffer-read-only`, which is exactly the list of things a pane needs to
-differ on.
+There used to be a `templedb-agent-layout` (`C-c C-3`) that showed the
+same session as three windows — state in a sidebar, conversation top
+right, `Next Prompt` underneath — built from *indirect buffers*
+(`make-indirect-buffer`) each narrowed to a contiguous span of the base.
+It was removed because the split cost a whole second rendering contract:
 
-Consequences worth knowing:
+- Every section re-render, every agent event and every new exchange had
+  to re-narrow every pane, because a narrowing's bounds move when the
+  text inside them changes size.
+- A full `--render-buffer` erases the buffer, which collapsed every
+  pane's restriction to nothing and needed repairing before anyone saw
+  it.
+- Overlays are the one thing an indirect buffer does *not* share, so the
+  fading highlight on a fresh agent write was invisible in the panes.
+- A pane held no buffer-local session state, so every binding needed a
+  parallel `templedb-agent-view-*` wrapper that re-entered the base, and
+  the `,` major-mode leader did not work in a pane at all.
+- Retitling a session meant retitling its panes too, including ones
+  orphaned by re-running the major mode in the base.
 
-- Editing a pane edits the base and flips the base's modification flag,
-  so idle autosave still fires for text typed in a pane.
-- Killing the base kills every pane. Emacs does that itself — there is
-  no cleanup hook to forget.
-- A pane has no buffer-local session state, so `C-c C-c` and friends go
-  through `templedb-agent-view-*` wrappers that run in the base.
-  Positions need no translation: it is the same text.
-- **Overlays are not shared.** The fading highlight on a fresh agent
-  write is drawn in the base and is invisible in the panes; the text
-  still updates.
-- A narrowing's bounds absorb text inserted *at* them, so an insert on
-  the Conversation/`Next Prompt` boundary briefly shows up in the prompt
-  pane. `templedb-agent--layout-refresh` re-narrows every pane after
-  anything structural — each event, each section re-render, each full
-  render, each new exchange — and is a no-op when no panes are open.
-
-Panes are configurable via `templedb-agent-layout-panes`, but a pane's
-sections must be **contiguous** in `templedb-agent--section-order`: a
-window shows one span, not a selection. Sections in no pane are absorbed
-by the pane in front of them, which is what keeps agent-created
-`dynamic:*` sections (rendered after every fixed section) in the last
-pane instead of off the layout. Also
-`templedb-agent-layout-{sidebar-width,prompt-height,read-only-panes,follow-conversation}`.
+None of that bought anything `C-x 3` does not. Split the window with
+Emacs if you want two places in the file at once; the only thing the
+layout gave that plain windows do not is "put point where I type", which
+is `C-c C-n` (`templedb-agent-focus-prompt`).
 
 ### 3b. Buffer names, and which spacemacs layout they land in
 
@@ -400,7 +387,7 @@ therefore not only *what Claude is told* but *where Claude stands*.
 | `C-c C-q` | Close session |
 | `C-c C-s` | Save user-owned sections |
 | `C-c C-l` | Reload from checkout |
-| `C-c C-3` | Toggle the three-window pane layout (§3a) |
+| `C-c C-n` | Jump to the end of `Next Prompt`, ready to type |
 | `C-c u` | Remove agent entry at point |
 | `, i` | Send guidance *while Claude works* |
 | `, g` | Refresh buffer from DB |
@@ -416,11 +403,8 @@ therefore not only *what Claude is told* but *where Claude stands*.
 `, i` is worth internalising — mid-run steering without cancelling is the
 main ergonomic advantage over a terminal.
 
-**In a pane** (§3a) the same `C-c` chords work — `C-c C-c`, `C-c C-k`,
-`C-c C-r`, `C-c C-s`, `C-c u` — plus `C-c C-n` (jump to the prompt pane),
-`C-c C-b` (show the whole buffer in this window) and `C-c C-w` (close the
-layout). The `,` major-mode leader is not rebound in panes; use `C-c C-b`
-for those.
+There is one buffer per session and no pane variants of these keys (§3a),
+so every chord above works wherever point is in the file.
 
 ---
 
