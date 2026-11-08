@@ -83,18 +83,39 @@ def _ensure_writable(path: Path) -> None:
     humans and must not block TempleDB rewriting its own output —
     materialize owns the checkout.
 
-    Deliberately narrow: it adds u+w to a file that is already there and
-    does nothing else. It does not unlock the tree wholesale, because a
-    crash mid-materialize would then leave every file writable and
-    silently retire the guard. It also swallows failures — a file we
+    Deliberately narrow: it adds u+w to a file that is already there, or
+    to the directory that is about to receive a file that is not there
+    yet, and does nothing else. It does not unlock the tree wholesale,
+    because a crash mid-materialize would then leave every file writable
+    and silently retire the guard. It also swallows failures — a file we
     cannot chmod will fail at the write with a clearer error than
     anything raised from here.
+
+    The directory case matters because creating a file needs the write
+    bit on the *parent*, not on the file, and make_readonly() chmods
+    directories to 0555. So publishing a newly added file into a locked
+    checkout failed with EACCES on a path materialize owns, while an edit
+    to an existing file in the same directory went through — publish then
+    reported the checkout as diverging from the DB and advised publishing
+    again, which failed identically. Observed adding
+    tests/test_checkout_lock_spares_git.py 2026-11-08.
+
+    The unlocked directory is left unlocked: DB-owned files there are
+    still 0444, so the guard that stops a human editing generated content
+    is intact, and the only new freedom is creating an untracked file —
+    which templedb already reports rather than silently adopts.
     """
     try:
         if path.exists():
             mode = path.stat().st_mode & 0o777
             if not mode & 0o200:
                 path.chmod(mode | 0o200)
+            return
+        parent = path.parent
+        if parent.is_dir():
+            mode = parent.stat().st_mode & 0o777
+            if not mode & 0o200:
+                parent.chmod(mode | 0o200)
     except OSError:
         pass
 
@@ -549,8 +570,29 @@ class SystemService:
                 # Enable git daemon export
                 (git_dir / "git-daemon-export-ok").touch()
 
-            subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
-                           capture_output=True, check=False)
+            # A failed stage or commit here is NOT cosmetic, which is why
+            # neither is check=False any more. The caller's next step is
+            # pushing to a mirror, and git -- not the DB, and not this
+            # directory -- is what a push and a flake pin read. So a git
+            # step that fails while materialize reports success produces a
+            # push of the PREVIOUS head, announced as "Published", and a
+            # flake rev that builds stale source. That is exactly what a
+            # read-only .git did on 2026-11-08 (see `_SKIP_DIRS` in
+            # sync/permissions.py). Returning None instead makes publish
+            # refuse to push, which is its documented policy for a failed
+            # earlier step.
+            add = subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
+                                 capture_output=True, text=True, check=False)
+            if add.returncode != 0:
+                logger.error(
+                    f"Materialize wrote {written} files to {checkout_dir} but "
+                    f"`git add -A` failed: {(add.stderr or '').strip()}. The "
+                    f"files on disk are correct and git has not recorded "
+                    f"them, so nothing downstream (mirror push, flake pin, "
+                    f"git daemon) would see them. If .git is read-only: "
+                    f"chmod -R u+w {checkout_dir}/.git and re-run."
+                )
+                return None
 
             # Only commit if there are actual changes (avoid noisy empty commits)
             diff_result = subprocess.run(
@@ -559,15 +601,24 @@ class SystemService:
             )
             if diff_result.returncode != 0:
                 # There are staged changes — commit them
-                subprocess.run(
+                commit = subprocess.run(
                     ["git", "commit", "-m",
                      f"TempleDB materialize ({written} files)"],
-                    cwd=str(checkout_dir), capture_output=True, check=False,
+                    cwd=str(checkout_dir), capture_output=True, text=True,
+                    check=False,
                     env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
                          "GIT_AUTHOR_EMAIL": "templedb@localhost",
                          "GIT_COMMITTER_NAME": "TempleDB",
                          "GIT_COMMITTER_EMAIL": "templedb@localhost"}
                 )
+                if commit.returncode != 0:
+                    logger.error(
+                        f"Materialize staged {written} files in "
+                        f"{checkout_dir} but `git commit` failed: "
+                        f"{(commit.stderr or commit.stdout or '').strip()}. "
+                        f"Nothing downstream would ship them."
+                    )
+                    return None
 
             suffix = f" ({deleted} stale removed)" if deleted else ""
             logger.info(f"Materialized {written} files to {checkout_dir}{suffix}")
@@ -683,23 +734,38 @@ class SystemService:
                 fpath.chmod(0o444)
                 locked += 1
 
-        # Final git commit (only if changes exist)
-        subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
-                       capture_output=True, check=False)
+        # Final git commit (only if changes exist). Logged on failure for
+        # the same reason as in `materialize_from_db`: a lost commit here
+        # is invisible until a later push ships the wrong head.
+        add = subprocess.run(["git", "add", "-A"], cwd=str(checkout_dir),
+                             capture_output=True, text=True, check=False)
+        if add.returncode != 0:
+            logger.error(
+                f"lock_checkout: `git add -A` failed in {checkout_dir}: "
+                f"{(add.stderr or '').strip()}. {locked} file(s) were "
+                f"locked but git recorded nothing."
+            )
+            return locked
         diff_result = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
             cwd=str(checkout_dir), capture_output=True, check=False
         )
         if diff_result.returncode != 0:
-            subprocess.run(
+            commit = subprocess.run(
                 ["git", "commit", "-m",
                  f"TempleDB locked ({locked} files read-only)"],
-                cwd=str(checkout_dir), capture_output=True, check=False,
+                cwd=str(checkout_dir), capture_output=True, text=True,
+                check=False,
                 env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",
                      "GIT_AUTHOR_EMAIL": "templedb@localhost",
                      "GIT_COMMITTER_NAME": "TempleDB",
                      "GIT_COMMITTER_EMAIL": "templedb@localhost"}
             )
+            if commit.returncode != 0:
+                logger.error(
+                    f"lock_checkout: `git commit` failed in {checkout_dir}: "
+                    f"{(commit.stderr or commit.stdout or '').strip()}"
+                )
         return locked
 
     def unlock_checkout(self, project_slug: str):

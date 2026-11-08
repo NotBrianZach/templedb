@@ -9,6 +9,26 @@ from logger import get_logger
 
 logger = get_logger(__name__)
 
+# Directories these functions must not descend into.
+#
+# `.git` is the load-bearing entry. The read-only guard exists to stop
+# *humans* editing DB-owned files in a checkout; git's own state is not
+# one of those files, and locking it breaks the tooling that depends on
+# it. Concretely: chmod 0444 on `.git/index` and 0555 on `.git/` makes
+# `git add -A` die with EACCES on `.git/index.lock`. Both
+# `SystemService.materialize_from_db` and `lock_checkout` run `git add -A`
+# with `check=False`, so the failure was silent, the materialize commit
+# never happened, and the mirror push that followed shipped the PREVIOUS
+# head while reporting success — after which a flake pin taken from that
+# head built stale source. Observed on the templedb checkout 2026-11-08,
+# locked by `project checkout` (no --writable) three publishes earlier.
+#
+# Every other place in this codebase that walks a checkout already
+# excludes `.git` for the same reason (`materialize_from_db`'s
+# `_SKIP_DIRS`, `lock_checkout`, `unlock_checkout`); this was the one
+# walker that did not.
+_SKIP_DIRS = {'.git'}
+
 
 def make_readonly(path: Union[str, Path]) -> None:
     """
@@ -16,6 +36,8 @@ def make_readonly(path: Union[str, Path]) -> None:
 
     Directories: r-xr-xr-x (555) - need execute to traverse
     Files: r--r--r-- (444)
+
+    `.git` is left alone — see `_SKIP_DIRS`.
     """
     path = Path(path)
 
@@ -30,6 +52,9 @@ def make_readonly(path: Union[str, Path]) -> None:
 
     # Directory: recursively make everything read-only
     for root, dirs, files in os.walk(path):
+        # Prune in place so os.walk never descends; this also removes the
+        # entry from the chmod loop below, leaving `.git` itself untouched.
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
         # Make directories r-xr-xr-x (need x to traverse)
         for d in dirs:
             dir_path = Path(root) / d
@@ -63,6 +88,10 @@ def make_writable(path: Union[str, Path]) -> None:
 
     Directories: rwxr-xr-x (755)
     Files: rw-r--r-- (644)
+
+    `.git` is left alone — see `_SKIP_DIRS`. Skipping it here is not just
+    symmetry with `make_readonly`: a blanket 0644 over `.git` would strip
+    the exec bit from every hook in `.git/hooks`.
     """
     path = Path(path)
 
@@ -80,6 +109,7 @@ def make_writable(path: Union[str, Path]) -> None:
 
     # Directory: recursively make everything writable
     for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
         # Make directories rwxr-xr-x
         for d in dirs:
             dir_path = Path(root) / d
