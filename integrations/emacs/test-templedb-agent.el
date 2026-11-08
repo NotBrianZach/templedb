@@ -836,5 +836,156 @@ nothing when the layout was never opened."
   (should (eq (lookup-key templedb-agent-mode-map (kbd "C-c C-3"))
               'templedb-agent-layout-toggle)))
 
+;;;; Buffer names and spacemacs layouts
+;;
+;; persp-mode is absent in batch, so `--persp-active-p' is nil and every
+;; claim is a no-op — which is itself worth asserting, since a session
+;; must open the same whether or not layouts exist. The scope arithmetic
+;; is tested with that predicate stubbed true.
+
+(ert-deftest templedb-agent-test/buffer-name-grows-with-the-identity ()
+  "Identity arrives in pieces, and each piece has to show up in the name."
+  (should (equal (templedb-agent--buffer-name) "*Temple Agent: new*"))
+  (should (equal (templedb-agent--buffer-name "woofs") "*Temple Agent: woofs*"))
+  (should (equal (templedb-agent--buffer-name nil 357) "*Temple Agent: #357*"))
+  (should (equal (templedb-agent--buffer-name "woofs" 357 "fix the shop test")
+                 "*Temple Agent: woofs #357 fix the shop test*"))
+  ;; An empty project is what `session.open' hands back for a session
+  ;; with no project row, and it must not leave a stray separator.
+  (should (equal (templedb-agent--buffer-name "" 357) "*Temple Agent: #357*")))
+
+(ert-deftest templedb-agent-test/clean-title-is-one-truncated-line ()
+  (let ((templedb-agent-buffer-name-title-width 10))
+    (should (equal (templedb-agent--clean-title "a\nb\tc") "a b c"))
+    (should (equal (templedb-agent--clean-title "   ") nil))
+    (should (equal (templedb-agent--clean-title nil) nil))
+    (should (equal (templedb-agent--clean-title "0123456789abcdef")
+                   "012345678…")))
+  (let ((templedb-agent-buffer-name-title-width nil))
+    (should (equal (templedb-agent--clean-title "0123456789abcdef")
+                   "0123456789abcdef"))))
+
+(ert-deftest templedb-agent-test/title-from-message-matches-the-server ()
+  "The server titles a session with `content[:80].strip()' plus an
+ellipsis when it cut. Drift here means the buffer name and the roster row
+disagree about what the same session is called."
+  (should (equal (templedb-agent--title-from-message "  ship it  ") "ship it"))
+  (should (equal (templedb-agent--title-from-message "") nil))
+  (let* ((long (make-string 100 ?x))
+         (title (templedb-agent--title-from-message long)))
+    (should (equal title (concat (make-string 80 ?x) "...")))))
+
+(ert-deftest templedb-agent-test/retitle-tracks-session-state ()
+  (templedb-agent-test--in-buffer
+    (setq templedb-agent--project "woofs")
+    (templedb-agent--retitle-buffer)
+    (should (equal (buffer-name) "*Temple Agent: woofs*"))
+    (setq templedb-agent--session-id 357)
+    (templedb-agent--retitle-buffer)
+    (should (equal (buffer-name) "*Temple Agent: woofs #357*"))
+    (setq templedb-agent--session-title "fix the shop test")
+    (templedb-agent--retitle-buffer)
+    (should (equal (buffer-name) "*Temple Agent: woofs #357 fix the shop test*"))
+    ;; Idempotent: it runs on every session event.
+    (templedb-agent--retitle-buffer)
+    (should (equal (buffer-name) "*Temple Agent: woofs #357 fix the shop test*"))))
+
+(ert-deftest templedb-agent-test/retitle-leaves-a-pinned-buffer-alone ()
+  "The overseer buffer is found by exact name, so session state must not
+rename it."
+  (templedb-agent-test--in-buffer
+    (rename-buffer "*Temple Agent: Fleet*" t)
+    (setq templedb-agent--buffer-name-pinned t
+          templedb-agent--project "woofs"
+          templedb-agent--session-id 358)
+    (templedb-agent--retitle-buffer)
+    (should (equal (buffer-name) "*Temple Agent: Fleet*"))))
+
+(ert-deftest templedb-agent-test/send-names-the-buffer-for-the-task ()
+  "Dispatching is the moment a session stops being anonymous — the title
+the server will derive has to land in the buffer name without waiting
+for a reopen."
+  (templedb-agent-test--in-buffer
+    (setq templedb-agent--project "woofs"
+          templedb-agent--session-id 357)
+    (goto-char (templedb-agent--layout-prompt-point))
+    (insert "rename the agent buffers")
+    (cl-letf (((symbol-function 'templedb-agent--send)
+               (lambda (&rest _) nil)))
+      (templedb-agent-send))
+    (should (equal templedb-agent--session-title "rename the agent buffers"))
+    (should (equal (buffer-name)
+                   "*Temple Agent: woofs #357 rename the agent buffers*"))))
+
+(ert-deftest templedb-agent-test/session-buffer-is-found-by-state-not-name ()
+  (templedb-agent-test--in-buffer
+    (setq templedb-agent--session-id 357)
+    (rename-buffer "*Temple Agent: woofs #357 whatever*" t)
+    (should (eq (templedb-agent--session-buffer 357) (current-buffer)))
+    (should (null (templedb-agent--session-buffer 999)))))
+
+(ert-deftest templedb-agent-test/view-names-carry-project-and-id ()
+  (templedb-agent-test--in-buffer
+    (setq templedb-agent--project "woofs"
+          templedb-agent--session-id 357)
+    (should (equal (templedb-agent--layout-view-name 'conversation)
+                   "*TAgent woofs #357 Conversation*"))
+    (setq templedb-agent--project nil)
+    (should (equal (templedb-agent--layout-view-name 'state)
+                   "*TAgent #357 State*"))))
+
+(ert-deftest templedb-agent-test/retitle-renames-live-views ()
+  (templedb-agent-test--with-views
+    (setq templedb-agent--project "woofs"
+          templedb-agent--session-id 357)
+    (templedb-agent--retitle-buffer)
+    (should (equal (buffer-name (cdr (assq 'prompt views)))
+                   "*TAgent woofs #357 Prompt*"))))
+
+(ert-deftest templedb-agent-test/retitle-renames-orphaned-views ()
+  "Re-running the major mode in the base wipes `--layout-views' and
+leaves the panes alive, which is the state every long-lived session was
+found in. A pane orphaned that way still shows the session, so it still
+has to be renamed."
+  (templedb-agent-test--with-views
+    (setq templedb-agent--project "woofs"
+          templedb-agent--session-id 357)
+    (let ((orphan (cdr (assq 'state views))))
+      (setq templedb-agent--layout-views nil)
+      (should (member orphan (templedb-agent--session-views)))
+      (templedb-agent--retitle-buffer)
+      (should (equal (buffer-name orphan) "*TAgent woofs #357 State*")))))
+
+(ert-deftest templedb-agent-test/perspective-names-follow-the-scope ()
+  (cl-letf (((symbol-function 'templedb-agent--persp-active-p) (lambda () t)))
+    (let ((templedb-agent-perspective-prefix "@"))
+      (let ((templedb-agent-perspectives 'project))
+        (should (equal (templedb-agent--perspective-name "woofs" 357) "@woofs"))
+        ;; No project yet (opening by id): nothing to claim the buffer.
+        (should (null (templedb-agent--perspective-name nil 357)))
+        (should (null (templedb-agent--perspective-name "" 357))))
+      (let ((templedb-agent-perspectives 'session))
+        (should (equal (templedb-agent--perspective-name "woofs" 357)
+                       "@agent#357"))
+        (should (null (templedb-agent--perspective-name "woofs" nil))))
+      (let ((templedb-agent-perspectives 'fleet)
+            (templedb-agent-perspective-fleet-name "agents"))
+        (should (equal (templedb-agent--perspective-name) "@agents")))
+      (let ((templedb-agent-perspectives nil))
+        (should (null (templedb-agent--perspective-name "woofs" 357)))))))
+
+(ert-deftest templedb-agent-test/perspectives-are-inert-without-persp-mode ()
+  "Batch has no persp-mode. Naming still works, claiming does nothing,
+and nothing signals — a session must open identically either way."
+  (should-not (templedb-agent--persp-active-p))
+  (should (null (templedb-agent--perspective-name "woofs" 357)))
+  (should (null (templedb-agent--perspective-enter nil)))
+  (templedb-agent-test--in-buffer
+    (setq templedb-agent--project "woofs"
+          templedb-agent--session-id 357)
+    (templedb-agent--retitle-buffer)
+    (should (equal (buffer-name) "*Temple Agent: woofs #357*"))
+    (should (null templedb-agent--perspective))))
+
 (provide 'test-templedb-agent)
 ;;; test-templedb-agent.el ends here

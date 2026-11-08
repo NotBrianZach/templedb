@@ -838,6 +838,16 @@ its state was mutated."
 (defvar-local templedb-agent--run-id nil "Current run ID.")
 (defvar-local templedb-agent--status "created" "Current session status.")
 (defvar-local templedb-agent--project nil "Primary project slug.")
+(defvar-local templedb-agent--session-title nil
+  "The session's title — what the roster and `fleet' show for this id.
+Server-side it is the first 80 characters of the first user message;
+`templedb-agent-send' derives the same string locally so the buffer name
+stops saying just `#357' the moment the session has something to do.")
+(defvar-local templedb-agent--buffer-name-pinned nil
+  "Non-nil if session state must not rewrite this buffer's name.
+Set in the overseer buffer, which other code finds by exact name.")
+(defvar-local templedb-agent--perspective nil
+  "Spacemacs layout (persp-mode perspective) this buffer was claimed by.")
 (defvar-local templedb-agent--projects nil "List of project slugs in context.")
 (defvar-local templedb-agent--context-config nil
   "Context config per project. Alist of (slug . items-alist).")
@@ -1928,6 +1938,14 @@ output blobs are not persisted per event, so we can't reproduce them."
       (user-error "No message to send. Type in the Next Prompt section"))
     ;; Auto-set goal from first message
     (templedb-agent--auto-goal-from-message text)
+    ;; The server auto-titles from this same message. Derive it here too,
+    ;; so the buffer stops being "#357" the moment it has a job — waiting
+    ;; for a reopen to learn its own title is what made a dispatched fleet
+    ;; unreadable.
+    (unless templedb-agent--session-title
+      (setq templedb-agent--session-title
+            (templedb-agent--title-from-message text))
+      (templedb-agent--retitle-buffer))
     ;; Fold prior exchanges before appending the new one (gated on eob).
     (templedb-agent--collapse-old-exchanges)
     ;; Push a new exchange node into the ewoc for this turn.
@@ -2066,8 +2084,11 @@ Bound to \\[templedb-agent-reload-from-checkout] in
        (setq templedb-agent--status (alist-get 'status session))
        (setq templedb-agent--project
              (or (alist-get 'project_slug session) templedb-agent--project))
+       (setq templedb-agent--session-title
+             (or (alist-get 'title session) templedb-agent--session-title))
        (setq templedb-agent--provider
              (or (alist-get 'provider_name session) templedb-agent--provider))
+       (templedb-agent--retitle-buffer)
        (templedb-agent--render-buffer)
        (when messages
          (templedb-agent--restore-conversation messages events-by-run))
@@ -2080,6 +2101,330 @@ Bound to \\[templedb-agent-reload-from-checkout] in
            (templedb-agent--set-section-text "Scratch" s)))
        (templedb-agent--restore-sections sections)
        (goto-char (min pos (point-max)))))))
+
+;;;; Buffer names and spacemacs layouts
+;;
+;; Two complaints with one cause. A session buffer used to be named for
+;; whatever we happened to know when we created it — a project slug, or a
+;; bare `#357' — and nothing renamed it once the session had an identity.
+;; Dispatch five agents and the buffer list grows five rows that differ
+;; only by a number you then have to look up in the roster, and all five
+;; land in whichever layout you were working in.
+;;
+;; So two things. Names carry project, id and the session's own title
+;; (the first 80 characters of its first user message — the same string
+;; `fleet' and the roster show), and `templedb-agent--retitle-buffer' is
+;; called every time one of those three becomes known; it is idempotent,
+;; so calling it on every session event is fine. And each session buffer
+;; is claimed by a spacemacs layout — a persp-mode perspective — so the
+;; fleet stops piling into the layout you are reading code in.
+;;
+;; Everything persp here is guarded twice: on `persp-mode' actually being
+;; on, and on a `condition-case' around the calls. A perspective is a
+;; convenience; failing to get one must never stop a session opening.
+
+;; Both are defined further down the file, with the roster and with the
+;; pane layout. Declared here so the `let' below binds the defcustom
+;; dynamically rather than quietly making a lexical variable of the same
+;; name, and so the view lookups do not read as free variables.
+(defvar templedb-agent-roster-recent-days)
+(defvar templedb-agent--layout-views)
+(defvar templedb-agent--layout-key)
+(defvar templedb-agent--overseer-buffer)
+
+;; persp-mode is optional: these are only ever called behind
+;; `templedb-agent--persp-active-p'.
+(declare-function persp-get-by-name "persp-mode" (name &optional phash default))
+(declare-function persp-add-new "persp-mode" (name &optional phash))
+(declare-function persp-add-buffer "persp-mode" (&rest args))
+(declare-function persp-remove-buffer "persp-mode" (&rest args))
+(declare-function persp-contain-buffer-p "persp-mode" (&rest args))
+(declare-function persp-frame-switch "persp-mode" (name &optional frame))
+(declare-function persp-switch "persp-mode" (name &optional frame))
+(declare-function persp-persps "persp-mode" (&rest args))
+(declare-function persp-name "persp-mode" (persp))
+(declare-function perspective-p "persp-mode" (obj))
+
+(defcustom templedb-agent-buffer-name-title-width 36
+  "Characters of the session title to keep in a buffer name.
+The whole title can be 80 characters, which is longer than most
+buffer-switcher columns. Nil keeps all of it."
+  :type '(choice (const :tag "Whole title" nil) integer)
+  :group 'templedb-agent)
+
+(defcustom templedb-agent-perspectives 'project
+  "Which spacemacs layout a Temple Agent session buffer belongs in.
+
+  `project'  one layout per project — `@woofs_projects'. The default:
+             layouts are long-lived and shared by every session on the
+             project, which is how you actually work on one.
+  `fleet'    one layout for every agent, named by
+             `templedb-agent-perspective-fleet-name'. The roster and the
+             manager join it too, since in this mode the layout *is* the
+             fleet view.
+  `session'  one layout per session — `@agent#357'. Maximum isolation,
+             and a layout to kill (`SPC l x') for every session you
+             finish.
+  nil        off; buffers land wherever they are created, as before.
+
+Ignored unless `persp-mode' is on — without it there are no layouts to
+put anything in."
+  :type '(choice (const :tag "Per project" project)
+                 (const :tag "One fleet layout" fleet)
+                 (const :tag "Per session" session)
+                 (const :tag "Off" nil))
+  :group 'templedb-agent)
+
+(defcustom templedb-agent-perspective-prefix "@"
+  "Prefix for layout names this file creates.
+`@' is the spacemacs convention for a named layout, which is what
+`spacemacs|define-custom-layout' uses."
+  :type 'string
+  :group 'templedb-agent)
+
+(defcustom templedb-agent-perspective-fleet-name "agents"
+  "Layout name (after the prefix) used when `templedb-agent-perspectives'
+is `fleet'."
+  :type 'string
+  :group 'templedb-agent)
+
+(defcustom templedb-agent-perspective-switch t
+  "If non-nil, opening a session switches the frame to its layout.
+Nil files the buffer into its layout without moving you — which is what
+you want when something is dispatching a batch of agents in the
+background and you are reading something else."
+  :type 'boolean
+  :group 'templedb-agent)
+
+(defun templedb-agent--clean-title (title)
+  "Return TITLE as one truncated line fit for a buffer name, or nil."
+  (when (stringp title)
+    (let ((flat (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " title))))
+      (unless (string-empty-p flat)
+        (if templedb-agent-buffer-name-title-width
+            (truncate-string-to-width
+             flat templedb-agent-buffer-name-title-width nil nil "…")
+          flat)))))
+
+(defun templedb-agent--title-from-message (text)
+  "The title the server will derive from TEXT.
+Mirrors the auto-title in `Service._run' (`src/agent/service.py') so the
+buffer name and the roster row agree on what this session is called."
+  (let ((head (string-trim (substring text 0 (min 80 (length text))))))
+    (unless (string-empty-p head)
+      (if (> (length text) 80) (concat head "...") head))))
+
+(defun templedb-agent--buffer-name (&optional project session-id title)
+  "Buffer name for a session, from as much of its identity as is known.
+Everything is optional because identity arrives in pieces: the project
+when you pick it, the id when `session.create' answers, the title when
+the session is first given work."
+  (let ((parts (delq nil
+                     (list (and (stringp project)
+                                (not (string-empty-p project))
+                                project)
+                           (and session-id (format "#%s" session-id))
+                           (templedb-agent--clean-title title)))))
+    (format "*Temple Agent: %s*"
+            (if parts (string-join parts " ") "new"))))
+
+(defun templedb-agent--retitle-buffer (&optional buf)
+  "Rename BUF (default current) to match its session, and re-home it.
+Also renames the session's pane views and re-checks its layout, so the
+whole set of buffers for one session stays consistent. Idempotent."
+  (with-current-buffer (or buf (current-buffer))
+    (when (and (derived-mode-p 'templedb-agent-mode)
+               (not templedb-agent--buffer-name-pinned))
+      (let ((want (templedb-agent--buffer-name templedb-agent--project
+                                               templedb-agent--session-id
+                                               templedb-agent--session-title)))
+        (unless (equal want (buffer-name))
+          ;; UNIQUE, not an error: two sessions on one project with the
+          ;; same first message is unlikely but not impossible, and a
+          ;; `<2>' suffix beats refusing to open the buffer.
+          (rename-buffer want t)))
+      (templedb-agent--retitle-views)
+      (templedb-agent--perspective-sync))))
+
+(defun templedb-agent--session-views (&optional base)
+  "Live pane views of BASE (default current buffer).
+
+Found by scanning for indirect buffers rather than by reading
+`templedb-agent--layout-views', because re-running the major mode in the
+base — which `templedb-agent-open' does on an existing buffer — wipes
+that alist via `kill-all-local-variables' while the view buffers live on.
+An orphaned pane still shows this session's text, so it still needs its
+name and its layout fixed."
+  (let ((base (or base (current-buffer))))
+    (cl-remove-if-not
+     (lambda (buf)
+       (and (eq (buffer-base-buffer buf) base)
+            (buffer-local-value 'templedb-agent--layout-key buf)))
+     (buffer-list))))
+
+(defun templedb-agent--retitle-views ()
+  "Rename this session's live pane views to match the base buffer."
+  (dolist (view (templedb-agent--session-views))
+    (with-current-buffer view
+      (let ((want (templedb-agent--layout-view-name
+                   templedb-agent--layout-key)))
+        (unless (equal want (buffer-name))
+          (rename-buffer want t))))))
+
+;;; Layouts (persp-mode perspectives)
+
+(defun templedb-agent--persp-active-p ()
+  "Non-nil when we can and should put agent buffers in layouts."
+  (and templedb-agent-perspectives
+       (bound-and-true-p persp-mode)
+       (fboundp 'persp-add-new)
+       (fboundp 'persp-add-buffer)
+       (fboundp 'persp-get-by-name)))
+
+(defun templedb-agent--perspective-name (&optional project session-id)
+  "Layout name for a session on PROJECT with SESSION-ID, or nil.
+Nil means \"nothing to claim this buffer yet\" — either layouts are off,
+or the part of the identity this scope names is still unknown."
+  (when (templedb-agent--persp-active-p)
+    (let ((p templedb-agent-perspective-prefix))
+      (pcase templedb-agent-perspectives
+        ('fleet (concat p templedb-agent-perspective-fleet-name))
+        ('session (and session-id (format "%sagent#%s" p session-id)))
+        ('project (and (stringp project)
+                       (not (string-empty-p project))
+                       (concat p project)))
+        (_ nil)))))
+
+(defun templedb-agent--persp-real-p (obj)
+  "Non-nil if OBJ is an actual perspective that can hold a buffer.
+
+persp-mode answers with the `:nil' sentinel — which is truthy — for both
+the nil perspective and for a name it has never heard of. So an
+`or'-style existence test \"finds\" a perspective, skips creating the
+real one, and then `persp-add-buffer' signals `wrong-type-argument'.
+Worse, `persp-remove-buffer' on the nil perspective can kill the buffer
+outright. Everything here is gated on this predicate for both reasons."
+  (if (fboundp 'perspective-p)
+      (perspective-p obj)
+    (and obj (not (keywordp obj)))))
+
+(defun templedb-agent--perspective-ensure (name)
+  "Return the perspective called NAME, creating it if it does not exist."
+  (let ((existing (persp-get-by-name name)))
+    (if (templedb-agent--persp-real-p existing)
+        existing
+      (persp-add-new name))))
+
+(defun templedb-agent--perspective-enter (name)
+  "Switch this frame to layout NAME, creating it if needed. Return NAME.
+Called *before* the session buffer is created so the buffer is born in
+the right layout rather than being moved out of the wrong one."
+  (when (and name templedb-agent-perspective-switch)
+    (condition-case err
+        (progn
+          (templedb-agent--perspective-ensure name)
+          (if (fboundp 'persp-frame-switch)
+              (persp-frame-switch name)
+            (persp-switch name))
+          name)
+      (error
+       (message "Temple Agent: could not enter layout %s (%s)"
+                name (error-message-string err))
+       nil))))
+
+(defun templedb-agent--perspective-claim (buf name)
+  "Make layout NAME the one holding BUF, and the only one.
+Removing BUF from the other layouts is the point: a buffer left in the
+layout it was created in shows up there forever, which is the clutter
+this is meant to end. The nil perspective is never touched — removing
+from it can kill the buffer outright."
+  (when (and name (buffer-live-p buf) (templedb-agent--persp-active-p))
+    (condition-case err
+        (let ((target (templedb-agent--perspective-ensure name)))
+          (persp-add-buffer buf target nil nil)
+          (when (and (fboundp 'persp-remove-buffer)
+                     (fboundp 'persp-persps)
+                     (fboundp 'persp-name))
+            (dolist (other (persp-persps))
+              (when (and (templedb-agent--persp-real-p other)
+                         (not (equal (persp-name other) name))
+                         (or (not (fboundp 'persp-contain-buffer-p))
+                             (persp-contain-buffer-p buf other)))
+                (persp-remove-buffer buf other nil nil))))
+          (with-current-buffer buf
+            (setq templedb-agent--perspective name))
+          name)
+      (error
+       (message "Temple Agent: could not file %s into layout %s (%s)"
+                (buffer-name buf) name (error-message-string err))
+       nil))))
+
+(defun templedb-agent--perspective-sync (&optional buf)
+  "Claim BUF (default current) for the layout its identity now implies.
+A no-op until something changes, so the identity arriving in pieces — a
+project on open, an id from `session.create' — costs at most one claim."
+  (with-current-buffer (or buf (current-buffer))
+    (let ((name (templedb-agent--perspective-name
+                 templedb-agent--project templedb-agent--session-id)))
+      (when (and name (not (equal name templedb-agent--perspective)))
+        (templedb-agent--perspective-claim (current-buffer) name)
+        ;; The views live in the same layout as the session they show.
+        (dolist (view (templedb-agent--session-views))
+          (templedb-agent--perspective-claim view name))))))
+
+(defun templedb-agent--perspective-fleet-view (buf)
+  "File a fleet view — roster, manager, overseer — into the agents layout.
+Only under `fleet' scope, where that layout *is* the fleet view. Under
+`project' scope the roster spans every project and belongs to no single
+layout, so it is left wherever you summoned it."
+  (when (eq templedb-agent-perspectives 'fleet)
+    (templedb-agent--perspective-claim buf (templedb-agent--perspective-name))))
+
+;;;###autoload
+(defun templedb-agent-rename-buffers ()
+  "Retitle every live agent buffer and file it into its layout.
+
+For buffers that predate descriptive naming, or were opened by id (where
+`session.open' is the only thing that knows the project), the project and
+title are filled in from `ai agent fleet --json' first. Run this after
+\\[templedb-agent-reload-from-checkout] to fix up a fleet that is already
+on screen."
+  (interactive)
+  (let* ((payload
+          ;; From a temp buffer so the roster's buffer-local project
+          ;; filter cannot narrow the lookup, and with no recency window:
+          ;; a buffer open on a six-week-old session still wants its name.
+          (with-temp-buffer
+            (let ((templedb-agent-roster-recent-days nil))
+              (templedb-agent--roster-fetch))))
+         (rows (append (alist-get 'rows payload) nil))
+         (renamed 0))
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        ;; An overseer buffer that predates the pin is still the overseer,
+        ;; and `templedb-agent-roster-chat' still finds it by this name —
+        ;; renaming it here would strand it and start a second one.
+        (when (equal (buffer-name) templedb-agent--overseer-buffer)
+          (setq templedb-agent--buffer-name-pinned t))
+        (when (and (derived-mode-p 'templedb-agent-mode)
+                   (not templedb-agent--buffer-name-pinned))
+          (when-let* ((id templedb-agent--session-id)
+                      (row (cl-find id rows
+                                    :key (lambda (r) (alist-get 'id r))
+                                    :test #'equal)))
+            (when-let ((slug (alist-get 'project_slug row)))
+              (setq templedb-agent--project slug))
+            (unless templedb-agent--session-title
+              (setq templedb-agent--session-title (alist-get 'title row))))
+          (let ((before (buffer-name)))
+            (templedb-agent--retitle-buffer)
+            (unless (equal before (buffer-name))
+              (cl-incf renamed))))))
+    (message "Temple Agent: %d buffer%s renamed%s"
+             renamed (if (= renamed 1) "" "s")
+             (if (templedb-agent--persp-active-p)
+                 (format "; layouts by %s" templedb-agent-perspectives)
+               ""))))
 
 ;;;; Session management
 
@@ -2139,6 +2484,7 @@ Bound to \\[templedb-agent-reload-from-checkout] in
      (when (buffer-live-p buf)
        (with-current-buffer buf
          (setq templedb-agent--session-id (alist-get 'id result))
+         (templedb-agent--retitle-buffer)
          (templedb-agent--render-buffer)
          (templedb-agent--set-now "Ready")
          (message "Temple Agent session %d created"
@@ -2160,8 +2506,11 @@ Bound to \\[templedb-agent-reload-from-checkout] in
                (sections (alist-get 'sections result)))
            (setq templedb-agent--project
                  (or (alist-get 'project_slug session) templedb-agent--project))
+           (setq templedb-agent--session-title
+                 (or (alist-get 'title session) templedb-agent--session-title))
            (setq templedb-agent--provider (alist-get 'provider_name session))
            (setq templedb-agent--status (alist-get 'status session))
+           (templedb-agent--retitle-buffer)
            (templedb-agent--render-buffer)
            (when messages
              (templedb-agent--restore-conversation messages events-by-run))
@@ -2245,6 +2594,7 @@ anchors show up in the buffer."
              (when (buffer-live-p buf)
                (with-current-buffer buf
                  (setq templedb-agent--session-id (alist-get 'id result))
+                 (templedb-agent--retitle-buffer)
                  (templedb-agent--render-buffer)
                  (templedb-agent--set-now "Ready")
                  (message "Temple Agent session %d created"
@@ -2263,7 +2613,12 @@ anchors show up in the buffer."
 If PROJECT has a recent session, offers to resume it."
   (interactive
    (list (completing-read "Project: " (templedb-agent--project-slugs) nil nil)))
-  (let* ((buf-name (format "*Temple Agent: %s*" project))
+  ;; Enter the layout first so the buffer is born in it. The name is the
+  ;; project alone for now; `--retitle-buffer' adds the id and the title
+  ;; as the session acquires them.
+  (templedb-agent--perspective-enter
+   (templedb-agent--perspective-name project nil))
+  (let* ((buf-name (templedb-agent--buffer-name project))
          (buf (get-buffer-create buf-name)))
     (switch-to-buffer buf)
     (templedb-agent-mode)
@@ -2299,10 +2654,14 @@ If PROJECT has a recent session, offers to resume it."
                        (sections (alist-get 'sections result)))
                    (setq templedb-agent--project
                          (or (alist-get 'project_slug session) ""))
+                   (setq templedb-agent--session-title
+                         (or (alist-get 'title session)
+                             templedb-agent--session-title))
                    (setq templedb-agent--provider
                          (alist-get 'provider_name session))
                    (setq templedb-agent--status
                          (alist-get 'status session))
+                   (templedb-agent--retitle-buffer)
                    (templedb-agent--render-buffer)
                    (when messages
                      (templedb-agent--restore-conversation messages events-by-run))
@@ -2328,7 +2687,12 @@ If PROJECT has a recent session, offers to resume it."
 (defun templedb-agent-open (session-id)
   "Open an existing Temple Agent session by SESSION-ID."
   (interactive "nSession ID: ")
-  (let* ((buf-name (format "*Temple Agent: #%d*" session-id))
+  ;; All we know here is the id, so the project-scoped layout cannot be
+  ;; named yet — `session.open' brings the project back and
+  ;; `--retitle-buffer' files the buffer then.
+  (templedb-agent--perspective-enter
+   (templedb-agent--perspective-name nil session-id))
+  (let* ((buf-name (templedb-agent--buffer-name nil session-id))
          (buf (get-buffer-create buf-name)))
     (switch-to-buffer buf)
     (templedb-agent-mode)
@@ -2778,6 +3142,17 @@ which would cut off a run that is mid-flight."
             (process-live-p templedb-agent--process))))
    (buffer-list)))
 
+(defun templedb-agent--session-buffer (id)
+  "Return any live agent buffer whose session is ID, process or not.
+By session-local state rather than by buffer name: names now carry the
+project and title too, so there is no name to guess."
+  (cl-find-if
+   (lambda (buf)
+     (with-current-buffer buf
+       (and (derived-mode-p 'templedb-agent-mode)
+            (equal templedb-agent--session-id id))))
+   (buffer-list)))
+
 (defun templedb-agent-roster-reply (text)
   "Send TEXT to the session on the current line without leaving the roster.
 Reuses the session's existing buffer and process when there is one,
@@ -3036,7 +3411,7 @@ row status='interrupted' so it stops showing as active."
   (let ((id (templedb-agent--roster-require-session)))
     (when (y-or-n-p (format "Kill agent session #%s? " id))
       (let ((buf (or (templedb-agent--roster-session-buffer id)
-                     (get-buffer (format "*Temple Agent: #%s*" id)))))
+                     (templedb-agent--session-buffer id))))
         (if (buffer-live-p buf)
             (with-current-buffer buf (templedb-agent-close))
           (templedb-agent--sql-execute
@@ -3291,6 +3666,10 @@ prompt is already a bad place to be.  Straight to session.create."
   (let ((buf (get-buffer-create templedb-agent--overseer-buffer)))
     (with-current-buffer buf
       (templedb-agent-mode)
+      ;; `templedb-agent-roster-chat' finds this buffer by exact name, so
+      ;; it is the one session buffer that must not be renamed for its
+      ;; project and title.
+      (setq templedb-agent--buffer-name-pinned t)
       (setq templedb-agent--project project)
       (setq templedb-agent--projects (list project))
       (setq templedb-agent--context-config nil)
@@ -3301,6 +3680,11 @@ prompt is already a bad place to be.  Straight to session.create."
       (templedb-agent--set-now "Starting fleet overseer…")
       (templedb-agent--start-process)
       (templedb-agent--overseer-wait-then-create buf 0))
+    ;; A fleet view, not a session on its project: it talks about the
+    ;; roster. Pinned above, so `--retitle-buffer' never files it into the
+    ;; overseer project's layout; under `fleet' scope it joins the agents
+    ;; layout with the roster it serves.
+    (templedb-agent--perspective-fleet-view buf)
     buf))
 
 (defun templedb-agent--overseer-wait-then-create (buf attempts)
@@ -3524,6 +3908,7 @@ prompt is already a bad place to be.  Straight to session.create."
       (unless (derived-mode-p 'templedb-agent-manager-mode)
         (templedb-agent-manager-mode))
       (templedb-agent-manager-refresh))
+    (templedb-agent--perspective-fleet-view buf)
     (pop-to-buffer buf)))
 
 ;;;###autoload
@@ -3536,6 +3921,7 @@ prompt is already a bad place to be.  Straight to session.create."
         (templedb-agent-roster-mode))
       (templedb-agent--roster-start-timer)
       (templedb-agent-roster-refresh))
+    (templedb-agent--perspective-fleet-view buf)
     (pop-to-buffer buf)))
 
 ;;;###autoload
@@ -4243,11 +4629,20 @@ is what quietly hands the dynamic sections to the last pane."
             (cons start (if later (apply #'min later) (point-max)))))))))
 
 (defun templedb-agent--layout-view-name (key)
-  "Buffer name for pane KEY's view."
-  (let ((pane (templedb-agent--layout-pane key))
-        (sid (buffer-local-value 'templedb-agent--session-id
-                                 (templedb-agent--layout-base))))
-    (format "*TAgent #%s %s*" (or sid "?")
+  "Buffer name for pane KEY's view.
+Carries the project as well as the id — three panes per session times
+several sessions is where a bare number stops identifying anything. The
+title is left out on purpose: it is already in the base buffer's name,
+and repeating it three times per session buys nothing."
+  (let* ((base (templedb-agent--layout-base))
+         (pane (templedb-agent--layout-pane key))
+         (sid (buffer-local-value 'templedb-agent--session-id base))
+         (project (buffer-local-value 'templedb-agent--project base)))
+    (format "*TAgent %s#%s %s*"
+            (if (and (stringp project) (not (string-empty-p project)))
+                (concat project " ")
+              "")
+            (or sid "?")
             (or (plist-get pane :title) (symbol-name key)))))
 
 (defun templedb-agent--layout-ensure-view (key)
@@ -4279,6 +4674,11 @@ is what quietly hands the dynamic sections to the last pane."
             (when (memq key templedb-agent-layout-read-only-panes)
               (setq buffer-read-only t)))
           (setf (alist-get key templedb-agent--layout-views) view)
+          ;; A pane belongs to the same spacemacs layout as the session it
+          ;; is a window onto.
+          (templedb-agent--perspective-claim
+           view (templedb-agent--perspective-name
+                 templedb-agent--project templedb-agent--session-id))
           view)))))
 
 (defun templedb-agent--layout-view-mode-line ()

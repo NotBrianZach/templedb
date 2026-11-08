@@ -147,6 +147,52 @@ by the pane in front of them, which is what keeps agent-created
 pane instead of off the layout. Also
 `templedb-agent-layout-{sidebar-width,prompt-height,read-only-panes,follow-conversation}`.
 
+### 3b. Buffer names, and which spacemacs layout they land in
+
+A session buffer is named for its identity as far as that identity is
+known: `*Temple Agent: woofs_projects #357 fix the shop UI test*`. The
+title is the session's own — the first 80 characters of its first user
+message, the same string the roster and `fleet` show — truncated to
+`templedb-agent-buffer-name-title-width` (36).
+
+Identity arrives in pieces, so the name is rewritten as each piece lands:
+the project when you pick it, the id when `session.create` answers, the
+title the first time you send anything (`templedb-agent-send` derives it
+locally with the same rule `Service._run` uses server-side, rather than
+waiting for a reopen to learn it). `templedb-agent--retitle-buffer` is
+idempotent and runs on all of those paths. Panes are renamed with it:
+`*TAgent woofs_projects #357 Conversation*`.
+
+Two consequences. Nothing may find a session buffer by guessing its
+name — use `templedb-agent--session-buffer`, which matches on
+buffer-local session state. And the overseer buffer, which *is* found by
+exact name, sets `templedb-agent--buffer-name-pinned`.
+
+Each session buffer is also claimed by a **spacemacs layout**
+(a persp-mode perspective), so dispatching a fleet does not pile five
+buffers into whatever layout you were reading code in:
+
+| `templedb-agent-perspectives` | Layout |
+|---|---|
+| `project` (default) | one per project — `@woofs_projects` |
+| `fleet` | one for every agent — `@agents`; the roster and manager join it |
+| `session` | one per session — `@agent#357` |
+| `nil` | off — buffers land wherever they are created |
+
+`templedb-agent-new` enters the layout *before* creating the buffer, so
+the buffer is born there rather than being moved out of somewhere else;
+opening by id claims it once `session.open` says what project it is on.
+`templedb-agent-perspective-switch` nil files buffers into their layouts
+without moving you, which is what you want while something is
+dispatching in the background. All of it is inert unless `persp-mode` is
+on, and every persp call is wrapped — a layout is a convenience and must
+never stop a session opening.
+
+`M-x templedb-agent-rename-buffers` (`SPC a T A N`) retitles and re-homes
+every agent buffer already on screen, filling in project and title from
+`ai agent fleet --json`. That is the fixup path after
+`templedb-agent-reload-from-checkout`.
+
 ### Reading the markers
 
 | Marker | Where | Meaning |
@@ -342,6 +388,7 @@ therefore not only *what Claude is told* but *where Claude stands*.
 | `SPC a T A ?` | Ask about symbol at point |
 | `SPC a T A L` | Work log |
 | `SPC a T A d` | Doctor (provider health) |
+| `SPC a T A N` | Retitle and re-home every agent buffer (§3b) |
 
 **In the agent buffer** — `C-c` chords and `,` major-mode leader:
 

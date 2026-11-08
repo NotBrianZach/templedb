@@ -82,22 +82,32 @@ def create_session(provider_name, project_id=None, title=None, model=None):
 
 
 def get_session(session_id):
-    """Get session by ID with provider info."""
+    """Get session by ID with provider info and project slug.
+
+    project_slug is a LEFT JOIN because project_id is nullable (ON DELETE
+    SET NULL, see migration 141). It is what `session.open` hands Emacs to
+    label the session with, so a session opened by id alone can still say
+    which project it is on.
+    """
     return query_one(
-        """SELECT s.*, p.name as provider_name, p.provider_kind, p.executable
+        """SELECT s.*, p.name as provider_name, p.provider_kind, p.executable,
+                  pr.slug AS project_slug
            FROM agent_sessions s
            JOIN agent_providers p ON s.provider_id = p.id
+           LEFT JOIN projects pr ON s.project_id = pr.id
            WHERE s.id = ?""",
         (session_id,),
     )
 
 
 def get_session_by_uuid(session_uuid):
-    """Get session by UUID."""
+    """Get session by UUID. Same columns as `get_session`."""
     return query_one(
-        """SELECT s.*, p.name as provider_name, p.provider_kind, p.executable
+        """SELECT s.*, p.name as provider_name, p.provider_kind, p.executable,
+                  pr.slug AS project_slug
            FROM agent_sessions s
            JOIN agent_providers p ON s.provider_id = p.id
+           LEFT JOIN projects pr ON s.project_id = pr.id
            WHERE s.session_uuid = ?""",
         (session_uuid,),
     )

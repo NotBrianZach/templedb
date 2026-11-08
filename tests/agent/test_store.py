@@ -42,6 +42,28 @@ class TestStore(unittest.TestCase):
         fetched = get_session(session['id'])
         self.assertEqual(fetched['provider_name'], 'fake')
 
+    def test_get_session_includes_project_slug(self):
+        """session.open labels the Emacs buffer from this column.
+
+        Without it a session opened by id alone could not say which project
+        it was on, so the buffer stayed named `#357'.
+        """
+        from agent.store import create_session, get_session, execute
+        project_id = execute(
+            "INSERT INTO projects (slug, name) VALUES (?, ?)",
+            ('naming-test', 'Naming Test'),
+        )
+        session = create_session('fake', project_id=project_id)
+        self.assertEqual(session['project_slug'], 'naming-test')
+        self.assertEqual(get_session(session['id'])['project_slug'],
+                         'naming-test')
+
+    def test_get_session_project_slug_is_none_without_a_project(self):
+        """project_id is nullable, so the join has to be a LEFT JOIN."""
+        from agent.store import create_session, get_session
+        session = create_session('fake')
+        self.assertIsNone(get_session(session['id'])['project_slug'])
+
     def test_session_status_update(self):
         from agent.store import create_session, update_session_status, get_session
         session = create_session('fake')
