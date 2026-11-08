@@ -1122,8 +1122,11 @@ class FileCommands(Command):
 
         Mirrors probed (skip any that don't exist for this slug):
           - DB (via file_contents.is_current)
-          - ~/.config/templedb/checkouts/<slug>/<path>       (read-only publish)
-          - ~/.config/templedb/edit-workspaces/<slug>/<path> (writable workspace)
+          - the PURPOSE_BUILD tree (materialised, `publish` owns it)
+          - the PURPOSE_EDIT tree (the workspace status/diff/commit use)
+            Both resolved from the checkout records, so an edit workspace
+            is found at its real <slug>/<session-name>/ path. Deduped
+            when both purposes resolve to the same directory.
           - Current home-manager profile (built overlays — e.g. Spacemacs
             layer files under ~/.emacs.d/private/local-layers/, resolved
             through their nix-store real paths). Matches by basename.
@@ -1149,11 +1152,54 @@ class FileCommands(Command):
             return 2
 
         # 2. Probe filesystem mirrors.
+        #
+        # Both roots come from the checkout records, not from a hardcoded
+        # ~/.config/templedb/{checkouts,edit-workspaces}/<slug>. The old
+        # hardcoded pair got the edit workspace wrong in a way that could
+        # never match: workspaces live at
+        # edit-workspaces/<slug>/<session-name>/<path>, so the probe
+        # omitted the session component, .exists() was always False, and
+        # step 4 skips missing mirrors silently. The copy most likely to
+        # be drifted — the tree `vcs status` scans and `vcs commit` reads
+        # — was therefore the one mirror `where` never reported, while it
+        # still printed "✓ match" for the rest. That is exactly the
+        # silent drift this command exists to surface.
+        #
+        # PURPOSE_BUILD is the materialised tree `publish` owns;
+        # PURPOSE_EDIT is the workspace status/diff/commit resolve. They
+        # are often the same directory, so dedupe on the resolved path
+        # rather than printing one copy twice.
         home = Path.home()
-        mirrors = [
-            ("checkout ", home / ".config/templedb/checkouts" / slug / path),
-            ("edit-work", home / ".config/templedb/edit-workspaces" / slug / path),
-        ]
+        mirrors = []
+        try:
+            from sync.manager import SyncManager
+            from repositories.checkout_repository import CheckoutRepository
+            sync_manager = SyncManager(slug)
+            seen_roots = set()
+            for label, purpose in (
+                ("checkout ", CheckoutRepository.PURPOSE_BUILD),
+                ("edit-work", CheckoutRepository.PURPOSE_EDIT),
+            ):
+                try:
+                    root = sync_manager.get_checkout_path(purpose)
+                except Exception as e:
+                    # A project with no edit workspace raises here; that
+                    # is an absent mirror, not an error worth printing.
+                    logger.debug(f"{purpose} checkout lookup failed: {e}")
+                    continue
+                if str(root) in seen_roots:
+                    continue
+                seen_roots.add(str(root))
+                mirrors.append((label, Path(root) / path))
+        except Exception as e:
+            logger.debug(f"checkout resolution failed (non-fatal): {e}")
+
+        if not mirrors:
+            # No checkout rows at all — fall back to the canonical layout
+            # so `where` still reports something rather than DB-only.
+            mirrors.append(
+                ("checkout ", home / ".config/templedb/checkouts" / slug / path)
+            )
 
         # 2b. Probe live overlay surfaces. For any file whose basename
         # matches under these entry points, we surface the resolved

@@ -93,7 +93,8 @@ class CheckoutRepository(BaseRepository):
 
     def create_or_update(self, project_id: int, checkout_path: str,
                          branch_name: str = 'main',
-                         kind: Optional[str] = None) -> int:
+                         kind: Optional[str] = None,
+                         session_id: Optional[int] = None) -> int:
         """
         Create or update a checkout record.
 
@@ -103,6 +104,10 @@ class CheckoutRepository(BaseRepository):
             branch_name: Branch name (default: 'main')
             kind: canonical | edit | scratch. Inferred from the path when
                 not given.
+            session_id: the session that owns an edit tree. Defaults to
+                `current_session_id()`, which is env-only and returns
+                None in an ordinary shell — see below for why a caller
+                may need to override it.
 
         Returns:
             Checkout ID
@@ -121,7 +126,35 @@ class CheckoutRepository(BaseRepository):
         # agents stop competing for one answer. Only edit trees get an
         # owner: a canonical tree is shared by definition, and a scratch
         # tree is never resolved to.
-        session_id = self.current_session_id() if kind == 'edit' else None
+        #
+        # **An explicit `session_id` wins, and `templedb edit` passes
+        # one.** `current_session_id()` is deliberately env-only — it
+        # must never create a session, because resolution calls it — so
+        # in a shell with neither TEMPLEDB_SESSION_ID nor
+        # TEMPLEDB_SESSION it returns None and the workspace is written
+        # owned by nobody. That is the common case, not a corner: a
+        # plain `templedb edit <slug>` went through here and all six of
+        # templedb-rust's edit workspaces carried a NULL owner.
+        #
+        # Nobody owning it means `resolve(PURPOSE_SCAN)` refuses the
+        # tree and falls back to canonical, while `PURPOSE_EDIT` adopts
+        # it — so `vcs status` displayed the workspace and reported the
+        # canonical checkout, and fourteen edited files read as "No
+        # changes".
+        #
+        # The caller that knows the answer is the one provisioning the
+        # tree: `templedb edit` is an explicit user action that is
+        # already allowed to open a session, and it has to resolve one
+        # anyway to name the directory. So it resolves through
+        # `get_current_session()` — which agrees with
+        # `current_session_id()` whenever that has an answer and
+        # supplies one otherwise — and hands it down here. Resolution
+        # keeps using the strict resolver and keeps its no-side-effects
+        # property; only the provisioning write changed.
+        if kind != 'edit':
+            session_id = None
+        elif session_id is None:
+            session_id = self.current_session_id()
 
         # Migration 122 made "one active canonical row per project" a
         # UNIQUE index, which turns a path change into a hard failure
@@ -337,6 +370,30 @@ class CheckoutRepository(BaseRepository):
         if session_id is not None:
             mine = [r for r in edits if r['session_id'] == session_id]
             if mine:
+                # Warned on too, and this branch did not used to be.
+                #
+                # `_warn_if_behind` guarded only the two *adoptable*
+                # branches below, on the reasonable assumption that a
+                # tree you own is a tree you are using and therefore
+                # current. That assumption is load-bearing and it is
+                # not safe once `templedb edit` stamps ownership
+                # properly: `edit` reuses an existing workspace without
+                # re-materialising it — "pass --refresh to
+                # re-materialize from DB" — so an owned tree can be
+                # arbitrarily far behind, and from 2026-11-05 far more
+                # trees are owned.
+                #
+                # That matters because ownership is exactly what makes
+                # PURPOSE_SCAN willing to scan, and a scan records an
+                # absent file as a deletion. Leaving this branch silent
+                # would reopen the failure the SCAN split was built to
+                # close — 63 manufactured deletions on `bza` — through
+                # an owned tree instead of an adopted one. The warning
+                # names the files a commit would genuinely revert, so it
+                # stays quiet for the current tree that is the normal
+                # case.
+                if not quiet:
+                    self._warn_if_behind(project_id, mine[0])
                 return mine[0]
 
         # A scanner takes the canonical tree rather than adopting. Falling

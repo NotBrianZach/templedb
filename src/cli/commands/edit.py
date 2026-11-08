@@ -112,6 +112,79 @@ def _resolve_workspace_session_name() -> str:
         return 'default'
 
 
+def _claim_workspace(slug: str, workspace: Path) -> None:
+    """Record that this session owns `workspace`, on every run.
+
+    # Why this exists at all
+
+    `checkouts.session_id` used to be written once, at provisioning,
+    from `current_session_id()` — and that resolver is env-only by
+    design, because resolution calls it and resolving a path must not
+    open a session. So a plain `templedb edit <slug>`, with no
+    TEMPLEDB_SESSION_ID and no TEMPLEDB_SESSION, created a workspace
+    owned by nobody. All six of templedb-rust's edit workspaces carried
+    a NULL owner.
+
+    An unowned workspace is adopted by `PURPOSE_EDIT` and refused by
+    `PURPOSE_SCAN`, so `vcs status` printed the workspace's path and
+    then reported the canonical checkout's contents underneath it. That
+    is how fourteen edited files read as "No changes".
+
+    # Why here, and why `get_current_session`
+
+    This is the one place in the system where resolving a session is
+    already a legitimate side effect: `templedb edit` is an explicit
+    user action whose whole purpose is to set up a place to work, and it
+    has to resolve a session anyway to name the directory
+    (`_resolve_workspace_session_name`). So it uses the permissive
+    resolver — which honours both env vars first and therefore agrees
+    with `current_session_id()` whenever that has an answer, and
+    supplies one otherwise — and hands the id down explicitly.
+    `resolve()` keeps using the strict resolver and keeps its
+    no-side-effects property.
+
+    # Why on the reuse path too, which is the half that was missing
+
+    `templedb edit` only shells out to `project checkout` when the
+    workspace is new or `--refresh` was passed; the "Reusing workspace"
+    branch wrote nothing at all. So ownership recorded the session that
+    *created the directory*, never the session using it, and a
+    long-lived workspace was correctly owned exactly once. Re-running
+    `TEMPLEDB_SESSION_ID=<id> templedb edit <slug>` to fix a NULL owner
+    did nothing, because it took the reuse branch.
+
+    Claiming on every run means the row names the session that most
+    recently asked to edit this tree. Two sessions cannot normally race
+    here: the workspace path is derived from the session name, so they
+    get different directories and each claims its own. They collide only
+    when both fall through to the `'default'` name, in which case they
+    already share one directory and last-writer-wins is the honest
+    answer rather than a new problem.
+
+    Failures are non-fatal. A workspace that exists and is usable must
+    not be withheld because a bookkeeping row could not be written; the
+    consequence of not claiming it is the old behaviour, which is a
+    stale status rather than lost work.
+    """
+    try:
+        from db_utils import query_one
+        from repositories.checkout_repository import CheckoutRepository
+        from services.context import ServiceContext
+
+        project = query_one(
+            "SELECT id FROM projects WHERE slug = ?", (slug,))
+        if not project:
+            return
+        session = ServiceContext().get_vcs_service().get_current_session()
+        session_id = session.get('id') if session else None
+        if session_id is None:
+            return
+        CheckoutRepository().create_or_update(
+            project['id'], str(workspace), kind='edit', session_id=session_id)
+    except Exception as e:
+        logger.debug(f"could not claim workspace {workspace}: {e}")
+
+
 def edit_workspace_path(slug: str) -> Path:
     """Return the default edit-workspace path for a slug.
 
@@ -173,6 +246,8 @@ class EditCommands:
             print(f"Reusing workspace at {workspace}")
             print("  (pass --refresh to re-materialize from DB; "
                   "add --force to overwrite local edits)")
+
+        _claim_workspace(slug, workspace)
 
         target = str(workspace)
         if args.path:

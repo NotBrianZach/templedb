@@ -1059,3 +1059,137 @@ def test_scan_falls_back_cleanly_with_no_edit_tree_at_all(repo):
     """The ordinary case after checkout-gc has retired everything."""
     r, pid = repo([('canonical', 'canon', 1, None, True)])
     assert r.resolve(pid, SCAN)['checkout_path'].endswith('canon')
+
+
+def _owner(pid, path):
+    """The row's session_id. Queried directly because
+    `get_by_path` projects seven columns and this is not one of
+    them -- the same reason the `kind` test above queries too."""
+    return query_one(
+        "SELECT session_id FROM checkouts WHERE project_id = ? "
+        "AND checkout_path = ?", (pid, path))['session_id']
+
+
+# --- explicit ownership at provisioning -------------------------------
+#
+# `current_session_id()` is env-only on purpose — resolve() calls it and
+# resolving a path must not open a session — so in an ordinary shell it
+# returns None and `create_or_update` wrote an edit workspace owned by
+# nobody. That is the common path, not a corner: a plain
+# `templedb edit <slug>` went through it, and all six of templedb-rust's
+# edit workspaces carried a NULL owner.
+#
+# Unowned means PURPOSE_SCAN refuses the tree and PURPOSE_EDIT adopts
+# it, so `vcs status` printed the workspace and reported the canonical
+# checkout underneath — fourteen edited files reading as "No changes".
+# `templedb edit` now resolves through the permissive resolver, which it
+# needs anyway to name the directory, and passes the id down.
+
+def test_an_explicit_session_id_owns_a_new_edit_workspace(repo, monkeypatch):
+    """The fix: a caller that knows the session can say so, and does not
+    have to go through the environment to be heard."""
+    r, pid = repo([])
+    sid = _session()
+    monkeypatch.delenv('TEMPLEDB_SESSION', raising=False)
+    monkeypatch.delenv('TEMPLEDB_SESSION_ID', raising=False)
+    p = '/home/u/.config/templedb/edit-workspaces/proj/sess'
+    r.create_or_update(pid, p, kind='edit', session_id=sid)
+    assert _owner(pid, p) == sid
+
+
+def test_without_an_explicit_id_an_unpinned_shell_still_owns_nothing(repo, monkeypatch):
+    """The old behaviour, kept as the default and pinned as such.
+
+    `create_or_update` must not start resolving a session on its own —
+    it is reached from paths that have no business creating one. The
+    caller supplies the answer or there is no answer.
+    """
+    r, pid = repo([])
+    _session()
+    monkeypatch.delenv('TEMPLEDB_SESSION', raising=False)
+    monkeypatch.delenv('TEMPLEDB_SESSION_ID', raising=False)
+    p = '/home/u/.config/templedb/edit-workspaces/proj/sess'
+    r.create_or_update(pid, p, kind='edit')
+    assert _owner(pid, p) is None
+
+
+def test_an_explicit_id_is_ignored_for_a_canonical_tree(repo, monkeypatch):
+    """A canonical tree is shared by definition. Owning one would make
+    `resolve` hand it to a single session and strand everyone else."""
+    r, pid = repo([])
+    sid = _session()
+    monkeypatch.delenv('TEMPLEDB_SESSION', raising=False)
+    monkeypatch.delenv('TEMPLEDB_SESSION_ID', raising=False)
+    p = '/home/u/.config/templedb/checkouts/proj'
+    r.create_or_update(pid, p, kind='canonical', session_id=sid)
+    assert _owner(pid, p) is None
+
+
+def test_reclaiming_an_unowned_workspace_moves_the_owner(repo, tmp_path, monkeypatch):
+    """`templedb edit` claims on every run, not only at creation.
+
+    Ownership used to be written once, at provisioning, and the reuse
+    branch wrote nothing — so the row named the session that created the
+    directory and never the session using it. Re-running
+    `TEMPLEDB_SESSION_ID=<id> templedb edit <slug>` to repair a NULL
+    owner did nothing at all, because it took that branch.
+    """
+    r, pid = repo([('edit', 'ws', 1, None, True)])
+    sid = _session()
+    monkeypatch.delenv('TEMPLEDB_SESSION', raising=False)
+    monkeypatch.delenv('TEMPLEDB_SESSION_ID', raising=False)
+    path = str(tmp_path / 'ws')
+    assert _owner(pid, path) is None
+    r.create_or_update(pid, path, kind='edit', session_id=sid)
+    assert _owner(pid, path) == sid
+
+
+def test_claiming_makes_scan_willing_to_use_the_workspace(repo, tmp_path, monkeypatch):
+    """The whole point, end to end at the resolver.
+
+    Unowned, SCAN refuses the workspace and takes canonical — correct,
+    because a scan records an absent file as a deletion and must not be
+    pointed at a tree nobody is tending. Owned by a live session, the
+    same tree is the right answer, and that is what makes `vcs status`
+    describe the directory it is printing.
+    """
+    r, pid = repo([
+        ('canonical', 'canon', 1, None, True),
+        ('edit', 'ws', 1, None, True),
+    ])
+    sid = _session()
+    monkeypatch.setenv('TEMPLEDB_SESSION_ID', str(sid))
+    path = str(tmp_path / 'ws')
+
+    # Unowned: SCAN declines, EDIT adopts. The split that made the
+    # header and the body disagree.
+    assert r.resolve(pid, SCAN)['checkout_path'].endswith('canon')
+    assert r.resolve(pid, EDIT)['checkout_path'].endswith('ws')
+
+    r.create_or_update(pid, path, kind='edit', session_id=sid)
+
+    # Owned: both agree, and they agree on the tree being edited.
+    assert r.resolve(pid, SCAN)['checkout_path'].endswith('ws')
+    assert r.resolve(pid, EDIT)['checkout_path'].endswith('ws')
+
+
+def test_claiming_does_not_touch_another_sessions_workspace(repo, tmp_path, monkeypatch):
+    """Claiming is per-path, so it cannot steal a tree.
+
+    Two sessions normally get different directories — the path is
+    derived from the session name — and each claims its own. This pins
+    that the upsert is keyed on the path rather than on the project.
+    """
+    r, pid = repo([
+        ('edit', 'theirs', 1, None, True),
+        ('edit', 'mine', 1, None, True),
+    ])
+    other = _session()
+    execute("UPDATE checkouts SET session_id = ? WHERE checkout_path LIKE '%theirs'",
+            (other,))
+    sid = _session()
+    monkeypatch.delenv('TEMPLEDB_SESSION', raising=False)
+    monkeypatch.delenv('TEMPLEDB_SESSION_ID', raising=False)
+    r.create_or_update(pid, str(tmp_path / 'mine'), kind='edit', session_id=sid)
+    assert _owner(pid, str(tmp_path / 'mine')) == sid
+    assert _owner(pid, str(tmp_path / 'theirs')) == other

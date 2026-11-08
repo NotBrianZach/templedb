@@ -3778,15 +3778,59 @@ class TestFileWhere:
 
     def test_where_detects_drift(self, populated_env, monkeypatch, tmp_path,
                                  capsys):
-        """DB has content X, edit-workspace has content Y. Exit 1, output
-        contains 'drift'."""
+        """DB has content X, edit workspace has content Y. Exit 1, output
+        contains 'drift'.
+
+        The workspace is placed at its real
+        `edit-workspaces/<slug>/<session-name>/` path and registered as a
+        checkout row, because that is the only shape that occurs. This
+        test used to build it at `edit-workspaces/<slug>/README.md` —
+        session-less — and passed only because `where` probed that same
+        impossible path. Code and test shared one wrong assumption, so a
+        green suite hid the fact that the edit mirror was never probed at
+        all.
+        """
         from cli.commands.file import FileCommands
+        from db_utils import query_one, execute
         import argparse
 
-        # Set up edit-workspace with wrong content.
-        ews = tmp_path / ".config" / "templedb" / "edit-workspaces" / "testproj"
-        (ews).mkdir(parents=True)
+        # Clear session env so PURPOSE_EDIT resolution doesn't depend on
+        # whatever the developer (or agent) happens to have exported.
+        monkeypatch.delenv('TEMPLEDB_SESSION', raising=False)
+        monkeypatch.delenv('TEMPLEDB_SESSION_ID', raising=False)
+
+        pid = query_one("SELECT id FROM projects WHERE slug='testproj'")['id']
+
+        def _register(path, kind):
+            execute(
+                """INSERT OR REPLACE INTO checkouts
+                     (project_id, checkout_path, branch_name, is_active, kind,
+                      session_id)
+                   VALUES (?, ?, 'main', 1, ?, NULL)""",
+                (pid, str(path), kind),
+            )
+
+        # A canonical tree holding the DB's content, so PURPOSE_BUILD and
+        # PURPOSE_EDIT resolve to *different* directories. With only one
+        # tree registered both purposes return it and the two mirrors
+        # dedupe into a single line — which is correct behaviour, but it
+        # would not exercise the edit mirror this test is about.
+        from services.system_service import SystemService
+        canonical = tmp_path / ".config" / "templedb" / "checkouts" / "testproj"
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        svc = SystemService()
+        monkeypatch.setattr(svc, "_checkout_dir_for", lambda slug: canonical)
+        svc.materialize_from_db("testproj")
+        _register(canonical, 'canonical')
+
+        # Real layout: the session name is a directory component.
+        ews = (tmp_path / ".config" / "templedb" / "edit-workspaces" /
+               "testproj" / "agent-drift-test")
+        ews.mkdir(parents=True)
         (ews / "README.md").write_text("wrong content")
+        # session_id NULL is deliberate: an unowned workspace is adopted
+        # by PURPOSE_EDIT (and refused by PURPOSE_WRITE).
+        _register(ews, 'edit')
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
@@ -3796,6 +3840,9 @@ class TestFileWhere:
         captured = capsys.readouterr()
         assert rc == 1, f"expected 1 (drift), got {rc}: {captured.out}"
         assert "drift" in captured.out.lower()
+        assert "edit-work" in captured.out, (
+            f"the edit workspace mirror was not reported: {captured.out}"
+        )
 
     def test_where_returns_two_when_db_has_no_current(self, populated_env,
                                                      monkeypatch, tmp_path,

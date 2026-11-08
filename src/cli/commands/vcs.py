@@ -145,6 +145,145 @@ class VCSCommands(Command):
             )
         return row['id']
 
+    def _working_state_staleness(self, project: dict) -> Optional[str]:
+        """Why `vcs working_state` needs rescanning, or None if it does not.
+
+        The string is a reason, printed to say which it was. None means
+        the cached rows still describe the tree.
+
+        # The bug this replaces
+
+        The test used to be `COUNT(*) == 0` — rescan only when there are
+        no rows at all — and it is the reason `vcs status` could report
+        "No changes" against a workspace with fourteen edited files. A
+        cache keyed on its own emptiness has no invalidation: the first
+        scan fills it and every later `vcs status` reports whatever that
+        scan found, forever. Nothing in the output said so; the header
+        named the right checkout and then answered about a reading of it
+        taken at some earlier time.
+
+        Observed on `templedb-rust`, which held 45 rows all saying
+        `unmodified` with a `content_hash` matching the *canonical*
+        checkout while the resolved tree was an edit workspace. `-r`
+        gave the right answer, so the fix was reachable and the default
+        was wrong — which is the worse shape, because the command had no
+        way to tell you to pass it.
+
+        # What this checks, and the one case it still misses
+
+        The scan records `last_modified` per row, so the newest of those
+        is when the cache was built. If anything the scan *would* look
+        at is newer than that, the cache predates an edit. Asked through
+        `FileScanner.newest_mtime`, which shares `scan_directory`'s
+        membership rules so that the question is about the same file set
+        the scan would write — see that method for why walking
+        everything instead would report every tree as permanently stale.
+
+        `last_modified` is written by SQLite's `datetime('now')`, which
+        is **UTC**, while `vcs_commits.created_at` in the same database
+        is local. Parsed as UTC here, explicitly, because reading it as
+        local would place the cache six hours in the future on this
+        machine and report every tree as fresh — which is this bug
+        again, with a new cause.
+
+        What it does not catch: a switch to a *different* tree whose
+        files are all older than the last scan. Resolution can move
+        between a canonical checkout and an edit workspace without
+        anything being edited, and nothing records which tree a cached
+        scan came from. In practice a freshly provisioned workspace is
+        newer than any earlier scan, because materialising writes the
+        files; the hole is a workspace provisioned long ago, never
+        touched, and resolved to for the first time now. Closing it
+        properly needs a column naming the scanned tree, which is a
+        migration and not this fix.
+        """
+        from datetime import datetime, timezone
+
+        newest_row = self.vcs_repo.query_one("""
+            SELECT MAX(last_modified) AS scanned_at, COUNT(*) AS count
+            FROM vcs_working_state
+            WHERE project_id = ?
+        """, (project['id'],))
+
+        if not newest_row or not newest_row['count']:
+            return "first time"
+
+        scanned_at = newest_row['scanned_at']
+        if not scanned_at:
+            # Rows with no timestamp predate the column's default. They
+            # cannot vouch for themselves, so they are not allowed to.
+            return "cached scan has no timestamp"
+
+        try:
+            workspace = self._scan_tree(project)
+        except ValueError:
+            # Resolution failed. `_refresh_working_state` reports the
+            # error properly, so defer to it rather than reporting a
+            # staleness verdict that is really a resolution failure.
+            return "checkout could not be resolved"
+        # Coerced rather than assumed: `get_checkout_path` returns a
+        # Path today, and this function's only contract with it is "a
+        # thing that names a directory".
+        workspace = Path(workspace) if workspace is not None else None
+        if workspace is None or not workspace.exists():
+            return "checkout is missing"
+
+        try:
+            scanned_epoch = datetime.strptime(
+                scanned_at, "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            return "cached scan timestamp is unreadable"
+
+        from importer.scanner import FileScanner
+        newest_mtime = FileScanner(str(workspace)).newest_mtime()
+        if newest_mtime is None:
+            # Nothing to compare. An empty tree against non-empty cached
+            # rows is itself a change — every tracked file is a deletion
+            # — so this is stale, not fresh.
+            return "tree has no scannable files"
+
+        # `>=`, not `>`: `last_modified` has second granularity and an
+        # edit landing in the same second as the scan is invisible to a
+        # strict comparison. The cost of the conservative choice is one
+        # extra scan when an edit and a scan share a second, which is
+        # the trade the whole command exists to make.
+        if newest_mtime >= scanned_epoch:
+            return "tree changed since last scan"
+        return None
+
+    def _status_tree_mismatch(self, project: dict, shown: Path) -> Optional[str]:
+        """The scan tree's path when it is not the one being displayed.
+
+        None when they agree, which is the ordinary case — so the
+        caller prints nothing and the output is unchanged for every
+        project whose workspace is owned.
+        """
+        try:
+            scan = self._scan_tree(project)
+        except ValueError:
+            return None
+        if scan is None:
+            return None
+        try:
+            same = Path(scan).resolve() == Path(shown).resolve()
+        except OSError:
+            same = str(scan) == str(shown)
+        return None if same else str(scan)
+
+    def _scan_tree(self, project: dict):
+        """The tree a refresh would scan, or None.
+
+        PURPOSE_SCAN, matching `_refresh_working_state` — the staleness
+        question has to be asked about the tree the scan would write
+        from, not the one `vcs status` displays. Those differ: the
+        display resolves PURPOSE_EDIT.
+        """
+        from repositories.checkout_repository import CheckoutRepository
+        from sync import SyncManager
+        return SyncManager(project['slug']).get_checkout_path(
+            CheckoutRepository.PURPOSE_SCAN)
+
     def _refresh_working_state(self, project: dict):
         """Refresh VCS working state by detecting changes.
 
@@ -166,11 +305,15 @@ class VCSCommands(Command):
         # exist. That happened: 63 of them on bza, four days stale, including a
         # file live in production. SCAN takes this session's workspace if it has
         # one and the canonical tree otherwise.
+        # Through `_scan_tree`, so that the staleness probe and the scan
+        # cannot disagree about which tree is being talked about.
         try:
-            workspace = SyncManager(project['slug']).get_checkout_path(
-                CheckoutRepository.PURPOSE_SCAN)
+            workspace = self._scan_tree(project)
         except ValueError as e:
             print(f"   Error: {e}", file=sys.stderr)
+            return
+        if workspace is None:
+            print("   Error: no checkout to scan", file=sys.stderr)
             return
 
         if not workspace.exists():
@@ -1014,18 +1157,49 @@ class VCSCommands(Command):
                         and checkout_row['session_id'] == _current_session_id()
                     ),
                     "edit_session_started": edit_session['started_at'] if edit_session else None,
+                    # **The tree the status below is actually about**, when
+                    # it is not the one named above. None when they agree.
+                    #
+                    # These resolve differently and the command used to
+                    # print only the first: the header resolves
+                    # PURPOSE_EDIT, which *adopts* the newest edit
+                    # workspace even if no session owns it, while the
+                    # scan resolves PURPOSE_SCAN, which refuses an
+                    # unowned workspace and falls back to the canonical
+                    # tree. So `vcs status` would print
+                    # "Checkout: …/edit-workspaces/<slug>/<session>
+                    # [adopted edit workspace, writable]" and then
+                    # report the *canonical* checkout's state under it.
+                    #
+                    # That is how fourteen edited files read as "No
+                    # changes" even once the cache was being invalidated
+                    # correctly: the invalidation was asking about the
+                    # right tree and the right tree was not the one the
+                    # user was editing.
+                    #
+                    # Reported rather than resolved away. Making
+                    # PURPOSE_SCAN accept an adopted workspace is the
+                    # change that manufactured 63 deletions on `bza`,
+                    # and the underlying cause is upstream of here:
+                    # `templedb edit` leaves `checkouts.session_id`
+                    # NULL, because it stamps the row through
+                    # `current_session_id()`, which reads only
+                    # TEMPLEDB_SESSION_ID / TEMPLEDB_SESSION — while
+                    # the session this command *reports* comes from
+                    # `get_current_session()`, which derives one. Two
+                    # notions of "current session", and ownership uses
+                    # the stricter. Deciding which is authoritative is a
+                    # design change, not a status fix.
+                    "status_tree": self._status_tree_mismatch(project, checkout_path),
                 }
 
             if hasattr(args, 'refresh') and args.refresh:
                 self._refresh_working_state(project)
             else:
-                existing = self.vcs_repo.query_one("""
-                    SELECT COUNT(*) as count FROM vcs_working_state
-                    WHERE project_id = ?
-                """, (project['id'],))
-                if not existing or existing['count'] == 0:
+                reason = self._working_state_staleness(project)
+                if reason:
                     if not getattr(args, 'json', False):
-                        print("Detecting changes (first time)...")
+                        print(f"Detecting changes ({reason})...")
                     self._refresh_working_state(project)
 
             status = self.service.get_status(project['slug'])
@@ -1071,7 +1245,22 @@ class VCSCommands(Command):
                 "modified": status.get('modified', []),
                 "untracked": status.get('untracked', []),
                 "pending_session_commits": status.get('pending_session_commits', 0),
-                "clean": not (status.get('staged') or status.get('modified') or status.get('untracked')),
+                # `staged_by_others` counts. It was left out, and the
+                # consequence was not a cosmetic one: `_human` prints
+                # "No changes" and *returns* on `clean`, so its own
+                # "Staged in other sessions" block was unreachable in
+                # exactly the case it exists for — a file staged by a
+                # session that ended without committing. The tree then
+                # read as clean while holding content nobody could see,
+                # and `vcs commit` would not pick it up either, because
+                # the commit selects by this session's id.
+                #
+                # Reproduced on `regr-test`: one file, `state=modified`,
+                # `staged_by_session_id=1196` from an ended session.
+                # Every later session got "No changes" and no listing.
+                "clean": not (status.get('staged') or status.get('modified')
+                              or status.get('untracked')
+                              or status.get('staged_by_others')),
                 "checkout": checkout_info,
                 "all_sessions_view": grouped,
                 "active_merges": self._active_merges(project['id']),
@@ -1118,6 +1307,18 @@ class VCSCommands(Command):
                         # all. Say so rather than guessing a role.
                         role = "unclassified"
                     print(f"Checkout: {c['path']}  [{role}, {access}]")
+                    if c.get('status_tree'):
+                        # The one line that makes the rest of this
+                        # output interpretable when the two trees
+                        # disagree. Without it the file lists below are
+                        # about a directory that is never named.
+                        print(f"          Status below describes "
+                              f"{c['status_tree']} instead — this workspace "
+                              f"is not owned by a live session, so it is not "
+                              f"scanned. Edits here are invisible to "
+                              f"`vcs status` and to `vcs commit`; "
+                              f"`templedb commit {d['project']} {c['path']}` "
+                              f"still commits them.")
                     if kind == 'canonical':
                         # The permissions do not stop you — this tree is
                         # mode 755 with 644 files — so the warning has to

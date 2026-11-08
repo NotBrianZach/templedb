@@ -446,6 +446,56 @@ class FileScanner:
         """Count lines in file"""
         return len(content.splitlines())
 
+    def newest_mtime(self) -> Optional[float]:
+        """The newest mtime among the files `scan_directory` would return.
+
+        A cheap staleness probe for callers that cache a scan's result:
+        if nothing in the tree is newer than when the cache was built,
+        the cache still describes the tree.
+
+        Deliberately shares `scan_directory`'s membership rules —
+        SKIP_DIRS, `is_ignored_path`, and the git file list — by walking
+        the same way rather than by walking everything. Two reasons, and
+        the second is the load-bearing one:
+
+          * `target/` and `node_modules/` are rewritten by builds that
+            change no tracked file. A probe that saw them would report
+            every tree as stale forever, which is the same as having no
+            cache at all. `templedb-rust`'s checkout has a 5 GB
+            `target/` beside 49 tracked files.
+          * A membership rule that only one of the two uses drifts.
+            Staleness has to be asked about exactly the set the scan
+            would write, or the answer is about a different tree.
+
+        Stats rather than reads: no hashing, no `get_file_type`, no
+        content. Returns None for a tree with no qualifying files, which
+        the caller must not read as "fresh" — there is nothing to
+        compare and a scan is the only way to find out.
+        """
+        newest = None
+        for root, dirs, files in os.walk(self.project_root):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for file_name in files:
+                file_path = Path(root) / file_name
+                rel_path = str(file_path.relative_to(self.project_root))
+                if is_ignored_path(rel_path):
+                    continue
+                if self._git_files is not None and rel_path not in self._git_files:
+                    continue
+                try:
+                    # `stat`, which follows symlinks, because
+                    # `scan_directory` skips broken links via
+                    # `.exists()` and reads through good ones.
+                    mtime = file_path.stat().st_mtime
+                except OSError:
+                    # A file that cannot be stat'd is one
+                    # `scan_directory` would also drop. Not evidence of
+                    # freshness either way.
+                    continue
+                if newest is None or mtime > newest:
+                    newest = mtime
+        return newest
+
     def scan_directory(self) -> List[ScannedFile]:
         """Recursively scan directory and return list of tracked files.
 
