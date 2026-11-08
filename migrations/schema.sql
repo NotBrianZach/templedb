@@ -1,5 +1,5 @@
 -- TempleDB canonical schema
--- Generated from live database, sourced with migrations 001-140 applied.
+-- Generated from live database, sourced with migrations 001-142 applied.
 -- Regenerate after adding any new migration:
 --     python3 scripts/regen_schema.py
 --
@@ -14,7 +14,7 @@
 -- That failure mode has bitten twice (075-082, then 084-125). Use --check in CI.
 
 -- ======================================================================
--- Tables (136)
+-- Tables (137)
 -- ======================================================================
 
 CREATE TABLE IF NOT EXISTS agent_events (
@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS agent_session_sections (
     UNIQUE(session_id, section, entry_id)
 );
 
-CREATE TABLE IF NOT EXISTS agent_sessions (
+CREATE TABLE IF NOT EXISTS "agent_sessions" (
     id INTEGER PRIMARY KEY,
     session_uuid TEXT NOT NULL UNIQUE,
     project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS agent_user_edits (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS agent_work_log (
+CREATE TABLE IF NOT EXISTS "agent_work_log" (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES agent_sessions(id),
     run_id INTEGER REFERENCES agent_runs(id),
@@ -1190,7 +1190,7 @@ CREATE TABLE IF NOT EXISTS graph_query_log (
     executed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS handoff_notes (
+CREATE TABLE IF NOT EXISTS "handoff_notes" (
     id              INTEGER PRIMARY KEY,
 
     -- Sender identity. from_session is TEMPLEDB_SESSION_ID or a
@@ -1634,6 +1634,48 @@ CREATE TABLE IF NOT EXISTS observations_archive (
     -- capture; the essential fields above are always populated.
     prior_label            TEXT,
     prior_source_authority TEXT
+);
+
+CREATE TABLE IF NOT EXISTS origination_events (
+    id             INTEGER PRIMARY KEY,
+
+    -- Client-generated, and the whole reason a retry is safe. A phone
+    -- on bad signal cannot know whether its submit landed, so it
+    -- resubmits; submit is INSERT OR IGNORE on this column, so the
+    -- second copy is a no-op rather than a duplicate prompt.
+    event_uuid     TEXT NOT NULL UNIQUE,
+
+    -- Which device originated it. Not a fleet_machines FK on purpose:
+    -- that table's columns (target_host, nixos_version, system_profile,
+    -- deployment_status) describe a machine TempleDB deploys NixOS to
+    -- over SSH, and a handset is none of that. A row there would have
+    -- every interesting column NULL, which the Rust port's README
+    -- calls out as worse than an absent row. A free-text device id is
+    -- the honest shape until there is something real to reference.
+    device_id      TEXT NOT NULL,
+
+    kind           TEXT NOT NULL,
+    payload_json   TEXT NOT NULL,
+
+    -- occurred_at is the DEVICE's clock: when the thought happened,
+    -- which is the fact offline origination exists to preserve. It is
+    -- not validated against the server clock and may be skewed or in
+    -- the future -- that is accepted, because a wrong timestamp is
+    -- worth more than a lost capture.
+    occurred_at    TEXT NOT NULL,
+    -- received_at is the server clock, so delivery lag is visible
+    -- rather than collapsed into one timestamp.
+    received_at    TEXT NOT NULL DEFAULT (datetime('now')),
+
+    -- Apply is a SEPARATE step from submit, and rows are never deleted
+    -- by it. A captured thought is not lost because an applier had a
+    -- bug: the event stays, applied_at stays NULL, apply_error says
+    -- why, and it is retried next sweep. That also makes this table a
+    -- durable record of what each device originated and when.
+    applied_at     TEXT,
+    apply_result   TEXT,
+    apply_error    TEXT,
+    apply_attempts INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS project_domains (
@@ -3365,7 +3407,7 @@ WHERE m.impact_level IN ('high', 'critical')
 ORDER BY c.commit_timestamp DESC;
 
 -- ======================================================================
--- Indexes (260)
+-- Indexes (262)
 -- ======================================================================
 
 CREATE INDEX IF NOT EXISTS agent_pending_asks_session_status
@@ -3761,6 +3803,12 @@ CREATE INDEX IF NOT EXISTS idx_observations_archive_entity
 
 CREATE INDEX IF NOT EXISTS idx_observations_archive_time
     ON observations_archive(observed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_origination_device
+    ON origination_events(device_id, occurred_at);
+
+CREATE INDEX IF NOT EXISTS idx_origination_pending
+    ON origination_events(applied_at, occurred_at);
 
 CREATE INDEX IF NOT EXISTS idx_project_domains_project_id ON project_domains(project_id);
 

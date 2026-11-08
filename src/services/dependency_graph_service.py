@@ -11,6 +11,13 @@ Builds cross-file dependency graph by:
 This implements Phase 1.3 from CODE_INTELLIGENCE_STATUS.md
 """
 
+# Load-bearing: methods below annotate `tree_sitter.Node`, which is
+# evaluated when the class body runs, so without PEP 563 this module
+# raises NameError at import time when tree-sitter is missing and the
+# ImportError guard below can never be reached. Same defect as
+# symbol_extraction_service.py; see the comment there.
+from __future__ import annotations
+
 import hashlib
 import json
 import logging

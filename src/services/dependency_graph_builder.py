@@ -18,6 +18,13 @@ Design Principle: Only track dependencies between PUBLIC symbols
 - Rationale: Local calls don't affect cross-file blast radius
 """
 
+# Load-bearing: methods below annotate `tree_sitter.Tree` / `.Node`, which
+# is evaluated when the class body runs, so without PEP 563 this module
+# raises NameError at import time when tree-sitter is missing and the
+# ImportError guard below can never be reached. Same defect as
+# symbol_extraction_service.py; see the comment there.
+from __future__ import annotations
+
 import logging
 import re
 from dataclasses import dataclass

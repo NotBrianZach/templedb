@@ -19,6 +19,16 @@ Key Design Principles:
 4. Incremental updates (check content_hash)
 """
 
+# Load-bearing, not style. Method signatures below annotate `tree_sitter.Tree`
+# and `tree_sitter.Node`, and an annotation in a def is evaluated when the
+# class body runs -- so without PEP 563 this module raises NameError at
+# *import* time whenever tree-sitter is missing, which makes the
+# `except ImportError` guard and HAS_TREE_SITTER below a lie: nothing can
+# reach the degraded path because nothing can import the module. Three test
+# modules (community_detection, dependency_graph, impact_analysis) failed to
+# collect for this reason in an env without the grammars.
+from __future__ import annotations
+
 import hashlib
 import logging
 import re
