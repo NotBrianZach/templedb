@@ -227,6 +227,29 @@ def test_pseudo_machines_get_health_but_not_nixos_facts(fleet_db, cmd, monkeypat
     assert pseudo['last_deployed_at'] is None
 
 
+def test_a_non_nixos_machine_is_still_really_probed(fleet_db, cmd, monkeypatch):
+    """Only system_type='localhost' is a pseudo-machine.
+
+    A Windows box on the tailnet is a real machine whose reachability is a
+    real question — marking every non-nixos row healthy would answer it
+    with a cheerful lie.
+    """
+    import db_utils
+    db_utils.execute(
+        "INSERT INTO fleet_machines (id, network_id, machine_name, "
+        "machine_uuid, target_host, system_type) "
+        "VALUES (4, 1, 'winbox', 'm-uuid-4', 'zachgigamothers', 'windows')")
+
+    class FakeBackend:
+        def machines_from_db(self, network_id):
+            return []
+    monkeypatch.setattr('services.nix_deploy_backend.NixDeployBackend',
+                        FakeBackend)
+
+    cmd.sweep(Args(as_json=False))
+    assert _row(fleet_db, 4)['health_status'] == 'unreachable'
+
+
 def test_drift_report_names_what_only_one_list_knows(fleet_db, cmd):
     drift = cmd._inventory_drift()
     # zStation has a host config and no machine row.

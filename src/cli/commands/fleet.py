@@ -694,11 +694,17 @@ class FleetCommands(Command):
 
         for m in machines:
             local = self._is_local_machine(m, hostname)
-            if (m['system_type'] or 'nixos') != 'nixos':
+            if (m['system_type'] or 'nixos') == 'localhost':
                 # `localhost` / `bza-localhost` are execution contexts for
                 # `deploy run`, not systems anyone deploys NixOS to.
                 # Stamping them with this machine's profile and version
                 # would make two more rows claim to be zMothership2.
+                #
+                # Keyed on 'localhost' exactly, not "anything that is not
+                # nixos": a Windows box on the tailnet is a real machine
+                # whose reachability is a real question, and blanket-
+                # marking non-nixos rows healthy would answer it with a
+                # cheerful lie.
                 info = {'reachable': True}
             elif local:
                 info = self._local_machine_facts()

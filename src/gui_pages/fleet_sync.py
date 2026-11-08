@@ -408,18 +408,23 @@ def _fleet_sync_get_hosts() -> list[dict]:
     except Exception:
         pass
 
-    # Known host fallbacks
     import socket
     hostname = socket.gethostname()
-    known = {"zMothership2": "localhost" if hostname == "zMothership2" else "192.168.8.164",
-             "zMothership3": "localhost" if hostname == "zMothership3" else "192.168.8.172"}
-    for k, v in known.items():
-        if k not in ip_map:
-            ip_map[k] = v
+    ts_map = _fleet_sync_tailscale_addresses()
 
     for h in hosts:
-        h["host"] = ip_map.get(h["name"])
+        h["host"] = _fleet_sync_resolve_host(h["name"], ip_map, ts_map, hostname)
     return hosts
+
+
+# Addressing and ssh-error wording live in services/fleet_addressing.py:
+# neither is a GUI concern, and importing this module needs fastapi, which
+# made them untestable without the web stack.
+from services.fleet_addressing import (                      # noqa: E402
+    classify_ssh_error as _fleet_sync_classify_ssh_error,
+    resolve_host as _fleet_sync_resolve_host,
+    tailscale_addresses as _fleet_sync_tailscale_addresses,
+)
 
 def _fleet_sync_probe(host_info: dict, projects: list[str]) -> dict:
     """SSH into a host and get its DB sync state."""
@@ -431,7 +436,8 @@ def _fleet_sync_probe(host_info: dict, projects: list[str]) -> dict:
     result = {"name": name, "host": host or "unknown", "ssh": False, "projects": {}, "error": None}
 
     if not host:
-        result["error"] = "No IP configured"
+        result["error"] = (f"no address: {name} is not in fleet_machines and "
+                           f"no online tailscale peer has that hostname")
         return result
 
     # Local machine
@@ -457,7 +463,7 @@ def _fleet_sync_probe(host_info: dict, projects: list[str]) -> dict:
 
         r = subprocess.run(ssh_base + ["echo ok"], capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
-            result["error"] = "SSH failed"
+            result["error"] = _fleet_sync_classify_ssh_error(r.returncode, r.stderr)
             return result
         result["ssh"] = True
 
