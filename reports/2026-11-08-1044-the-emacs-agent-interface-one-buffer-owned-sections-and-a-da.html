@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The Emacs agent interface — one buffer, owned sections, and a database that outlives the render</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #13131f;
+    --border: #1e1e3a;
+    --text: #d0d0e8;
+    --muted: #8080a0;
+    --accent: #e94560;
+    --link: #7ec7ff;
+    --code-bg: #0a0a14;
+  }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
+    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
+    line-height: 1.65; font-size: 16.5px;
+  }
+  h1 { color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }
+  h2 { color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
+       text-transform: uppercase; letter-spacing: 0.06em;
+       border-top: 1px solid var(--border); padding-top: 1.3rem; }
+  h3 { color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+  .lede { color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  p { margin: 0 0 1rem; }
+  code { background: var(--code-bg); color: #b0e0b0;
+         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
+         font-family: "JetBrains Mono", ui-monospace, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }
+  a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  .callout { background: var(--panel); border-left: 3px solid var(--accent);
+             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1rem 0;
+          font-size: 0.89em; }
+  th, td { border: 1px solid var(--border); padding: 0.5rem 0.7rem;
+           text-align: left; vertical-align: top; }
+  th { background: var(--panel); color: #b0b0d0; font-weight: 600; }
+  td code { font-size: 0.92em; }
+  .yes { color: #8fd98f; }
+  .no { color: var(--accent); }
+  .part { color: #d9c98f; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<h1>The Emacs agent interface — one buffer, owned sections, and a
+database that outlives the render</h1>
+
+<p class="lede">A design-philosophy pass over
+<code>integrations/emacs/templedb-agent.el</code>, written the same day
+the multi-pane layout was removed from it. The interface rests on three
+commitments: a session is exactly one Org buffer, every section of that
+buffer has exactly one owner, and the buffer is a <em>view</em> whose
+authority lives in SQLite. Usage data across 104 real sessions says two
+of the three are carrying the design and the third is mostly unused —
+and that the most-praised feature in the docs has never once been
+touched by a human.</p>
+
+<h2>Why this report exists</h2>
+
+<p>Prompted by removing something. <code>templedb-agent-layout</code>
+(<code>C-c C-3</code>) showed a session as three windows — state in a
+sidebar, conversation top right, <code>Next Prompt</code> underneath —
+built from indirect buffers each narrowed to a span of the base. It was
+clever and it worked. It is now deleted, along with
+<code>templedb-open-layout</code> in the spacemacs layer, which did the
+analogous thing one level up: a <code>T:&lt;slug&gt;</code> perspective
+holding VCS status, a dired pane and a vterm.</p>
+
+<p>Deleting two features in one afternoon is a good moment to ask what
+the interface is actually <em>for</em>, because the answer is what makes
+one removal obvious and another a mistake. There is already a reference
+document — <code>docs/TEMPLE_AGENT_EMACS.md</code> — that says what each
+moving part does. This is the other half: what the parts are <em>for</em>,
+which of them earn their keep, and how to work with the thing.</p>
+
+<h2>The thesis: the buffer is a view</h2>
+
+<p>The single most load-bearing sentence in the client is a comment on
+its rendering: Emacs holds no authoritative state. The buffer is rebuilt
+from the database on <code>, g</code>. Everything the interface does
+follows from taking that seriously.</p>
+
+<p>That is a stronger claim than it sounds. It means the Org document is
+not a transcript that happens to be saved — it is a projection, and the
+session is the rows. A terminal-based agent client has the opposite
+property: the scrollback <em>is</em> the session, and when it is gone the
+session is gone. Here you can kill the buffer mid-run, restart Emacs,
+reopen by id, and the conversation reassembles from
+<code>agent_events</code> — 37,399 of them across 1,209 runs at the time
+of writing.</p>
+
+<p>Three consequences fall out, and they are the whole design:</p>
+
+<ul>
+<li><strong>Other readers are free.</strong> The same rows render as web
+pages (<code>src/gui_pages/agent_{sections,sessions,work_log}.py</code>),
+as CLI output (<code>templedb ai agent fleet --json</code>), and as the
+roster triage buffer. None of them is a second implementation of the
+session; they are second <em>queries</em>.</li>
+<li><strong>The agent can write into your document.</strong> If the
+buffer were the truth, a tool running in a sibling process could not
+touch it. Because the truth is a table, it can — see
+<a href="#bridge">the MCP bridge</a>.</li>
+<li><strong>Render code is disposable.</strong> Which is exactly why the
+pane layout could go without a migration, a deprecation window or a
+single lost byte of anyone's session.</li>
+</ul>
+
+<h2>Commitment 1 — a session is one buffer</h2>
+
+<p>This was the implicit default for most of the client's life and became
+an explicit rule today. The case against panes is instructive, because
+none of it is about taste.</p>
+
+<p>An indirect buffer shares the base's text <em>and its text
+properties</em>, which is why panes were attractive: the section anchors,
+the ewoc's in-place rendering and the save path all kept working
+untouched. What it does not share is narrowing, point, window and
+<code>buffer-read-only</code> — precisely the list a pane needs to differ
+on. The design was correct. The cost was that it created a second
+rendering contract that every write had to honour:</p>
+
+<table>
+<tr><th>Obligation</th><th>Imposed on</th></tr>
+<tr><td>Re-narrow every pane, because a narrowing's bounds move when text inside them changes size</td><td>every section re-render, every agent event, every new exchange</td></tr>
+<tr><td>Repair every pane's restriction, which a full erase collapses to nothing</td><td><code>--render-buffer</code></td></tr>
+<tr><td>Accept that the fresh-write highlight is invisible — overlays are the one thing indirect buffers do not share</td><td>every agent-owned section write</td></tr>
+<tr><td>Maintain a parallel keymap of <code>view-*</code> wrappers that re-enter the base; the <code>,</code> major-mode leader did not work in a pane at all</td><td>every binding</td></tr>
+<tr><td>Rename the session's panes, including ones orphaned when re-running the major mode wiped the alist that tracked them</td><td>every retitle</td></tr>
+</table>
+
+<p>Five ongoing obligations, paid on every write, so that a window could
+be split in a way <code>C-x 3</code> already splits it. The removal was
+−549 lines in the client and −286 in its test file. The one capability
+panes had that plain windows do not — "put point where I actually type"
+— survived as <code>templedb-agent-focus-prompt</code> on
+<code>C-c C-n</code>, which is 10 lines.</p>
+
+<div class="callout">
+<p><strong>The principle, stated generally.</strong> A feature that adds
+an invariant every unrelated write must maintain is not priced at its own
+line count. It is priced at the sum of all the places that now have to
+remember it. The pane layout cost about 460 lines to <em>have</em> and
+five standing obligations to <em>keep</em>, and only the first number was
+visible when it was written.</p>
+</div>
+
+<h2>Commitment 2 — every section has exactly one owner</h2>
+
+<p>The Org document is not a chat log with extra headings. It is eleven
+fixed sections in a fixed order, and the order encodes who may write
+where. <code>templedb-agent--section-order</code>:</p>
+
+<pre>guide now goal context conversation next-prompt
+findings todo open-questions
+notes scratch
+       + dynamic:NAME*  (agent-created, appended after scratch)</pre>
+
+<table>
+<tr><th>Section</th><th>Owner</th><th>Lifecycle</th></tr>
+<tr><td><code>Goal</code></td><td class="yes">you</td><td>re-sent with <em>every</em> message — the anti-drift mechanism</td></tr>
+<tr><td><code>Next Prompt</code></td><td class="yes">you</td><td><code>C-c C-c</code> sends and clears it</td></tr>
+<tr><td><code>Notes</code></td><td class="yes">you</td><td>persisted to <code>agent_session_notes.notes_org</code></td></tr>
+<tr><td><code>Scratch</code></td><td class="yes">you</td><td>never sent; genuinely local</td></tr>
+<tr><td><code>Findings</code></td><td class="no">agent</td><td><code>templedb_agent_note_finding</code></td></tr>
+<tr><td><code>Todo</code></td><td class="no">agent</td><td><code>templedb_agent_todo_add</code> / <code>_todo_done</code></td></tr>
+<tr><td><code>Open Questions</code></td><td class="no">agent</td><td><code>templedb_agent_question_add</code> / <code>_question_answered</code></td></tr>
+<tr><td><code>dynamic:*</code></td><td class="no">agent</td><td><code>templedb_agent_section_write</code> — arbitrary named sections</td></tr>
+<tr><td><code>Now</code></td><td class="part">neither</td><td>live status line</td></tr>
+<tr><td><code>Context</code></td><td class="part">neither</td><td>the context basket; toggled, not typed</td></tr>
+<tr><td><code>Conversation</code></td><td class="part">neither</td><td>exclusively an ewoc's; nothing may <code>insert</code> between its anchor and <code>Next Prompt</code></td></tr>
+</table>
+
+<p>Two details make the ownership real rather than documentary.</p>
+
+<p><strong>Anchors, not regexes.</strong> Sections are located by text
+properties. The old <code>--section-heading-regex</code> survives only
+for legacy callers and is marked deprecated, because regex matching
+breaks the first time a tool result contains a line starting with
+<code>* </code> — which, in a tool that reads Org files and shell output,
+is immediately.</p>
+
+<p><strong>A one-way persistence firewall.</strong>
+<code>templedb-agent-save-user-sections</code> is the only path that
+writes user sections back to the DB. It fires on <code>C-c C-s</code>, on
+3 seconds of idle with the buffer modified, and on
+<code>kill-buffer-hook</code> — and deliberately <em>not</em> from
+run-completion handlers. That coupling used to exist, and on 2026-08-28 a
+rendering bug let it persist tool-bucket garbage into the user's Scratch.
+The fix was both to decouple it and to add
+<code>--scratch-is-polluted-p</code>, which refuses to save Scratch text
+containing <code>:TOOL_ID:</code> or <code>**** RUNNING/DONE/FAILED</code>
+and says so. Note the asymmetry: user sections are saved by an explicit
+guarded path; agent sections are written by the agent's own tools and
+read back as rows. Neither side's writer can reach the other's storage.</p>
+
+<h2 id="bridge">Commitment 3 — the agent writes into your document mid-run</h2>
+
+<p>This is the part of the design that is genuinely surprising, and it is
+the thing a terminal cannot do at all.</p>
+
+<p>When Claude calls <code>templedb_agent_note_finding</code>, that tool
+executes in the MCP server process, which is a child of the
+<code>claude</code> subprocess — <em>not</em> in
+<code>AgentService</code>. It has no access to the event callback that
+would push a line to Emacs. The bridge is a table:</p>
+
+<pre>MCP tool handler  ──writes row──▶  agent_pending_events   (one-way)
+                                   agent_pending_asks     (round-trip)
+                                            │
+AgentService._ask_poll_loop ──polls 300ms───┘
+                                            │
+                                     re-emits as events ──▶ Emacs</pre>
+
+<p>One poll loop serves both transports per session, marking rows
+dispatched so they fire once. The directions differ: pending <em>events</em>
+are fire-and-forget (a finding, a todo), while pending <em>asks</em> are a
+round trip — <code>templedb_ask_user</code> blocks until a human answers,
+and the answer travels back by <code>ask_id</code>.</p>
+
+<p>Because the ask polls its <em>own</em> row, the answer only has to
+land in the table. It does not have to come back through the session that
+asked. That single fact is why you can answer a question from the roster
+without opening the session, or from any shell with
+<code>templedb ai agent ask respond</code>. It is also why a stale
+<code>ai agent serve</code> process is actively harmful rather than
+merely idle: two pollers race the same rows.</p>
+
+<h2>What the data says about which parts earn their keep</h2>
+
+<p>Section usage, restricted to the 104 sessions on the real
+<code>claude_code</code> provider. The other 257 session rows are
+<code>fake</code>-provider test leavings and would make every ratio
+below look better than it is — a trap worth naming, since the unfiltered
+count is what <code>COUNT(*)</code> hands you.</p>
+
+<table>
+<tr><th>Section</th><th class="num">Entries</th><th class="num">Sessions using it</th><th>Verdict</th></tr>
+<tr><td><code>Findings</code></td><td class="num">961</td><td class="num">76 / 104 &nbsp;(73%)</td><td class="yes">load-bearing</td></tr>
+<tr><td><code>Todo</code></td><td class="num">631</td><td class="num">72 / 104 &nbsp;(69%)</td><td class="yes">load-bearing</td></tr>
+<tr><td><code>Goal</code></td><td class="num">—</td><td class="num">66 / 104 &nbsp;(63%)</td><td class="yes">load-bearing</td></tr>
+<tr><td><code>Open Questions</code></td><td class="num">64</td><td class="num">34 / 104 &nbsp;(33%)</td><td class="part">real but thin</td></tr>
+<tr><td><code>dynamic:*</code></td><td class="num">8</td><td class="num">5 / 104 &nbsp;(5%)</td><td class="no">essentially unused</td></tr>
+<tr><td><code>Notes</code></td><td class="num">—</td><td class="num">0 / 104 &nbsp;(0%)</td><td class="no">never used</td></tr>
+<tr><td><code>Scratch</code></td><td class="num">—</td><td class="num">0 / 104 &nbsp;(0%)</td><td class="no">never used</td></tr>
+</table>
+
+<p>Three readings, in increasing order of how much they should change
+what gets built next.</p>
+
+<p><strong>The agent-writes-your-document bet paid off.</strong> 961
+findings and 631 todos, in roughly 70% of all real sessions, is not a
+feature being politely tolerated. It is the main thing the interface
+does that a terminal does not, and it is used accordingly. The
+<code>[F:n T:n Q:n]</code> modeline badge is the quiet companion win —
+you can see that seven findings have accumulated without unfolding
+anything.</p>
+
+<p><strong><code>Goal</code> is the sleeper.</strong> 63% adoption for a
+section whose entire mechanism is "this text is re-sent with every
+message." It is the cheapest anti-drift device in the system and it
+competes with nothing.</p>
+
+<p><strong>Notes and Scratch have never been used once.</strong> Zero of
+104 real sessions. The reference doc describes <code>Notes</code> as
+persisted-to-DB and <code>Scratch</code> as "genuinely local", both in
+the tone of features. They are, in practice, two headings that exist to
+be scrolled past — and they cost more than nothing: they are half the
+surface of the persistence firewall, the reason
+<code>--scratch-is-polluted-p</code> exists, and the subject of the one
+data-loss incident the save path has had (2026-08-28). A feature with no
+users and a dedicated guard against its own failure mode is a feature
+worth retiring.</p>
+
+<p><code>dynamic:*</code> is the interesting near-miss: 8 entries across
+6 distinct names, including a <code>dynamic:Next Prompt</code> and a
+<code>dynamic:Suggested Next Prompts</code> that are plainly an agent
+reaching for a section that already exists. Arbitrary agent-named
+sections are more generality than the problem needed.</p>
+
+<h2>Suggested workflows</h2>
+
+<p>Keyed to what the data says actually works, rather than to the full
+feature surface.</p>
+
+<h3>The default loop: Goal, then let findings accumulate</h3>
+
+<p><code>SPC a T A n</code> → <code>, x a</code> to add the project →
+write the standing constraints into <code>Goal</code> → ask the question
+in <code>Next Prompt</code> → <code>C-c C-c</code>.</p>
+
+<p>The thing to internalise is that <code>Goal</code> is re-sent every
+message, so it is where "don't touch the migrations", "this is a
+read-only investigation" or "the acceptance test is X" belongs. Putting
+that in a message instead means it decays with distance. Then let the
+agent file findings as it goes rather than asking for a summary at the
+end: a finding written at the moment of discovery survives buffer
+refresh, <code>/compact</code>, and you closing the buffer, because it is
+a row.</p>
+
+<h3>Steering without cancelling — and what it actually does</h3>
+
+<p><code>, i</code> (<code>templedb-agent-guide</code>) is the chord
+worth memorising: it gets a correction to the agent without cancelling
+and re-prompting, which is what a terminal client forces. It is the
+difference between watching an agent go the wrong direction for four
+minutes and redirecting it in ten seconds.</p>
+
+<p>The mechanism is worth stating precisely, because the reference doc
+calls it "mid-run steering" and that is slightly generous. There are two
+different send paths:</p>
+
+<table>
+<tr><th></th><th><code>C-c C-c</code> (send)</th><th><code>, i</code> (guide)</th></tr>
+<tr><td>While idle</td><td><code>message.send</code> + full context payload</td><td><code>message.send</code>, content only</td></tr>
+<tr><td>While a run is active</td><td>switches to <code>message.queue</code> — drained when the turn ends</td><td>still <code>message.send</code>, immediately</td></tr>
+<tr><td>Carries <code>Goal</code> and the context basket</td><td class="yes">yes</td><td class="no">no</td></tr>
+</table>
+
+<p>So guide does not interleave text into the turn in flight.
+<code>send_message</code> creates a <em>new run</em>, and because the
+provider passes <code>--resume &lt;external_session_id&gt;</code>, that
+run continues the same Claude conversation. Your guidance therefore
+reaches the right thread without losing the run — which is the useful
+property — but as another turn rather than an injection. Two practical
+consequences: guidance does not re-send your <code>Goal</code>, so it
+should be self-contained; and it is the one path that can put two runs on
+one session (see <a href="#open">open questions</a>).</p>
+
+<h3>Long investigations: hand off to yourself</h3>
+
+<p>Work the problem, let <code>Findings</code> and <code>Open
+Questions</code> fill, then walk away. Coming back, <code>, s s</code>
+into the session rebuilds the buffer from stored events and the
+open-question count tells you where you stopped. For anything
+genuinely durable, promote the findings into a report in
+<code>reports/</code> — the session is a view, but it is not a
+<em>document</em>, and nobody greps 37,000 event rows for a conclusion.</p>
+
+<h3>Fleet work: triage from the roster, not the buffer list</h3>
+
+<p><code>SPC a T A l</code> buckets every session by <strong>who is
+blocked</strong> — <code>NEEDS INPUT</code>, <code>WORKING</code>,
+<code>NEEDS ATTENTION</code>, <code>DONE · your turn</code>,
+<code>IDLE</code> — and auto-refreshes while on screen. Use
+<code>a</code> to answer a live question inline and <code>c</code> to
+reply without leaving it. <code>C</code> opens an overseer session seeded
+with a fleet snapshot: chat <em>about</em> the agents rather than with
+one. Press <code>?</code> rather than memorising keys — the guide is
+generated with <code>substitute-command-keys</code> against the live
+keymaps, so it prints your config's actual bindings, which matters
+because evil's motion state steals six of the plain ones.</p>
+
+<h3>Read-only reconnaissance is a deliberate act</h3>
+
+<p>Permission mode defaults to <code>bypassPermissions</code>.
+<code>, P</code> (plan mode) is therefore a <em>narrowing</em>, not a
+default you can forget to turn off. Use it before pointing an agent at
+anything you do not want edited.</p>
+
+<h3>Walk away, but arm the alerts</h3>
+
+<p>The event stream only reaches whoever launched the run, so a finished
+run in a hidden buffer gets an echo-area message that the next
+<code>message</code> erases. The durable channel is on disk: six event
+types drop a pre-rendered JSON file into
+<code>~/.local/share/templedb/alerts</code>, and
+<code>templedb-agent-alerts-mode</code> turns each into a desktop
+notification. Enable it from your init file rather than letting it
+self-start on first agent buffer, or you miss everything that finished
+before you opened one.</p>
+
+<h2>The failure modes this design has already paid for</h2>
+
+<p>A design philosophy is partly a list of scars. These are worth
+knowing because each one is still reachable.</p>
+
+<table>
+<tr><th>Failure</th><th>Why the design allowed it</th><th>What holds now</th></tr>
+<tr><td>Tool output persisted into user Scratch (2026-08-28)</td><td>save-on-run-completion coupled rendering state to the DB write</td><td>save is idle/explicit/kill-only, plus a marker check that refuses</td></tr>
+<tr><td>16 asks aged 8–36 days sitting <code>pending</code> with no reader</td><td><code>status='pending'</code> was treated as "needs input"; the handler's poll deadline is 600s</td><td>liveness is a separate notion; the roster offers only live asks, <code>ask respond</code> refuses expired without <code>--force</code></td></tr>
+<tr><td>An agent asked "is the DB locked?" killed two sibling servers, including its own parent</td><td><code>ps</code> plus <code>kill</code> is an obvious-looking answer</td><td><code>ai agent stop-stale</code>, which excludes its own ancestor chain via <code>TEMPLEDB_AGENT_SERVER_PID</code></td></tr>
+<tr><td>Test sessions outnumbering real ones 257:104 and hiding real sessions below a row cap</td><td>the <code>fake</code> provider writes to the live roster</td><td>roster excludes test provider kinds and reports truncation (fixed 2026-10-25)</td></tr>
+<tr><td>Dispatched agents leaving unowned edit workspaces</td><td>the function stamping the <code>checkouts</code> row never creates a session, so <code>templedb edit</code> first leaves <code>session_id IS NULL</code></td><td>dispatch opens the vcs session, exports it, <em>then</em> runs <code>edit</code> — in that order</td></tr>
+</table>
+
+<p>The last row generalises into the most repeated lesson in this
+codebase: <strong>order of operations across two subsystems is a design
+decision, not an implementation detail.</strong> Session-before-edit,
+write-then-rename for alert files, enter-the-layout-before-creating-the-buffer
+— same shape three times.</p>
+
+<h2>The philosophy, stated as rules</h2>
+
+<ol>
+<li><strong>The database is the session; the buffer is a query.</strong>
+Anything that makes the render authoritative is a regression, however
+convenient.</li>
+
+<li><strong>One session, one buffer.</strong> Splitting is the window
+manager's job. A view layer inside the application has to be maintained
+by every writer in the application.</li>
+
+<li><strong>Every region of the document has exactly one owner.</strong>
+Shared-write regions are where corruption lives. The ewoc owns
+Conversation outright and the source says so in a warning.</li>
+
+<li><strong>Price a feature at the invariants it imposes, not the lines
+it adds.</strong> The pane layout's five standing obligations were the
+real cost and were invisible at authoring time.</li>
+
+<li><strong>Cross-process writes go through a table, never a
+callback.</strong> It is why the agent can annotate your document
+mid-run and why an ask is answerable from anywhere.</li>
+
+<li><strong>Degrade, never block.</strong> Every persp call is wrapped
+and falls back to a <code>message</code>; alert writes never raise into
+the event path; the provider abstraction has a <code>fake</code> so the
+stack is testable without tokens. A convenience must never be able to
+stop a session opening.</li>
+
+<li><strong>One list, many readers.</strong> <code>--fleet-tools</code>
+is rendered for the human in the guide window and handed to the overseer
+agent in its brief, so the two cannot drift into different accounts of
+how to manage a fleet. Same instinct as bucket rules living in
+<code>store.classify_fleet_row</code> and being consumed by CLI, Emacs
+and GUI alike.</li>
+
+<li><strong>Generality is a cost until it has users.</strong>
+<code>dynamic:*</code> at 5% adoption, and <code>Notes</code>/
+<code>Scratch</code> at 0%, are the standing counter-examples to rules
+2–7 being followed everywhere.</li>
+</ol>
+
+<h2>What I would change next</h2>
+
+<p>In rough order of value over effort.</p>
+
+<ul>
+<li><strong>Retire <code>Notes</code> and <code>Scratch</code>.</strong>
+Zero real users, two of the eleven fixed sections, half the persistence
+firewall's surface, and the site of its only data-loss incident. The
+rows (<code>agent_session_notes.notes_org</code>,
+<code>scratch_org</code>) can stay; the headings do not need to.
+<code>Goal</code> keeps the one part of that table that is used.</li>
+
+<li><strong>Collapse <code>dynamic:*</code> into something narrower.</strong>
+The observed uses are an agent reaching for "suggested next prompts" and
+"discoveries" — both of which want to be first-class sections or nothing.
+Arbitrary names bought flexibility nobody spent.</li>
+
+<li><strong>Decide what <code>templedb-agent-perspectives</code> is
+for.</strong> It defaults to <code>project</code> and is live here
+(persp-mode is on), so every session buffer is claimed by an
+<code>@&lt;project&gt;</code> layout and the frame follows it there.
+That is a different axis from the pane layout — it is about which
+frame-level buffer set the one buffer belongs to, not about splitting it
+— and the <em>removal</em> half (taking the buffer out of every other
+layout) is the part that earns its keep. The <em>switch</em> half
+(<code>templedb-agent-perspective-switch</code>, default <code>t</code>)
+is the part that rearranges your frame without being asked.</li>
+
+<li><strong>Add a doctor check for the deployed-vs-DB gap.</strong> The
+client is nix-store-backed: <code>~/.emacs.d/private/local-layers/templedb</code>
+is a symlink into <code>/nix/store</code>, assembled from both
+<code>system_config</code> (layer scaffolding, leader keys) and
+<code>templedb</code> (the agent client itself). A committed change to
+<code>templedb-agent.el</code> is inert in the running Emacs until a
+home-rebuild or an explicit <code>load-file</code> — as of this writing
+the live layer is still the 5,453-line pre-removal build, panes and all.
+Nothing warns about that.</li>
+</ul>
+
+<h2 id="open">Open questions</h2>
+
+<p>Things this pass surfaced but did not settle. Each is a real question
+about the code, not a rhetorical one.</p>
+
+<ul>
+<li><strong>Can <code>, i</code> start a concurrent run?</strong>
+<code>templedb-agent-send</code> checks <code>--status</code> and
+switches to <code>message.queue</code> while a run is active;
+<code>templedb-agent-guide</code> has no such check and calls
+<code>message.send</code> unconditionally. Server-side,
+<code>send_message</code> creates a run and overwrites
+<code>self._active_run[session_id]</code>. Whether anything upstream
+refuses the second run, or whether two runs genuinely stream into one
+session, I did not verify. If it is unguarded, the fix is the same
+status check <code>send</code> already does — but the <em>point</em> of
+guide is immediacy, so queueing it would defeat it, and the right answer
+is probably a provider-level injection path that does not exist yet.</li>
+
+<li><strong>Should guide carry <code>Goal</code>?</strong> It currently
+sends content only. Given <code>Goal</code>'s whole purpose is surviving
+distance, omitting it from the one message you send <em>because the
+agent drifted</em> is at least ironic.</li>
+
+<li><strong>Is the 600s ask deadline the right number?</strong> The
+record is 58 responded, 16 expired, 8 pending out of 82. A 20% expiry
+rate on questions the agent considered blocking is either a human-latency
+problem or a deadline problem, and the data does not distinguish
+them.</li>
+</ul>
+
+<div class="callout">
+<p><strong>Correction to the reference doc.</strong> §9 of
+<code>docs/TEMPLE_AGENT_EMACS.md</code> warns about a shadowed, stale
+copy of the agent client at
+<code>system_config/emacs.d/layers/templedb/local/templedb-agent/templedb-agent.el</code>
+(1,781 lines, predating agent-writable sections). That file no longer
+exists in the DB — verified 2026-11-08. The surrounding warning that the
+layer is a <em>composite</em> of both projects is still accurate and still
+matters.</p>
+</div>
+
+<h2>Where to look</h2>
+
+<table>
+<tr><th>Question</th><th>File</th></tr>
+<tr><td>Buffer rendering, section anchors, keymaps, the roster</td><td><code>integrations/emacs/templedb-agent.el</code></td></tr>
+<tr><td>What each moving part does (reference, not philosophy)</td><td><code>docs/TEMPLE_AGENT_EMACS.md</code></td></tr>
+<tr><td>Protocol methods and line framing</td><td><code>src/agent/protocol.py</code></td></tr>
+<tr><td>Session/run lifecycle, recovery, the 300ms poll loop</td><td><code>src/agent/service.py</code></td></tr>
+<tr><td>Any DB write; bucket rules and ask liveness</td><td><code>src/agent/store.py</code></td></tr>
+<tr><td>Event vocabulary (the closed set providers map into)</td><td><code>src/agent/events.py</code></td></tr>
+<tr><td>Alert drop-files</td><td><code>src/agent/alerts.py</code></td></tr>
+<tr><td>Context basket items</td><td><code>src/agent/context.py</code></td></tr>
+<tr><td>The agent-writable MCP tools</td><td><code>src/mcp_server.py</code></td></tr>
+<tr><td>Leader keys and the layer scaffolding</td><td><code>system_config/emacs.d/layers/templedb/packages.el</code></td></tr>
+<tr><td>Web views of the same rows</td><td><code>src/gui_pages/agent_{sections,sessions,work_log}.py</code></td></tr>
+</table>
+
+<p class="lede">Written 2026-11-08, the day
+<code>templedb-agent-layout</code> and <code>templedb-open-layout</code>
+were removed (templedb <code>413A478B</code>, system_config
+<code>FAA51F87</code>). Usage figures are from
+<code>agent_session_sections</code>, <code>agent_session_notes</code> and
+<code>agent_sessions</code> as of that date, filtered to the
+<code>claude_code</code> provider.</p>
+
+</body>
+</html>
