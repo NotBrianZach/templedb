@@ -178,6 +178,19 @@ FILE_TYPE_PATTERNS = [
     (r'\.scss$', 'scss', None),
     (r'\.html$', 'html', None),
     (r'\.htm$', 'html', None),
+    # Server-side includes. Same content as .html as far as this table is
+    # concerned, and load-bearing: woofspetsalon.com is five pages that
+    # each `<!--#include file="/header.shtml">` three partials, and those
+    # four files were the only ones a commit of the site refused, so the
+    # tracked copy would have rendered every page with no header and no
+    # navbar. A name this table has never heard of is silently left out
+    # of the commit, which is the worst place to learn a new extension.
+    (r'\.shtml$', 'html', None),
+    (r'\.shtm$', 'html', None),
+    # The partial's own template is the same content type. Deliberately
+    # specific rather than a generic `\.template$` rule: that would also
+    # claim nginx.conf.template and friends and call them HTML.
+    (r'\.shtml\.template$', 'html', None),
 
     # Docker
     (r'Dockerfile$', 'docker_file', None),

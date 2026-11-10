@@ -59,6 +59,21 @@ class TestClassifyPath(unittest.TestCase):
         """`myjustfile` is a different file; don't claim it."""
         self.assertIsNone(self.classify('myjustfile'))
 
+    def test_server_side_includes_are_web_pages(self):
+        """An unclassified name is silently left out of a commit.
+
+        woofspetsalon.com is five pages that each include three .shtml
+        partials, and those four partials were the only files a commit of
+        the site refused — so the tracked copy of the site would have
+        rendered every page with no header and no navbar.
+        """
+        self.assertEqual(self.classify('header.shtml'), 'html')
+        self.assertEqual(self.classify('website/navbar.shtml'), 'html')
+        self.assertEqual(self.classify('index.shtm'), 'html')
+        # A template beside it must classify too — the suffix is what
+        # matters, and `.shtml.template` is not `.shtml`.
+        self.assertEqual(self.classify('header.shtml.template'), 'html')
+
     def test_dockerfile_variants(self):
         self.assertEqual(self.classify('Dockerfile.dev'), 'docker_file')
         self.assertEqual(self.classify('Dockerfile.prod'), 'docker_file')
