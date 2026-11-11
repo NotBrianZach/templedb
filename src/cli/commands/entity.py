@@ -24,6 +24,8 @@ entities and relations tables added in migration 089:
 All three are read-mostly. Ingest is the only writer, and it's
 idempotent (upserts by (kind, external_ref) and (from, kind, to)).
 """
+import posixpath
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -3737,6 +3739,8 @@ WantedBy=timers.target
              self._check_checkout_matches_db),
             ('checkout_roles_are_unambiguous',
              self._check_checkout_roles_unambiguous),
+            ('nix_path_references_are_tracked',
+             self._check_nix_path_references_are_tracked),
             ('exec_targets_are_executable',
              self._check_exec_targets_are_executable),
             ('wal_within_size_budget',
@@ -6069,6 +6073,121 @@ WantedBy=timers.target
                         f"NULL. Re-triage, then update the baseline row.")
                 issues.append(detail)
 
+        return issues
+
+    # Relative path literals in nix: ./foo, ../bar/baz.nix. Deliberately
+    # only the relative forms — they are project-relative by definition,
+    # which is what makes them checkable. An absolute /nix/store path or
+    # an angle path <nixpkgs> refers to something outside the project and
+    # is none of this check's business.
+    _NIX_REL_PATH = re.compile(r'(?<![\w"\'/])(\.\.?/[A-Za-z0-9._+\-/]+)')
+    _NIX_COMMENT = re.compile(r'#[^\n]*|/\*.*?\*/', re.DOTALL)
+    _NIX_DQ_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
+    # Indented strings hold shell, and shell is full of ./paths that are
+    # not nix path literals: `cp ./server.js $out/` in an installPhase,
+    # `if [ -f ./public_key.gpg ]` in an activation script. Both appear in
+    # this database and both were false positives until this was added.
+    # Whether those files ought to be tracked is a real question, but it
+    # is a question about build inputs, not about nix imports, and a
+    # check should test what it says it tests.
+    _NIX_IND_STRING = re.compile(r"''.*?''", re.DOTALL)
+    _NIX_UNTRACKED_BY_DESIGN = frozenset({
+        'result', 'node_modules', '.direnv', 'dist', 'build', 'target',
+        '__pycache__', '.venv', 'venv',
+    })
+
+    @classmethod
+    def _nix_relative_references(cls, source):
+        """Relative path literals in SOURCE, comments and strings removed.
+
+        Strings are stripped because `"./foo"` is a string in nix, not a
+        path, and nothing imports it. That also removes the common false
+        positive `modulesPath + "/profiles/qemu-guest.nix"`, where the
+        path half is a string and the real reference is a variable.
+        """
+        stripped = cls._NIX_DQ_STRING.sub(
+            '""', cls._NIX_IND_STRING.sub("''''", cls._NIX_COMMENT.sub('', source)))
+        refs = set()
+        for raw in cls._NIX_REL_PATH.findall(stripped):
+            if '${' in raw:
+                continue        # interpolated — not statically resolvable
+            ref = raw.rstrip('/')
+            base = posixpath.basename(ref)
+            # Build artefacts are never tracked, by design — `result` is a
+            # nix out-link, node_modules belongs to npm. Reporting them
+            # would bury the real finding in noise every run, and a check
+            # people learn to skim is a check that is not running.
+            if base in cls._NIX_UNTRACKED_BY_DESIGN or base.startswith('result-'):
+                continue
+            refs.add(ref)
+        return refs
+
+    def _check_nix_path_references_are_tracked(self):
+        """Invariant: a tracked .nix file's ./relative references are tracked too.
+
+        A project whose own files reference paths it does not contain is
+        an incomplete import, and it is silent: nothing fails until
+        someone tries to evaluate it, which may be months later and on a
+        day when the machine is already down.
+
+        That is not hypothetical. `nixos_anywhere_vultr_woofs/flake.nix`
+        declared `modules = [ ./configuration.nix ]` for most of a year
+        while the project tracked no configuration.nix at all — the real
+        one lived only in an unregistered GitHub repo. On 2026-11-11 that
+        led to the config being reconstructed from the running host
+        instead of read, and woofspetsalon.com spent ~40 minutes in
+        emergency mode because the reconstruction could not know about an
+        import it had never seen. This check states the thing that was
+        true and unsaid the whole time: the import was incomplete.
+
+        Directory references count as satisfied when any tracked file
+        sits under them, which is how `websiteDir = ./website` resolves.
+        """
+        from db_utils import query_all
+
+        rows = query_all("""
+            SELECT p.slug AS slug, pf.file_path AS path, cb.content_text AS body
+              FROM project_files pf
+              JOIN projects p         ON p.id = pf.project_id
+              JOIN file_contents fc   ON fc.file_id = pf.id AND fc.is_current = 1
+              JOIN content_blobs cb   ON cb.hash_sha256 = fc.content_hash
+             WHERE pf.status = 'active'
+               AND pf.file_path LIKE '%.nix'
+               AND cb.content_text IS NOT NULL
+        """) or []
+        if not rows:
+            return []
+
+        tracked = {}
+        for r in query_all("""
+            SELECT p.slug AS slug, pf.file_path AS path
+              FROM project_files pf
+              JOIN projects p ON p.id = pf.project_id
+             WHERE pf.status = 'active'
+        """) or []:
+            tracked.setdefault(r['slug'], set()).add(r['path'])
+
+        issues = []
+        for row in rows:
+            slug, path = row['slug'], row['path']
+            paths = tracked.get(slug, set())
+            base = posixpath.dirname(path)
+            for ref in sorted(self._nix_relative_references(row['body'])):
+                target = posixpath.normpath(posixpath.join(base, ref))
+                if target in ('.', ''):
+                    continue                       # `src = ./.` — the project itself
+                if target.startswith('..'):
+                    issues.append(
+                        f"{slug}/{path}: references {ref}, which escapes the "
+                        f"project root — unresolvable in any checkout")
+                    continue
+                if target in paths:
+                    continue
+                if any(p.startswith(target + '/') for p in paths):
+                    continue                       # directory reference
+                issues.append(
+                    f"{slug}/{path}: references {ref} but {target} is not "
+                    f"tracked — the import is incomplete")
         return issues
 
     def _check_exec_targets_are_executable(self):
