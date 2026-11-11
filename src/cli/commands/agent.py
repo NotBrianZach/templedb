@@ -246,9 +246,15 @@ class AgentCommands(Command):
             print(f"error: ask already {row['status']}", file=sys.stderr)
             return 1
 
+        # Checked here as well as in `record_ask_response` — the store
+        # refuses on its own now, but it can only return False, and this
+        # fires before the payload parse so it can name the age and point
+        # at --force. Keep `force` flowing through to the store call below
+        # or --force would pass this gate and be refused by that one.
+        force = bool(getattr(args, 'force', False))
         age = _store._age_seconds(row['created_at'])
         if age is not None and age > _store.FLEET_ASK_DEADLINE_SECONDS \
-                and not getattr(args, 'force', False):
+                and not force:
             print(f"error: ask is {_store._humanize_age(age)} old — the "
                   f"handler stopped polling after "
                   f"{_store.FLEET_ASK_DEADLINE_SECONDS}s, so this answer "
@@ -271,8 +277,13 @@ class AgentCommands(Command):
                 return 2
             question = (questions[0].get('question')
                         if questions else 'answer')
-        _store.record_ask_response(row['ask_id'],
-                                   {'answers': {question: args.answer}})
+        if not _store.record_ask_response(
+                row['ask_id'], {'answers': {question: args.answer}},
+                force=force):
+            print(f"error: ask {row['ask_id'][:12]} is no longer answerable "
+                  f"(it was answered or expired since this command started)",
+                  file=sys.stderr)
+            return 2
         print(f"answered ask {row['ask_id'][:12]} "
               f"(session #{row['session_id']})")
         return 0

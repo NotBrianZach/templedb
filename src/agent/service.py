@@ -214,6 +214,61 @@ class AgentService:
         if not provider:
             raise ValueError(f"No provider for session {session_id}. Call open_session first.")
 
+        # Never start a second run on a session that already has one.
+        #
+        # Emacs picks `message.queue` over `message.send` from its own local
+        # status flag, but that check is per-client and incomplete:
+        # `templedb-agent-guide` (, i) calls send unconditionally, and so do
+        # the CLI and the roster. The guard has to hold for all of them, so
+        # it belongs here rather than in any one client.
+        #
+        # What a second run costs, concretely: the assignments below would
+        # overwrite `_cancel_flags[session_id]` so the first run could no
+        # longer be cancelled at all, and `provider.send()` would replace
+        # the provider's `self._process`, orphaning the first subprocess
+        # with no handle left to kill it. Both runs would then be driving
+        # one `claude --resume <id>` conversation, and whichever finished
+        # first would pop `_active_run` — at which point `queue_message`
+        # sees no active run and starts a third.
+        #
+        # Degrade to a queue rather than erroring: a guide message is a
+        # correction someone typed, and delivering it at the end of the turn
+        # beats discarding it. This does mean `, i` is not mid-run injection
+        # — it cannot be, while the provider passes the prompt in argv and
+        # closes the child's stdin. Real injection needs a provider that
+        # holds stdin open (`claude --input-format stream-json`); until that
+        # exists this is the honest behaviour, and it says so to the user
+        # instead of silently reordering their message.
+        with self._lock:
+            busy = session_id in self._active_run
+        if busy:
+            if content is None:
+                logger.warning(
+                    f"refusing concurrent run for session {session_id}: "
+                    f"a run is already active and there is no new message "
+                    f"to queue"
+                )
+                return
+            store.add_message(session_id, ROLE_USER, content)
+            logger.info(
+                f"session {session_id} busy — queued message for the "
+                f"post-turn drain instead of starting a second run"
+            )
+            yield self._enrich_event(
+                session_id,
+                self._active_run.get(session_id, {}).get("id"),
+                {},
+                make_event(
+                    events.AGENT_MESSAGE,
+                    summary="Queued — a run is already active",
+                    header="Queued",
+                    body=("A run is already in flight, so this was queued "
+                          "and will be delivered when the current turn "
+                          "ends. It is not injected into the turn."),
+                ),
+            )
+            return
+
         # Store user message (skipped on resume — the pending message is
         # already in the DB and re-adding it would duplicate seq 79/80-style
         # orphans as a fresh tail user message).
@@ -610,11 +665,16 @@ class AgentService:
                 logger.error(f"Ask/pending-event poll error: {e}")
             self._ask_poll_stop.wait(0.3)
 
-    def respond_to_ask(self, ask_id, response):
+    def respond_to_ask(self, ask_id, response, force=False):
         """Emacs replied — write the answer back into the transport table.
         The MCP tool handler polling on the other end will see it and return
-        the answer as its tool_result to Claude."""
-        store.record_ask_response(ask_id, response)
+        the answer as its tool_result to Claude.
+
+        Returns True if the answer was recorded. False means it was refused
+        as undeliverable — nobody is polling that row any more — and the
+        caller must say so rather than let the user believe it landed.
+        """
+        return store.record_ask_response(ask_id, response, force=force)
 
     def shutdown(self):
         """Cleanly stop background threads (for test/teardown)."""

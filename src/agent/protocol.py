@@ -447,14 +447,28 @@ class ProtocolServer:
     def _handle_ask_respond(self, request_id, params):
         """Emacs → agent: user answered a pending ask from templedb_ask_user.
 
-        params: {ask_id: str, response: dict}
+        params: {ask_id: str, response: dict, force: bool?}
         The response is forwarded via the DB rendezvous table to the MCP tool
         handler polling on the other end (which then returns it to Claude as
-        the tool_result)."""
+        the tool_result).
+
+        An answer past the handler's poll deadline is refused rather than
+        recorded, because the poller it was meant for gave up and nothing
+        would ever collect it. Report that as an error: the whole failure
+        mode being fixed here is a human typing an answer and being given
+        no reason to doubt it arrived."""
         ask_id = params.get("ask_id")
         response = params.get("response")
         if not ask_id:
             self._respond(request_id, error="ask_id required")
             return
-        self.service.respond_to_ask(ask_id, response)
+        recorded = self.service.respond_to_ask(
+            ask_id, response, force=bool(params.get("force")))
+        if not recorded:
+            from agent import store as _store
+            self._respond(request_id, error=(
+                f"ask is no longer answerable — the handler stopped polling "
+                f"after {_store.FLEET_ASK_DEADLINE_SECONDS}s, so this answer "
+                f"would go nowhere. Reply in the session instead."))
+            return
         self._respond(request_id, result={"ok": True})

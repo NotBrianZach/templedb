@@ -478,6 +478,91 @@ class TestAskRespondCommand(unittest.TestCase):
         self.assertEqual(self.respond(ask_id='cli-twice', answer='twice'), 1)
 
 
+class TestRecordAskResponseDeadline(unittest.TestCase):
+    """The deadline belongs to the store, not to one of its two callers.
+
+    `cli/commands/agent.py` checked it; the `ask.respond` protocol handler
+    the Emacs buffer and roster use did not, and nine real asks were
+    recorded 751-2262s after being asked — answers the MCP poller had
+    already stopped waiting for. These cover the chokepoint directly, so
+    any future caller inherits the guard.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db_path = setup_test_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        teardown_test_db()
+
+    def make_ask(self, ask_id, age_days=0):
+        from agent.store import create_session, create_pending_ask
+        from db_utils import execute
+        session = create_session('fake')
+        create_pending_ask(ask_id, session['id'], 'question',
+                           {'questions': [{'question': 'q?'}]})
+        if age_days:
+            execute("UPDATE agent_pending_asks SET created_at = "
+                    "datetime('now', ?) WHERE ask_id = ?",
+                    (f'-{age_days} days', ask_id))
+        return session['id']
+
+    def test_records_a_live_answer(self):
+        from agent.store import record_ask_response, get_pending_ask
+        self.make_ask('store-live')
+        self.assertTrue(record_ask_response('store-live', {'answers': {}}))
+        self.assertEqual(get_pending_ask('store-live')['status'], 'responded')
+
+    def test_refuses_an_answer_past_the_deadline(self):
+        from agent.store import record_ask_response, get_pending_ask
+        self.make_ask('store-stale', age_days=3)
+        self.assertFalse(record_ask_response('store-stale', {'answers': {}}))
+        row = get_pending_ask('store-stale')
+        self.assertEqual(row['status'], 'expired')
+        self.assertIsNone(row['response'])
+
+    def test_force_records_even_after_the_refusal_expired_it(self):
+        """The documented next move must stay possible.
+
+        Refusing and expiring in one step would otherwise strand the row:
+        attempt one expires it, and the --force retry finds nothing pending.
+        """
+        from agent.store import record_ask_response, get_pending_ask
+        self.make_ask('store-revive', age_days=3)
+        self.assertFalse(record_ask_response('store-revive', {'answers': {}}))
+        self.assertEqual(get_pending_ask('store-revive')['status'], 'expired')
+        self.assertTrue(record_ask_response(
+            'store-revive', {'answers': {'q?': 'late'}}, force=True))
+        self.assertEqual(get_pending_ask('store-revive')['status'],
+                         'responded')
+
+    def test_force_never_overwrites_a_real_answer(self):
+        import json
+        from agent.store import record_ask_response, get_pending_ask
+        self.make_ask('store-answered')
+        self.assertTrue(record_ask_response(
+            'store-answered', {'answers': {'q?': 'first'}}))
+        self.assertFalse(record_ask_response(
+            'store-answered', {'answers': {'q?': 'second'}}, force=True))
+        row = get_pending_ask('store-answered')
+        self.assertEqual(json.loads(row['response']),
+                         {'answers': {'q?': 'first'}})
+
+    def test_unknown_ask_id_is_false_not_an_error(self):
+        from agent.store import record_ask_response
+        self.assertFalse(record_ask_response('no-such-ask', {'answers': {}}))
+
+    def test_deadline_is_injectable_for_callers_with_other_policies(self):
+        from agent.store import record_ask_response, get_pending_ask
+        self.make_ask('store-generous', age_days=1)
+        self.assertTrue(record_ask_response(
+            'store-generous', {'answers': {}},
+            ask_deadline_seconds=90 * 86400))
+        self.assertEqual(get_pending_ask('store-generous')['status'],
+                         'responded')
+
+
 class TestResumableLabel(unittest.TestCase):
     """`resumable` must mirror `resume_run`'s precondition, not `status`.
 

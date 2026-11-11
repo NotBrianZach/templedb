@@ -986,14 +986,67 @@ def mark_ask_dispatched(ask_id):
     )
 
 
-def record_ask_response(ask_id, response):
-    """Emacs replied — MCP-side poller will see status='responded' and return."""
-    execute(
-        """UPDATE agent_pending_asks
-           SET status = 'responded', response = ?, responded_at = ?
-           WHERE ask_id = ? AND status = 'pending'""",
-        (json.dumps(response), _now(), ask_id),
-    )
+def record_ask_response(ask_id, response, force=False,
+                        ask_deadline_seconds=None):
+    """A human replied — MCP-side poller will see status='responded'.
+
+    Returns True if the answer was recorded, False if it was refused or
+    there was no pending ask under that id.
+
+    The refusal is the point. `tool_ask_user` polls its own row for
+    `FLEET_ASK_DEADLINE_SECONDS` and then returns an error to the model;
+    nothing has watched the row since. Writing `status='responded'` after
+    that records an answer no reader will ever collect, and the row then
+    *looks* answered while the agent in fact carried on without it. Nine
+    such rows existed when this guard was written, answered 751-2262s
+    after being asked — the human typed them, the UI took them, and they
+    went nowhere.
+
+    `cli/commands/agent.py` checked the deadline before calling, but the
+    `ask.respond` protocol handler — the path the Emacs buffer and the
+    roster both use — did not, so the only guard sat on the path humans
+    use least. Enforcing it here covers every caller by construction, and
+    is why `ask_deadline_seconds` is resolved at call time rather than as
+    a default argument: `FLEET_ASK_DEADLINE_SECONDS` is defined further
+    down this module and would not exist yet at def time.
+
+    A refused ask is flipped to 'expired' on the way out, so `status`
+    stops claiming an answer was delivered without waiting for a sweep to
+    come round — which matters because nothing schedules one.
+
+    `force` therefore has to accept an 'expired' row as well as a pending
+    one. Refusing and expiring in one step would otherwise make the
+    documented next move impossible: the first attempt expires the row and
+    the `--force` retry finds nothing pending. 'responded' is never
+    revivable at any force level — that would overwrite a real answer.
+    """
+    if ask_deadline_seconds is None:
+        ask_deadline_seconds = FLEET_ASK_DEADLINE_SECONDS
+    row = get_pending_ask(ask_id)
+    if row is None:
+        return False
+    answerable = ("pending", "expired") if force else ("pending",)
+    if row["status"] not in answerable:
+        return False
+    age = _age_seconds(row["created_at"])
+    if not force and age is not None and age > ask_deadline_seconds:
+        execute(
+            """UPDATE agent_pending_asks SET status = 'expired'
+                WHERE ask_id = ? AND status = 'pending'""",
+            (ask_id,),
+        )
+        _logger.info(
+            f"refused answer to ask {ask_id[:12]}: {_humanize_age(age)} old, "
+            f"past the {ask_deadline_seconds}s handler deadline"
+        )
+        return False
+    placeholders = ", ".join("?" * len(answerable))
+    return execute_rowcount(
+        f"""UPDATE agent_pending_asks
+            SET status = 'responded', response = ?, responded_at = ?
+            WHERE ask_id = ? AND status IN ({placeholders})""",
+        (json.dumps(response), _now(), ask_id) + answerable,
+    ) > 0
 
 
 # ---------------------------------------------------------------------------

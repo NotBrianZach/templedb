@@ -322,7 +322,7 @@ different send paths:</p>
 <table>
 <tr><th></th><th><code>C-c C-c</code> (send)</th><th><code>, i</code> (guide)</th></tr>
 <tr><td>While idle</td><td><code>message.send</code> + full context payload</td><td><code>message.send</code>, content only</td></tr>
-<tr><td>While a run is active</td><td>switches to <code>message.queue</code> — drained when the turn ends</td><td>still <code>message.send</code>, immediately</td></tr>
+<tr><td>While a run is active</td><td>switches to <code>message.queue</code> — drained when the turn ends</td><td>still calls <code>message.send</code>, but the server now queues it too — drained when the turn ends</td></tr>
 <tr><td>Carries <code>Goal</code> and the context basket</td><td class="yes">yes</td><td class="no">no</td></tr>
 </table>
 
@@ -333,8 +333,21 @@ run continues the same Claude conversation. Your guidance therefore
 reaches the right thread without losing the run — which is the useful
 property — but as another turn rather than an injection. Two practical
 consequences: guidance does not re-send your <code>Goal</code>, so it
-should be self-contained; and it is the one path that can put two runs on
-one session (see <a href="#open">open questions</a>).</p>
+should be self-contained; and it used to be the one path that could put
+two runs on one session.</p>
+
+<p><strong>Amended 2026-11-10.</strong> That last part is now guarded.
+It really was unguarded, and the damage went past "two runs on one
+session" into a clobbered cancel handle and an orphaned subprocess — the
+<a href="#open">open questions</a> carry the detail. Guide while a run
+is active therefore now behaves like <code>C-c C-c</code> does: queued,
+delivered at the end of the turn, and reported as queued so the
+immediacy you didn't get isn't left to inference. Which means the one
+property the chord existed for is, for the moment, gone — <code>, i</code>
+is still better than cancel-and-re-prompt, because it keeps the run and
+lands on the right thread, but it is no longer fast. Getting it back
+needs the provider to hold the child's stdin open; also in the open
+questions.</p>
 
 <h3>Long investigations: hand off to yourself</h3>
 
@@ -388,6 +401,7 @@ knowing because each one is still reachable.</p>
 <tr><th>Failure</th><th>Why the design allowed it</th><th>What holds now</th></tr>
 <tr><td>Tool output persisted into user Scratch (2026-08-28)</td><td>save-on-run-completion coupled rendering state to the DB write</td><td>save is idle/explicit/kill-only, plus a marker check that refuses</td></tr>
 <tr><td>16 asks aged 8–36 days sitting <code>pending</code> with no reader</td><td><code>status='pending'</code> was treated as "needs input"; the handler's poll deadline is 600s</td><td>liveness is a separate notion; the roster offers only live asks, <code>ask respond</code> refuses expired without <code>--force</code></td></tr>
+<tr><td>9 answers recorded 751–2262s after the ask, past the deadline and into a table nobody was polling</td><td>the age check lived in the CLI responder, not in <code>record_ask_response</code> — so the <code>ask.respond</code> path the buffer and roster use had none</td><td>enforced at the chokepoint every answer passes through; a refused ask self-expires, and the refusal is reported rather than swallowed (2026-11-10)</td></tr>
 <tr><td>An agent asked "is the DB locked?" killed two sibling servers, including its own parent</td><td><code>ps</code> plus <code>kill</code> is an obvious-looking answer</td><td><code>ai agent stop-stale</code>, which excludes its own ancestor chain via <code>TEMPLEDB_AGENT_SERVER_PID</code></td></tr>
 <tr><td>Test sessions outnumbering real ones 257:104 and hiding real sessions below a row cap</td><td>the <code>fake</code> provider writes to the live roster</td><td>roster excludes test provider kinds and reports truncation (fixed 2026-10-25)</td></tr>
 <tr><td>Dispatched agents leaving unowned edit workspaces</td><td>the function stamping the <code>checkouts</code> row never creates a session, so <code>templedb edit</code> first leaves <code>session_id IS NULL</code></td><td>dispatch opens the vcs session, exports it, <em>then</em> runs <code>edit</code> — in that order</td></tr>
@@ -485,30 +499,92 @@ Nothing warns about that.</li>
 <p>Things this pass surfaced but did not settle. Each is a real question
 about the code, not a rhetorical one.</p>
 
+<p><em>Resolved 2026-11-10 — the first two are answered below and the
+third turned out to be the wrong question. Kept rather than deleted,
+because what the answers cost to find is the useful part.</em></p>
+
 <ul>
-<li><strong>Can <code>, i</code> start a concurrent run?</strong>
-<code>templedb-agent-send</code> checks <code>--status</code> and
-switches to <code>message.queue</code> while a run is active;
-<code>templedb-agent-guide</code> has no such check and calls
-<code>message.send</code> unconditionally. Server-side,
-<code>send_message</code> creates a run and overwrites
-<code>self._active_run[session_id]</code>. Whether anything upstream
-refuses the second run, or whether two runs genuinely stream into one
-session, I did not verify. If it is unguarded, the fix is the same
-status check <code>send</code> already does — but the <em>point</em> of
-guide is immediacy, so queueing it would defeat it, and the right answer
-is probably a provider-level injection path that does not exist yet.</li>
+<li><strong>Can <code>, i</code> start a concurrent run? — Yes, and it
+was unguarded.</strong> <code>templedb-agent-send</code> checks
+<code>--status</code> and switches to <code>message.queue</code> while a
+run is active; <code>templedb-agent-guide</code> has no such check and
+calls <code>message.send</code> unconditionally. Nothing upstream
+refused it: <code>_active_run</code> was <em>read</em> only by
+<code>queue_message</code>, never by the send path, so the Emacs
+client's flag was the only thing in the way — and the CLI and roster
+don't have it either.
 
-<li><strong>Should guide carry <code>Goal</code>?</strong> It currently
-sends content only. Given <code>Goal</code>'s whole purpose is surviving
-distance, omitting it from the one message you send <em>because the
-agent drifted</em> is at least ironic.</li>
+<p>It is worse than two runs streaming into one session. The second run
+overwrites <code>_cancel_flags[session_id]</code>, so the first becomes
+uncancellable; <code>provider.send()</code> replaces the single
+per-session provider's <code>self._process</code>, orphaning the first
+subprocess with no handle left to kill it; both then drive one
+<code>claude --resume &lt;id&gt;</code> conversation; and whichever
+finishes first pops <code>_active_run</code>, at which point
+<code>queue_message</code> sees an idle session and starts a third.</p>
 
-<li><strong>Is the 600s ask deadline the right number?</strong> The
-record is 58 responded, 16 expired, 8 pending out of 82. A 20% expiry
-rate on questions the agent considered blocking is either a human-latency
-problem or a deadline problem, and the data does not distinguish
-them.</li>
+<p>Fixed by guarding <code>send_message</code> itself rather than any
+client, since <code>protocol.py</code> serves all three. It degrades to
+a queue and <em>says so</em> via an <code>agent.message</code> event:
+discarding a correction someone typed is worse than delivering it at the
+end of the turn. That does concede the immediacy — see below.</p></li>
+
+<li><strong>Should guide carry <code>Goal</code>? — No.</strong>
+Decided 2026-11-10. Guidance is a correction to the turn in front of
+you; the standing constraints are already re-sent with every
+<code>C-c C-c</code>, and duplicating them into every nudge buys
+nothing. Guide messages should be self-contained, which is a thing to
+know rather than a thing to fix.</li>
+
+<li><strong>Is the 600s ask deadline the right number? — The number was
+the wrong question.</strong> The original framing said the data could
+not distinguish a human-latency problem from a deadline problem. It
+can, and it says something worse than either: of 59 rows marked
+<code>responded</code>, <strong>nine were answered 751–2262s after
+being asked</strong> — past the handler's poll deadline, into a table
+nobody was watching. Someone typed those answers, the UI accepted them,
+and the agent had already carried on without them. The real record is 50
+delivered, 9 silently dropped, 16 expired, 8 pending out of 83.
+
+<p>So the bug was never the threshold, it was that a late answer was
+accepted silently — and that the guard against it sat on the path humans
+use least. <code>cli/commands/agent.py</code> checked the age and
+refused with a good message; <code>service.respond_to_ask</code>, which
+is what the Emacs buffer and the roster both reach,
+called <code>record_ask_response</code> with no check at all.</p>
+
+<p>Fixed by moving enforcement into <code>record_ask_response</code> —
+the one chokepoint every answer passes through — so future callers
+inherit it. A refused ask is expired on the way out, which also disposes
+of the "wire expiry into the scheduler tick" follow-up: there is no
+scheduler. <code>expire_stale_asks</code> is called from exactly one
+place, the <code>ai agent ask expire</code> CLI command, and the
+"scheduler tick" named in <code>mcp_server.py</code>'s docstring does
+not exist anywhere in the tree. Expiring at the moment of refusal is
+what the correctness case actually needed; the leftover
+<code>pending</code> rows are a reporting matter, on demand.</p>
+
+<p>With that in place the threshold is a tuning question rather than a
+data-loss one. For the record, 38 of the 50 delivered answers arrive
+inside two minutes and all 50 inside 466s, so 600s is not obviously
+wrong — but the nine late ones span 12 to 38 minutes, and a human who
+wandered off for a quarter of an hour is a normal thing to be. The 16
+true expiries are 8–36 days old; no threshold reaches those, and they
+are a notification problem.</p></li>
+
+<li><strong>Still open: should <code>, i</code> be real injection?</strong>
+The guard above makes guide honest but not immediate, which costs the
+one property the chord existed for. Genuine mid-run steering is
+impossible as the provider stands — the prompt goes in argv and the
+child's stdin is <code>DEVNULL</code>, deliberately, so <code>claude
+-p</code> doesn't stall waiting on it. Claude Code does support
+<code>--input-format stream-json</code> ("realtime streaming input")
+alongside <code>--replay-user-messages</code>, so the path exists: keep
+stdin as a pipe and give the provider a <code>send_mid_run()</code> that
+writes one JSON line into the live child. It belongs in
+<code>providers/base.py</code> as a capability with a fallback, since
+<code>fake</code> and anything later need the same method. Not attempted
+here.</li>
 </ul>
 
 <div class="callout">
