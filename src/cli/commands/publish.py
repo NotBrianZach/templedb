@@ -28,7 +28,25 @@ class PublishCommands(Command):
         from services.system_service import SystemService
 
         project_slug = args.project
-        message = args.message or "TempleDB publish"
+        # -F wins over -m here, rather than being an error as it is in
+        # `vcs commit`. The difference is that this -m carries a DEFAULT
+        # ("TempleDB publish"), so it is always set and "both given" would
+        # fire on every single use of -F.
+        message_path = getattr(args, 'message_file', None)
+        if message_path:
+            # Imported here, not relied on from the later local import at
+            # the commit step -- that one is inside an `if` further down,
+            # so referencing Namespace up here would be a NameError the
+            # moment anybody passed -F.
+            from argparse import Namespace as _NS
+            from cli.commit_message import resolve_message
+            message = resolve_message(
+                _NS(message=None, message_file=message_path)
+            )
+            if message is None:
+                return 1
+        else:
+            message = args.message or "TempleDB publish"
 
         conn = get_connection()
         proj = conn.execute(
@@ -84,6 +102,9 @@ class PublishCommands(Command):
                     commit_args = Namespace(
                         project=project_slug,
                         message=message,
+                        # Resolved above, never through a shell. See the
+                        # provenance note in cli/commit_message.py.
+                        message_is_internal=True,
                         author="TempleDB",
                         branch=None,
                     )
@@ -670,7 +691,21 @@ def register(cli):
     # publish run
     run_p = subparsers.add_parser('run', help='Commit + push to all mirrors')
     run_p.add_argument('project', help='Project slug')
-    run_p.add_argument('-m', '--message', help='Commit message', default='TempleDB publish')
+    # -m AND -F, because `publish run` commits and therefore inherits the
+    # multi-line refusal in cli/commit_message.py. Registering only -m
+    # would mean a publish with a body in -m gets told to use -F and then
+    # finds no such option — advice that cannot be followed, which is
+    # worse than the original hazard.
+    #
+    # The default stays on -m. `publish run` with no message is a routine
+    # thing and "TempleDB publish" is the honest label for it; see the
+    # note at the top of this file about committing first if you want the
+    # message to be yours.
+    run_p.add_argument('-m', '--message', help='Commit message (one line)',
+                       default='TempleDB publish')
+    run_p.add_argument('-F', '--message-file', metavar='PATH',
+                       help='Read the commit message from a file (safe for '
+                            'backticks and $; use "-" for stdin)')
     run_p.add_argument('--force', '-f', action='store_true',
                        help='Deprecated no-op; publish always overwrites '
                             'the checkout (DB is authoritative).')
