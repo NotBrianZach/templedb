@@ -1,54 +1,76 @@
 # CLAUDE.md — reports/
 
-Convention for adding reports to `reports/` inside the templedb project.
+Reports are **rows in the `reports` table**, not files in this directory.
+This file is the only thing left in it.
 
-## Filename
+## Creating one
 
-`reports/YYYY-MM-DD-HHMM-kebab-title.html`
-
-Date is today. Time is 24h HHMM (local), so multiple reports the same
-day sort naturally and stay visually distinguishable in the GUI list.
-Title ≤ ~8 words. Prefer `templedb reports new "Your title"` — it
-computes the filename (including current time), drops the standard
-template, and refuses to overwrite.
-
-Reports from before this convention landed use the shorter
-`YYYY-MM-DD-kebab-title.html` form; both are still parsed correctly.
-Don't rename older files just to add time — links live in commit
-messages and other reports.
-
-## Self-contained
-
-One HTML file per report. Inline CSS in a `<style>` block in `<head>`. Do
-NOT extract shared CSS or images into separate files — the invariant is
-"one HTML file, one browser tab, no missing dependencies." Making reports
-emailable and pastable is worth some duplication of the style block.
-
-## Structural expectations
-
-Every report should have:
-
-- `<title>…</title>` — the report title, matches the `<h1>`
-- `<h1>…</h1>` — visible title
-- `<p class="lede">…</p>` — one-paragraph summary; `templedb reports
-  reindex` picks this up for the index listing
-
-Everything else is up to the report.
-
-## After adding a report
-
-```
-templedb reports reindex   # regenerate index.html
-templedb vcs add -p templedb reports/<new file> index.html
-templedb vcs commit -p templedb -m "reports: <title>"
+```bash
+templedb reports new "Your title"                 # markdown, templedb
+templedb reports new "Your title" --project bza   # any project
+templedb reports new "Your title" --html          # self-contained HTML
+templedb reports edit <project>/<slug>            # $EDITOR, writes back
 ```
 
-## Not for
+`new` prints the slug and the GUI path. There is no filename to compute
+and no `reindex` step — the listing at `/reports` is a SELECT.
 
-- Ephemeral scratch — use `/tmp/`.
-- Machine-readable data — this is for humans reading in a browser.
-- Living wiki-style documentation — reports are snapshots. If a doc needs
-  to evolve over time, it belongs in the project it documents (or in
-  templedb's top-level `docs/`).
-- Session recap / metacognition reports — those go here too, tagged
-  `session-recap` in the title so the index makes them findable.
+## The shape of a row
+
+| Column | Notes |
+|---|---|
+| `slug` | stable id, unique per project. No date, no extension. |
+| `title` | a column, not a `<title>` tag to be parsed |
+| `lede` | one-paragraph summary for the index. Re-derived on `edit`. |
+| `body` | the document, as authored |
+| `format` | `markdown` or `html`. Decides rendering. |
+| `created_at` | a real timestamp |
+| `supersedes_id` | when a report replaces an earlier one |
+| `legacy_path` | the file it was migrated from. A forwarding address, not an id. |
+
+## Markdown or HTML
+
+**Markdown is the default and is usually right.** The GUI renders it with
+a small stdlib renderer in `gui_pages/reports.py` — headings, paragraphs,
+fenced code, tables, blockquotes, lists, inline emphasis and links. The
+page chrome supplies the `<h1>` and the lede, so do not repeat the title
+as a heading in the body.
+
+**`--html` is for a document that needs its own layout.** It is served
+exactly as authored, so it must be self-contained: inline the CSS in a
+`<style>` block, no external files, no images fetched from elsewhere. The
+invariant is "one document, one browser tab, no missing dependencies" —
+that is a property of the document and it survives the move to rows.
+
+## Why this changed
+
+Reports were HTML files found by the glob
+`reports/[0-9][0-9][0-9][0-9]-*.html`. The bytes were always in SQLite —
+a report is a tracked project file — but the *model* was the filesystem,
+and every awkwardness came from that:
+
+- a markdown report was invisible, because the glob ends in `.html`. Two
+  bza reports existed for weeks while `/reports?project=bza` rendered
+  "No reports";
+- the date lived in the filename, so the convention grew an `HHMM` to
+  order same-day reports, and this file used to say *"don't rename older
+  files just to add time"* — because the filename was the primary key;
+- the title and lede were regexes over the document's own markup, so a
+  report that styled its opening differently had no index summary, and
+  one with no `<title>` listed as "(untitled)";
+- `reports new` hardcoded `REPORT_PROJECT = "templedb"`, so a report
+  about any other project had to be hand-written with `file set`;
+- `reindex` existed at all because `index.html` was a generated artifact
+  that could disagree with the directory it described.
+
+Migration 143 moved them. See `migrations/143_reports.sql`.
+
+## Old links still work
+
+The 72 migrated reports keep their `legacy_path`, and `/reports/<old
+dated filename>.html` still resolves — in both the bare and
+`<project>/<filename>` forms, since the old index emitted the second one.
+Those URLs are in published commit messages and inside other reports.
+
+`report_implementations.report_path` is also still populated, alongside a
+new `report_id`, so `templedb provenance report <path>` keeps working.

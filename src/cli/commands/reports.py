@@ -1,15 +1,29 @@
 #!/usr/bin/env python3
-"""Agent report management.
+"""Agent reports — stored as rows in `reports`.
 
-Reports are self-contained HTML overview documents living at
-`reports/YYYY-MM-DD-kebab-title.html` inside the templedb project. Each is a
-snapshot of an analysis, design discussion, or session recap.
+  templedb reports list                -- newest-first, every project
+  templedb reports list --project bza  -- one project
+  templedb reports new "Title"         -- create a row and print how to edit it
+  templedb reports view <query>        -- render one and open it in a browser
 
-CLI:
-  templedb reports list           -- newest-first, date + title
-  templedb reports view [query]   -- extract all + open in browser
-  templedb reports new <title>    -- scaffold a new report from template
-  templedb reports reindex        -- rebuild index.html from files in reports/
+── They used to be files ────────────────────────────────────────────────
+
+A report was an HTML file under a project's `reports/` directory, found by
+the glob `reports/[0-9][0-9][0-9][0-9]-*.html`. The bytes were in SQLite
+all along, but existence came from the glob, the date from the filename,
+and the title and lede from regexes over the document's own markup.
+
+Three consequences this module carried:
+
+  - `REPORT_PROJECT = "templedb"` was hardcoded, so `reports new` could
+    only ever create a templedb report. A bza report had to be written by
+    hand with `file set`.
+  - `reindex` existed because `index.html` was a generated artifact that
+    could disagree with the directory it described.
+  - A markdown report was invisible, because the glob ends in `.html`.
+
+Migration 143 made reports rows. `format` is a column, `created_at` is a
+timestamp, `slug` is a stable per-project id, and the listing is a SELECT.
 """
 import json
 import os
@@ -18,357 +32,158 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from db_utils import query_all, query_one, execute
 from cli.core import Command
-from logger import get_logger
 
-logger = get_logger(__name__)
-
-REPORT_PROJECT = "templedb"
-REPORT_DIR = "reports"
 EXTRACT_DIR = Path(tempfile.gettempdir()) / "templedb-reports"
 
-def _file_set_argv(rel_path: str) -> list:
-    """argv for writing a report through `templedb file set`.
-
-    Two things this gets right that a bare `["templedb", ...]` did not.
-
-    It goes through templedb_command(), which resolves the installed
-    wrapper deliberately rather than relying on whatever `templedb` PATH
-    lookup finds — the rest of the codebase already does this.
-
-    And it forwards the session. `file set` auto-stages, so this
-    subprocess stages somewhere; without --session it resolves its own
-    identity, which for a child process need not be the session the
-    caller is committing from. On 2026-10-08 that left reports/index.html
-    staged in an implicit session twice, and each time the next
-    `publish run` found nothing staged in its own session, failed its
-    commit step, and correctly refused to push.
-    """
-    from cli.core import templedb_command
-
-    argv = templedb_command("file", "set", REPORT_PROJECT, rel_path, "--verify")
-    sid = (os.environ.get("TEMPLEDB_SESSION_ID")
-           or os.environ.get("TEMPLEDB_SESSION") or "").strip()
-    if sid:
-        argv += ["--session", sid]
-    return argv
-
-
-# Kebab-case slug allowed characters in filenames
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
-_TITLE_RE = re.compile(r"<title>([^<]+)</title>", re.IGNORECASE)
-_LEDE_RE = re.compile(
-    r'<p\s+class="lede"[^>]*>(.*?)</p>', re.IGNORECASE | re.DOTALL
-)
-_H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.IGNORECASE | re.DOTALL)
-_TAG_STRIP_RE = re.compile(r"<[^>]+>")
+# The default project for `reports new`.
+#
+# A default rather than the old hardcoding: most reports are about
+# templedb, and `--project` now means a report about anything else is a
+# first-class thing to create rather than something to hand-write.
+DEFAULT_PROJECT = "templedb"
 
 
 def _slugify(title: str) -> str:
-    return _SLUG_RE.sub("-", title.lower()).strip("-")[:60]
+    s = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    # 60 chars, matching what the filename convention produced, so slugs
+    # migrated from paths and slugs created here look the same.
+    return s[:60].rstrip("-")
 
 
-def _strip_tags(html: str) -> str:
-    return re.sub(r"\s+", " ", _TAG_STRIP_RE.sub("", html)).strip()
+def _project_id(slug: str):
+    row = query_one("SELECT id FROM projects WHERE slug = ?", (slug,))
+    return row["id"] if row else None
 
 
-def _list_report_files():
-    """Return sorted list of (file_path, date_str, title, lede) tuples.
-
-    Newest first. Reads from templedb project via db_utils rather than the
-    checkout so this works whether or not the project is materialized.
+def _rows(project=None):
+    sql = """
+        SELECT r.id, p.slug AS project, r.slug, r.title, r.lede,
+               r.format, r.created_at, r.legacy_path
+          FROM reports r
+          JOIN projects p ON p.id = r.project_id
     """
-    from db_utils import get_simple_connection
-    conn = get_simple_connection(row_factory=True)
-    try:
-        # Match reports/YYYY-*.html (dated reports only); exclude index.html
-        # and any other non-dated files that live in the reports dir.
-        rows = conn.execute("""
-            SELECT pf.file_path, cb.content_text
-              FROM project_files pf
-              JOIN projects p ON p.id = pf.project_id
-              JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
-              JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
-             WHERE p.slug = ? AND pf.status = 'active'
-               AND pf.file_path GLOB ?
-             ORDER BY pf.file_path DESC
-        """, (REPORT_PROJECT, f"{REPORT_DIR}/[0-9][0-9][0-9][0-9]-*.html")).fetchall()
-    finally:
-        conn.close()
-
-    out = []
-    for r in rows:
-        path = r["file_path"]
-        html = r["content_text"] or ""
-        # File date/time from filename: YYYY-MM-DD[-HHMM]-slug.html.
-        # HHMM was added late so we accept both forms and render time
-        # only when present.
-        m = re.search(r"/(\d{4}-\d{2}-\d{2})(?:-(\d{4}))?-", path)
-        if m:
-            date_str = m.group(1)
-            if m.group(2):
-                date_str = f"{date_str} {m.group(2)[:2]}:{m.group(2)[2:]}"
-        else:
-            date_str = "----------"
-        # Prefer <title>, fall back to first <h1>, then filename stem
-        title = "(untitled)"
-        tm = _TITLE_RE.search(html)
-        if tm:
-            title = _strip_tags(tm.group(1))
-            # Drop " — TempleDB" or similar suffix
-            title = re.sub(r"\s*[—-]\s*TempleDB\s*$", "", title, flags=re.I)
-        else:
-            hm = _H1_RE.search(html)
-            if hm:
-                title = _strip_tags(hm.group(1))
-        lede_m = _LEDE_RE.search(html)
-        lede = _strip_tags(lede_m.group(1)) if lede_m else ""
-        out.append((path, date_str, title, lede))
-    return out
+    params = []
+    if project:
+        sql += " WHERE p.slug = ?"
+        params.append(project)
+    sql += " ORDER BY r.created_at DESC, r.slug ASC"
+    return query_all(sql, tuple(params))
 
 
-def _extract_all_to(dest: Path):
-    """Extract index.html + all reports to dest for browser viewing.
+# No `# {title}` heading, deliberately.
+#
+# The row carries the title and the markdown page chrome renders it as the
+# <h1>. A heading here as well puts the title on the page twice -- which
+# the first version did, as an <h1> from the chrome followed immediately by
+# an <h2> from the body. The lede is also a column, so it is not repeated
+# in the body either.
+_MD_TEMPLATE = """{lede_placeholder}
 
-    Recreates the same layout so cross-links work.
-    """
-    from db_utils import get_simple_connection
-    conn = get_simple_connection(row_factory=True)
-    try:
-        rows = conn.execute("""
-            SELECT pf.file_path, cb.content_text, cb.content_blob
-              FROM project_files pf
-              JOIN projects p ON p.id = pf.project_id
-              JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
-              JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
-             WHERE p.slug = ? AND pf.status = 'active'
-               AND (pf.file_path = 'index.html' OR pf.file_path LIKE ?)
-        """, (REPORT_PROJECT, f"{REPORT_DIR}/%.html")).fetchall()
-    finally:
-        conn.close()
+## Background
 
-    dest.mkdir(parents=True, exist_ok=True)
-    for r in rows:
-        p = dest / r["file_path"]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        if r["content_text"] is not None:
-            p.write_text(r["content_text"])
-        elif r["content_blob"] is not None:
-            p.write_bytes(r["content_blob"])
-    return len(rows)
+## What I found
 
-
-def _open_in_browser(path: Path):
-    opener = os.environ.get("BROWSER") or "xdg-open"
-    try:
-        subprocess.Popen([opener, str(path)],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except FileNotFoundError:
-        return False
-
-
-_REPORT_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>{title}</title>
-<style>
-  :root {{
-    --bg: #0f0f1a;
-    --panel: #13131f;
-    --border: #1e1e3a;
-    --text: #d0d0e8;
-    --muted: #8080a0;
-    --accent: #e94560;
-    --link: #7ec7ff;
-    --code-bg: #0a0a14;
-  }}
-  html, body {{ background: var(--bg); color: var(--text); }}
-  body {{
-    font-family: "IBM Plex Sans", "Inter", -apple-system, system-ui, sans-serif;
-    max-width: 820px; margin: 3rem auto 6rem; padding: 0 1.5rem;
-    line-height: 1.65; font-size: 16.5px;
-  }}
-  h1 {{ color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }}
-  h2 {{ color: var(--accent); font-size: 1.05rem; margin: 2.6rem 0 0.7rem;
-       text-transform: uppercase; letter-spacing: 0.06em;
-       border-top: 1px solid var(--border); padding-top: 1.3rem; }}
-  h3 {{ color: #b0b0d0; font-size: 1rem; margin: 1.6rem 0 0.5rem; }}
-  .lede {{ color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }}
-  p {{ margin: 0 0 1rem; }}
-  code {{ background: var(--code-bg); color: #b0e0b0;
-         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
-         font-family: "JetBrains Mono", ui-monospace, monospace; }}
-  pre {{ background: var(--code-bg); border: 1px solid var(--border);
-        padding: 0.85rem 1rem; border-radius: 5px; overflow-x: auto;
-        font-family: "JetBrains Mono", ui-monospace, monospace;
-        font-size: 0.83em; line-height: 1.55; margin: 0.9rem 0; }}
-  a {{ color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }}
-  .callout {{ background: var(--panel); border-left: 3px solid var(--accent);
-             padding: 0.75rem 1.1rem; margin: 1.2rem 0; border-radius: 0 4px 4px 0; }}
-</style>
-</head>
-<body>
-
-<h1>{title}</h1>
-<p class="lede">
-  {lede_placeholder}
-</p>
-
-<h2>Section</h2>
-<p>Body.</p>
-
-</body>
-</html>
-"""
-
-
-def _regenerate_index(reports_data) -> str:
-    """Build index.html content from a list of (path, date, title, lede)."""
-    entries = []
-    for path, dt, title, lede in reports_data:
-        # index.html lives in reports/, so hrefs are relative to that dir
-        rel = path.removeprefix(f"{REPORT_DIR}/")
-        entries.append(
-            f'<a class="report" href="{rel}">\n'
-            f'  <div class="row">\n'
-            f'    <span class="date">{dt}</span>\n'
-            f'    <span class="title">{title}</span>\n'
-            f'  </div>\n'
-            f'  <div class="summary">\n'
-            f'    {lede or "(no lede)"}\n'
-            f'  </div>\n'
-            f'</a>\n'
-        )
-    entries_html = "\n".join(entries) if entries else '<p class="empty">(no reports yet)</p>'
-
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Agent Reports — TempleDB</title>
-<style>
-  :root {{
-    --bg: #0f0f1a; --panel: #13131f; --border: #1e1e3a; --text: #d0d0e8;
-    --muted: #8080a0; --accent: #e94560; --link: #7ec7ff; --code-bg: #0a0a14;
-  }}
-  html, body {{ background: var(--bg); color: var(--text); }}
-  body {{ font-family: "IBM Plex Sans", "Inter", system-ui, sans-serif;
-         max-width: 780px; margin: 3rem auto 6rem; padding: 0 1.5rem;
-         line-height: 1.65; font-size: 16.5px; }}
-  h1 {{ color: var(--accent); font-size: 1.6rem; margin: 0 0 0.4rem; }}
-  h2 {{ color: var(--accent); font-size: 1rem; margin: 2.6rem 0 1rem;
-       text-transform: uppercase; letter-spacing: 0.08em;
-       border-top: 1px solid var(--border); padding-top: 1.2rem; }}
-  .lede {{ color: var(--muted); margin-bottom: 2rem; font-size: 0.95rem; }}
-  code {{ background: var(--code-bg); color: #b0e0b0;
-         padding: 1px 5px; border-radius: 3px; font-size: 0.88em;
-         font-family: "JetBrains Mono", ui-monospace, monospace; }}
-  .report {{ display: block; padding: 0.9rem 1.1rem; margin-bottom: 0.7rem;
-            background: var(--panel); border: 1px solid var(--border);
-            border-radius: 5px; text-decoration: none;
-            transition: border-color 0.15s; }}
-  .report:hover {{ border-color: var(--accent); }}
-  .report .row {{ display: flex; align-items: baseline; gap: 0.8rem; margin-bottom: 0.3rem; }}
-  .report .date {{ font-family: "JetBrains Mono", ui-monospace, monospace;
-                  color: var(--muted); font-size: 0.82rem; min-width: 5.5rem; }}
-  .report .title {{ color: var(--link); font-weight: 600; font-size: 1.02rem; }}
-  .report .summary {{ color: var(--text); font-size: 0.9rem; line-height: 1.5; padding-left: 6.3rem; }}
-  .empty {{ color: var(--muted); font-style: italic; }}
-</style>
-</head>
-<body>
-
-<h1>Agent Reports</h1>
-<p class="lede">
-  Readable HTML overviews produced by agents while working on TempleDB. Each
-  entry is a self-contained snapshot; no report is edited in place.
-  Auto-generated by <code>templedb reports reindex</code>.
-</p>
-
-<h2>Reports</h2>
-
-{entries_html}
-
-<h2>Adding a report</h2>
-<p>
-  <code>templedb reports new "Your title here"</code> scaffolds a new file at
-  <code>reports/YYYY-MM-DD-your-title-here.html</code> with the standard
-  template. Fill in the body, then <code>templedb reports reindex</code>
-  regenerates this page from filenames and <code>&lt;p class="lede"&gt;</code>
-  contents.
-</p>
-
-</body>
-</html>
+## What I would do
 """
 
 
 class ReportsCommands(Command):
-    """Agent HTML report management."""
+    """Agent report management, over rows."""
 
     def list(self, args):
-        reports = _list_report_files()
+        project = getattr(args, "project", None)
+        reports = _rows(project)
         if args.json:
-            print(json.dumps([{
-                "path": p, "date": d, "title": t, "lede": l
-            } for p, d, t, l in reports], indent=2))
+            print(json.dumps([dict(r) for r in reports], indent=2))
             return 0
         if not reports:
-            print("No reports yet. Create one with:")
-            print("  templedb reports new <title>")
+            scope = f" for {project}" if project else ""
+            print(f"No reports{scope} yet. Create one with:")
+            print('  templedb reports new "<title>"')
             return 0
-        print(f"\n{len(reports)} report(s), newest first:\n")
-        for path, dt, title, _lede in reports:
-            print(f"  {dt}  {title}")
-            print(f"             {path}\n")
+        scope = f" in {project}" if project else ""
+        print(f"\n{len(reports)} report(s){scope}, newest first:\n")
+        for r in reports:
+            stamp = (r["created_at"] or "")[:16]
+            fmt = "" if r["format"] == "html" else f"  [{r['format']}]"
+            print(f"  {stamp}  {r['title']}{fmt}")
+            print(f"                    {r['project']}/{r['slug']}\n")
         return 0
 
     def view(self, args):
-        reports = _list_report_files()
+        """Render one report to a temp file and open it.
+
+        A file on disk rather than a GUI URL, deliberately: the GUI may not
+        be running, and `reports view` predates it. The temp file is a
+        rendering of the row, not a copy of a tracked file -- there is no
+        longer a tracked file to copy.
+        """
+        reports = _rows(getattr(args, "project", None))
         if not reports:
-            print("No reports to view. Create one with: templedb reports new <title>")
+            print("No reports to view.")
             return 1
 
-        # Refresh extraction dir every call
-        if EXTRACT_DIR.exists():
-            shutil.rmtree(EXTRACT_DIR)
-        n = _extract_all_to(EXTRACT_DIR)
-
-        target = EXTRACT_DIR / REPORT_DIR / "index.html"
-        if args.query:
-            q = args.query.lower()
-            matches = [p for p, _d, _t, _l in reports if q in p.lower()]
+        q = (args.query or "").lower()
+        if q:
+            matches = [r for r in reports if q in r["slug"].lower()]
             if not matches:
-                # Try matching by title
-                matches = [p for p, _d, t, _l in reports if q in t.lower()]
+                matches = [r for r in reports if q in r["title"].lower()]
+            if not matches and q:
+                matches = [
+                    r for r in reports
+                    if r["legacy_path"] and q in r["legacy_path"].lower()
+                ]
             if not matches:
-                print(f"No report matches '{args.query}'.")
-                print(f"Available:")
-                for p, dt, t, _ in reports:
-                    print(f"  {dt}  {t}")
+                print(f"No report matches '{args.query}'. Available:")
+                for r in reports:
+                    print(f"  {(r['created_at'] or '')[:10]}  {r['title']}")
                 return 1
             if len(matches) > 1:
                 print(f"Multiple matches for '{args.query}':")
-                for p in matches:
-                    print(f"  {p}")
+                for r in matches:
+                    print(f"  {r['project']}/{r['slug']}  {r['title']}")
                 print("Refine the query.")
                 return 1
-            target = EXTRACT_DIR / matches[0]
+            target_row = matches[0]
+        else:
+            target_row = reports[0]
 
-        if not target.exists():
-            print(f"Not extracted: {target}")
-            return 1
+        full = query_one(
+            "SELECT body, format, title, lede FROM reports WHERE id = ?",
+            (target_row["id"],),
+        )
+        if EXTRACT_DIR.exists():
+            shutil.rmtree(EXTRACT_DIR)
+        EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
+        out = EXTRACT_DIR / f"{target_row['slug']}.html"
 
-        print(f"Opening {target}")
-        if not _open_in_browser(target):
-            print(f"No browser opener available. Path:")
-            print(f"  file://{target}")
+        if full["format"] == "html":
+            out.write_text(full["body"])
+        else:
+            # Reuse the GUI's renderer rather than keeping a second one --
+            # two markdown implementations would disagree eventually, and
+            # the disagreement would be invisible until somebody compared
+            # the browser against the terminal.
+            sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+            from gui_pages.reports import _render_markdown, _MD_PAGE
+            lede = (
+                f'<p class="lede">{full["lede"]}</p>' if full["lede"] else ""
+            )
+            out.write_text(_MD_PAGE.format(
+                title=full["title"], back="", lede=lede,
+                body=_render_markdown(full["body"]),
+            ))
+
+        print(f"Opening {out}")
+        if not _open_in_browser(out):
+            print("No browser opener available. Path:")
+            print(f"  file://{out}")
         return 0
 
     def new(self, args):
@@ -376,81 +191,219 @@ class ReportsCommands(Command):
         if not title:
             print("Title required.")
             return 1
-        slug = _slugify(title)
-        # HHMM in the filename so multiple reports per day sort and
-        # display distinctly in the CLI list and GUI index.
-        now = datetime.now()
-        stamp = now.strftime("%Y-%m-%d-%H%M")
-        filename = f"{stamp}-{slug}.html"
-        rel_path = f"{REPORT_DIR}/{filename}"
 
-        # Refuse to overwrite an existing report
-        existing = {p for p, *_ in _list_report_files()}
-        if rel_path in existing:
-            print(f"A report already exists at {rel_path}. Refusing to overwrite.")
-            print("Pick a different title or edit the existing report.")
+        project = getattr(args, "project", None) or DEFAULT_PROJECT
+        pid = _project_id(project)
+        if pid is None:
+            print(f"No such project: {project}")
             return 1
 
-        content = _REPORT_TEMPLATE.format(
-            title=title,
-            lede_placeholder=(
-                "One-paragraph summary of what this report covers and why."
-            ),
-        )
+        slug = _slugify(title)
+        if not slug:
+            print("Title produced an empty slug. Use some letters or digits.")
+            return 1
 
-        tmp = Path(tempfile.mkdtemp()) / filename
-        tmp.write_text(content)
-        r = subprocess.run(
-            _file_set_argv(rel_path),
-            stdin=open(tmp), capture_output=True, text=True,
+        # Per-project uniqueness is the table's, not this check's -- the
+        # UNIQUE(project_id, slug) constraint is what actually prevents a
+        # collision. This exists to say something useful first.
+        existing = query_one(
+            "SELECT slug FROM reports WHERE project_id = ? AND slug = ?",
+            (pid, slug),
         )
-        if r.returncode != 0:
-            print(f"file set failed: {r.stderr}")
-            return r.returncode
+        if existing:
+            print(f"A report already exists at {project}/{slug}.")
+            print("Pick a different title, or edit the existing one.")
+            return 1
 
-        print(f"Created {rel_path}")
-        print(f"Edit with:  templedb file edit {REPORT_PROJECT} {rel_path}")
-        print(f"After edit: templedb reports reindex")
+        fmt = "html" if getattr(args, "html", False) else "markdown"
+        lede_placeholder = (
+            "One-paragraph summary of what this report covers and why."
+        )
+        if fmt == "markdown":
+            body = _MD_TEMPLATE.format(
+                title=title, lede_placeholder=lede_placeholder
+            )
+        else:
+            body = _HTML_TEMPLATE.format(
+                title=title, lede_placeholder=lede_placeholder
+            )
+
+        execute(
+            """
+            INSERT INTO reports
+                (project_id, slug, title, lede, body, format, created_at,
+                 updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (pid, slug, title, lede_placeholder, body, fmt,
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        print(f"Created {project}/{slug} ({fmt})")
+        print(f"  GUI:  /reports/{project}/{slug}")
+        print(f"  Edit: templedb reports edit {project}/{slug}")
+        return 0
+
+    def edit(self, args):
+        """Open the body in $EDITOR and write it back to the row."""
+        ref = args.ref
+        project, _sep, slug = ref.partition("/")
+        if not slug:
+            project, slug = DEFAULT_PROJECT, ref
+        row = query_one(
+            """
+            SELECT r.id, r.body, r.format, r.slug FROM reports r
+              JOIN projects p ON p.id = r.project_id
+             WHERE p.slug = ? AND r.slug = ?
+            """,
+            (project, slug),
+        )
+        if not row:
+            print(f"No such report: {project}/{slug}")
+            return 1
+        suffix = ".md" if row["format"] == "markdown" else ".html"
+        tmp = Path(tempfile.mkdtemp()) / f"{row['slug']}{suffix}"
+        tmp.write_text(row["body"])
+        before = tmp.read_text()
+        editor = os.environ.get("EDITOR", "vi")
+        subprocess.run([editor, str(tmp)])
+        after = tmp.read_text()
+        if after == before:
+            print("Unchanged.")
+            return 0
+        # Re-derive the lede from the edited body, so the index summary
+        # follows the document rather than going stale the first time
+        # somebody rewrites their opening paragraph.
+        lede = _derive_lede(after, row["format"])
+        execute(
+            """
+            UPDATE reports
+               SET body = ?, lede = COALESCE(?, lede),
+                   updated_at = ?
+             WHERE id = ?
+            """,
+            (after, lede, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             row["id"]),
+        )
+        print(f"Updated {project}/{slug} ({len(after)} chars)")
         return 0
 
     def regenerate_index(self, args):
-        reports = _list_report_files()
-        content = _regenerate_index(reports)
-        tmp = Path(tempfile.mkdtemp()) / "index.html"
-        tmp.write_text(content)
-        r = subprocess.run(
-            _file_set_argv(f"{REPORT_DIR}/index.html"),
-            stdin=open(tmp), capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            print(f"file set failed: {r.stderr}")
-            return r.returncode
-        print(f"Regenerated index.html from {len(reports)} report(s).")
+        """Kept as a notice rather than removed.
+
+        Removing it would give `argparse` an "invalid choice" error, which
+        says nothing about why. The index was a generated file that could
+        disagree with the directory; there is no directory now.
+        """
+        print("reindex is no longer needed.")
+        print()
+        print("index.html was a generated artifact derived from a directory")
+        print("listing. Reports are rows now (migration 143), so the listing")
+        print("at /reports is a SELECT and cannot be stale.")
         return 0
 
 
+def _derive_lede(body: str, fmt: str):
+    if fmt == "html":
+        m = re.search(
+            r'<p\s+class="lede"[^>]*>(.*?)</p>', body,
+            re.IGNORECASE | re.DOTALL,
+        )
+        return re.sub(r"<[^>]+>", "", m.group(1)).strip() if m else None
+    # Markdown: the first non-heading, non-blank paragraph.
+    for block in re.split(r"\n\s*\n", body):
+        b = block.strip()
+        if b and not b.startswith("#"):
+            return re.sub(r"\s+", " ", b)[:500]
+    return None
+
+
+def _open_in_browser(path: Path) -> bool:
+    for opener in ("xdg-open", "wslview", "open"):
+        if shutil.which(opener):
+            subprocess.Popen(
+                [opener, str(path)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return True
+    return False
+
+
+_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  :root {{ --bg:#0f0f1a; --border:#1e1e3a; --text:#d0d0e8; --muted:#8080a0;
+           --accent:#e94560; --link:#7ec7ff; --code:#0a0a14; }}
+  html,body {{ background:var(--bg); color:var(--text); }}
+  body {{ font-family:"IBM Plex Sans","Inter",system-ui,sans-serif;
+          max-width:780px; margin:3rem auto 6rem; padding:0 1.5rem;
+          line-height:1.65; font-size:16.5px; }}
+  h1 {{ color:var(--accent); font-size:1.6rem; margin:0 0 0.4rem; }}
+  h2 {{ color:var(--accent); font-size:1rem; margin:2.6rem 0 1rem;
+        text-transform:uppercase; letter-spacing:0.08em;
+        border-top:1px solid var(--border); padding-top:1.2rem; }}
+  .lede {{ color:var(--muted); margin-bottom:2rem; font-size:0.95rem; }}
+  code {{ background:var(--code); color:#b0e0b0; padding:1px 5px;
+          border-radius:3px; font-size:0.88em;
+          font-family:"JetBrains Mono",ui-monospace,monospace; }}
+  pre {{ background:var(--code); border:1px solid var(--border);
+         border-radius:5px; padding:0.9rem 1.1rem; overflow-x:auto;
+         font-size:0.84em; }}
+  a {{ color:var(--link); }}
+</style>
+</head>
+<body>
+
+<h1>{title}</h1>
+
+<p class="lede">{lede_placeholder}</p>
+
+<h2>Background</h2>
+
+<h2>What I found</h2>
+
+<h2>What I would do</h2>
+
+</body>
+</html>
+"""
+
+
 def register(cli):
-    """Register templedb reports command tree."""
+    """Register the templedb reports command tree."""
     cmd = ReportsCommands()
     reports_parser = cli.register_command(
-        'reports', None, help_text='Agent HTML reports (in templedb/reports/)'
+        'reports', None, help_text='Agent reports (rows in the reports table)'
     )
-    sub = reports_parser.add_subparsers(dest='reports_subcommand', required=True)
+    sub = reports_parser.add_subparsers(
+        dest='reports_subcommand', required=True
+    )
 
     ls = sub.add_parser('list', help='List reports newest-first')
     ls.add_argument('--json', action='store_true')
+    ls.add_argument('--project', help='Scope to one project slug')
     cli.commands['reports.list'] = cmd.list
 
-    v = sub.add_parser('view', help='Extract reports and open in browser')
-    v.add_argument('query', nargs='?',
-                   help='Substring match (omit to open the index)')
+    v = sub.add_parser('view', help='Render a report and open it in a browser')
+    v.add_argument('query', nargs='?', help='Substring of slug, title or legacy path')
+    v.add_argument('--project', help='Scope to one project slug')
     cli.commands['reports.view'] = cmd.view
 
-    n = sub.add_parser('new', help='Scaffold a new report from the template')
-    n.add_argument('title', help='Report title (turned into a kebab-case slug)')
+    n = sub.add_parser('new', help='Create a report')
+    n.add_argument('title')
+    n.add_argument('--project', help=f'Project slug (default: {DEFAULT_PROJECT})')
+    n.add_argument('--html', action='store_true',
+                   help='Author as self-contained HTML instead of markdown')
     cli.commands['reports.new'] = cmd.new
 
+    e = sub.add_parser('edit', help='Edit a report body in $EDITOR')
+    e.add_argument('ref', help='project/slug, or slug for the default project')
+    cli.commands['reports.edit'] = cmd.edit
+
     ri = sub.add_parser('reindex', aliases=['regenerate-index'],
-                        help='Rebuild reports/index.html from filenames + ledes')
+                        help='(no longer needed; explains why)')
     cli.commands['reports.reindex'] = cmd.regenerate_index
     cli.commands['reports.regenerate-index'] = cmd.regenerate_index

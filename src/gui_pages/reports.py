@@ -3,21 +3,34 @@
 Routes:
   GET /reports                     -- listing across every project
   GET /reports?project=<slug>      -- listing scoped to one project
-  GET /reports/{filename}          -- one report, project inferred
-  GET /reports/{slug}/{filename}   -- one report, project explicit
+  GET /reports/{project}/{slug}    -- one report
+  GET /reports/{slug}              -- one report, project inferred
+  GET /reports/{legacy-filename}   -- an old dated .html path, still resolved
 
-Reports are HTML files under a project's `reports/` directory, one file
-per report. Listing is derived from the DB, not the filesystem.
+── Reports are rows ─────────────────────────────────────────────────────
 
-Previously both routes hardcoded REPORT_PROJECT = "templedb", so a
-report in any other project was unreachable and invisible. Every report
-that exists today is still a templedb one (46 of them); this makes the
-other projects addressable rather than migrating anything.
+They were files under a project's `reports/` directory, discovered by the
+glob `reports/[0-9][0-9][0-9][0-9]-*.html`. The bytes were always in
+SQLite -- a report is a tracked project file -- but the MODEL was the
+filesystem: existence came from the glob, the date from a regex over the
+filename, and the title and lede from regexes over the document's own
+markup.
 
-Bare `/reports/{filename}` is kept working because all existing links
-use it. Filenames are date-prefixed and unique across projects today; if
-two ever collide the explicit two-segment form disambiguates, and the
-bare form says so instead of silently picking one.
+Every oddity this page used to carry came from that. A markdown report
+was invisible, because the glob ends in `.html`. The title fell back to
+"(untitled)" when a document had no `<title>`, because presentation
+markup was being read as metadata. Filenames could collide across
+projects, so `_resolve` had to report ambiguity. And `reports reindex`
+existed because a generated index could disagree with the directory.
+
+Migration 143 made them rows: `format` is a column, so markdown renders;
+`created_at` is a timestamp, so the filename carries nothing; and `slug`
+is a stable id, unique per project, so there is nothing to disambiguate.
+
+Old `/reports/2026-10-27-1952-thing.html` links still resolve, through
+`reports.legacy_path`. Those URLs are in published commit messages and
+inside other reports, so they have to keep working; they are a
+forwarding address and not an identity.
 """
 import html
 import re
@@ -34,76 +47,149 @@ from gui_helpers import _base
 
 router = APIRouter()
 
-REPORT_DIR = "reports"
-
-# Dated convention: YYYY-MM-DD[-HHMM]-slug.html. Excludes reports/index.html.
-_REPORT_GLOB = f"{REPORT_DIR}/[0-9][0-9][0-9][0-9]-*.html"
-
-_TITLE_RE = re.compile(r"<title>([^<]+)</title>", re.IGNORECASE)
-_LEDE_RE = re.compile(
-    r'<p\s+class="lede"[^>]*>(.*?)</p>', re.IGNORECASE | re.DOTALL
-)
-_H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.IGNORECASE | re.DOTALL)
 _TAG_STRIP_RE = re.compile(r"<[^>]+>")
 
 
 def _strip_tags(s: str) -> str:
-    return re.sub(r"\s+", " ", _TAG_STRIP_RE.sub("", s)).strip()
+    return _TAG_STRIP_RE.sub("", s or "").strip()
 
 
-def _parse_report(slug, path, html_text):
-    """Derive (slug, filename, date_str, title, lede) from one report."""
-    filename = path.removeprefix(f"{REPORT_DIR}/")
-    # Filename format: YYYY-MM-DD[-HHMM]-slug.html. HHMM is optional for
-    # backward compat with reports created before the convention was
-    # tightened; when present, display as "YYYY-MM-DD HH:MM" so multiple
-    # reports the same day are visually distinguishable.
-    m = re.search(r"^(\d{4}-\d{2}-\d{2})(?:-(\d{4}))?-", filename)
-    if m:
-        date_str = m.group(1)
-        if m.group(2):
-            date_str = f"{date_str} {m.group(2)[:2]}:{m.group(2)[2:]}"
-    else:
-        date_str = "----------"
+# ── Markdown, rendered here rather than by a dependency ──────────────────
+#
+# This page imports nothing but the stdlib and fastapi, and adding a
+# markdown package would mean a nix rebuild to render a document the
+# database already holds. The subset below is the subset reports actually
+# use -- headings, paragraphs, fenced code, tables, blockquotes, lists and
+# inline emphasis -- and anything outside it degrades to a paragraph
+# rather than to an error.
+#
+# It exists because `format` is a column now. A markdown report used to be
+# invisible; it would be a poor fix to make it visible and then unreadable.
 
-    title = "(untitled)"
-    tm = _TITLE_RE.search(html_text)
-    if tm:
-        title = _strip_tags(tm.group(1))
-        title = re.sub(r"\s*[—-]\s*TempleDB\s*$", "", title, flags=re.I)
-    else:
-        hm = _H1_RE.search(html_text)
-        if hm:
-            title = _strip_tags(hm.group(1))
+_MD_INLINE = (
+    (re.compile(r"`([^`]+)`"), r"<code>\1</code>"),
+    (re.compile(r"\*\*([^*]+)\*\*"), r"<b>\1</b>"),
+    (re.compile(r"(?<![*\w])\*([^*\n]+)\*"), r"<em>\1</em>"),
+    (re.compile(r"\[([^\]]+)\]\(([^)]+)\)"), r'<a href="\2">\1</a>'),
+)
 
-    lede_m = _LEDE_RE.search(html_text)
-    lede = _strip_tags(lede_m.group(1)) if lede_m else ""
-    return (slug, filename, date_str, title, lede)
 
+def _md_inline(s: str) -> str:
+    out = html.escape(s)
+    for pattern, repl in _MD_INLINE:
+        out = pattern.sub(repl, out)
+    return out
+
+
+def _render_markdown(src: str) -> str:
+    lines = (src or "").split("\n")
+    out, para, i = [], [], 0
+
+    def flush():
+        if para:
+            out.append(f"<p>{_md_inline(' '.join(para).strip())}</p>")
+            para.clear()
+
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("```"):
+            flush()
+            i += 1
+            code = []
+            while i < len(lines) and not lines[i].startswith("```"):
+                code.append(lines[i])
+                i += 1
+            i += 1
+            out.append(
+                "<pre><code>" + html.escape("\n".join(code)) + "</code></pre>"
+            )
+            continue
+        m = re.match(r"^(#{1,4}) +(.*)$", line)
+        if m:
+            flush()
+            level = min(len(m.group(1)) + 1, 4)
+            out.append(f"<h{level}>{_md_inline(m.group(2))}</h{level}>")
+            i += 1
+            continue
+        if line.startswith("|"):
+            flush()
+            rows = []
+            while i < len(lines) and lines[i].startswith("|"):
+                rows.append(lines[i])
+                i += 1
+            # The |---|---| separator carries no content.
+            rows = [r for r in rows if not re.fullmatch(r"\|[\s|:-]+\|", r.strip())]
+            if rows:
+                def cells(r):
+                    return [c.strip() for c in r.strip().strip("|").split("|")]
+                trs = ["<tr>" + "".join(
+                    f"<th>{_md_inline(c)}</th>" for c in cells(rows[0])
+                ) + "</tr>"]
+                for r in rows[1:]:
+                    trs.append("<tr>" + "".join(
+                        f"<td>{_md_inline(c)}</td>" for c in cells(r)
+                    ) + "</tr>")
+                out.append("<table>" + "".join(trs) + "</table>")
+            continue
+        if line.startswith("> "):
+            flush()
+            quote = []
+            while i < len(lines) and (lines[i].startswith("> ") or lines[i] == ">"):
+                quote.append(re.sub(r"^>\s?", "", lines[i]))
+                i += 1
+            out.append(f"<blockquote>{_md_inline(' '.join(quote).strip())}</blockquote>")
+            continue
+        if re.match(r"^([-*] |\d+\. )", line):
+            flush()
+            ordered = bool(re.match(r"^\d+\. ", line))
+            items = []
+            while i < len(lines):
+                if re.match(r"^([-*] |\d+\. )", lines[i]):
+                    items.append(re.sub(r"^([-*]|\d+\.) ", "", lines[i]))
+                elif re.match(r"^\s+\S", lines[i]) and items:
+                    items[-1] += " " + lines[i].strip()
+                else:
+                    break
+                i += 1
+            tag = "ol" if ordered else "ul"
+            out.append(
+                f"<{tag}>"
+                + "".join(f"<li>{_md_inline(x)}</li>" for x in items)
+                + f"</{tag}>"
+            )
+            continue
+        if not line.strip():
+            flush()
+            i += 1
+            continue
+        para.append(line)
+        i += 1
+
+    flush()
+    return "\n".join(out)
+
+
+# ── Reads. All of them hit `reports`; none of them touch a path ───────────
 
 def _list_reports(project=None):
     """Reports newest-first, optionally scoped to one project slug."""
     sql = """
-        SELECT p.slug, pf.file_path, cb.content_text
-          FROM project_files pf
-          JOIN projects p ON p.id = pf.project_id
-          JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
-          JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
-         WHERE pf.status = 'active'
-           AND pf.file_path GLOB ?
+        SELECT p.slug AS project, r.slug, r.title, r.lede, r.created_at,
+               r.format, r.supersedes_id,
+               (SELECT COUNT(*) FROM reports s WHERE s.supersedes_id = r.id)
+                   AS superseded_by_count
+          FROM reports r
+          JOIN projects p ON p.id = r.project_id
     """
-    params = [_REPORT_GLOB]
+    params = []
     if project:
-        sql += " AND p.slug = ?"
+        sql += " WHERE p.slug = ?"
         params.append(project)
-    # Sort by filename so the date prefix orders them, then by slug for a
-    # stable tie-break when two projects file a report the same minute.
-    sql += " ORDER BY pf.file_path DESC, p.slug ASC"
-    rows = query_all(sql, tuple(params))
-    return [
-        _parse_report(r["slug"], r["file_path"], r["content_text"] or "")
-        for r in rows
-    ]
+    # created_at DESC, then slug for a stable tie-break when two reports
+    # share a timestamp -- which the old filename sort got for free and a
+    # timestamp with minute precision does not.
+    sql += " ORDER BY r.created_at DESC, r.slug ASC"
+    return query_all(sql, tuple(params))
 
 
 def _report_counts():
@@ -111,61 +197,62 @@ def _report_counts():
     rows = query_all(
         """
         SELECT p.slug, COUNT(*) AS n
-          FROM project_files pf
-          JOIN projects p ON p.id = pf.project_id
-         WHERE pf.status = 'active' AND pf.file_path GLOB ?
+          FROM reports r
+          JOIN projects p ON p.id = r.project_id
          GROUP BY p.slug
          ORDER BY n DESC, p.slug ASC
-        """,
-        (_REPORT_GLOB,),
+        """
     )
     return [(r["slug"], r["n"]) for r in rows]
 
 
-def _resolve(ref):
-    """Map a URL ref to (slug, filename, candidates).
+def _fetch(ref):
+    """One report from a URL ref, or None.
 
-    `ref` is either "filename.html" or "slug/filename.html". Returns
-    candidates so an ambiguous bare filename can be reported rather than
-    resolved arbitrarily.
+    `ref` is `project/slug`, a bare `slug`, or a legacy dated filename.
+    Tried in that order, which is also most-specific first.
+
+    A bare slug can in principle match two projects. That was a real
+    ambiguity under filenames and is a near-impossibility now -- `slug` is
+    only unique per project, so the two-segment form is the addressable
+    one and this is a convenience. When it is ambiguous, nothing is
+    guessed: the caller is handed the candidates.
     """
     ref = ref.strip("/")
-    slug, sep, filename = ref.partition("/")
-    if sep and filename:
-        return slug, filename, None
+    project, sep, slug = ref.partition("/")
 
-    filename = ref
+    if sep and slug:
+        rows = query_all(
+            """
+            SELECT r.*, p.slug AS project FROM reports r
+              JOIN projects p ON p.id = r.project_id
+             WHERE p.slug = ? AND (r.slug = ? OR r.legacy_path = ?)
+            """,
+            # Legacy too, and this form matters MORE than the bare one: the
+            # old index generated two-segment hrefs of the shape
+            # /reports/<project>/<dated-filename>.html, so that is what most
+            # in-the-wild links actually look like. Matching only the slug
+            # here would have broken every link the previous GUI emitted.
+            (project, slug, f"reports/{slug}"),
+        )
+        return (rows[0] if rows else None), []
+
+    # Bare: a slug, or a legacy path. `legacy_path` is matched with the
+    # directory prefix restored, since that is how the column was written.
     rows = query_all(
         """
-        SELECT p.slug
-          FROM project_files pf
-          JOIN projects p ON p.id = pf.project_id
-         WHERE pf.status = 'active' AND pf.file_path = ?
+        SELECT r.*, p.slug AS project FROM reports r
+          JOIN projects p ON p.id = r.project_id
+         WHERE r.slug = ? OR r.legacy_path = ?
          ORDER BY p.slug ASC
         """,
-        (f"{REPORT_DIR}/{filename}",),
+        (ref, f"reports/{ref}"),
     )
-    slugs = [r["slug"] for r in rows]
-    if len(slugs) == 1:
-        return slugs[0], filename, None
-    return None, filename, slugs
-
-
-def _fetch(slug, filename):
-    rows = query_all(
-        """
-        SELECT cb.content_text, cb.content_blob
-          FROM project_files pf
-          JOIN projects p ON p.id = pf.project_id
-          JOIN file_contents fc ON fc.file_id = pf.id AND fc.is_current = 1
-          JOIN content_blobs cb ON cb.hash_sha256 = fc.content_hash
-         WHERE p.slug = ? AND pf.file_path = ? AND pf.status = 'active'
-        """,
-        (slug, f"{REPORT_DIR}/{filename}"),
-    )
-    return rows[0] if rows else None
-
-
+    if len(rows) == 1:
+        return rows[0], []
+    if not rows:
+        return None, []
+    return None, [r["project"] for r in rows]
 _STYLES = """
 <style>
   .report-card {
@@ -207,19 +294,16 @@ _STYLES = """
 
 
 def _filter_bar(counts, active):
-    """Project chips. Omitted entirely when only one project has reports."""
-    if len(counts) < 2:
-        return ""
-    total = sum(n for _s, n in counts)
+    total = sum(n for _slug, n in counts)
     chips = [
         f'<a class="proj-chip{"" if active else " active"}" href="/reports">'
-        f'all ({total})</a>'
+        f'all <span class="n">{total}</span></a>'
     ]
     for slug, n in counts:
-        cls = " active" if active == slug else ""
+        cls = " active" if slug == active else ""
         chips.append(
             f'<a class="proj-chip{cls}" href="/reports?project={html.escape(slug)}">'
-            f'{html.escape(slug)} ({n})</a>'
+            f'{html.escape(slug)} <span class="n">{n}</span></a>'
         )
     return f'<div class="proj-filter">{"".join(chips)}</div>'
 
@@ -245,32 +329,43 @@ def reports_list(project: str = None):
             _STYLES
             + "<h2>Reports</h2>"
             + '<p class="muted">No reports yet.</p>'
-            + '<p>Create one with <code>templedb reports new "your title"</code>, '
-              'then <code>templedb reports reindex</code>.</p>'
+            + '<p>Create one with <code>templedb reports new "your title"</code>.</p>'
         )
         return _base("Reports", body, active="reports")
 
-    # Show the project badge only when the list spans more than one, so a
-    # single-project view is not cluttered by a constant label.
     show_badge = project is None and len(counts) > 1
 
     items = []
-    for slug, filename, date_str, title, lede in reports:
+    for r in reports:
         summary = (
-            html.escape(lede) if lede
+            html.escape(r["lede"]) if r["lede"]
             else '<span class="muted">(no lede)</span>'
         )
         badge = (
-            f'<span class="report-proj">{html.escape(slug)}</span>'
+            f'<span class="report-proj">{html.escape(r["project"])}</span>'
             if show_badge else ""
         )
-        href = f"/reports/{html.escape(slug)}/{html.escape(filename)}"
+        # Minute precision only when there is one, so a date-only report
+        # does not display a meaningless 00:00.
+        stamp = r["created_at"] or ""
+        shown = stamp[:16] if not stamp.endswith("00:00:00") else stamp[:10]
+        # Markdown is now a first-class state, so it is labelled rather
+        # than being the silent reason a report used to be missing.
+        fmt = (
+            '<span class="report-proj">md</span>'
+            if r["format"] == "markdown" else ""
+        )
+        superseded = (
+            '<span class="report-proj">superseded</span>'
+            if r["superseded_by_count"] else ""
+        )
+        href = f'/reports/{html.escape(r["project"])}/{html.escape(r["slug"])}'
         items.append(
             f'<a class="report-card" href="{href}">'
             f'  <div class="report-row">'
-            f'    <span class="report-date">{html.escape(date_str)}</span>'
-            f'    <span class="report-title">{html.escape(title)}</span>'
-            f'    {badge}'
+            f'    <span class="report-date">{html.escape(shown)}</span>'
+            f'    <span class="report-title">{html.escape(r["title"])}</span>'
+            f'    {badge}{fmt}{superseded}'
             f'  </div>'
             f'  <div class="report-summary">{summary}</div>'
             f'</a>'
@@ -282,9 +377,9 @@ def reports_list(project: str = None):
         + "<h2>Reports</h2>"
         + _filter_bar(counts, project)
         + f'<p class="muted" style="margin-bottom:1.2rem">'
-          f'{len(reports)} report(s){scope}, newest first. Each opens in its '
-          f'own styled page. Add new reports via '
-          f'<code>templedb reports new</code> then <code>reindex</code>.</p>'
+          f'{len(reports)} report(s){scope}, newest first. Stored as rows in '
+          f'<code>reports</code>; add one with '
+          f'<code>templedb reports new</code>.</p>'
         + "".join(items)
     )
     return _base("Reports", body, active="reports")
@@ -305,64 +400,101 @@ def _error_page(heading, detail):
     )
 
 
+# Minimal page for a markdown body, which has no styling of its own.
+#
+# An HTML report ships its own <style> and is served untouched -- that is
+# the "one browser tab, no missing dependencies" invariant and it is a
+# property of the document. A markdown report has no such thing, so the
+# chrome is supplied here.
+_MD_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>{title}</title>
+<style>
+  :root {{ --bg:#0f0f1a; --border:#1e1e3a; --text:#d0d0e8; --muted:#8080a0;
+           --accent:#e94560; --link:#7ec7ff; --code:#0a0a14; }}
+  html,body {{ background:var(--bg); color:var(--text); }}
+  body {{ font-family:"IBM Plex Sans","Inter",system-ui,sans-serif;
+          max-width:780px; margin:3rem auto 6rem; padding:0 1.5rem;
+          line-height:1.65; font-size:16.5px; }}
+  h1 {{ color:var(--accent); font-size:1.6rem; margin:0 0 0.4rem; }}
+  h2 {{ color:var(--accent); font-size:1rem; margin:2.6rem 0 1rem;
+        text-transform:uppercase; letter-spacing:0.08em;
+        border-top:1px solid var(--border); padding-top:1.2rem; }}
+  h3,h4 {{ color:#a0a0c0; font-size:0.95rem; margin:1.8rem 0 0.6rem; }}
+  .lede {{ color:var(--muted); margin-bottom:2rem; font-size:0.95rem; }}
+  code {{ background:var(--code); color:#b0e0b0; padding:1px 5px;
+          border-radius:3px; font-size:0.88em;
+          font-family:"JetBrains Mono",ui-monospace,monospace; }}
+  pre {{ background:var(--code); border:1px solid var(--border);
+         border-radius:5px; padding:0.9rem 1.1rem; overflow-x:auto;
+         font-size:0.84em; line-height:1.5; }}
+  pre code {{ background:none; padding:0; }}
+  table {{ width:100%; border-collapse:collapse; margin:1rem 0 1.4rem; }}
+  th {{ text-align:left; padding:0.45rem 0.6rem; color:var(--muted);
+        font-size:0.78rem; text-transform:uppercase; letter-spacing:0.06em;
+        border-bottom:1px solid var(--border); }}
+  td {{ padding:0.42rem 0.6rem; border-bottom:1px solid #1a1a2e;
+        font-size:0.9rem; vertical-align:top; }}
+  blockquote {{ border-left:2px solid var(--border); margin:1.2rem 0;
+                padding:0.2rem 0 0.2rem 1.1rem; color:var(--muted); }}
+  a {{ color:var(--link); }}
+  ul,ol {{ padding-left:1.3rem; }} li {{ margin-bottom:0.45rem; }}
+</style></head><body>{back}<h1>{title}</h1>{lede}{body}</body></html>"""
+
+
 @router.get("/reports/{ref:path}", response_class=HTMLResponse)
 def reports_view(ref: str):
-    # Serve the raw report HTML — it's self-contained with its own styling,
-    # and wrapping in the GUI chrome would fight its layout.
-    #
-    # One route handles both "filename" and "slug/filename" rather than two,
-    # because {ref:path} is greedy and would shadow a separate two-segment
-    # route depending on declaration order.
+    # One route for every form rather than several, because {ref:path} is
+    # greedy and would shadow a two-segment route depending on declaration
+    # order.
     if ".." in ref or ref.startswith("/"):
         return HTMLResponse(status_code=400, content="Bad request")
 
-    slug, filename, candidates = _resolve(ref)
+    row, candidates = _fetch(ref)
 
-    if slug is None:
+    if row is None:
         if candidates:
             links = "".join(
                 f"<li><a style='color:#7ec7ff' "
-                f"href='/reports/{html.escape(s)}/{html.escape(filename)}'>"
+                f"href='/reports/{html.escape(s)}/{html.escape(ref)}'>"
                 f"{html.escape(s)}</a></li>"
                 for s in candidates
             )
             return _error_page(
-                "Ambiguous report name",
-                f"<p>{html.escape(filename)} exists in more than one "
+                "Ambiguous report slug",
+                f"<p><code>{html.escape(ref)}</code> exists in more than one "
                 f"project:</p><ul>{links}</ul>",
             )
-        return _error_page(
-            "Report not found",
-            f"<p>{html.escape(filename)}</p>",
-        )
+        return _error_page("Report not found", f"<p>{html.escape(ref)}</p>")
 
-    row = _fetch(slug, filename)
-    if not row:
-        return _error_page(
-            "Report not found",
-            f"<p>{html.escape(slug)}/{REPORT_DIR}/{html.escape(filename)}</p>",
-        )
-
-    content = row["content_text"]
-    if content is None and row["content_blob"] is not None:
-        try:
-            content = row["content_blob"].decode("utf-8")
-        except Exception:
-            content = "<pre>[binary content]</pre>"
-
-    # Floating "back" link so users can return to the listing without the
-    # browser back button. Carries the project through, so returning from a
-    # report lands on that project's filtered list.
-    back_link = (
+    # Floating back link, carrying the project so returning lands on that
+    # project's filtered list.
+    back = (
         '<div style="position:fixed;top:0.6rem;left:0.6rem;z-index:100;'
         'background:#13131f;border:1px solid #1e1e3a;border-radius:4px;'
         'padding:0.3rem 0.6rem;font-family:monospace;font-size:0.8rem">'
-        f'<a href="/reports?project={html.escape(slug)}" '
+        f'<a href="/reports?project={html.escape(row["project"])}" '
         'style="color:#7ec7ff;text-decoration:none">'
-        f'&larr; {html.escape(slug)} reports</a></div>'
+        f'&larr; {html.escape(row["project"])} reports</a></div>'
     )
-    if "<body" in content:
-        content = re.sub(
-            r"(<body[^>]*>)", r"\1" + back_link, content, count=1
+
+    if row["format"] == "markdown":
+        lede = (
+            f'<p class="lede">{html.escape(row["lede"])}</p>'
+            if row["lede"] else ""
         )
+        return HTMLResponse(content=_MD_PAGE.format(
+            title=html.escape(row["title"]),
+            back=back,
+            lede=lede,
+            body=_render_markdown(row["body"]),
+        ))
+
+    # HTML: served as authored. The back link is injected after <body> when
+    # there is one, and prepended otherwise -- a fragment without a <body>
+    # is still a legal report body.
+    content = row["body"] or ""
+    if "<body" in content:
+        content = re.sub(r"(<body[^>]*>)", r"\1" + back, content, count=1)
+    else:
+        content = back + content
     return HTMLResponse(content=content)
