@@ -26,7 +26,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from cli.commit_message import add_message_args, resolve_message
+from cli.commit_message import (
+    add_message_args, collapsed_expansion, resolve_message,
+)
 
 
 class TestResolveMessage(unittest.TestCase):
@@ -155,6 +157,191 @@ class TestResolveMessage(unittest.TestCase):
         help_text = parser.format_help()
         self.assertIn("ONE LINE", help_text)
         self.assertIn("-F", help_text)
+
+
+class TestCollapsedExpansion(unittest.TestCase):
+    """The single-line hole the newline rule cannot reach.
+
+    This file used to rest on the claim that a one-line `-m` with
+    backticks was undetectable, "because by the time argv exists the
+    substitution has already happened and the evidence is gone". It is
+    not gone: a non-interactive parent shell holds its whole `-c` string
+    in /proc/<pid>/cmdline, unexpanded, and shlex re-reads it without
+    substituting. So the original and the arrival can be compared.
+
+    The distinction every test here turns on is LOSS versus EXPANSION. A
+    span that produced nothing is the bug; a span that produced text is a
+    deliberate interpolation and must still work, which is why this needs
+    no opt-out flag.
+    """
+
+    # What bash would really have put in argv for each raw line below,
+    # written out rather than computed, so a wrong expectation is visible.
+    def test_eaten_backtick_span_is_detected(self):
+        self.assertEqual(
+            collapsed_expansion(
+                "docs: see  for the rule",
+                'templedb vcs commit -p x -m "docs: see `vcs commit` for the rule"',
+            ),
+            "docs: see `vcs commit` for the rule",
+        )
+
+    def test_it_returns_the_original_so_the_error_can_show_it(self):
+        original = collapsed_expansion(
+            "fix ", 'tdb commit -m "fix `resolve_message`"')
+        self.assertEqual(original, "fix `resolve_message`")
+
+    def test_single_quoted_backticks_survive_and_are_not_refused(self):
+        """The safe spelling. argv holds the backticks, so nothing was lost."""
+        self.assertIsNone(collapsed_expansion(
+            "docs: see `vcs commit` for the rule",
+            "templedb vcs commit -m 'docs: see `vcs commit` for the rule'",
+        ))
+
+    def test_escaped_backticks_survive_and_are_not_refused(self):
+        r"""The other safe spelling: \` inside double quotes.
+
+        Python's shlex leaves the backslash where bash removes it, so the
+        recovered token is compared in both forms. Without that, this
+        correct message would be reported as corrupted.
+        """
+        self.assertIsNone(collapsed_expansion(
+            "docs: see `vcs commit` for the rule",
+            r'templedb vcs commit -m "docs: see \`vcs commit\` for the rule"',
+        ))
+
+    def test_a_substitution_that_produced_text_is_allowed(self):
+        """THE CASE THAT KEEPS THIS FROM OVERREACHING.
+
+        A deliberate interpolation is a legitimate use of -m. Refusing it
+        would make this guard a nuisance that gets switched off, and it is
+        distinguishable for free: deleting the spans from the original
+        does not yield what argv holds, because the span produced output.
+        """
+        self.assertIsNone(collapsed_expansion(
+            "bump to a1b2c3d",
+            'templedb vcs commit -m "bump to $(git rev-parse --short HEAD)"',
+        ))
+
+    def test_an_unset_variable_that_vanished_is_also_detected(self):
+        """Same silent loss, same route, so it is the same bug."""
+        self.assertEqual(
+            collapsed_expansion(
+                "deploy to  tonight",
+                'templedb vcs commit -m "deploy to $TARGET_HOST tonight"',
+            ),
+            "deploy to $TARGET_HOST tonight",
+        )
+
+    def test_a_set_variable_is_allowed(self):
+        self.assertIsNone(collapsed_expansion(
+            "released by zach",
+            'templedb vcs commit -m "released by $USER"',
+        ))
+
+    def test_a_nested_command_line_is_still_searched(self):
+        """THE CASE THE FIRST VERSION MISSED, in the setting that motivated it.
+
+        The command is usually not at the top level of the shell string:
+        an agent harness wraps it in `eval '…'`, and so do ssh and su. One
+        shlex pass returns the whole inner command as a single token, so
+        `-m` is not a token and nothing is found. Measured against the
+        real wrapper: 38 tokens, 0 candidates, until the scan recursed.
+        """
+        self.assertEqual(
+            collapsed_expansion(
+                "docs: see  rule",
+                """bash -c 'cd /tmp && eval "templedb vcs commit -m \\"docs: see `vcs commit` rule\\""'""",
+            ),
+            "docs: see `vcs commit` rule",
+        )
+
+    def test_prose_mentioning_the_flag_is_not_mistaken_for_a_command(self):
+        """Recursion descends into anything containing "-m ", which is fine.
+
+        A false candidate cannot produce a refusal, because the match
+        demands that deleting every expansion from it yield the received
+        message exactly. This message talks about -m and has no expansion
+        at all, so it survives.
+        """
+        self.assertIsNone(collapsed_expansion(
+            "use -m for subjects and -F for bodies",
+            'tdb commit -m "use -m for subjects and -F for bodies"',
+        ))
+
+    def test_recursion_is_bounded(self):
+        """A pathological nest must not hang or recurse without end."""
+        nested = 'tdb -m "x"'
+        for _ in range(12):
+            nested = f"""bash -c '{nested} -m "wrapped"'"""
+        self.assertIsNone(collapsed_expansion("nothing matching", nested))
+
+    def test_no_raw_command_means_no_opinion(self):
+        """An interactive shell, or a platform with no /proc.
+
+        None means "no evidence", and the only safe reading of no evidence
+        is to let the commit through. A guard that refused here would fail
+        closed on exactly the users it cannot see.
+        """
+        self.assertIsNone(collapsed_expansion("anything at all", None))
+
+    def test_unbalanced_quotes_are_not_an_error(self):
+        """The shell already ran it; this is not the place to object."""
+        self.assertIsNone(collapsed_expansion(
+            "whatever", 'templedb vcs commit -m "unterminated'))
+
+    def test_a_line_with_no_message_flag_is_ignored(self):
+        self.assertIsNone(collapsed_expansion(
+            "subject", "templedb vcs status bza --refresh"))
+
+    def test_several_commands_on_one_line_do_not_cross_contaminate(self):
+        """`a -m x && b -m y` gives two candidates and no way to know ours.
+
+        Resolved conservatively: a candidate identical to what arrived
+        proves nothing was expanded, so the clean sibling vouches for us
+        rather than the dirty one convicting us.
+        """
+        self.assertIsNone(collapsed_expansion(
+            "second subject",
+            'tdb commit -m "first `eaten`" && tdb commit -m "second subject"',
+        ))
+
+    def test_resolve_message_refuses_a_corrupted_one_liner(self):
+        """End to end, with the parent lookup stubbed.
+
+        Patched rather than faked with a real subprocess: the point under
+        test is the comparison, and spawning a shell to prove that bash
+        substitutes backticks would be testing bash.
+        """
+        import cli.commit_message as mod
+        original = mod._raw_shell_command
+        mod._raw_shell_command = lambda: (
+            'templedb vcs commit -p bza -m "docs: see `vcs commit`"')
+        try:
+            self.assertIsNone(resolve_message(Namespace(
+                message="docs: see ", message_file=None)))
+        finally:
+            mod._raw_shell_command = original
+
+    def test_an_internal_caller_is_exempt(self):
+        """publish resolves its own message and calls commit in-process.
+
+        That string never passed through a shell, so the parent's command
+        line says nothing about it and must not be consulted.
+        """
+        import cli.commit_message as mod
+        original = mod._raw_shell_command
+        mod._raw_shell_command = lambda: (
+            'templedb publish run x -m "docs: see `vcs commit`"')
+        try:
+            self.assertEqual(
+                resolve_message(Namespace(
+                    message="docs: see ", message_file=None,
+                    message_is_internal=True)),
+                "docs: see ",
+            )
+        finally:
+            mod._raw_shell_command = original
 
 
 if __name__ == "__main__":

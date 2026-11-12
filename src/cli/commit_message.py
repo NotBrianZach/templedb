@@ -24,13 +24,166 @@ diffs a whole directory). `vcs commit` got `-F` first and the whole-tree
 one did not, which left the more dangerous command as the only one that
 could still eat a message.
 """
+import os
+import re
+import shlex
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from logger import get_logger
 
 logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# The residual hole, and why it was not one
+# ---------------------------------------------------------------------------
+#
+# This file used to end its guard with: "a single-line -m containing
+# backticks is still corruptible, and nothing here can detect it, because
+# by the time argv exists the substitution has already happened and the
+# evidence is gone."
+#
+# The first clause is true and the second is false. Two facts recover the
+# evidence:
+#
+#  1. A backtick that SURVIVES into argv was never a substitution — it was
+#     single-quoted or backslash-escaped, so that spelling is already safe
+#     and needs no detection. Only the vanished ones are the bug.
+#  2. The shell that performed the substitution is this process's parent,
+#     and a non-interactive shell holds its whole `-c` string in
+#     /proc/<pid>/cmdline — UNEXPANDED. `shlex` re-reads that string
+#     without substituting anything, so the original message is available
+#     to compare against the one argv received.
+#
+# That covers the case this actually keeps happening in — an agent or
+# script invoking through `bash -c` — and degrades to no protection, never
+# to a false refusal, for an interactive shell whose cmdline is just
+# "-bash".
+#
+# WHAT IS REFUSED IS LOSS, NOT EXPANSION, and that distinction is the
+# whole reason this needs no opt-out flag. `-m "bump to $(git rev-parse
+# --short HEAD)"` is a deliberate interpolation that produces text, and
+# refusing it would be this guard overreaching into a legitimate use. The
+# bug is a span that collapsed to NOTHING: a command that does not exist,
+# or an unset variable. So the test is not "did the shell change this" but
+# "did the shell delete part of this", which is exactly the silent failure
+# and nothing else.
+
+_SHELLS = frozenset({'bash', 'sh', 'dash', 'zsh', 'ksh', 'mksh', 'busybox'})
+
+# Everything the shell replaces with the output of something else.
+#
+# Both command-substitution spellings plus parameter expansion, because an
+# unset `$FOO` vanishing out of a commit message is the same silent loss as
+# a backticked word and arrives by the same route. Nested `$( $() )` is
+# deliberately not matched — the pattern then finds nothing, which costs a
+# detection rather than inventing one.
+_EXPANSION = re.compile(
+    r'`[^`]*`'                      # `cmd`
+    r'|\$\([^()]*\)'                # $(cmd)
+    r'|\$\{[^}]*\}'                 # ${VAR}
+    r'|\$[A-Za-z_][A-Za-z0-9_]*'    # $VAR
+)
+
+# What bash itself unescapes inside double quotes. Applied so the SAFE
+# spelling is recognised as safe outright, rather than by falling through
+# the comparison below — Python's shlex leaves `\<backtick>` as two
+# characters where bash leaves one.
+_DQ_ESCAPE = re.compile(r'\\([`$"\\])')
+
+
+def _raw_shell_command() -> Optional[str]:
+    """The parent shell's unexpanded `-c` string, or None.
+
+    None for every case that is not a non-interactive shell parent: no
+    /proc, a parent that is not a shell, an interactive shell (no `-c`).
+    All of them mean "no evidence available", and the caller's correct
+    response is to let the message through — a guard that guessed here
+    would refuse good commits on platforms where it simply cannot see.
+    """
+    try:
+        with open(f'/proc/{os.getppid()}/cmdline', 'rb') as handle:
+            raw = handle.read()
+    except OSError:
+        return None
+    argv = [part.decode('utf-8', 'replace') for part in raw.split(b'\0') if part]
+    if not argv or os.path.basename(argv[0]) not in _SHELLS:
+        return None
+    try:
+        return argv[argv.index('-c') + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+def _inline_arguments(raw_command: str, depth: int = 0) -> List[str]:
+    """Every `-m` argument in the raw command line, unexpanded.
+
+    A list because one shell line can hold several commands — `a -m x &&
+    b -m y` — and this function has no way to know which one is us. The
+    caller handles that ambiguity conservatively.
+
+    RECURSIVE, because the command is often not at the top level. An
+    agent harness wraps it (`bash -c "… eval 'templedb … -m \"…\"' …"`),
+    and so do `ssh host '…'`, `su -c '…'` and every `eval`. One shlex
+    pass over the outer string returns that whole inner command as a
+    single token, `-m` never appears as a token of its own, and the
+    detector finds nothing — which is how the first version of this
+    silently did nothing in exactly the setting that motivated it.
+    Measured: 38 tokens recovered, 0 candidates, before this recursed.
+
+    Descending into any token that still looks like a command line is
+    safe in the only direction that matters. A false candidate cannot
+    cause a refusal: the caller demands that deleting every expansion
+    from a candidate yields the received message EXACTLY, and prose that
+    merely mentions `-m` will not. It can only ever find the real one.
+    """
+    if depth > 3:
+        return []
+    try:
+        tokens = shlex.split(raw_command)
+    except ValueError:
+        # Unbalanced quotes. The string is not something to reason about,
+        # and the shell already ran it, so this is not the place to object.
+        return []
+
+    found = [tokens[i + 1] for i, token in enumerate(tokens[:-1])
+             if token in ('-m', '--message')]
+    for token in tokens:
+        # A token holding a whole command line, rather than being one
+        # argument. Guarded on the flag appearing WITH a space after it so
+        # that a plain word is not re-lexed at every level.
+        if ('-m ' in token or '--message ' in token) and token != raw_command:
+            found.extend(_inline_arguments(token, depth + 1))
+    return found
+
+
+def collapsed_expansion(inline: str, raw_command: Optional[str]) -> Optional[str]:
+    """The text the shell replaced with nothing, or None if nothing was lost.
+
+    Returns the ORIGINAL argument, so the caller can show the author what
+    they wrote and what arrived. See the module header for why loss rather
+    than expansion is the thing being detected.
+    """
+    if not inline or not raw_command:
+        return None
+
+    candidates = _inline_arguments(raw_command)
+    # The literal survived: nothing was expanded on the way in. Checked in
+    # both spellings because `-m 'a `b` c'` reaches argv verbatim while
+    # `-m "a \`b\` c"` reaches it unescaped by one level.
+    if any(inline in (raw, _DQ_ESCAPE.sub(r'\1', raw)) for raw in candidates):
+        return None
+
+    for raw in candidates:
+        if not _EXPANSION.search(raw):
+            continue
+        # The equality is the proof. If deleting every expansion from the
+        # original yields exactly what argv holds, then every one of them
+        # produced nothing — which no deliberate interpolation does.
+        if _EXPANSION.sub('', raw) == inline:
+            return raw
+    return None
 
 
 def add_message_args(parser, *, required_hint: bool = True) -> None:
@@ -106,10 +259,9 @@ def resolve_message(args) -> Optional[str]:
     # being removed — "is 119 characters still fine?" is a judgement call,
     # and a magic number is a worse rule than a structural one.
     #
-    # The residual hole is honest and small: a single-line -m containing
-    # backticks is still corruptible, and nothing here can detect it,
-    # because by the time argv exists the substitution has already
-    # happened and the evidence is gone.
+    # The residual hole — a single-line -m whose backticks were eaten — is
+    # now caught too, by `collapsed_expansion` below. See the module header:
+    # the evidence is not gone, it is in the parent shell's cmdline.
     # An in-process caller is exempt, and the exemption is about PROVENANCE
     # rather than about trust.
     #
@@ -146,5 +298,36 @@ def resolve_message(args) -> Optional[str]:
             'Use -m for a one-line subject.'
         )
         return None
+
+    # THE ONE-LINE CASE, which the newline rule above cannot reach.
+    #
+    # Exempt for the same provenance reason: an in-process caller's string
+    # never passed through a shell, so there is no parent command line that
+    # means anything about it.
+    if not getattr(args, 'message_is_internal', False):
+        original = collapsed_expansion(inline, _raw_shell_command())
+        if original is not None:
+            logger.error(
+                'The shell deleted part of this message before it got here.\n'
+                '\n'
+                f'  you wrote:  -m "{original}"\n'
+                f'  I received: "{inline}"\n'
+                '\n'
+                'Every backtick span in a double-quoted shell string is run '
+                'as a command and replaced by its output — which for a '
+                'quoted identifier is nothing at all, plus a "command not '
+                'found" on stderr that scrolls past. The commit would have '
+                'succeeded with the word missing.\n'
+                '\n'
+                'Single-quote the message, escape the backticks, or pass a '
+                'file:\n'
+                '\n'
+                f"    … -m '{original}'\n"
+                "    … -F /tmp/msg.txt\n"
+                '\n'
+                'A deliberate substitution that produces text is not '
+                'refused — only one that produced nothing.'
+            )
+            return None
 
     return inline
