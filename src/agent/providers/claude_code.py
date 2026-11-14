@@ -46,6 +46,47 @@ def _find_claude():
     return None
 
 
+_POLICY_BRIEFINGS = {
+    "readonly": (
+        "Your policy for this run is READONLY. You may read anything and "
+        "record findings, but every write is denied by a hook: no file "
+        "edits, no `templedb file set`, no commits. Produce analysis, not "
+        "changes."
+    ),
+    "commit": (
+        "Your policy for this run is COMMIT. You may edit files and commit "
+        "them to the TempleDB database. You may NOT publish, deploy, push "
+        "to git, or rebuild NixOS -- a hook denies those. Leave your work "
+        "committed but unpublished; an operator reviews and publishes it. "
+        "Do not try to work around the denial."
+    ),
+    "publish": (
+        "Your policy for this run is PUBLISH. You may commit and run "
+        "`templedb publish run`, which pushes to the public GitHub mirror. "
+        "Irreversible deletions and NixOS switches are still denied."
+    ),
+}
+
+
+def _policy_prompt(policy):
+    """Tell the agent its policy up front.
+
+    The hook enforces the policy either way; this just stops the run
+    wasting turns discovering it. An agent that learns "publish is
+    denied" only by being denied has already written a commit message
+    and planned a push, and will usually retry a variant first.
+    """
+    briefing = _POLICY_BRIEFINGS.get(policy)
+    if not briefing:
+        return ""
+    return (
+        f"{briefing} The restriction is enforced by a PreToolUse hook, so "
+        f"a denied command fails rather than prompting. If you believe the "
+        f"task genuinely requires a denied action, stop and record it as a "
+        f"finding instead of attempting it another way."
+    )
+
+
 class ClaudeCodeProvider(BaseProvider):
     """Real Claude Code CLI provider."""
 
@@ -136,6 +177,72 @@ class ClaudeCodeProvider(BaseProvider):
         "instead; it auto-excludes the current process's ancestor chain."
     )
 
+    # System prompt tail for an UNATTENDED run. Deliberately not the
+    # Emacs one: nobody is reading a buffer, so asking the agent to post
+    # suggested next prompts or route questions through
+    # `templedb_ask_user` just burns a turn waiting out a 600s timeout
+    # that no human will answer.
+    _AUTONOMOUS_SYSTEM_PROMPT = (
+        "You are running UNATTENDED, started by `templedb ai agent tick` "
+        "from a scheduled task. There is no human watching this run and "
+        "no interactive UI attached. "
+        # The asking tools are worse than useless here -- they block.
+        "Do NOT use mcp__templedb__templedb_ask_user, AskUserQuestion, or "
+        "mcp__templedb__templedb_agent_suggest_next_prompts: there is "
+        "nobody to answer, and ask_user will block until it times out. "
+        "If you hit a genuine decision you cannot make alone, record it "
+        "with mcp__templedb__templedb_agent_question_add and continue "
+        "with the rest of the work -- a question recorded is delivered, "
+        "a question asked is a stalled run. "
+        # Where the output of an unattended run actually goes.
+        "Your findings must be written somewhere durable, because your "
+        "reply text will be read later out of the work log rather than by "
+        "someone at a prompt: use "
+        "mcp__templedb__templedb_agent_note_finding for facts you "
+        "establish and mcp__templedb__templedb_agent_todo_add for "
+        "follow-up work. End your final message with a short plain-text "
+        "summary of what you did and what you could not do. "
+        # Budget discipline.
+        "Prefer finishing a smaller scope completely over leaving several "
+        "things half-done: an unattended run that stops mid-edit leaves "
+        "the DB in a state the next run has to figure out. "
+        "You are running inside a `templedb ai agent tick` subprocess. Do "
+        "NOT kill `ai agent serve` or `ai agent tick` processes found via "
+        "ps/pgrep -- you may be looking at your own parent. Use "
+        "`templedb ai agent stop-stale` instead."
+    )
+
+    def _guard_settings(self, policy):
+        """Inline `--settings` JSON registering the PreToolUse deny hook.
+
+        Returns a JSON string, or None if `templedb` is not resolvable on
+        PATH -- in which case we would be registering a hook command that
+        cannot run. A hook whose command exits non-zero is treated by
+        Claude Code as "no decision", i.e. allow, so a broken hook path
+        would silently drop the policy. Failing to add it at all is no
+        worse and is at least visible to the caller.
+        """
+        templedb_bin = shutil.which("templedb")
+        if not templedb_bin:
+            logger.warning(
+                "policy %r requested but `templedb` is not on PATH; "
+                "no guard hook installed", policy)
+            return None
+        hook_cmd = f"{templedb_bin} ai agent guard --policy {policy}"
+        # matcher "*" rather than "Bash": the policy also covers Edit/Write
+        # and the MCP deploy tool (see src/agent/guard.py), and a matcher
+        # scoped to Bash would never see those calls at all.
+        return json.dumps({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "*",
+                        "hooks": [{"type": "command", "command": hook_cmd}],
+                    }
+                ]
+            }
+        })
+
     def _write_mcp_config(self, agent_session_id):
         """Write a per-session mcp-config JSON that exposes the templedb MCP
         server with our agent session id in env. Claude Code loads this via
@@ -185,15 +292,48 @@ class ClaudeCodeProvider(BaseProvider):
             cmd.extend(["--resume", self._session_id])
         cmd.append("--dangerously-skip-permissions")
 
+        # An unattended run gets a different system-prompt tail and a
+        # PreToolUse deny hook. Both come from the context the service was
+        # handed, so an interactive Emacs run (which passes neither) keeps
+        # exactly the behaviour it had before.
+        policy = (context or {}).get("policy")
+        autonomous = bool((context or {}).get("autonomous"))
+
         # If the service passed our agent session id, wire the MCP bridge so
         # Claude can ask the user via templedb_ask_user / templedb_message_user
         # instead of the auto-cancelled AskUserQuestion.
         agent_session_id = (context or {}).get("agent_session_id")
+        mcp_config_path = None
         if agent_session_id is not None:
             mcp_config_path = self._write_mcp_config(agent_session_id)
             if mcp_config_path:
                 cmd.extend(["--mcp-config", mcp_config_path])
-                cmd.extend(["--append-system-prompt", self._AGENT_SYSTEM_PROMPT])
+
+        # The system-prompt tail is assembled even when the MCP bridge is
+        # unavailable: the Emacs tail is useless without the MCP tools it
+        # names, but the policy tail is not, and an unattended run that
+        # silently loses its policy briefing is exactly the run that
+        # wastes its budget rediscovering the deny hook by trial.
+        prompt_parts = []
+        if agent_session_id is not None and mcp_config_path:
+            prompt_parts.append(
+                self._AUTONOMOUS_SYSTEM_PROMPT if autonomous
+                else self._AGENT_SYSTEM_PROMPT)
+        elif autonomous:
+            prompt_parts.append(self._AUTONOMOUS_SYSTEM_PROMPT)
+        if policy:
+            prompt_parts.append(_policy_prompt(policy))
+        if prompt_parts:
+            cmd.extend(["--append-system-prompt", " ".join(prompt_parts)])
+
+        # The deny hook. `--dangerously-skip-permissions` above means deny
+        # *rules* are not consulted, so the policy has to be a hook --
+        # those run in every permission mode. `--settings` takes inline
+        # JSON, so there is no temp file to leak or clean up.
+        if policy and policy != "trusted":
+            settings = self._guard_settings(policy)
+            if settings:
+                cmd.extend(["--settings", settings])
 
         # `--` ends option parsing; without it, a prompt starting with `-`
         # (e.g. a bullet pasted from a reply) is misread as an unknown option
@@ -223,6 +363,15 @@ class ClaudeCodeProvider(BaseProvider):
                 "TEMPLEDB_SESSION",
                 f"claude-code-agent-{os.getpid()}",
             )
+            # The MCP bridge gets the session id through --mcp-config, but
+            # a PreToolUse hook is launched by Claude itself and inherits
+            # only this env. Without it the guard can still deny, but the
+            # denial goes nowhere a human will see it (hook stderr is
+            # invisible outside --debug).
+            if agent_session_id is not None:
+                child_env["TEMPLEDB_AGENT_SESSION_ID"] = str(agent_session_id)
+            if policy:
+                child_env["TEMPLEDB_AGENT_POLICY"] = policy
             self._process = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,

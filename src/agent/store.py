@@ -1838,3 +1838,186 @@ def retire_sessions(session_ids):
                 deleted[table] += execute_rowcount(
                     sql.format(ids=placeholders), tuple(batch), commit=False)
     return deleted
+
+
+# ---------------------------------------------------------------------------
+# agent_tasks — autonomous work queue (migration 144).
+# ---------------------------------------------------------------------------
+
+# Columns a caller may set through `update_task`. Whitelisted rather than
+# interpolating whatever keys arrive: this is reached from CLI argument
+# parsing, and an unknown key should be a loud KeyError at the boundary
+# instead of a SQL syntax error three frames down.
+_TASK_UPDATABLE = frozenset({
+    "name", "project_slug", "prompt", "policy", "model", "cadence_sec",
+    "enabled", "max_runtime_sec", "notify", "next_run_at",
+})
+
+
+def create_task(name, prompt, project_slug=None, policy="commit", model=None,
+                cadence_sec=None, max_runtime_sec=3600, notify="error",
+                next_run_at=None, enabled=1):
+    """Insert an agent_tasks row. Returns the new id."""
+    return _retry_on_lock(lambda: execute(
+        """INSERT INTO agent_tasks
+             (name, project_slug, prompt, policy, model, cadence_sec,
+              enabled, max_runtime_sec, notify, next_run_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (name, project_slug, prompt, policy, model, cadence_sec,
+         1 if enabled else 0, max_runtime_sec, notify, next_run_at),
+    ))
+
+
+def get_task(task_ref):
+    """Look a task up by id or by name.
+
+    Accepts either because every CLI surface here does: `task show 3` and
+    `task show nightly-doctor` should both work, and a name is what a
+    human actually remembers.
+    """
+    try:
+        task_id = int(task_ref)
+    except (TypeError, ValueError):
+        return query_one("SELECT * FROM agent_tasks WHERE name = ?", (task_ref,))
+    return query_one("SELECT * FROM agent_tasks WHERE id = ?", (task_id,))
+
+
+def list_tasks(enabled_only=False, limit=100):
+    """List tasks, soonest-due first. Disabled tasks sort last."""
+    sql = "SELECT * FROM agent_tasks"
+    if enabled_only:
+        sql += " WHERE enabled = 1"
+    # NULL next_run_at means "due now", so it must sort FIRST, not last
+    # as SQLite's default NULL ordering would put it in DESC.
+    sql += (" ORDER BY enabled DESC,"
+            " CASE WHEN next_run_at IS NULL THEN 0 ELSE 1 END,"
+            " next_run_at, id LIMIT ?")
+    return query_all(sql, (limit,))
+
+
+def update_task(task_id, **fields):
+    """Update whitelisted columns on a task. Returns rows affected."""
+    unknown = set(fields) - _TASK_UPDATABLE
+    if unknown:
+        raise KeyError(f"not updatable on agent_tasks: {sorted(unknown)}")
+    if not fields:
+        return 0
+    sets = ", ".join(f"{col} = ?" for col in fields)
+    params = tuple(fields.values()) + (_now(), int(task_id))
+    return _retry_on_lock(lambda: execute_rowcount(
+        f"UPDATE agent_tasks SET {sets}, updated_at = ? WHERE id = ?", params))
+
+
+def delete_task(task_id):
+    """Delete a task row. Returns rows affected."""
+    return _retry_on_lock(lambda: execute_rowcount(
+        "DELETE FROM agent_tasks WHERE id = ?", (int(task_id),)))
+
+
+def due_task_ids(now=None):
+    """Ids of enabled, unclaimed, due tasks — soonest first.
+
+    Read-only; claiming is a separate conditional write so that two
+    concurrent ticks reading the same list still cannot both win.
+    """
+    now = now or _now()
+    return [r["id"] for r in query_all(
+        """SELECT id FROM agent_tasks
+            WHERE enabled = 1
+              AND claimed_at IS NULL
+              AND (next_run_at IS NULL OR next_run_at <= ?)
+            ORDER BY CASE WHEN next_run_at IS NULL THEN 0 ELSE 1 END,
+                     next_run_at, id""",
+        (now,))]
+
+
+def reclaim_stale(stale_after_sec=7200):
+    """Release claims older than STALE_AFTER_SEC. Returns rows affected.
+
+    A tick that is SIGKILLed (OOM, reboot, `systemctl stop`) leaves
+    `claimed_at` set with no process behind it, and that task would never
+    run again. There is no pid to check -- the claim may be from a tick
+    on another host once the Windows worker exists -- so staleness is
+    the only signal available. Default is deliberately well past the
+    1h default `max_runtime_sec` so a long legitimate run is never
+    stolen out from under itself.
+    """
+    cutoff = f"-{int(stale_after_sec)} seconds"
+    return _retry_on_lock(lambda: execute_rowcount(
+        """UPDATE agent_tasks
+              SET claimed_at = NULL, claimed_by = NULL, updated_at = ?
+            WHERE claimed_at IS NOT NULL
+              AND claimed_at < datetime('now', ?)""",
+        (_now(), cutoff)))
+
+
+def claim_task(task_id, claimed_by):
+    """Try to claim one task. Returns the claimed row, or None if lost.
+
+    The claim predicate is repeated in the WHERE clause rather than
+    trusting the caller's earlier read: `due_task_ids` and this call are
+    separate statements, and between them another tick (or the same
+    timer firing twice because the previous run overran its interval)
+    can claim the row. The UPDATE is the only atomic point, so it has to
+    carry the whole condition.
+    """
+    won = _retry_on_lock(lambda: execute_rowcount(
+        """UPDATE agent_tasks
+              SET claimed_at = ?, claimed_by = ?, updated_at = ?
+            WHERE id = ?
+              AND enabled = 1
+              AND claimed_at IS NULL""",
+        (_now(), claimed_by, _now(), int(task_id))))
+    if not won:
+        return None
+    return get_task(task_id)
+
+
+def finish_task(task_id, status, error=None, session_id=None,
+                cadence_sec=None):
+    """Record a run outcome, release the claim, and reschedule.
+
+    Rescheduling is relative to NOW (run end) rather than to the
+    previous `next_run_at`: a task whose cadence is shorter than its own
+    runtime would otherwise come back due the instant it finishes, and
+    then run continuously. See the cadence_sec note in migration 144.
+
+    A one-shot task (cadence_sec NULL) is disabled rather than deleted,
+    so `task list` still shows what happened.
+    """
+    failed = status != "completed"
+    if cadence_sec:
+        next_run_at = f"datetime('now', '+{int(cadence_sec)} seconds')"
+        enabled_sql = "enabled"
+    else:
+        next_run_at = "NULL"
+        enabled_sql = "0"
+    sql = f"""UPDATE agent_tasks
+                 SET claimed_at = NULL,
+                     claimed_by = NULL,
+                     last_run_at = ?,
+                     last_status = ?,
+                     last_error = ?,
+                     last_session_id = COALESCE(?, last_session_id),
+                     run_count = run_count + 1,
+                     fail_count = fail_count + {1 if failed else 0},
+                     next_run_at = {next_run_at},
+                     enabled = {enabled_sql},
+                     updated_at = ?
+               WHERE id = ?"""
+    return _retry_on_lock(lambda: execute_rowcount(
+        sql, (_now(), status, error, session_id, _now(), int(task_id))))
+
+
+def release_claim(task_id):
+    """Drop a claim without recording a run. Returns rows affected.
+
+    For `tick --dry-run`, which has to claim a task to prove it could
+    (and to show the same task a real tick would pick) but must not make
+    it look like it ran.
+    """
+    return _retry_on_lock(lambda: execute_rowcount(
+        """UPDATE agent_tasks
+              SET claimed_at = NULL, claimed_by = NULL, updated_at = ?
+            WHERE id = ?""",
+        (_now(), int(task_id))))

@@ -711,6 +711,751 @@ class AgentCommands(Command):
                 print(f"Cannot kill {pid}: {e}")
         return 0
 
+    # --- Autonomous runs -------------------------------------------------
+
+    def guard(self, args):
+        """PreToolUse hook: deny tool calls this run's policy forbids.
+
+        Installed by the provider via `--settings` for any run that
+        carries a policy. Runs once per tool call, so it stays cheap: no
+        imports beyond the pure guard module on the allow path, and the
+        DB is touched only when something is actually denied.
+        """
+        import os
+        from agent.guard import evaluate, DEFAULT_POLICY
+
+        policy = (getattr(args, 'policy', None)
+                  or os.environ.get("TEMPLEDB_AGENT_POLICY")
+                  or DEFAULT_POLICY)
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except json.JSONDecodeError:
+            # Unparseable hook input: allow. Denying every tool call
+            # because we could not read the payload would wedge the whole
+            # run, and a malformed payload means our integration with
+            # Claude Code's hook format is broken — a bug to fix, not an
+            # attempt to block.
+            print("guard: unparseable hook payload, allowing",
+                  file=sys.stderr)
+            return 0
+
+        reason = evaluate(payload.get("tool_name") or "",
+                          payload.get("tool_input") or {},
+                          policy)
+        if not reason:
+            return 0
+
+        # Emit the decision BEFORE recording it: the denial is what
+        # Claude is waiting on, and a slow or failing DB write must not
+        # delay it or turn a deny into an allow.
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }))
+        sys.stdout.flush()
+        self._record_denial(payload.get("tool_name") or "", reason)
+        return 0
+
+    def _record_denial(self, tool_name, reason):
+        """Best-effort durable record of a denial, for later triage.
+
+        Hook stderr is invisible unless Claude is run with --debug, so a
+        denial would otherwise leave no trace outside the model's own
+        context. Writes into the session's `guard` section, which is the
+        same place agent-written findings live, so `agent sessions`
+        consumers already know how to read it.
+
+        Keyed by a hash of (tool, reason) so a model that retries the
+        same blocked command five times leaves one row, not five.
+        """
+        import os
+        session_id = os.environ.get("TEMPLEDB_AGENT_SESSION_ID")
+        if not session_id:
+            return
+        try:
+            import hashlib
+            from datetime import datetime
+            from agent import store as _store
+            entry_id = hashlib.sha1(
+                f"{tool_name}:{reason}".encode("utf-8")).hexdigest()[:12]
+            _store.upsert_section_entry(
+                int(session_id), "guard", entry_id,
+                {
+                    "tool": tool_name,
+                    "reason": reason,
+                    "at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
+        except Exception as e:
+            # Never let bookkeeping failure change the decision.
+            print(f"guard: could not record denial: {e}", file=sys.stderr)
+
+    def _execute_run(self, prompt, project=None, policy=None, model=None,
+                     session_id=None, max_runtime_sec=3600, title=None,
+                     quiet=False):
+        """Drive one headless run to completion.
+
+        The core of autonomy, and deliberately thin: `AgentService`
+        already does everything (stores the message, creates the run,
+        streams provider events, writes the work log). What was missing
+        was any caller other than the Emacs stdio protocol.
+
+        Returns {status, session_id, error, events, text} where status is
+        'completed' | 'failed' | 'timeout'.
+        """
+        import time
+        from agent.service import AgentService
+        from agent.events import (
+            RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED,
+            ASSISTANT_COMPLETED, TOOL_STARTED,
+        )
+
+        service = AgentService()
+        status = "failed"
+        error = None
+        text = ""
+        event_count = 0
+        sid = None
+        started = time.time()
+
+        try:
+            if session_id:
+                session = service.open_session(int(session_id))
+            else:
+                session = service.create_session(
+                    provider_name="claude-code",
+                    project_slug=project,
+                    title=title or "autonomous run",
+                    model=model,
+                )
+                service.open_session(session["id"])
+            sid = session["id"]
+
+            context = {"autonomous": True}
+            if policy:
+                context["policy"] = policy
+            if project:
+                context["projects"] = [project]
+
+            if not quiet:
+                print(f"session={sid} policy={policy or 'none'} "
+                      f"project={project or '-'}", flush=True)
+
+            for event in service.send_message(sid, content=prompt,
+                                              context=context):
+                event_count += 1
+                etype = event.get("type", "")
+
+                # Enforce the wall clock here rather than in the provider:
+                # IDLE_TIMEOUT_SEC only fires when a tool is wedged, and a
+                # task can burn hours while making healthy progress.
+                elapsed = time.time() - started
+                if elapsed > max_runtime_sec:
+                    service.cancel_run(sid)
+                    status = "timeout"
+                    error = (f"exceeded max_runtime_sec={max_runtime_sec} "
+                             f"after {int(elapsed)}s")
+                    print(f"timeout: {error}", file=sys.stderr, flush=True)
+                    break
+
+                if not quiet and etype == TOOL_STARTED:
+                    summary = event.get("summary") or ""
+                    print(f"  [{int(elapsed):5d}s] {summary[:140]}",
+                          flush=True)
+
+                if etype == ASSISTANT_COMPLETED:
+                    text = (event.get("data", {}) or {}).get("full_text", "")
+                if etype == RUN_COMPLETED:
+                    status = "completed"
+                elif etype == RUN_FAILED:
+                    status = "failed"
+                    error = (event.get("data", {}) or {}).get(
+                        "error", event.get("summary"))
+                elif etype == RUN_INTERRUPTED:
+                    # Only a timeout can interrupt an unattended run —
+                    # there is no user to cancel it — but don't overwrite
+                    # the more specific status if we set it above.
+                    if status != "timeout":
+                        status = "failed"
+                        error = error or event.get("summary")
+        except Exception as e:
+            status = "failed"
+            error = str(e)
+        finally:
+            service.shutdown()
+
+        return {
+            "status": status,
+            "session_id": sid,
+            "error": error,
+            "events": event_count,
+            "text": text,
+            "elapsed_sec": int(time.time() - started),
+        }
+
+    def run(self, args):
+        """Run one prompt headlessly and exit with its status."""
+        from db_utils import query_one
+        from agent.guard import POLICIES, DEFAULT_POLICY
+
+        prompt = getattr(args, 'message', None)
+        if getattr(args, 'prompt_file', None):
+            try:
+                with open(args.prompt_file) as f:
+                    prompt = f.read()
+            except OSError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+        if not prompt and not sys.stdin.isatty():
+            prompt = sys.stdin.read()
+        if not prompt or not prompt.strip():
+            print("error: no prompt — pass -m, --prompt-file, or stdin",
+                  file=sys.stderr)
+            return 1
+
+        policy = getattr(args, 'policy', None) or DEFAULT_POLICY
+        if policy not in POLICIES:
+            print(f"error: unknown policy {policy!r} "
+                  f"(choose from {', '.join(POLICIES)})", file=sys.stderr)
+            return 1
+
+        # Validate the slug rather than letting it fall through.
+        # `create_session` silently leaves project_id NULL for an unknown
+        # slug, which for an unattended task means it runs with no project
+        # context and no CLAUDE.md — a misfire that looks like a success.
+        project = getattr(args, 'project', None)
+        if project and not query_one(
+                "SELECT id FROM projects WHERE slug = ?", (project,)):
+            print(f"error: no project with slug {project!r}", file=sys.stderr)
+            return 1
+
+        result = self._execute_run(
+            prompt=prompt,
+            project=project,
+            policy=policy,
+            model=getattr(args, 'model', None),
+            session_id=getattr(args, 'session', None),
+            max_runtime_sec=getattr(args, 'timeout', 3600),
+            title=getattr(args, 'title', None),
+            quiet=getattr(args, 'quiet', False),
+        )
+
+        if getattr(args, 'json', False):
+            print(json.dumps(result))
+        else:
+            print(f"\n{result['status']} in {result['elapsed_sec']}s "
+                  f"({result['events']} events, session "
+                  f"{result['session_id']})")
+            if result["error"]:
+                print(f"error: {result['error']}", file=sys.stderr)
+            if result["text"] and not getattr(args, 'quiet', False):
+                print(f"\n{result['text']}")
+        return 0 if result["status"] == "completed" else 1
+
+    # --- Task queue ------------------------------------------------------
+
+    _CADENCE_ALIASES = {
+        "hourly": 3600,
+        "daily": 86400,
+        "weekly": 604800,
+    }
+
+    def _parse_cadence(self, raw):
+        """'hourly' | 'daily' | 'weekly' | '<seconds>' → seconds or None."""
+        if raw in (None, "", "once"):
+            return None
+        if raw in self._CADENCE_ALIASES:
+            return self._CADENCE_ALIASES[raw]
+        try:
+            secs = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"unknown cadence {raw!r} — use once, hourly, daily, "
+                f"weekly, or a number of seconds")
+        if secs <= 0:
+            raise ValueError("cadence must be positive")
+        return secs
+
+    def task_add(self, args):
+        """Register an autonomous task."""
+        from agent import store as _store
+        from agent.guard import POLICIES
+        from db_utils import query_one
+
+        prompt = getattr(args, 'message', None)
+        if getattr(args, 'prompt_file', None):
+            try:
+                with open(args.prompt_file) as f:
+                    prompt = f.read()
+            except OSError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+        if not prompt and not sys.stdin.isatty():
+            prompt = sys.stdin.read()
+        if not prompt or not prompt.strip():
+            print("error: no prompt — pass -m, --prompt-file, or stdin",
+                  file=sys.stderr)
+            return 1
+
+        if args.policy not in POLICIES:
+            print(f"error: unknown policy {args.policy!r}", file=sys.stderr)
+            return 1
+        if args.project and not query_one(
+                "SELECT id FROM projects WHERE slug = ?", (args.project,)):
+            print(f"error: no project with slug {args.project!r}",
+                  file=sys.stderr)
+            return 1
+        if _store.get_task(args.name):
+            print(f"error: a task named {args.name!r} already exists",
+                  file=sys.stderr)
+            return 1
+        try:
+            cadence = self._parse_cadence(getattr(args, 'cadence', None))
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+
+        task_id = _store.create_task(
+            name=args.name,
+            prompt=prompt,
+            project_slug=args.project,
+            policy=args.policy,
+            model=getattr(args, 'model', None),
+            cadence_sec=cadence,
+            max_runtime_sec=getattr(args, 'timeout', 3600),
+            notify=getattr(args, 'notify', 'error'),
+        )
+        print(f"task {task_id} ({args.name}) added — policy={args.policy} "
+              f"cadence={cadence or 'once'}")
+        return 0
+
+    def task_list(self, args):
+        """List autonomous tasks."""
+        from agent import store as _store
+        rows = _store.list_tasks(enabled_only=getattr(args, 'enabled', False),
+                                 limit=getattr(args, 'limit', 100))
+        if getattr(args, 'json', False):
+            print(json.dumps(rows, default=str))
+            return 0
+        if not rows:
+            print("No autonomous tasks. Add one with "
+                  "`templedb ai agent task add`.")
+            return 0
+        print(f"{'ID':>4}  {'NAME':22} {'POLICY':9} {'CADENCE':9} "
+              f"{'NEXT RUN':20} {'LAST':10} RUNS")
+        for r in rows:
+            cadence = (f"{r['cadence_sec']}s" if r['cadence_sec']
+                       else "once")
+            state = "" if r["enabled"] else " (disabled)"
+            runs = f"{r['run_count']}"
+            if r["fail_count"]:
+                runs += f" ({r['fail_count']} failed)"
+            print(f"{r['id']:>4}  {r['name'][:22]:22} {r['policy']:9} "
+                  f"{cadence:9} {str(r['next_run_at'] or 'now')[:20]:20} "
+                  f"{str(r['last_status'] or '-')[:10]:10} {runs}{state}")
+        return 0
+
+    def task_show(self, args):
+        """Show one task in full, including its prompt."""
+        from agent import store as _store
+        task = _store.get_task(args.task)
+        if not task:
+            print(f"error: no task {args.task!r}", file=sys.stderr)
+            return 1
+        if getattr(args, 'json', False):
+            print(json.dumps(task, default=str))
+            return 0
+        for key in ("id", "name", "project_slug", "policy", "model",
+                    "cadence_sec", "enabled", "max_runtime_sec", "notify",
+                    "next_run_at", "claimed_at", "claimed_by", "last_run_at",
+                    "last_status", "last_session_id", "run_count",
+                    "fail_count", "created_at"):
+            print(f"  {key:16} {task[key]}")
+        if task["last_error"]:
+            print(f"  {'last_error':16} {task['last_error']}")
+        print(f"\nprompt:\n{task['prompt']}")
+        return 0
+
+    def task_rm(self, args):
+        """Delete a task."""
+        from agent import store as _store
+        task = _store.get_task(args.task)
+        if not task:
+            print(f"error: no task {args.task!r}", file=sys.stderr)
+            return 1
+        _store.delete_task(task["id"])
+        print(f"deleted task {task['id']} ({task['name']})")
+        return 0
+
+    def task_enable(self, args):
+        """Enable a task and make it due now."""
+        from agent import store as _store
+        task = _store.get_task(args.task)
+        if not task:
+            print(f"error: no task {args.task!r}", file=sys.stderr)
+            return 1
+        _store.update_task(task["id"], enabled=1, next_run_at=None)
+        print(f"enabled task {task['id']} ({task['name']}) — due now")
+        return 0
+
+    def task_disable(self, args):
+        """Disable a task without deleting it."""
+        from agent import store as _store
+        task = _store.get_task(args.task)
+        if not task:
+            print(f"error: no task {args.task!r}", file=sys.stderr)
+            return 1
+        _store.update_task(task["id"], enabled=0)
+        print(f"disabled task {task['id']} ({task['name']})")
+        return 0
+
+    def tick(self, args):
+        """Claim and run every due task. The scheduler's entry point.
+
+        Runs tasks sequentially on purpose. Two concurrent Claude
+        subprocesses on one machine contend for the same SQLite write
+        lock and the same rate limit, and an unattended pile-up is much
+        harder to reason about than a queue that drains slowly.
+        """
+        import os
+        import socket
+        from agent import store as _store
+
+        released = _store.reclaim_stale(getattr(args, 'stale_after', 7200))
+        if released:
+            print(f"released {released} stale claim(s)", flush=True)
+
+        due = _store.due_task_ids()
+        if not due:
+            if not getattr(args, 'quiet', False):
+                print("no due tasks")
+            return 0
+
+        limit = getattr(args, 'max_tasks', 1) or 1
+        claimed_by = f"{socket.gethostname()}:{os.getpid()}"
+        ran, failed = 0, 0
+
+        for task_id in due:
+            if ran >= limit:
+                print(f"stopping at --max-tasks={limit}; "
+                      f"{len(due) - ran} still due", flush=True)
+                break
+            task = _store.claim_task(task_id, claimed_by)
+            if not task:
+                # Another tick won the race, or the task was disabled
+                # between the scan and the claim.
+                continue
+            ran += 1
+            print(f"\n=== task {task['id']} ({task['name']}) "
+                  f"policy={task['policy']} ===", flush=True)
+
+            if getattr(args, 'dry_run', False):
+                # Release the claim without recording a run: a dry run
+                # that bumped run_count and pushed next_run_at forward
+                # would make the task look like it had executed.
+                _store.release_claim(task["id"])
+                print("dry run — would execute this task; claim released",
+                      flush=True)
+                continue
+
+            result = self._execute_run(
+                prompt=task["prompt"],
+                project=task["project_slug"],
+                policy=task["policy"],
+                model=task["model"],
+                max_runtime_sec=task["max_runtime_sec"],
+                title=f"task:{task['name']}",
+            )
+            if result["status"] != "completed":
+                failed += 1
+            _store.finish_task(
+                task["id"], result["status"],
+                error=result["error"],
+                session_id=result["session_id"],
+                cadence_sec=task["cadence_sec"],
+            )
+            print(f"task {task['id']} {result['status']} in "
+                  f"{result['elapsed_sec']}s", flush=True)
+            self._notify_task_outcome(task, result)
+
+        if ran and not getattr(args, 'dry_run', False):
+            self._drain_notifications()
+        return 1 if failed else 0
+
+    def _notify_task_outcome(self, task, result):
+        """Enqueue an agent_notifications row per the task's notify mode."""
+        from agent import store as _store
+
+        mode = task["notify"] or "error"
+        ok = result["status"] == "completed"
+        if mode == "never" or (mode == "error" and ok):
+            return
+
+        kind = "final" if ok else "error"
+        subject = (f"[templedb] task {task['name']}: {result['status']} "
+                   f"in {result['elapsed_sec']}s")
+        body = [
+            f"**Task**: {task['name']} (id {task['id']})",
+            f"**Policy**: {task['policy']}",
+            f"**Project**: {task['project_slug'] or '-'}",
+            f"**Status**: {result['status']} after {result['elapsed_sec']}s, "
+            f"{result['events']} events",
+            f"**Session**: {result['session_id']}",
+        ]
+        if result["error"]:
+            body.append(f"\n**Error**\n\n```\n{result['error']}\n```")
+        if result["text"]:
+            body.append(f"\n**Agent summary**\n\n{result['text'][:4000]}")
+        try:
+            _store.create_notification(
+                session_id=result["session_id"], kind=kind,
+                subject=subject, body_md="\n\n".join(body))
+        except Exception as e:
+            print(f"warning: could not queue notification: {e}",
+                  file=sys.stderr)
+
+    def _drain_notifications(self):
+        """Send queued notifications.
+
+        tick drains inline rather than relying on a separate timer:
+        nothing else on this host drains the queue, so an enqueued
+        check-in would otherwise sit unsent until someone ran `notify
+        drain` by hand — which defeats the point of an unattended run
+        reporting in.
+        """
+        try:
+            from services.email_service import EmailService, EmailConfigError
+        except ImportError as e:
+            print(f"warning: email unavailable: {e}", file=sys.stderr)
+            return
+        try:
+            result = EmailService().drain(limit=50)
+            if result["sent"] or result["failed"]:
+                print(f"notifications: sent={result['sent']} "
+                      f"failed={result['failed']}")
+        except EmailConfigError as e:
+            # Not configured is a normal state, not a task failure.
+            print(f"notifications not sent ({e})", file=sys.stderr)
+        except Exception as e:
+            print(f"warning: notification drain failed: {e}",
+                  file=sys.stderr)
+
+    # --- Scheduling ------------------------------------------------------
+
+    def schedule(self, args):
+        """Manage the systemd user timer that drains the task queue.
+
+        Parallel to `templedb ingest schedule` and `templedb reconcile
+        schedule`, deliberately: those two already taught this machine
+        what a templedb-owned timer looks like, and a third one with its
+        own conventions would just be a thing to remember.
+        """
+        action = args.action
+        if action == 'install':
+            return self._schedule_install(args)
+        if action == 'uninstall':
+            return self._schedule_uninstall()
+        if action == 'status':
+            return self._schedule_status()
+        print(f"error: unknown schedule action: {action}", file=sys.stderr)
+        return 1
+
+    def _schedule_install(self, args):
+        import shutil
+        import subprocess
+        from pathlib import Path
+        from agent import store as _store
+
+        interval = getattr(args, 'interval', None) or '*:0/15'
+        max_tasks = getattr(args, 'max_tasks', 1) or 1
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True, exist_ok=True)
+
+        templedb_bin = (shutil.which('templedb')
+                        or '/home/zach/.nix-profile/bin/templedb')
+
+        # The timer calls the INSTALLED binary, not whatever is in the DB.
+        # A new subcommand is inert until a rebuild, so an install that
+        # looked successful but whose every firing exits 2 is the obvious
+        # failure here — check once, now, rather than letting the user
+        # find it in journalctl next week.
+        #
+        # The probe has to run with dev mode STRIPPED from the
+        # environment. Installing from a dev-mode shell (the normal way
+        # to reach a brand-new subcommand) would otherwise have the
+        # probe resolve the same workspace tree the caller is testing,
+        # report success, and suppress the very warning it exists to
+        # give — a false green precisely when the warning matters.
+        import os as _os
+        probe_env = {k: v for k, v in _os.environ.items()
+                     if k not in ("TEMPLEDB_DEV_MODE", "TEMPLEDB_DEV_SRC")}
+        probe = subprocess.run(
+            [templedb_bin, 'ai', 'agent', 'tick', '--help'],
+            capture_output=True, text=True, env=probe_env)
+        tick_supported = probe.returncode == 0
+
+        dev_src = getattr(args, 'dev_src', None)
+        env_lines = ""
+        if dev_src:
+            dev_path = Path(dev_src).expanduser().resolve()
+            if not (dev_path / "cli").is_dir():
+                print(f"error: {dev_path} does not look like a templedb "
+                      f"src tree (no cli/ inside)", file=sys.stderr)
+                return 1
+            env_lines = (f"Environment=TEMPLEDB_DEV_MODE=1\n"
+                         f"Environment=TEMPLEDB_DEV_SRC={dev_path}\n")
+
+        # TimeoutStartSec has to clear the slowest task's own wall clock,
+        # or systemd kills a healthy run partway and the task is left
+        # claimed until reclaim_stale releases it. Derive it from the
+        # queue instead of guessing.
+        try:
+            longest = max([t["max_runtime_sec"] for t in
+                           _store.list_tasks(limit=500)] or [3600])
+        except Exception:
+            longest = 3600
+        timeout_start = max(longest * max_tasks, 3600) + 600
+
+        service = f"""[Unit]
+Description=TempleDB autonomous agent tick — run due tasks
+Documentation=man:templedb(1)
+
+[Service]
+Type=oneshot
+{env_lines}# Runs at most {max_tasks} task per firing, sequentially.
+ExecStart={templedb_bin} ai agent tick --max-tasks {max_tasks} --quiet
+# Clears the longest max_runtime_sec currently in the queue ({longest}s)
+# times --max-tasks, plus slack for startup and the notification drain.
+TimeoutStartSec={timeout_start}
+"""
+
+        timer = f"""[Unit]
+Description=Trigger templedb autonomous agent tick ({interval})
+Documentation=man:templedb(1)
+
+[Timer]
+OnCalendar={interval}
+# No RandomizedDelaySec: a task's cadence is already measured from when
+# its last run finished, so the queue self-spreads and jitter would only
+# make "why has this not run yet" harder to answer.
+Persistent=true
+# A tick that overran its interval must not be joined by the next one.
+# The DB claim makes a double-run harmless, but two Claude subprocesses
+# contending for one SQLite write lock is still worth avoiding.
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target
+"""
+
+        (unit_dir / "templedb-agent-tick.service").write_text(service)
+        (unit_dir / "templedb-agent-tick.timer").write_text(timer)
+
+        for cmd, label in (
+            (['systemctl', '--user', 'daemon-reload'], 'reload'),
+            (['systemctl', '--user', 'enable', '--now',
+              'templedb-agent-tick.timer'], 'enable + start'),
+        ):
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"error: systemctl failed ({label}): "
+                      f"{r.stderr.strip()}", file=sys.stderr)
+                return 2
+
+        print("✓ Installed templedb-agent-tick.timer")
+        print(f"  units:      {unit_dir}")
+        print(f"  oncalendar: {interval}")
+        print(f"  max-tasks:  {max_tasks} per firing")
+        print(f"  timeout:    {timeout_start}s")
+        if dev_src:
+            print(f"  dev src:    {dev_src}")
+        print()
+        if not tick_supported:
+            print("  WARNING: the installed binary at")
+            print(f"    {templedb_bin}")
+            print("  does not have `ai agent tick` yet, so every firing "
+                  "will fail until")
+            print("  the package is rebuilt. Either rebuild, or re-run "
+                  "this install with")
+            print("    --dev-src <edit-workspace>/src")
+            print("  to point the unit at DB-current code in the "
+                  "meantime.")
+            print()
+        print("  status:  templedb ai agent schedule status")
+        print("  logs:    journalctl --user -u templedb-agent-tick "
+              "--since '24 hours ago'")
+        print("  disable: templedb ai agent schedule uninstall")
+        return 0 if tick_supported or dev_src else 3
+
+    def _schedule_uninstall(self):
+        import subprocess
+        from pathlib import Path
+
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        subprocess.run(
+            ['systemctl', '--user', 'disable', '--now',
+             'templedb-agent-tick.timer'],
+            capture_output=True, text=True)
+        removed = []
+        for name in ('templedb-agent-tick.timer',
+                     'templedb-agent-tick.service'):
+            path = unit_dir / name
+            if path.exists():
+                path.unlink()
+                removed.append(name)
+        subprocess.run(['systemctl', '--user', 'daemon-reload'],
+                       capture_output=True, text=True)
+        if removed:
+            print(f"✓ Uninstalled {', '.join(removed)}")
+        else:
+            print("No templedb-agent-tick units were installed.")
+        print("Queued tasks are untouched — `ai agent task list` still "
+              "shows them, and `ai agent tick` still works by hand.")
+        return 0
+
+    def _schedule_status(self):
+        import subprocess
+        from pathlib import Path
+        from agent import store as _store
+
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        if not (unit_dir / "templedb-agent-tick.timer").exists():
+            print("Timer not installed. Install it with:")
+            print("  templedb ai agent schedule install")
+            return 1
+
+        r = subprocess.run(
+            ['systemctl', '--user', 'list-timers',
+             'templedb-agent-tick.timer', '--no-pager'],
+            capture_output=True, text=True)
+        print(r.stdout.strip() or "(no timer output)")
+
+        # The timer being healthy says nothing about whether it has
+        # anything to do, which is the question people actually mean.
+        try:
+            tasks = _store.list_tasks(limit=500)
+        except Exception as e:
+            print(f"\n(could not read the queue: {e})")
+            return 0
+        enabled = [t for t in tasks if t["enabled"]]
+        due = _store.due_task_ids()
+        claimed = [t for t in tasks if t["claimed_at"]]
+        failing = [t for t in tasks if t["last_status"]
+                   and t["last_status"] != "completed"]
+        print(f"\nqueue: {len(tasks)} task(s), {len(enabled)} enabled, "
+              f"{len(due)} due now")
+        if claimed:
+            for t in claimed:
+                print(f"  running: {t['name']} (claimed {t['claimed_at']} "
+                      f"by {t['claimed_by']})")
+        for t in failing:
+            print(f"  last run FAILED: {t['name']} — "
+                  f"{t['last_status']}: {(t['last_error'] or '')[:120]}")
+        return 0
+
 
 def _find_stop_stale_protected_pids():
     """Return the set of PIDs `stop-stale` must not kill: the current
@@ -775,9 +1520,15 @@ def _find_agent_serve_victims(protected_pids):
     return victims
 
 
+
+
 def register_agent_commands(subparsers, cli):
     """Register agent subcommands under 'ai agent'."""
     cmd = AgentCommands()
+
+    # Single source of truth for the policy choices, so `--policy` can
+    # never drift from what guard.py actually enforces.
+    from agent.guard import POLICIES as _GUARD_POLICIES
 
     agent_parser = subparsers.add_parser('agent', help='Temple Agent native AI interface')
     agent_sub = agent_parser.add_subparsers(dest='agent_subcommand')
@@ -954,6 +1705,134 @@ def register_agent_commands(subparsers, cli):
         '--force', action='store_true',
         help="Use SIGKILL instead of SIGTERM.")
     cli.commands['ai.agent.stop-stale'] = cmd.stop_stale
+
+    # run — headless one-shot. The piece that made autonomy possible:
+    # before this, AgentService.send_message had exactly one caller (the
+    # Emacs stdio protocol), so no Emacs meant no run.
+    run_parser = agent_sub.add_parser(
+        'run',
+        help='Run one prompt headlessly to completion (no Emacs needed)')
+    run_parser.add_argument('-m', '--message', help='The prompt')
+    run_parser.add_argument('--prompt-file',
+                            help='Read the prompt from a file (- for stdin)')
+    run_parser.add_argument('-p', '--project', help='Project slug for context')
+    run_parser.add_argument(
+        '--policy', default='commit', choices=list(_GUARD_POLICIES),
+        help='What this run is allowed to do (default: commit — may edit '
+             'and commit, may not publish/deploy/push/rebuild)')
+    run_parser.add_argument('--model', help='Model override')
+    run_parser.add_argument('--session', type=int,
+                            help='Continue an existing session id')
+    run_parser.add_argument('--title', help='Session title')
+    run_parser.add_argument(
+        '--timeout', type=int, default=3600,
+        help='Wall-clock seconds before the run is cancelled (default 3600)')
+    run_parser.add_argument('--quiet', action='store_true',
+                            help='Suppress per-tool progress lines')
+    cli.commands['ai.agent.run'] = cmd.run
+
+    # guard — PreToolUse hook. Not meant to be typed by hand; the
+    # provider installs it via `claude --settings` for policied runs.
+    guard_parser = agent_sub.add_parser(
+        'guard',
+        help='PreToolUse hook: deny tool calls a run policy forbids '
+             '(reads hook JSON on stdin; installed automatically)')
+    guard_parser.add_argument(
+        '--policy', default=None, choices=list(_GUARD_POLICIES),
+        help='Policy to enforce (default: $TEMPLEDB_AGENT_POLICY, else commit)')
+    cli.commands['ai.agent.guard'] = cmd.guard
+
+    # task — the autonomous work queue
+    task_parser = agent_sub.add_parser(
+        'task', help='Autonomous task queue drained by `ai agent tick`')
+    task_sub = task_parser.add_subparsers(dest='task_subcommand')
+
+    task_add_p = task_sub.add_parser('add', help='Register an autonomous task')
+    task_add_p.add_argument('name', help='Short unique name')
+    task_add_p.add_argument('-m', '--message', help='The prompt')
+    task_add_p.add_argument('--prompt-file', help='Read the prompt from a file')
+    task_add_p.add_argument('-p', '--project', help='Project slug for context')
+    task_add_p.add_argument(
+        '--policy', default='commit', choices=list(_GUARD_POLICIES),
+        help='What the task may do (default: commit)')
+    task_add_p.add_argument('--model', help='Model override')
+    task_add_p.add_argument(
+        '--cadence', default='once',
+        help='once | hourly | daily | weekly | <seconds>. Measured from '
+             'when a run FINISHES, not when it starts.')
+    task_add_p.add_argument('--timeout', type=int, default=3600,
+                            help='Per-run wall clock limit (default 3600s)')
+    task_add_p.add_argument('--notify', default='error',
+                            choices=['never', 'error', 'always'],
+                            help='When to email a check-in (default: error)')
+    cli.commands['ai.agent.task.add'] = cmd.task_add
+
+    task_list_p = task_sub.add_parser('list', help='List autonomous tasks')
+    task_list_p.add_argument('--enabled', action='store_true',
+                             help='Only enabled tasks')
+    task_list_p.add_argument('--limit', type=int, default=100)
+    cli.commands['ai.agent.task.list'] = cmd.task_list
+
+    task_show_p = task_sub.add_parser('show', help='Show a task and its prompt')
+    task_show_p.add_argument('task', help='Task id or name')
+    cli.commands['ai.agent.task.show'] = cmd.task_show
+
+    task_rm_p = task_sub.add_parser('rm', help='Delete a task')
+    task_rm_p.add_argument('task', help='Task id or name')
+    cli.commands['ai.agent.task.rm'] = cmd.task_rm
+
+    task_enable_p = task_sub.add_parser(
+        'enable', help='Enable a task and make it due now')
+    task_enable_p.add_argument('task', help='Task id or name')
+    cli.commands['ai.agent.task.enable'] = cmd.task_enable
+
+    task_disable_p = task_sub.add_parser(
+        'disable', help='Disable a task without deleting it')
+    task_disable_p.add_argument('task', help='Task id or name')
+    cli.commands['ai.agent.task.disable'] = cmd.task_disable
+
+    # bare `ai agent task` → list
+    cli.commands['ai.agent.task'] = cmd.task_list
+
+    # tick — what the systemd timer calls
+    tick_parser = agent_sub.add_parser(
+        'tick',
+        help='Claim and run due autonomous tasks (the scheduler entry '
+             'point; safe to call from a timer)')
+    tick_parser.add_argument(
+        '--max-tasks', type=int, default=1,
+        help='Most tasks to run in one tick (default 1). Tasks run '
+             'sequentially to avoid two Claude subprocesses contending '
+             'for the same write lock.')
+    tick_parser.add_argument(
+        '--stale-after', type=int, default=7200,
+        help='Seconds after which an abandoned claim is released '
+             '(default 7200)')
+    tick_parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Show which task would run without executing it')
+    tick_parser.add_argument('--quiet', action='store_true',
+                             help='Say nothing when no task is due')
+    cli.commands['ai.agent.tick'] = cmd.tick
+
+    # schedule — the systemd user timer that drains the queue
+    schedule_parser = agent_sub.add_parser(
+        'schedule',
+        help='Manage the systemd user timer that runs due tasks')
+    schedule_parser.add_argument(
+        'action', choices=['install', 'uninstall', 'status'])
+    schedule_parser.add_argument(
+        '--interval', default='*:0/15',
+        help='systemd OnCalendar spec (default every 15 minutes). A task '
+             'runs no more often than its own cadence regardless.')
+    schedule_parser.add_argument(
+        '--max-tasks', type=int, default=1,
+        help='Tasks per firing (default 1)')
+    schedule_parser.add_argument(
+        '--dev-src',
+        help='Point the unit at a templedb src tree via TEMPLEDB_DEV_MODE, '
+             'for running DB-current code before a rebuild')
+    cli.commands['ai.agent.schedule'] = cmd.schedule
 
     # Default handler for bare 'ai agent'
     cli.commands['ai.agent'] = cmd.sessions
