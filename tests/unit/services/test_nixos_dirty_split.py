@@ -46,11 +46,25 @@ def test_host_scoped_woofs_keys_are_not_renderable(key):
 
 
 @pytest.mark.parametrize("key", [
+    'mirror.templedb.github',
+    'mirror.nixos_anywhere_vultr_woofs.github',
+    'zMothership2.mirror.templedb.github',
+])
+def test_mirror_keys_are_not_renderable(key):
+    """publish reads mirror.* out of system_config directly, and grep
+    for "mirror" across both generated files returns 0 (2026-11-13).
+    Adding the Vultr mirror URL on 2026-11-11 was enough to make
+    system-switch announce a pending generate that would have rewritten
+    flake.nix -- clobbering the pinned input rev -- and applied
+    nothing."""
+    assert _is_generated_key(key, HOSTS) is False
+
+
+@pytest.mark.parametrize("key", [
     'nixos.attr.services.openssh.enable',
     'nixos.pkg.user.cli_utilities.fzf',
     'zMothership2.nixos.flake.input.templedb',
     'zMothership2.videoDriver',
-    'mirror.templedb.github',
     'gcs.backup_bucket',
 ])
 def test_everything_else_defaults_to_renderable(key):
@@ -87,6 +101,34 @@ def test_split_partitions_without_dropping_anything():
     changed = ['woofs.enable', 'zMothership2.woofs.enable',
                'nixos.timeZone', 'mirror.x.y']
     generated, manual = _split_dirty(_Conn(), changed)
-    assert sorted(manual) == ['woofs.enable', 'zMothership2.woofs.enable']
-    assert sorted(generated) == ['mirror.x.y', 'nixos.timeZone']
+    assert sorted(manual) == ['mirror.x.y', 'woofs.enable',
+                              'zMothership2.woofs.enable']
+    assert sorted(generated) == ['nixos.timeZone']
     assert len(generated) + len(manual) == len(changed)
+
+
+def test_bookkeeping_keys_are_dropped_before_the_split():
+    """`admin db check` rewrites admin.db.check.last_pin_probe on every
+    run, so a timestamp-only dirty check reports it as a pending user
+    change. It was half of the bogus "2 config keys changed" prompt on
+    2026-11-13. Dropped outright rather than listed as unrenderable --
+    nobody set it and nobody needs to hear about it."""
+    from cli.commands.nixos import _changed_keys
+
+    rows = [('admin.db.check.last_pin_probe',), ('nixos.timeZone',),
+            ('mirror.templedb.github',)]
+
+    class _Conn:
+        def execute(self, sql, *a, **k):
+            class _R:
+                @staticmethod
+                def fetchone():
+                    return ('2026-10-14 18:21:53',)
+
+                @staticmethod
+                def fetchall():
+                    return rows
+            return _R()
+
+    assert sorted(_changed_keys(_Conn())) == [
+        'mirror.templedb.github', 'nixos.timeZone']

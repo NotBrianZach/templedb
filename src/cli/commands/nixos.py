@@ -22,6 +22,23 @@ logger = get_logger(__name__)
 
 _TRACKING_KEYS = ("nixos.last_generated_at", "nixos.last_generated_snapshot")
 
+# Prefixes written by TempleDB's own machinery, not by a person
+# configuring the system. These have an `updated_at` like any other row,
+# so a dirty check that only compares timestamps reports them as pending
+# user changes -- but there is nothing pending and nothing to apply.
+#
+# admin.* verified 2026-11-13: `admin.db.check.last_pin_probe` is a WAL
+# pin probe result that `admin db check` rewrites on every run, and it
+# alone was half of a "2 config keys changed since last generate"
+# prompt. A probe writing to system_config must not make the next
+# rebuild look dirty.
+#
+# Distinct from _UNRENDERED_NAMESPACES below: those are real config a
+# person set that generate cannot render (so they get named), while
+# these are machine state nobody needs to hear about (so they are
+# dropped entirely).
+_BOOKKEEPING_PREFIXES = ("admin.",)
+
 
 # ── Which keys `nixos generate` can actually render ───────────────────────────
 #
@@ -51,7 +68,16 @@ _TRACKING_KEYS = ("nixos.last_generated_at", "nixos.last_generated_snapshot")
 # files returns 0, and regenerating after changing woofs.data_owner
 # altered only the output's timestamp. Extend this tuple as others are
 # actually confirmed, not assumed.
-_UNRENDERED_NAMESPACES = ("woofs.",)
+#
+# mirror.* verified unrenderable 2026-11-13, by the same method and for
+# the reason the comment above already gave: publish reads mirror.* out
+# of system_config directly, and grep for "mirror" across both generated
+# files returns 0. Adding the Vultr mirror URL on 2026-11-11 was enough
+# to make `system-switch` announce a pending generate that would have
+# rewritten flake.nix -- clobbering the pinned input rev -- and changed
+# nothing else. That is the exact failure this deny-list exists for; it
+# just had one namespace in it when it needed two.
+_UNRENDERED_NAMESPACES = ("woofs.", "mirror.")
 
 
 def _known_hosts(conn) -> frozenset:
@@ -104,7 +130,11 @@ def _changed_keys(conn):
                 f"WHERE key NOT IN ({placeholders}) AND updated_at > ?",
                 (*_TRACKING_KEYS, row[0]),
             ).fetchall()
-        return [r[0] for r in rows]
+        # Filtered here rather than in SQL: the prefix list is the thing
+        # a reader needs to find, and a LIKE-per-prefix clause buries it
+        # in string building for a table of a few hundred rows.
+        return [r[0] for r in rows
+                if not r[0].startswith(_BOOKKEEPING_PREFIXES)]
     except Exception:
         return []
 
@@ -260,8 +290,16 @@ def _check_dirty_and_prompt(assume_yes: bool = False) -> bool:
             print(f"        {key}", file=sys.stderr)
         if len(manual) > 6:
             print(f"        ... and {len(manual) - 6} more", file=sys.stderr)
-        print("      These must be mirrored into their module by hand "
-              "(woofs.* -> modules/woofs/config.nix).", file=sys.stderr)
+        # Not all of these need an action, so do not assert one for all
+        # of them: woofs.* really must be hand-copied, but mirror.* is
+        # read straight out of system_config by publish and is already
+        # live. Saying "mirror these by hand" for a key with no module
+        # to mirror into is the same species of wrong answer as the
+        # bogus generate prompt this whole deny-list exists to prevent.
+        print("      A generate will not apply them: woofs.* must be "
+              "hand-copied into modules/woofs/config.nix, while mirror.* "
+              "is read from system_config by publish and needs nothing.",
+              file=sys.stderr)
 
     if count == 0:
         return True
@@ -411,7 +449,19 @@ def _nixos_status(slug: str):
             _TRACKING_KEYS,
         ).fetchall()
 
-    pending = [(r[0], r[1]) for r in pending_rows]
+    # Classified the same way the generate prompt classifies, and for
+    # the same reason: this display kept its own inline copy of the raw
+    # timestamp query, so it went on reporting "2 pending changes" after
+    # _dirty_count learned to discount exactly those two keys
+    # (2026-11-13). Two answers to "is a generate needed?" in one file
+    # is one too many, and the stale one is the one users read first.
+    hosts = _known_hosts(conn)
+    pending, unrendered = [], []
+    for key, value in ((r[0], r[1]) for r in pending_rows):
+        if key.startswith(_BOOKKEEPING_PREFIXES):
+            continue
+        (pending if _is_generated_key(key, hosts)
+         else unrendered).append((key, value))
     count = len(pending)
 
     if last_gen is None:
@@ -463,6 +513,17 @@ def _nixos_status(slug: str):
             else:
                 change = f"{old_val} → {new_val}"
             print(f"    {key:{key_w}}  {change}")
+
+    if unrendered:
+        # Listed, not counted. Dropping them would recreate the other
+        # half of this bug -- woofs.* looking live because nothing ever
+        # mentioned it -- while counting them is what made a no-op
+        # generate look mandatory.
+        print()
+        print("  Changed, but not rendered by a generate:")
+        key_w = max(len(k) for k, _ in unrendered)
+        for key, new_val in unrendered:
+            print(f"    {key:{key_w}}  {new_val}")
 
     needs_generate = count > 0
     needs_rebuild = last_gen is None or last_rebuild is None or last_gen > last_rebuild
