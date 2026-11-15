@@ -151,6 +151,12 @@ except Exception as e:
     logger.warning(f'Failed to load GUI page pending_asks: {e}')
 
 try:
+    from gui_pages.notifications import router as notifications_router
+    app.include_router(notifications_router)
+except Exception as e:
+    logger.warning(f'Failed to load GUI page notifications: {e}')
+
+try:
     from gui_pages.agent_sessions import router as agent_sessions_router
     app.include_router(agent_sessions_router)
 except Exception as e:

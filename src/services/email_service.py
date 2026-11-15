@@ -16,13 +16,30 @@ Expected secrets (all under project=templedb, profile=default):
     SMTP_FROM         From: header (defaults to SMTP_USER)
     NOTIFY_TO_EMAIL   Recipient inbox for agent check-ins
 
-Set them with:
+Set them with (the value is POSITIONAL -- there is no --value flag, and
+--keys is required):
 
-    templedb env secret set templedb SMTP_HOST      --value smtp.gmail.com
-    templedb env secret set templedb SMTP_PORT      --value 587
-    templedb env secret set templedb SMTP_USER      --value you@gmail.com
-    templedb env secret set templedb SMTP_PASSWORD  --value <app-password>
-    templedb env secret set templedb NOTIFY_TO_EMAIL --value you@gmail.com
+    templedb env secret set templedb SMTP_HOST smtp.gmail.com \
+        --keys age-key,templedb-primary
+    templedb env secret set templedb SMTP_PORT 587 --keys age-key,templedb-primary
+    templedb env secret set templedb SMTP_USER you@gmail.com \
+        --keys age-key,templedb-primary
+    templedb env secret set templedb SMTP_PASSWORD <app-password> \
+        --keys age-key,templedb-primary
+    templedb env secret set templedb NOTIFY_TO_EMAIL you@gmail.com \
+        --keys age-key,templedb-primary
+
+Pick the --keys carefully: this module decrypts WITHOUT a TTY, so a
+secret encrypted only to a yubikey recipient can never be read here, and
+the notification silently stays queued. `age-key` is the safe default --
+its private key is in both candidate identity files
+(~/.config/sops/age/keys.txt and ~/.age/key.txt), so decryption works
+whichever one _age_key_file() finds first. Listing templedb-primary too
+costs nothing and survives the loss of either file.
+
+With Gmail, SMTP_PASSWORD must be a 16-character App Password from
+myaccount.google.com/apppasswords (requires 2-Step Verification). The
+normal account password is rejected for SMTP AUTH.
 """
 import os
 import smtplib

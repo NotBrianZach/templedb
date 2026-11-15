@@ -436,6 +436,13 @@ class MCPServer:
         Only 10 tools exposed. Use templedb_cli for everything else.
         This saves ~6000 context tokens vs the old 77-tool set.
         """
+        # Imported here, not at module scope: every other use of agent.store
+        # in this file is a local import too, and templedb_ask_user's
+        # advertised timeout has to be the deadline it will actually enforce.
+        # A description promising 600s while the poll runs 3600 teaches the
+        # model the wrong thing about when to give up.
+        from agent.store import FLEET_ASK_DEADLINE_SECONDS as _ASK_DEADLINE_SECONDS
+
         return [
             {
                 "name": "templedb_cli",
@@ -600,7 +607,8 @@ class MCPServer:
                     "Use this INSTEAD of AskUserQuestion when running under TempleDB / Emacs "
                     "— AskUserQuestion has no working UI in this environment and gets "
                     "auto-cancelled. Requires TEMPLEDB_AGENT_SESSION_ID env (set by the "
-                    "agent provider when it launches Claude). Blocks for up to 600s waiting "
+                    f"agent provider when it launches Claude). Blocks for up to "
+                    f"{_ASK_DEADLINE_SECONDS}s waiting "
                     "for a response; if the user doesn't answer, returns an error and you "
                     "should either ask again or proceed with a reasonable default and note "
                     "what you assumed. Question shape mirrors AskUserQuestion: each has "
@@ -1466,8 +1474,12 @@ class MCPServer:
         from agent import store as _store
         ask_id = uuid.uuid4().hex
         _store.create_pending_ask(ask_id, sid, "question", {"questions": questions})
-        # Poll for the user's response; give up after 600s.
-        deadline = time.time() + 600
+        # Poll for the user's response, then give up. The deadline comes from
+        # store rather than a literal here: `expire_stale_asks` reaps rows
+        # using the same constant, so a number repeated in both places drifts
+        # into either reaping asks this loop is still waiting on, or leaving
+        # rows pending with no reader.
+        deadline = time.time() + _store.FLEET_ASK_DEADLINE_SECONDS
         while time.time() < deadline:
             row = _store.get_pending_ask(ask_id)
             if row and row.get("status") == "responded":

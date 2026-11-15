@@ -179,6 +179,10 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
             ("reports", "/reports",    "Reports",    ", r"),
             ("handoffs","/handoffs",   "Handoffs",   ", n"),
             ("pending-asks", "/pending-asks", "Asks",   ", A"),
+            # No keybinding: ", n" is Handoffs and ", N" would shadow it
+            # on a case-insensitive read. The phone has no keyboard
+            # anyway, which is the surface this page exists for.
+            ("notifications", "/notifications", "Check-ins", ""),
             ("agent-sessions", "/agent-sessions", "Sessions", ", J"),
             ("agent-work-log", "/agent-work-log", "Work log", ", W"),
             ("agent-sections", "/agent-sections", "Notes",  ", B"),

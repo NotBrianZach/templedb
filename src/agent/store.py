@@ -1156,12 +1156,24 @@ FLEET_STALL_SECONDS = 180
 FLEET_IDLE_DAYS = 2
 
 # `tool_ask_user` in mcp_server.py polls its own `agent_pending_asks` row for
-# 600s and then returns an error to Claude. Nothing marks the row afterwards,
-# so a `status='pending'` ask older than this has no reader left: answering it
-# writes into a table nobody is watching. Keep this in sync with that
-# deadline, or the roster will queue up asks that can no longer be delivered
-# (16 such rows, 8-27 days old, existed when this was written).
-FLEET_ASK_DEADLINE_SECONDS = 600
+# this long and then returns an error to Claude. Nothing marks the row
+# afterwards, so a `status='pending'` ask older than this has no reader left:
+# answering it writes into a table nobody is watching (16 such rows, 8-27 days
+# old, existed when this was written).
+#
+# This is now the single source for that deadline: mcp_server.py imports it
+# for both the poll loop and the tool description it advertises, rather than
+# repeating the number. It used to appear in three places and the comment here
+# asked the next person to keep them in sync by hand.
+#
+# Raised 600 -> 3600 on 2026-11-15. 600s was chosen when the only way to see
+# an ask was Emacs, already in front of you. The delivery surface is now also
+# the GUI over the tailnet — answerable from a phone — and that is a PULL
+# surface: nothing pushes, so the window has to be wide enough that noticing
+# on your own initiative still lands inside it. Ten minutes effectively
+# guarantees a missed ask; an hour matches the default `max_runtime_sec`, so
+# an ask still cannot outlive the run that asked it.
+FLEET_ASK_DEADLINE_SECONDS = 3600
 
 # Provider kinds whose sessions are test leavings, not fleet work. The
 # `fake` provider writes into this same database from `tests/agent/`, and

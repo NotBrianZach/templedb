@@ -1079,6 +1079,89 @@ class AgentCommands(Command):
         print(f"\nprompt:\n{task['prompt']}")
         return 0
 
+    def task_update(self, args):
+        """Change fields on an existing task, keeping its run history.
+
+        Exists because the alternative is `rm` + `add`, which resets
+        run_count/fail_count/last_status and so destroys the only record
+        of whether a long-lived task has been succeeding. A task prompt
+        is a living document — the figures it quotes go stale as the work
+        it describes lands — so editing one in place is the normal case,
+        not the exception.
+        """
+        from agent.guard import POLICIES
+        from agent import store as _store
+        from db_utils import query_one
+
+        task = _store.get_task(args.task)
+        if not task:
+            print(f"error: no task {args.task!r}", file=sys.stderr)
+            return 1
+
+        fields = {}
+
+        prompt = getattr(args, 'message', None)
+        if getattr(args, 'prompt_file', None):
+            try:
+                with open(args.prompt_file) as f:
+                    prompt = f.read()
+            except OSError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+        if prompt is not None:
+            if not prompt.strip():
+                print("error: refusing to set an empty prompt",
+                      file=sys.stderr)
+                return 1
+            fields['prompt'] = prompt
+
+        if getattr(args, 'name', None):
+            existing = _store.get_task(args.name)
+            if existing and existing['id'] != task['id']:
+                print(f"error: a task named {args.name!r} already exists",
+                      file=sys.stderr)
+                return 1
+            fields['name'] = args.name
+
+        if getattr(args, 'policy', None):
+            if args.policy not in POLICIES:
+                print(f"error: unknown policy {args.policy!r}", file=sys.stderr)
+                return 1
+            fields['policy'] = args.policy
+
+        if getattr(args, 'project', None):
+            if not query_one("SELECT id FROM projects WHERE slug = ?",
+                             (args.project,)):
+                print(f"error: no project with slug {args.project!r}",
+                      file=sys.stderr)
+                return 1
+            fields['project_slug'] = args.project
+
+        if getattr(args, 'model', None):
+            fields['model'] = args.model
+        if getattr(args, 'notify', None):
+            fields['notify'] = args.notify
+        if getattr(args, 'timeout', None) is not None:
+            fields['max_runtime_sec'] = args.timeout
+        if getattr(args, 'cadence', None):
+            try:
+                fields['cadence_sec'] = self._parse_cadence(args.cadence)
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+
+        if not fields:
+            print("error: nothing to change — pass at least one of "
+                  "-m/--prompt-file, --name, --policy, --project, --model, "
+                  "--cadence, --timeout, --notify", file=sys.stderr)
+            return 1
+
+        _store.update_task(task["id"], **fields)
+        changed = ", ".join(sorted(fields))
+        print(f"updated task {task['id']} ({fields.get('name', task['name'])})"
+              f" — {changed}")
+        return 0
+
     def task_rm(self, args):
         """Delete a task."""
         from agent import store as _store
@@ -1776,6 +1859,26 @@ def register_agent_commands(subparsers, cli):
     task_show_p = task_sub.add_parser('show', help='Show a task and its prompt')
     task_show_p.add_argument('task', help='Task id or name')
     cli.commands['ai.agent.task.show'] = cmd.task_show
+
+    task_update_p = task_sub.add_parser(
+        'update', help='Change an existing task, keeping its run history')
+    task_update_p.add_argument('task', help='Task id or name')
+    task_update_p.add_argument('-m', '--message', help='Replace the prompt')
+    task_update_p.add_argument('--prompt-file',
+                               help='Replace the prompt from a file')
+    task_update_p.add_argument('--name', help='Rename the task')
+    task_update_p.add_argument('-p', '--project', help='Project slug')
+    task_update_p.add_argument('--policy', choices=list(_GUARD_POLICIES),
+                               help='What the task may do')
+    task_update_p.add_argument('--model', help='Model override')
+    task_update_p.add_argument(
+        '--cadence', help='once | hourly | daily | weekly | <seconds>')
+    task_update_p.add_argument('--timeout', type=int,
+                               help='Per-run wall clock limit in seconds')
+    task_update_p.add_argument('--notify',
+                               choices=['never', 'error', 'always'],
+                               help='When to email a check-in')
+    cli.commands['ai.agent.task.update'] = cmd.task_update
 
     task_rm_p = task_sub.add_parser('rm', help='Delete a task')
     task_rm_p.add_argument('task', help='Task id or name')
