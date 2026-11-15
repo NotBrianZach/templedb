@@ -82,6 +82,36 @@ button.danger { background: #3a1a1a; border-color: #e94560; color: #e94560; }
 button.danger:hover { background: #4a2222; }
 #global-search { position: fixed; top: 0; left: 180px; right: 0; background: #0f0f1a; border-bottom: 1px solid #1e1e3a; padding: 0.5rem 2rem; z-index: 50; display: none; }
 #global-search.active { display: flex; align-items: center; gap: 0.75rem; }
+
+/* Narrow screens. The viewport meta tag alone is not enough here: body is
+   a flex ROW with a fixed 180px nav, so on a 390px phone the nav would
+   take half the width and every table would overflow the page. Stack the
+   nav above main instead and let the TABLE scroll rather than the body,
+   so horizontal panning never hides the nav or a form's submit button.
+
+   One breakpoint, not a responsive redesign. The target is answering an
+   ask from a phone inside its 600s deadline; the dense inspection pages
+   are still desktop work. */
+@media (max-width: 720px) {
+  body { flex-direction: column; }
+  nav { width: auto; flex-direction: row; flex-wrap: wrap; gap: 0.3rem;
+        border-right: none; border-bottom: 1px solid #1e1e3a;
+        padding: 0.8rem; }
+  nav h1 { width: 100%; margin-bottom: 0.5rem; }
+  nav a { padding: 0.3rem 0.5rem; background: #1a1a30; font-size: 0.8rem; }
+  /* The float:right keybinding hints cost width and mean nothing without
+     a physical keyboard. */
+  nav a kbd, kbd.keyhint { display: none; }
+  main { padding: 1rem; }
+  /* display:block is what makes overflow-x apply to a table at all. */
+  table { display: block; overflow-x: auto; }
+  pre { padding: 0.6rem; font-size: 0.75rem; }
+  /* Fixed widths that would force the page wider than the screen. */
+  #search-input { width: 100%; }
+  #global-search { left: 0; padding: 0.5rem 1rem; }
+  .stat { padding: 0.6rem 0.9rem; margin: 0 0.4rem 0.4rem 0; }
+  textarea { width: 100%; }
+}
 """
 
 def _find_templedb() -> str:
@@ -161,6 +191,12 @@ def _base(title: str, body: str, active: str = "") -> HTMLResponse:
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- Without this a phone renders every page at a ~980px viewport and
+     scales it down, which makes /pending-asks unusable precisely when
+     it matters: an ask expires in FLEET_ASK_DEADLINE_SECONDS (600s) and
+     the run continues without you. Answering from a phone is the whole
+     reason the GUI is reachable over the tailnet. -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)} — TempleDB</title>
 <script src="https://unpkg.com/htmx.org@1.9.10"></script>
 <style>{CSS}</style>

@@ -32,15 +32,41 @@ class GUICommands(Command):
             return 1
 
         port = getattr(args, "port", 8420) or 8420
-        host = "127.0.0.1"
+        host = getattr(args, "host", None) or "127.0.0.1"
         url = f"http://{host}:{port}"
 
-        # Open browser after server is up
-        def _open_browser():
-            time.sleep(0.8)
-            webbrowser.open(url)
+        # The GUI authenticates nobody. Every page is reachable by whoever
+        # can open the socket, and /pending-asks, /actions and the vcs
+        # pages all WRITE. So the default stays loopback, and widening it
+        # is a decision the caller has to type out.
+        #
+        # The supported way to reach it from another device is to bind the
+        # tailscale interface address (100.x.y.z, from `tailscale ip -4`):
+        # that interface only carries WireGuard traffic from tailnet peers,
+        # so it is reachable from the phone and NOT from the LAN. With
+        # MagicDNS on, the peer uses http://<host>.<tailnet>.ts.net:8420.
+        #
+        # `tailscale serve 8420` would be nicer still -- real TLS, no bind
+        # change -- but it blocks forever provisioning a cert unless HTTPS
+        # Certificates are enabled for the tailnet in the admin console.
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            print(f"warning: GUI is unauthenticated and binding {host} — "
+                  f"anyone who can reach that address can write to this "
+                  f"database", file=sys.stderr)
+            if host in ("0.0.0.0", "::"):
+                print("warning: 0.0.0.0 includes every LAN and public "
+                      "interface. Bind the specific tailscale address "
+                      "(`tailscale ip -4`) instead.", file=sys.stderr)
 
-        threading.Thread(target=_open_browser, daemon=True).start()
+        # Open browser after server is up. Pointless when serving a
+        # non-loopback bind from a systemd unit, where there is no session
+        # to open a browser in, and it spawns a stray process there.
+        if host in ("127.0.0.1", "localhost", "::1"):
+            def _open_browser():
+                time.sleep(0.8)
+                webbrowser.open(url)
+
+            threading.Thread(target=_open_browser, daemon=True).start()
 
         print(f"TempleDB GUI → {url}", file=sys.stderr)
         print("Press Ctrl+C to stop.", file=sys.stderr)
@@ -71,4 +97,12 @@ def register(cli):
     gui_parser.add_argument(
         "--port", type=int, default=8420,
         help="Port to listen on (default: 8420)"
+    )
+    gui_parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="Address to bind (default: 127.0.0.1). The GUI is "
+             "unauthenticated and can write, so to reach it from another "
+             "device bind the tailscale address from `tailscale ip -4` "
+             "rather than 0.0.0.0 — that interface carries only tailnet "
+             "peers, not the LAN."
     )
