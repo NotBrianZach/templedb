@@ -6871,22 +6871,60 @@ WantedBy=timers.target
                 f"(run `templedb ingest agent`)" for r in rows]
 
     def _check_report_impls_valid_report(self):
-        """Invariant: every report_implementations.report_path exists as
-        an active project_files entry. Catches renamed / deleted reports
-        that still have dangling impl rows."""
+        """Invariant: every report_implementations row resolves to a live
+        `reports` row, and agrees with it about which project owns it.
+
+        **This used to ask about `report_path` and that question stopped
+        having an answer.** Reports were files once —
+        `reports/2026-08-08-composed-valuations.html` and the like — and
+        this check joined `report_path` to an active `project_files` row
+        to catch a report that had been renamed or deleted out from under
+        an impl row. Then reports moved into the `reports` table and the
+        directory stopped existing (`reports reindex` is kept as a notice
+        saying exactly that). Every one of the 87 live rows then dangled
+        against a path no project tracks any more, which is 87 issues
+        reporting one migration rather than 87 problems.
+
+        `report_id` is the representation now, it is NOT NULL-clean in
+        practice (87 of 87 populated, measured 2026-11-21) and its FK
+        cascades on delete, so "the report is gone" can no longer be
+        reached by the path this check was written for. What a cascade
+        does *not* cover is the second half: `project_slug` is a
+        denormalised copy that nothing keeps in step with
+        `reports.project_id`, so a report moved between projects leaves
+        the impl row claiming the old one. That is the drift still worth
+        a check, and it is what this asks.
+
+        `report_path` is deliberately left in place and unvalidated. It
+        is the provenance of where the report lived when the link was
+        made, several of those files are genuinely gone, and validating a
+        historical path against present state is the mistake being
+        removed here.
+        """
         from db_utils import query_all
         rows = query_all(
-            """SELECT ri.id, ri.report_path
+            """SELECT ri.id, ri.report_path, ri.project_slug,
+                      r.id AS resolved, r.slug AS report_slug,
+                      p.slug AS owner_slug
                  FROM report_implementations ri
-                 LEFT JOIN project_files pf
-                   ON pf.file_path = ri.report_path
-                  AND pf.status = 'active'
-                 LEFT JOIN projects p ON p.id = pf.project_id
-                     AND p.slug = ri.project_slug
-                WHERE pf.id IS NULL"""
+                 LEFT JOIN reports r ON r.id = ri.report_id
+                 LEFT JOIN projects p ON p.id = r.project_id
+                WHERE r.id IS NULL
+                   OR p.slug IS NOT ri.project_slug"""
         )
-        return [f"report_implementations#{r['id']} references missing "
-                f"report {r['report_path']}" for r in rows]
+        out = []
+        for r in rows:
+            if r['resolved'] is None:
+                out.append(
+                    f"report_implementations#{r['id']} has no reports row "
+                    f"(report_id is NULL or dangling; linked from "
+                    f"{r['report_path']})")
+            else:
+                out.append(
+                    f"report_implementations#{r['id']} claims project "
+                    f"{r['project_slug']} but report {r['report_slug']} "
+                    f"belongs to {r['owner_slug']}")
+        return out
 
     def _check_report_impls_valid_commit(self):
         """Invariant: every report_implementations.commit_hash matches

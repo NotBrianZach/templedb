@@ -370,6 +370,15 @@
             (python3.withPackages (ps: with ps; [
               pyyaml rich requests cryptography fastapi uvicorn python-multipart
               tree-sitter tree-sitter-python tree-sitter-javascript
+
+              # Test runner. Listed here because the suite could not be run
+              # from this shell at all without it: tests/agent/conftest.py
+              # imports pytest at module level, so every file under
+              # tests/agent/ failed at COLLECTION with ModuleNotFoundError,
+              # and there is no justfile offering another entry point. The
+              # env above is the runtime closure; a test dep belongs in it
+              # only because this shell is also how the suite is run.
+              pytest
             ]))
           ];
           shellHook = ''

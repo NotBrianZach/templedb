@@ -98,6 +98,10 @@ class ClaudeCodeProvider(BaseProvider):
         self._session_id = None
         self._model = None
         self._active_tools = {}  # tool_use_id -> {name, input, start_time}
+        # Usage from the stream's final `result` event, carried to
+        # RUN_COMPLETED. See _capture_result_stats for why it has to be
+        # stashed rather than attached where it arrives.
+        self._final_stats = {}
 
     def doctor(self):
         details = []
@@ -492,7 +496,8 @@ class ClaudeCodeProvider(BaseProvider):
                     yield make_event(ASSISTANT_COMPLETED,
                                      summary="Response complete",
                                      full_text="".join(accumulated_text))
-                yield make_event(RUN_COMPLETED, summary="Done")
+                yield make_event(RUN_COMPLETED, summary="Done",
+                                 **self._final_stats)
             elif not terminal_emitted:
                 stderr = self._process.stderr.read() if self._process.stderr else ""
                 yield make_event(RUN_FAILED,
@@ -616,6 +621,7 @@ class ClaudeCodeProvider(BaseProvider):
 
         elif event_type == "result":
             is_error = event.get("is_error", False)
+            self._capture_result_stats(event)
             if is_error:
                 result_text = event.get("result", "Unknown error")
                 if "login" in result_text.lower():
@@ -623,9 +629,48 @@ class ClaudeCodeProvider(BaseProvider):
                                      summary="Login required. Run: claude auth login")
                     yield make_event(RUN_FAILED,
                                      summary="Login required. Run: claude auth login",
-                                     error=result_text)
+                                     error=result_text, **self._final_stats)
                 else:
-                    yield make_event(RUN_FAILED, summary=result_text, error=result_text)
+                    yield make_event(RUN_FAILED, summary=result_text,
+                                     error=result_text, **self._final_stats)
+
+    def _capture_result_stats(self, event):
+        """Stash the `result` event's usage so RUN_COMPLETED can carry it.
+
+        Everything needed to populate `agent_work_log`'s five telemetry
+        columns already existed except this. `store.create_work_log_entry`
+        has named `cost_usd`, `input_tokens`, `output_tokens`,
+        `duration_ms` and `num_turns` in its INSERT since the table was
+        added, and `service.py` passes the terminal event's `data` dict
+        straight in as `stats` — but the success path of this branch read
+        only `is_error` and dropped the payload, so all five have been
+        NULL across every row ever written (1,395 of them, measured
+        2026-11-21, which is what `no_new_unmaintained_columns` has been
+        reporting).
+
+        **It has to be stashed rather than attached where it arrives.**
+        The `result` event is the stream's last JSON line; RUN_COMPLETED
+        is emitted later, from the returncode check after stdout EOF, and
+        that is the event `service.py` turns into a work-log row. Yielding
+        the usage from here instead would mean no work-log row carries it,
+        because this branch yields a terminal event only on error.
+
+        Keys are mapped to what the consumer already reads, not to what
+        the CLI calls them: `store` asks for `turns`, the CLI says
+        `num_turns`. Mapping here keeps the fix to one file. Absent keys
+        are left out rather than written as 0 — a run whose usage the CLI
+        did not report should stay NULL, since 0 would claim it was free.
+        """
+        usage = event.get("usage") or {}
+        candidates = {
+            "cost_usd": event.get("total_cost_usd"),
+            "input_tokens": usage.get("input_tokens"),
+            "output_tokens": usage.get("output_tokens"),
+            "duration_ms": event.get("duration_ms"),
+            "turns": event.get("num_turns"),
+        }
+        self._final_stats = {k: v for k, v in candidates.items()
+                             if v is not None}
 
     def cancel(self):
         self._cancelled = True
