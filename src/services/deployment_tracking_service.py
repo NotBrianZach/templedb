@@ -66,10 +66,27 @@ class DeploymentTrackingService(BaseService):
         project_id: int,
         target: str,
         deployment_hash: Optional[str] = None,
-        work_dir: Optional[Path] = None
+        work_dir: Optional[Path] = None,
+        commit_hash: Optional[str] = None,
+        started_at: Optional[str] = None,
     ) -> int:
         """
         Start tracking a deployment.
+
+        commit_hash is what was deployed. It was never passed by either caller
+        in cli/commands/deploy.py, so every one of the 436 rows this table held
+        on 2026-11-22 had it NULL — the table recorded that a deploy happened
+        and not what it shipped. That is the reason "is production current?"
+        needed an HTTP probe and a human to think of running it, rather than
+        being a join. The column already existed; only the argument was
+        missing.
+
+        started_at is an override, because both callers record the deployment
+        AFTER the deploy process has exited: CURRENT_TIMESTAMP is then the
+        moment the row was written, not the moment the work began, and
+        `completed_at - started_at` disagrees with duration_ms. Row 439 read
+        2m44s against a duration_ms of 199s. Pass the real start and the two
+        agree.
 
         Returns:
             deployment_id for tracking progress
@@ -80,12 +97,37 @@ class DeploymentTrackingService(BaseService):
         deployment_id = db_utils.execute("""
             INSERT INTO deployment_history (
                 project_id, target_name, deployment_type, deployed_by,
-                status, cathedral_checksum, started_at
-            ) VALUES (?, ?, 'standard', ?, 'in_progress', ?, CURRENT_TIMESTAMP)
-        """, (project_id, target, deployed_by, deployment_hash))
+                status, cathedral_checksum, commit_hash, started_at
+            ) VALUES (?, ?, 'standard', ?, 'in_progress', ?, ?,
+                      COALESCE(?, CURRENT_TIMESTAMP))
+        """, (project_id, target, deployed_by, deployment_hash, commit_hash,
+              started_at))
 
         logger.info(f"📝 Started tracking deployment {deployment_id}")
         return deployment_id
+
+    @staticmethod
+    def default_branch_head(project_id: int) -> Optional[str]:
+        """
+        The commit a deploy of this project would be shipping.
+
+        `vcs_branches.head_commit_id` on the default branch, which is
+        maintained — checked against `MAX(id)` over the branch's commits on
+        2026-11-22 and they agreed. Preferred over the MAX(id) form anyway,
+        because that one silently answers with a feature branch's tip when one
+        is newer.
+
+        Returns None rather than raising: a project with no commits is a real
+        state and must not be a reason a deploy fails to be recorded.
+        """
+        row = db_utils.query_one(
+            """SELECT c.commit_hash
+                 FROM vcs_branches b
+                 JOIN vcs_commits c ON c.id = b.head_commit_id
+                WHERE b.project_id = ? AND b.is_default = 1""",
+            (project_id,),
+        )
+        return row['commit_hash'] if row else None
 
     def complete_deployment(
         self,
@@ -133,6 +175,118 @@ class DeploymentTrackingService(BaseService):
             check_result.error_message,
             check_result.details
         ))
+
+    def run_version_health_check(
+        self,
+        deployment_id: int,
+        base_url: str,
+        expected_commit: str,
+        path: str = '/api/version',
+        field: str = 'sha',
+        timeout: int = 20,
+    ) -> HealthCheckResult:
+        """
+        Ask the deployed thing which commit it is, and compare.
+
+        This is the one check worth running after every deploy, because it is
+        the only one that can tell a deploy that SUCCEEDED from a deploy that
+        ARRIVED. A wrangler upload reporting success and a live site still
+        serving last week's bundle look identical from this side of the wire;
+        the difference is a field at an endpoint.
+
+        It was already written, twice, as bash: bza's scripts/verify-live-sha.sh
+        does exactly this and is good at it. The trouble is where it lived —
+        step 4 of a deploy script, so it was lost precisely when the deploy was
+        interrupted, which is when it matters. On 2026-11-21 a deploy shipped
+        correctly, was cut off before its own verification, and the result had
+        to be confirmed by hand. Worse, the same script is the only thing that
+        ever asks the question, so "production is sixteen commits behind" was
+        discoverable only by someone choosing to ask.
+
+        As a health check it becomes a row: recorded per deployment, queryable
+        after the fact, and runnable on a timer by something that is not the
+        deploy.
+
+        `path` and `field` are arguments rather than conventions because the
+        endpoint is the project's business — templedb cannot know that a thing
+        it deployed exposes its build sha, let alone where. The defaults match
+        bza because bza is the project that has one; anything else passes its
+        own.
+
+        A mismatch is a `fail`, not an error. The deploy may well have worked
+        and the edge may simply not have caught up, so this records what it saw
+        and lets the caller decide. Prefix matching, because a build may stamp
+        a short sha: either side being a prefix of the other counts, which is
+        the same latitude `--if-match` gives a content hash.
+        """
+        url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+        if not HAS_REQUESTS:
+            result = HealthCheckResult(
+                check_type='http',
+                check_name='live commit matches graph',
+                status='skip',
+                endpoint=url,
+                error_message="requests module not available (pip install requests)",
+            )
+            self.add_health_check(deployment_id, result)
+            return result
+
+        start_time = time.time()
+        try:
+            response = requests.get(url, timeout=timeout)
+            elapsed_ms = int((time.time() - start_time) * 1000)
+
+            live = None
+            try:
+                live = (response.json() or {}).get(field)
+            except ValueError:
+                pass
+
+            if live is None:
+                result = HealthCheckResult(
+                    check_type='http',
+                    check_name='live commit matches graph',
+                    status='fail',
+                    response_time_ms=elapsed_ms,
+                    endpoint=url,
+                    status_code=response.status_code,
+                    error_message=f"no '{field}' in the response body",
+                )
+            else:
+                live = str(live)
+                expected = str(expected_commit)
+                agrees = live.startswith(expected) or expected.startswith(live)
+                result = HealthCheckResult(
+                    check_type='http',
+                    check_name='live commit matches graph',
+                    status='pass' if agrees else 'fail',
+                    response_time_ms=elapsed_ms,
+                    endpoint=url,
+                    status_code=response.status_code,
+                    error_message=None if agrees else f"live {live}, graph {expected}",
+                    details=f'{{"live": "{live}", "expected": "{expected}"}}',
+                )
+
+        except requests.Timeout:
+            result = HealthCheckResult(
+                check_type='http',
+                check_name='live commit matches graph',
+                status='timeout',
+                endpoint=url,
+                error_message=f"Request timed out after {timeout}s",
+            )
+        except Exception as e:
+            result = HealthCheckResult(
+                check_type='http',
+                check_name='live commit matches graph',
+                status='fail',
+                endpoint=url,
+                error_message=str(e),
+            )
+
+        self.add_health_check(deployment_id, result)
+        return result
 
     def run_http_health_check(
         self,

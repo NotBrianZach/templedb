@@ -262,65 +262,352 @@ class DeployOpsMixin:
                 return 0
 
             target_config = targets[0]
-            host = target_config.get('host')
 
-            if not host:
-                print("  No host configured for health checks")
+            # `access_url` first, `host` only as a fallback with a scheme put
+            # back on.
+            #
+            # This is why the command has never worked. It read `host`, which
+            # for bza/production is the bare 'aireadalong.com', and handed it
+            # to urllib — which answers "unknown url type: 'aireadalong.com'"
+            # because a bare authority is not a URL. The column holding a
+            # usable one, `access_url` = 'https://aireadalong.com', was in the
+            # same row the whole time.
+            url = (target_config.get('access_url') or '').strip()
+            if not url:
+                host = (target_config.get('host') or '').strip()
+                if host:
+                    url = host if '://' in host else f"https://{host}"
+            if not url:
+                print("  No URL configured for health checks")
                 print(f"  Set with: templedb deploy targets update {project_slug} {target} --host <url>")
                 return 0
 
-            # Run HTTP health check
-            checks = [
-                {'name': 'HTTP Response', 'url': host, 'expected_status': 200},
-                {'name': 'HTTPS Response', 'url': host.replace('http://', 'https://'), 'expected_status': 200},
-            ]
-
             all_passed = True
-            for check in checks:
-                start_time = time.time()
-                try:
-                    import urllib.request
-                    req = urllib.request.Request(check['url'], method='HEAD')
-                    response = urllib.request.urlopen(req, timeout=10)
-                    response_time = (time.time() - start_time) * 1000
-                    status = response.getcode()
+            checks_run = 0
 
-                    passed = status == check['expected_status']
-                    result_icon = "OK" if passed else "FAIL"
+            # Is it answering?
+            #
+            # Through the service rather than a local urllib call, which is the
+            # second reason this command did nothing: it called
+            # `tracking_service.record_health_check(...)`, and the service has
+            # no such method — it is `add_health_check`, taking a
+            # `HealthCheckResult`. Every invocation therefore raised
+            # AttributeError, the outer handler logged it, and the row was
+            # never written. That is why `deployment_health_checks` held three
+            # rows against 436 deployments: not an unused feature, a broken
+            # one. `run_http_health_check` records its own result, so there is
+            # no second call to get wrong.
+            result = tracking_service.run_http_health_check(
+                deployment_id=deployment_id,
+                check_name='HTTP Response',
+                url=url,
+            )
+            checks_run += 1
+            print(f"  [{'OK' if result.status == 'pass' else result.status.upper()}] HTTP Response: "
+                  f"{result.status_code or '-'} ({result.response_time_ms or 0}ms)"
+                  + (f" - {result.error_message}" if result.error_message else ""))
+            if result.status in ('fail', 'timeout'):
+                all_passed = False
 
-                    print(f"  [{result_icon}] {check['name']}: {status} ({response_time:.0f}ms)")
-
-                    tracking_service.record_health_check(
-                        deployment_id=deployment_id,
-                        check_name=check['name'],
-                        status='pass' if passed else 'fail',
-                        response_time_ms=response_time,
-                        details=f"HTTP {status}"
-                    )
-
-                    if not passed:
-                        all_passed = False
-
-                except Exception as e:
-                    response_time = (time.time() - start_time) * 1000
-                    print(f"  [FAIL] {check['name']}: {e} ({response_time:.0f}ms)")
-
-                    tracking_service.record_health_check(
-                        deployment_id=deployment_id,
-                        check_name=check['name'],
-                        status='fail',
-                        response_time_ms=response_time,
-                        details=str(e)
-                    )
+            # Is it answering with what we deployed?
+            #
+            # The check this command existed to make and did not. The one
+            # above says the service is up; a deploy that uploaded cleanly and
+            # left the edge serving last week's bundle passes it. See
+            # run_version_health_check for why that distinction is the whole
+            # point.
+            expected = tracking_service.default_branch_head(target_config['project_id'])
+            if expected:
+                result = tracking_service.run_version_health_check(
+                    deployment_id=deployment_id,
+                    base_url=url,
+                    expected_commit=expected,
+                )
+                checks_run += 1
+                print(f"  [{'OK' if result.status == 'pass' else result.status.upper()}] live commit: "
+                      f"{expected[:16]} expected"
+                      + (f" - {result.error_message}" if result.error_message else ""))
+                if result.status in ('fail', 'timeout'):
                     all_passed = False
 
             print()
+            # 'skip' is not failure — a host with no `requests` cannot make the
+            # probe, and reporting that as a drifted deployment would make the
+            # exit code useless to the timer this command is meant for.
             return 0 if all_passed else 1
 
         except Exception as e:
             logger.error(f"Health check failed: {e}")
             logger.debug("Full error:", exc_info=True)
             return 1
+
+    # ------------------------------------------------------------------
+    # deploy schedule — the timer that asks whether production is current
+    # ------------------------------------------------------------------
+
+    def schedule(self, args) -> int:
+        """Manage the systemd user timer that health-checks a deployment.
+
+        Parallel to `templedb ai agent schedule`, deliberately and down to
+        the dev-mode probe: that one already taught this machine what a
+        templedb-owned timer looks like, and a second set of conventions
+        would just be a thing to remember.
+
+        Why a timer at all, when `deploy run` now runs the same check: a
+        check that only runs during a deploy only ever answers "did THIS
+        deploy arrive". The question that went unanswered for sixteen
+        commits is "is production still current" — which nothing asks
+        between deploys, and which is false for days before anybody
+        notices. On 2026-11-21 a deploy was also interrupted after shipping
+        and before verifying, so even the during-deploy answer went
+        missing. A timer is what makes the question independent of
+        remembering to ask it.
+        """
+        action = args.action
+        if action == 'install':
+            return self._verify_schedule_install(args)
+        if action == 'uninstall':
+            return self._verify_schedule_uninstall(args)
+        if action == 'status':
+            return self._verify_schedule_status(args)
+        print(f"error: unknown schedule action: {action}", file=sys.stderr)
+        return 1
+
+    @staticmethod
+    def _verify_unit_names(slug: str):
+        """Per-slug units rather than one templated unit.
+
+        `ai agent tick` gets a single fixed-name unit because there is one
+        queue. A verify timer is per project AND per target, and a systemd
+        template has one service file shared by every instance — so the
+        target would have to be encoded in the instance name, or be the
+        same for everybody. Two short files per project is the cheaper
+        honesty.
+        """
+        base = f"templedb-deploy-verify-{slug}"
+        return f"{base}.service", f"{base}.timer"
+
+    def _verify_schedule_install(self, args) -> int:
+        import os as _os
+        import shutil
+        import subprocess
+        from pathlib import Path
+
+        slug = args.slug
+        target = getattr(args, 'target', None) or 'production'
+        interval = getattr(args, 'interval', None) or 'hourly'
+
+        project = self.query_one(
+            "SELECT id FROM projects WHERE slug = ?", (slug,))
+        if not project:
+            print(f"error: no such project: {slug}", file=sys.stderr)
+            return 1
+
+        # Refuse to schedule a check that can never pass. The command
+        # reports "No URL configured" and exits 0 in that case, so a timer
+        # over it would be green forever while answering nothing — the
+        # exact decoration this is meant to replace.
+        row = self.query_one(
+            """SELECT access_url, host FROM deployment_targets
+                WHERE project_id = ? AND target_name = ?""",
+            (project['id'], target))
+        if not row:
+            print(f"error: {slug} has no '{target}' target", file=sys.stderr)
+            return 1
+        if not (row['access_url'] or row['host']):
+            print(f"error: the '{target}' target has no access_url or host, "
+                  f"so there is nothing to probe", file=sys.stderr)
+            return 1
+
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        service_name, timer_name = self._verify_unit_names(slug)
+
+        templedb_bin = (shutil.which('templedb')
+                        or '/home/zach/.nix-profile/bin/templedb')
+
+        # Whether the INSTALLED binary can actually do this, probed with
+        # dev mode stripped — the same trap `ai agent schedule` documents:
+        # installing from a dev-mode shell is the normal way to reach a
+        # brand-new subcommand, and a probe that inherited it would resolve
+        # the caller's own workspace and report a false green.
+        #
+        # Unlike that one, the subcommand existing is NOT enough here.
+        # `deploy health-check` has existed all along and was broken — it
+        # called a method the service does not have — so a `--help` probe
+        # would pass against a binary whose every firing writes no row. The
+        # decisive question is whether the fix is in the package, so that
+        # is what gets asked.
+        probe_env = {k: v for k, v in _os.environ.items()
+                     if k not in ("TEMPLEDB_DEV_MODE", "TEMPLEDB_DEV_SRC")}
+        probe = subprocess.run(
+            [templedb_bin, 'deploy', 'health-check', '--help'],
+            capture_output=True, text=True, env=probe_env)
+        supported = probe.returncode == 0
+        fix_present = False
+        if supported:
+            try:
+                pkg = Path(templedb_bin).resolve().parent.parent
+                fix_present = any(
+                    'run_version_health_check' in p.read_text(errors='ignore')
+                    for p in pkg.rglob('deployment_tracking_service.py'))
+            except Exception:
+                fix_present = False
+
+        dev_src = getattr(args, 'dev_src', None)
+        env_lines = ""
+        if dev_src:
+            dev_path = Path(dev_src).expanduser().resolve()
+            if not (dev_path / "cli").is_dir():
+                print(f"error: {dev_path} does not look like a templedb "
+                      f"src tree (no cli/ inside)", file=sys.stderr)
+                return 1
+            env_lines = (f"Environment=TEMPLEDB_DEV_MODE=1\n"
+                         f"Environment=TEMPLEDB_DEV_SRC={dev_path}\n")
+
+        service = f"""[Unit]
+Description=TempleDB deploy verify — is {slug} ({target}) serving the graph head
+Documentation=man:templedb(1)
+# Needs the network to reach the deployment's own version endpoint.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+{env_lines}# Exits non-zero when a check fails, which is the whole signal: a red
+# unit means production is answering with something other than the graph
+# head. 'skip' is not a failure — see the exit code in health_check.
+ExecStart={templedb_bin} deploy health-check {slug} --target {target}
+# One HTTP request and a DB read. Anything beyond a minute is a hang.
+TimeoutStartSec=120
+"""
+
+        timer = f"""[Unit]
+Description=Ask hourly whether {slug} ({target}) is still serving the graph head
+Documentation=man:templedb(1)
+
+[Timer]
+OnCalendar={interval}
+# A missed window runs on the next boot. Drift does not heal while the
+# laptop is shut, so the answer after a weekend is still worth having.
+Persistent=true
+# Jitter, unlike the agent tick: this one makes an outbound request to a
+# third party on a round number, and every templedb-managed timer firing
+# at :00 together is a thundering herd of one.
+RandomizedDelaySec=5m
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target
+"""
+
+        (unit_dir / service_name).write_text(service)
+        (unit_dir / timer_name).write_text(timer)
+
+        for cmd, label in (
+            (['systemctl', '--user', 'daemon-reload'], 'reload'),
+            (['systemctl', '--user', 'enable', '--now', timer_name],
+             'enable + start'),
+        ):
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"error: systemctl failed ({label}): "
+                      f"{r.stderr.strip()}", file=sys.stderr)
+                return 2
+
+        print(f"✓ Installed {timer_name}")
+        print(f"  units:      {unit_dir}")
+        print(f"  oncalendar: {interval}")
+        print(f"  checks:     {slug} ({target}) → {row['access_url'] or row['host']}")
+        if dev_src:
+            print(f"  dev src:    {dev_src}")
+        print()
+        if not supported:
+            print("  WARNING: the installed binary at")
+            print(f"    {templedb_bin}")
+            print("  has no `deploy health-check`, so every firing will fail "
+                  "until the")
+            print("  package is rebuilt.")
+            print()
+        elif not fix_present:
+            print("  WARNING: the installed binary at")
+            print(f"    {templedb_bin}")
+            print("  has `deploy health-check` but NOT the version check — it "
+                  "predates")
+            print("  run_version_health_check, so every firing will log an "
+                  "error and")
+            print("  record nothing. Either rebuild, or re-run this install "
+                  "with")
+            print("    --dev-src <edit-workspace>/src")
+            print("  to point the unit at DB-current code in the meantime.")
+            print()
+        print(f"  status:  templedb deploy schedule {slug} status")
+        print(f"  logs:    journalctl --user -u templedb-deploy-verify-{slug} "
+              "--since '24 hours ago'")
+        print(f"  disable: templedb deploy schedule {slug} uninstall")
+        return 0 if (supported and fix_present) or dev_src else 3
+
+    def _verify_schedule_uninstall(self, args) -> int:
+        import subprocess
+        from pathlib import Path
+
+        slug = args.slug
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        service_name, timer_name = self._verify_unit_names(slug)
+        subprocess.run(
+            ['systemctl', '--user', 'disable', '--now', timer_name],
+            capture_output=True, text=True)
+        removed = []
+        for name in (timer_name, service_name):
+            path = unit_dir / name
+            if path.exists():
+                path.unlink()
+                removed.append(name)
+        subprocess.run(['systemctl', '--user', 'daemon-reload'],
+                       capture_output=True, text=True)
+        if removed:
+            print(f"✓ Uninstalled {', '.join(removed)}")
+        else:
+            print(f"No templedb-deploy-verify units for {slug} were installed.")
+        print("Recorded health checks are untouched — "
+              f"`templedb deploy history {slug}` still shows them.")
+        return 0
+
+    def _verify_schedule_status(self, args) -> int:
+        import subprocess
+        from pathlib import Path
+
+        slug = args.slug
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        service_name, timer_name = self._verify_unit_names(slug)
+        if not (unit_dir / timer_name).exists():
+            print(f"Timer not installed for {slug}. Install it with:")
+            print(f"  templedb deploy schedule {slug} install")
+            return 1
+
+        r = subprocess.run(
+            ['systemctl', '--user', 'list-timers', timer_name, '--no-pager'],
+            capture_output=True, text=True)
+        print(r.stdout.strip() or "(no timer output)")
+
+        # The timer being healthy says nothing about what it last found,
+        # which is the question people actually mean. Same reasoning as
+        # `ai agent schedule status` printing the queue underneath.
+        checks = self.query_all("""
+            SELECT hc.check_name, hc.status, hc.checked_at, hc.error_message
+              FROM deployment_health_checks hc
+              JOIN deployment_history dh ON dh.id = hc.deployment_id
+             WHERE dh.project_id = (SELECT id FROM projects WHERE slug = ?)
+             ORDER BY hc.id DESC LIMIT 4
+        """, (slug,))
+        if not checks:
+            print("\nNo health checks recorded yet.")
+            return 0
+        print("\nlast checks:")
+        for c in checks:
+            print(f"  [{c['status']}] {c['check_name']} — {c['checked_at']}"
+                  + (f" :: {c['error_message']}" if c['error_message'] else ""))
+        return 0
 
     def rollback(self, args) -> int:
         """Rollback to a previous deployment"""

@@ -20,6 +20,61 @@ import db_utils
 logger = get_logger(__name__)
 
 
+def _iso(epoch: float) -> str:
+    """
+    A UTC timestamp in the format the rest of deployment_history uses.
+
+    `datetime('now')` and CURRENT_TIMESTAMP are both UTC 'YYYY-MM-DD HH:MM:SS'
+    in SQLite, so an override has to match or the column holds two formats and
+    nothing can order by it.
+    """
+    return datetime.utcfromtimestamp(epoch).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _verify_live(tracking_service, project, target: str, deployment_id: int) -> None:
+    """
+    Ask the deployed thing which commit it is now serving, and record it.
+
+    Runs only on a successful deploy, and only for a target that declares an
+    `access_url` — a NixOS host or a local target has nothing to probe, and a
+    skipped check is better recorded as nothing than as a failure.
+
+    Deliberately swallows everything. This is bookkeeping about a deploy that
+    has already happened: a probe that cannot be made must not turn a
+    successful deploy into a failed command. The row not appearing IS the
+    signal, and `templedb deploy status` reports a deployment whose check is
+    missing differently from one whose check failed.
+    """
+    try:
+        head = tracking_service.default_branch_head(project['id'])
+        if not head:
+            return
+        row = db_utils.query_one(
+            """SELECT access_url FROM deployment_targets
+                WHERE project_id = ? AND target_name = ?
+                  AND access_url IS NOT NULL AND access_url != ''""",
+            (project['id'], target),
+        )
+        if not row:
+            return
+        result = tracking_service.run_version_health_check(
+            deployment_id=deployment_id,
+            base_url=row['access_url'],
+            expected_commit=head,
+        )
+        if result.status == 'pass':
+            print(f"✓ live commit matches graph ({head[:16]})")
+        elif result.status == 'skip':
+            print(f"• live commit not checked: {result.error_message}")
+        else:
+            # Printed, not raised. The deploy succeeded; what failed is the
+            # agreement between what shipped and what is being served, and the
+            # operator is the one who decides what that means.
+            print(f"✗ live commit does not match graph: {result.error_message}")
+    except Exception as e:
+        logger.warning(f"Failed to verify the live commit: {e}")
+
+
 from cli.commands.deploy_ops import DeployOpsMixin
 
 
@@ -294,7 +349,9 @@ class DeployCommands(DeployOpsMixin, Command):
                                 if project:
                                     deployment_id = tracking_service.start_deployment(
                                         project_id=project['id'],
-                                        target=target
+                                        target=target,
+                                        commit_hash=tracking_service.default_branch_head(project['id']),
+                                        started_at=_iso(deploy_start_time),
                                     )
 
                                     tracking_service.complete_deployment(
@@ -304,6 +361,8 @@ class DeployCommands(DeployOpsMixin, Command):
                                         duration_seconds=deploy_duration,
                                         notes=None if result.returncode == 0 else "Deployment script failed"
                                     )
+                                    if result.returncode == 0:
+                                        _verify_live(tracking_service, project, target, deployment_id)
                             except Exception as e:
                                 # Don't fail deployment if tracking fails
                                 logger.warning(f"Failed to record deployment: {e}")
@@ -363,7 +422,9 @@ class DeployCommands(DeployOpsMixin, Command):
                         deployment_id = tracking_service.start_deployment(
                             project_id=project['id'],
                             target=target,
-                            work_dir=result.work_dir
+                            work_dir=result.work_dir,
+                            commit_hash=tracking_service.default_branch_head(project['id']),
+                            started_at=_iso(deploy_start_time),
                         )
 
                         tracking_service.complete_deployment(
@@ -373,6 +434,8 @@ class DeployCommands(DeployOpsMixin, Command):
                             duration_seconds=deploy_duration,
                             notes=result.message if not result.success else None
                         )
+                        if result.success:
+                            _verify_live(tracking_service, project, target, deployment_id)
                 except Exception as e:
                     # Don't fail deployment if tracking fails
                     logger.warning(f"Failed to record deployment: {e}")
@@ -701,6 +764,28 @@ def register(cli):
     health_parser.add_argument('slug', help='Project slug')
     health_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
     cli.commands['deploy.health-check'] = deploy_handler.health_check
+
+    # deploy schedule command — the timer that runs health-check unattended.
+    # Same shape as `templedb ai agent schedule`, including the action
+    # positional, so there is one convention for a templedb-owned timer.
+    schedule_parser = subparsers.add_parser(
+        'schedule',
+        help='Manage the systemd user timer that health-checks a deployment')
+    schedule_parser.add_argument('slug', help='Project slug')
+    schedule_parser.add_argument(
+        'action', choices=['install', 'uninstall', 'status'])
+    schedule_parser.add_argument(
+        '--target', default='production',
+        help='Deployment target to check (default: production)')
+    schedule_parser.add_argument(
+        '--interval', default='hourly',
+        help='systemd OnCalendar spec (default: hourly). One HTTP request per '
+             'firing, so this can be frequent without costing anything.')
+    schedule_parser.add_argument(
+        '--dev-src',
+        help='Point the unit at a templedb src tree via TEMPLEDB_DEV_MODE, for '
+             'running DB-current code before a rebuild')
+    cli.commands['deploy.schedule'] = deploy_handler.schedule
 
     # deploy rollback command
     rollback_parser = subparsers.add_parser('rollback', help='Rollback to previous deployment')
