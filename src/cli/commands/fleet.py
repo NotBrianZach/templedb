@@ -268,6 +268,109 @@ class FleetCommands(Command):
             print(f"❌ Failed to list machines: {e}")
             return 1
 
+    def machine_update(self, args) -> int:
+        """Change an existing machine's address or SSH details.
+
+        `add` and `remove` were the whole surface here, which meant the
+        only supported way to correct a moved address was to delete the
+        row and re-add it. That loses `machine_uuid` — the stable handle
+        the entity graph and `nix_generations.machine_id` hang off — and
+        the DELETE cascades, so an address typo cost you the machine's
+        recorded history. Everyone who hit this reached for raw SQL
+        instead, which is how zMothership3 sat on a 192.168.1.x address
+        for two months after the laptop moved subnets.
+
+        Only the fields actually passed are written; everything else,
+        `machine_uuid` included, is left alone.
+        """
+        try:
+            network = self._get_network(args.network, args.project)
+            if not network:
+                return 1
+
+            machine = db_utils.query_one("""
+                SELECT * FROM fleet_machines
+                WHERE network_id = ? AND machine_name = ?
+            """, (network['id'], args.machine))
+
+            if not machine:
+                print(f"❌ Machine '{args.machine}' not found in network '{args.network}'")
+                return 1
+
+            sets: List[str] = []
+            params: List[Any] = []
+            changes: List[str] = []
+
+            for attr, column, label in (
+                ('host', 'target_host', 'Host'),
+                ('user', 'target_user', 'User'),
+                ('port', 'target_port', 'Port'),
+                ('system_type', 'system_type', 'Type'),
+                ('target_env', 'target_env', 'Env'),
+            ):
+                value = getattr(args, attr, None)
+                if value is None:
+                    continue
+                if machine[column] == value:
+                    continue
+                sets.append(f"{column} = ?")
+                params.append(value)
+                changes.append(f"   {label}: {machine[column] or 'N/A'} → {value}")
+
+            # tags and flake_attr share one JSON column, so they are
+            # merged into the existing config rather than replacing it —
+            # passing --tags must not silently drop --flake-attr.
+            tags = getattr(args, 'tags', None)
+            flake_attr = getattr(args, 'flake_attr', None)
+            if tags is not None or flake_attr is not None:
+                config = json.loads(machine['machine_config'] or '{}')
+                before = dict(config)
+                if tags is not None:
+                    config['tags'] = tags
+                if flake_attr is not None:
+                    config['flake_attr'] = flake_attr
+                if config != before:
+                    sets.append("machine_config = ?")
+                    params.append(json.dumps(config))
+                    if tags is not None:
+                        changes.append(f"   Tags: {', '.join(before.get('tags') or []) or 'none'}"
+                                       f" → {', '.join(tags) or 'none'}")
+                    if flake_attr is not None:
+                        changes.append(f"   Flake attr: {before.get('flake_attr') or args.machine}"
+                                       f" → {flake_attr}")
+
+            if not sets:
+                print(f"No changes for machine '{args.machine}'")
+                return 0
+
+            # A recorded health verdict is a statement about an address.
+            # Once the address moves, 'unreachable' is no longer a fact
+            # about this machine, so it reverts to unknown and waits for
+            # the next `sweep` rather than keeping a stale red.
+            host_moved = any(s.startswith('target_host') for s in sets)
+            if host_moved:
+                sets.extend(["health_status = NULL", "last_health_check_at = NULL"])
+
+            params.append(machine['id'])
+            db_utils.execute(f"""
+                UPDATE fleet_machines
+                   SET {', '.join(sets)}, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?
+            """, tuple(params))
+
+            print(f"✅ Updated machine '{args.machine}' in network '{args.network}'")
+            for line in changes:
+                print(line)
+            if host_moved:
+                print("   Health reset to unknown — run `templedb deploy fleet sweep` to recheck")
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Error updating machine: {e}")
+            print(f"❌ Failed to update machine: {e}")
+            return 1
+
     def machine_remove(self, args) -> int:
         """Remove a machine from a network"""
         try:
@@ -1187,6 +1290,26 @@ def _register_fleet_commands(handler, subparsers, cli, prefix='fleet'):
     mlist_parser.add_argument('project', help='Project slug')
     mlist_parser.add_argument('network', help='Network name')
     cli.commands[f'{prefix}.machine.list'] = handler.machine_list
+
+    # machine update
+    #
+    # No defaults on any optional flag: the handler writes only the
+    # fields that are not None, so a default would silently reset
+    # columns the caller never mentioned.
+    mupdate_parser = machine_subparsers.add_parser(
+        'update', help='Change an existing machine\'s address or SSH details')
+    mupdate_parser.add_argument('project', help='Project slug')
+    mupdate_parser.add_argument('network', help='Network name')
+    mupdate_parser.add_argument('machine', help='Machine name')
+    mupdate_parser.add_argument('--host', help='New target host (hostname or IP)')
+    mupdate_parser.add_argument('--user', help='New SSH user')
+    mupdate_parser.add_argument('--port', type=int, help='New SSH port')
+    mupdate_parser.add_argument('--system-type', help='New system type')
+    mupdate_parser.add_argument('--target-env', help='New target environment')
+    mupdate_parser.add_argument('--tags', nargs='+', metavar='TAG',
+                                help='Replace machine tags (e.g. --tags laptop tailnet)')
+    mupdate_parser.add_argument('--flake-attr', help='New flake attribute name')
+    cli.commands[f'{prefix}.machine.update'] = handler.machine_update
 
     # machine remove
     remove_parser = machine_subparsers.add_parser('remove', help='Remove a machine from a network')

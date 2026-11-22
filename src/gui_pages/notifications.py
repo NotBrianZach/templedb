@@ -15,9 +15,34 @@ SMTP secrets were never set.
 So the content existed and nothing could read it. The queue was write-
 only in practice, and `agent_notifications` appeared nowhere in
 gui_pages. This is the read surface, and it deliberately needs no
-transport: with the GUI served to the tailnet, "what did my agents do
-and what broke" is answerable from a phone without SMTP, a push
-provider, or an account anywhere.
+transport: "what did my agents do and what broke" is answerable
+without SMTP, a push provider, or an account anywhere.
+
+**Reachable over an SSH tunnel, NOT over the tailnet.** This paragraph
+used to say "with the GUI served to the tailnet … answerable from a
+phone", which was the intent and never the deployment. Measured
+2026-11-21: the GUI binds 127.0.0.1:8420 and the MCP daemon
+127.0.0.1:8421, and `scripts/termux-outbox.sh` records why, in the one
+place that had it right -- "the GUI is bound to 127.0.0.1 and has no
+authentication at all, so exposing it is a security decision that has
+not been made yet."
+
+That decision was taken on 2026-11-21 and it was to KEEP the tunnel:
+
+    ssh -L 8420:localhost:8420 zach@<mothership>
+
+SSH over the tailnet is already key-only and already the Tier 0 path
+that `device outbox` uses, so a phone can read this page today with no
+port opened and no token invented. Adding auth here is the prerequisite
+for any direct bind, and until it exists this page shows secrets, env
+vars and the whole schema to whoever reaches it -- which is the actual
+reason the port is closed, rather than an oversight to be tidied up by
+changing the host.
+
+Note the direction this covers and the one it does not. Phone to
+mothership is solved and append-only (`templedb device outbox`);
+mothership to phone has only the dead SMTP path, so this page is PULL.
+Nothing here notifies anybody.
 
 Reading here does NOT mark a row sent. `sent_at` means "the mail went
 out", and claiming delivery because someone opened a web page would
