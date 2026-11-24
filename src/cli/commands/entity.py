@@ -3787,6 +3787,19 @@ WantedBy=timers.target
              self._check_generation_log_covers_profile_links),
             ('no_undefined_names',
              self._check_no_undefined_names),
+            # ── transition invariants ────────────────────────────────
+            #
+            # The three below all watch the same shape of bug: a row
+            # whose columns are individually valid and jointly
+            # impossible, because something changed one region of its
+            # state and left another asserting the old world. See the
+            # report "Transition bugs, not state bugs".
+            ('health_verdict_describes_current_address',
+             self._check_health_verdict_describes_current_address),
+            ('read_handoffs_are_acked',
+             self._check_read_handoffs_are_acked),
+            ('active_sessions_have_live_processes',
+             self._check_active_sessions_have_live_processes),
         ]
         if args.check:
             checks = [c for c in checks if c[0] == args.check]
@@ -4919,6 +4932,226 @@ WantedBy=timers.target
             f"staged={r['staged_rows']} row(s)"
             for r in rows
         ]
+
+    # ── transition invariants ────────────────────────────────────────────
+    #
+    # Each of these watches a row whose columns are individually valid and
+    # jointly impossible: something advanced one region of the row's state
+    # and left another still describing the world before it. None of them
+    # can be expressed as a constraint, because the illegal thing is the
+    # *transition*, not the state.
+
+    @staticmethod
+    def _epoch_local_iso(value):
+        """Seconds since the epoch for a `datetime.now().isoformat()` string.
+
+        Naive and therefore LOCAL, which is the whole reason this helper
+        exists — see _check_health_verdict_describes_current_address.
+        Returns None rather than raising, so one malformed row cannot take
+        down a doctor run.
+        """
+        from datetime import datetime
+        try:
+            return datetime.fromisoformat(str(value)).timestamp()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _epoch_utc_sqlite(value):
+        """Seconds since the epoch for a SQLite CURRENT_TIMESTAMP string.
+
+        CURRENT_TIMESTAMP is UTC with a space separator and no zone
+        marker, so it must be told it is UTC before being compared with
+        anything.
+        """
+        from datetime import datetime, timezone
+        try:
+            naive = datetime.strptime(str(value)[:19], '%Y-%m-%d %H:%M:%S')
+            return naive.replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            return None
+
+    def _check_health_verdict_describes_current_address(self):
+        """Invariant: a machine's health verdict is not older than the row
+        that describes where that machine lives.
+
+        `health_status` is an assertion about `target_host`. When the host
+        moves and the verdict does not, the row keeps claiming something
+        true of an address the machine no longer has — which is exactly
+        how zMothership3 read 'unreachable' for two months while being up
+        the entire time, on a 192.168.1.x address it had left. Worse, it
+        reads as evidence: `fleet_addressing.resolve_host` treats
+        `target_host` as the most authoritative answer there is, so a
+        stale address also shadows the live one tailscale would supply.
+
+        `deploy fleet machine update` clears the verdict when the host
+        changes, but nothing enforces that on the other paths that write
+        `target_host`, and the obligation is invisible to whoever writes
+        the next one. This is the enforcement.
+
+        DO NOT compare the two timestamps in SQL. `last_health_check_at`
+        is written as `datetime.now().isoformat()` — naive LOCAL time with
+        a 'T' separator — while `updated_at` is SQLite CURRENT_TIMESTAMP,
+        which is UTC with a space. On this install they sit six hours
+        apart on every single row even when one UPDATE wrote both, so
+        `last_health_check_at < updated_at` is true for all rows, always,
+        and the check would be pure noise. Both are normalised to epoch
+        seconds here instead.
+        """
+        from db_utils import query_all
+        # Tolerance, not zero: the sweep writes both columns from one
+        # statement but not from one clock read, and a machine whose row
+        # was touched moments after its probe is not drifting.
+        TOLERANCE_S = 300
+        rows = query_all(
+            """SELECT machine_name, target_host, health_status,
+                      last_health_check_at, updated_at
+                 FROM fleet_machines
+                WHERE health_status IS NOT NULL
+                  AND last_health_check_at IS NOT NULL
+                  AND updated_at IS NOT NULL"""
+        )
+        issues = []
+        for r in rows:
+            probed = self._epoch_local_iso(r['last_health_check_at'])
+            touched = self._epoch_utc_sqlite(r['updated_at'])
+            if probed is None or touched is None:
+                issues.append(
+                    f"{r['machine_name']}: unparseable timestamps "
+                    f"(last_health_check_at={r['last_health_check_at']!r}, "
+                    f"updated_at={r['updated_at']!r})")
+                continue
+            drift = touched - probed
+            if drift > TOLERANCE_S:
+                issues.append(
+                    f"{r['machine_name']}: health_status="
+                    f"'{r['health_status']}' was recorded "
+                    f"{int(drift // 60)}m before the row was last modified "
+                    f"— the verdict may describe an address other than "
+                    f"'{r['target_host']}'. Re-probe with "
+                    f"`templedb deploy fleet sweep`.")
+        return issues
+
+    def _check_read_handoffs_are_acked(self):
+        """Invariant: a handoff note that has been read gets acked.
+
+        read → acked is the only transition left once a note is
+        delivered, and `handoff show` performs the read half as a side
+        effect of *looking*. There is no `handoff unread`, so a note read
+        by the wrong party is unrecoverable: it leaves the recipient's
+        unread list and the `templedb status` count, and nothing ever
+        says so.
+
+        That is not hypothetical. Verifying an outgoing note by running
+        `handoff show` on it set `read_at` six seconds after
+        `created_at` — the sender reading their own message — which would
+        have hidden it from the recipient permanently. The repair was to
+        resend as a new row and leave the original as a tombstone.
+
+        So two populations are reported. A note read within seconds of
+        being created is almost certainly the sender inspecting it, and
+        is worth surfacing immediately. A note read long ago and never
+        acked is the ordinary unfinished-business case and is given a
+        day's grace.
+        """
+        from db_utils import query_all
+        SELF_READ_S = 60
+        STALE_DAYS = 1
+        rows = query_all(
+            """SELECT id, from_session, to_session, to_topic,
+                      substr(subject, 1, 60) AS subject,
+                      created_at, read_at,
+                      CAST(strftime('%s', read_at) AS INTEGER)
+                        - CAST(strftime('%s', created_at) AS INTEGER)
+                        AS to_read_s,
+                      CAST(strftime('%s', 'now') AS INTEGER)
+                        - CAST(strftime('%s', read_at) AS INTEGER)
+                        AS since_read_s
+                 FROM handoff_notes
+                WHERE read_at IS NOT NULL
+                  AND acked_at IS NULL
+                ORDER BY id"""
+        )
+        issues = []
+        for r in rows:
+            dest = (f"session {r['to_session']}" if r['to_session']
+                    else f"topic {r['to_topic']}" if r['to_topic']
+                    else "broadcast")
+            if r['to_read_s'] is not None and r['to_read_s'] <= SELF_READ_S:
+                issues.append(
+                    f"handoff #{r['id']} to {dest} was read "
+                    f"{r['to_read_s']}s after it was created — almost "
+                    f"certainly the sender's own `handoff show`, which "
+                    f"removes it from the recipient's unread list. "
+                    f"Resend it; there is no mark-unread. "
+                    f"(\"{r['subject']}\")")
+            elif (r['since_read_s'] or 0) > STALE_DAYS * 86400:
+                issues.append(
+                    f"handoff #{r['id']} to {dest} read "
+                    f"{(r['since_read_s'] or 0) // 86400}d ago, never "
+                    f"acked (\"{r['subject']}\")")
+        return issues
+
+    def _check_active_sessions_have_live_processes(self):
+        """Invariant: an active vcs_session has a process behind it.
+
+        `ended_at IS NULL` is read all over as "someone is working here":
+        it decides which edit tree gets adopted, what `vcs status`
+        reports, and what `checkout-gc` may collect. A row whose PID is
+        gone keeps making that claim with nobody behind it.
+
+        Complementary to no_expired_active_sessions, which fires on age.
+        A session can be well inside its declared lifetime and already
+        dead — the reason dead-PID sessions younger than a day have to be
+        ended by hand — and conversely an *expired* row can be a live
+        long-running daemon that must not be reaped. Age and liveness are
+        different questions; this one asks liveness.
+
+        Only sessions recorded on this host are considered, because a PID
+        means nothing across machines, and a session from another host
+        would otherwise be reported dead on every run here.
+
+        Staged row counts are included because that is what makes it
+        urgent rather than untidy: a dead session still holding staged
+        rows is how work gets stranded and then reaped — session 1216 was
+        ended by stale-timeout with uncommitted content in
+        `file_contents`.
+        """
+        from db_utils import query_all
+        import os
+        import socket
+        this_host = socket.gethostname()
+        rows = query_all(
+            """SELECT id, name, pid, started_at, host,
+                      (SELECT COUNT(*) FROM vcs_working_state
+                        WHERE staged_by_session_id = s.id
+                          AND state != 'unmodified')
+                        AS staged_rows
+                 FROM vcs_sessions s
+                WHERE ended_at IS NULL
+                  AND pid IS NOT NULL
+                  AND host = ?
+                ORDER BY id""",
+            (this_host,)
+        )
+        issues = []
+        for r in rows:
+            # /proc is the authority; os.kill(pid, 0) would also answer
+            # but raises for a live process owned by another user, which
+            # would read as "alive" for the wrong reason.
+            if os.path.exists(f"/proc/{r['pid']}"):
+                continue
+            staged = r['staged_rows'] or 0
+            urgency = (f", holding {staged} staged row(s)" if staged
+                       else "")
+            issues.append(
+                f"session #{r['id']} ('{r['name'] or 'unnamed'}') is "
+                f"active but PID {r['pid']} is gone "
+                f"(started {r['started_at']}){urgency}. "
+                f"End it with `templedb vcs session end {r['id']}`"
+                + (" — it names any divergent file first." if staged
+                   else "."))
+        return issues
 
     def _check_no_stale_deploy_stage_runs(self):
         """Invariant: no deploy_stage_runs row has ended_at IS NULL for

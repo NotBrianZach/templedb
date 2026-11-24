@@ -19,6 +19,104 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
+# ----------------------------------------------------------------------
+# `deploy health-check` exit codes.
+#
+# The command folded every failure into `return 0 if all_passed else 1`,
+# and its two checks are not remotely alike. Production serving an older
+# commit means somebody committed and nobody has deployed yet — routine,
+# and `scripts/verify-live-sha.sh` says so in its own comments: "deploys
+# here are manual, so drift between releases is the normal state rather
+# than a fault". Production not answering at all means nobody can reach
+# the site, or this laptop cannot resolve it. One of those needs waking
+# somebody up.
+#
+# Both exited 1, so `systemctl --user status templedb-deploy-verify-bza`
+# reported the same `status=1/FAILURE` either way and the only way to
+# learn which happened was to open the journal. The unit fired three
+# times on 2026-11-22 and failed all three with three different
+# meanings; the 2026-11-23 07:03 firing was a NameResolutionError that
+# cleared on its own. Red is the resting state of this unit — 87 bza
+# commits against 21 production deploys since 2026-11-16 — which is how
+# a signal gets ignored before the one failure that matters.
+#
+# Drift stays red deliberately. The unit's own description is "is bza
+# (production) still serving the graph head", so drift being a failure is
+# the author's intent; making the two distinguishable is not a change to
+# that.
+#
+# Why 10/11/12 rather than 2/3/4, which is what the rest of the CLI
+# would suggest:
+#
+#   - The consumer is systemd, which labels low exit codes from its LSB
+#     table. Verified on this host with `systemd-run --user`: exit 2
+#     prints `status=2/INVALIDARGUMENT` and exit 3 prints
+#     `status=3/NOTIMPLEMENTED`, both actively false here, while 10 and
+#     11 print `status=10/n/a`. A code is a worse signal than no code if
+#     the place it is read mislabels it.
+#   - 1 through 4 are spoken for CLI-wide — see
+#     templedb-rust/crates/templedb-db/src/exit.rs, which documents 1
+#     bad input, 2 not found, 3 a valid negative answer, 4 stale base.
+#     Giving 2 or 3 a second meaning here would collide with that.
+#
+# A bare number needs a key, so the generated unit file carries one: see
+# `_verify_schedule_install`.
+VERIFY_OK = 0
+VERIFY_DRIFT = 10
+VERIFY_UNREACHABLE = 11
+VERIFY_DEGRADED = 12
+
+
+def classify_verify_result(http_result, version_result) -> int:
+    """Fold two health check results into one exit code.
+
+    Takes `HealthCheckResult`s, either of which may be None when the
+    check was not attempted — no `access_url` to probe, or a project
+    with no commits to compare against. Pure so that the classification
+    can be tested without a network, a database or systemd, which is the
+    only way to exercise the unreachable branch on a host whose DNS
+    works.
+
+    Precedence is unreachable, then degraded, then drift, and that order
+    is load-bearing. A 503 from `/` alongside a stale sha is not drift:
+    the site answered and answered wrong, so the urgent condition has to
+    win over the routine one it happens to co-occur with.
+
+    `status_code` is the discriminator for reachability rather than the
+    error text, because both runners in DeploymentTrackingService set it
+    exactly when an HTTP response came back and leave it None on timeout
+    or connection error. Parsing error_message would work today and
+    break the next time urllib3 rewords an exception.
+
+    `details` is the discriminator for drift for the same reason: the
+    version runner fills it with the live and expected shas only in the
+    branch where it actually read a live value. A `/api/version` that
+    answers 200 with no `sha` field is a fail with no details, and
+    calling that drift would report "nobody deployed" about an endpoint
+    that is broken — the same category error this function exists to
+    stop.
+    """
+    results = [r for r in (http_result, version_result) if r is not None]
+
+    # 'skip' is not failure — a host with no `requests` cannot make the
+    # probe, and reporting that as a drifted deployment would make the
+    # exit code useless to the timer this command is meant for.
+    failed = [r for r in results if r.status in ('fail', 'timeout')]
+    if not failed:
+        return VERIFY_OK
+
+    if any(r.status_code is None for r in failed):
+        return VERIFY_UNREACHABLE
+
+    drifted = (version_result is not None
+               and version_result.status == 'fail'
+               and version_result.details is not None)
+    if drifted and len(failed) == 1 and failed[0] is version_result:
+        return VERIFY_DRIFT
+
+    return VERIFY_DEGRADED
+
+
 class DeployOpsMixin:
     """Mixin providing operational deploy commands. Mixed into DeployCommands."""
 
@@ -282,7 +380,6 @@ class DeployOpsMixin:
                 print(f"  Set with: templedb deploy targets update {project_slug} {target} --host <url>")
                 return 0
 
-            all_passed = True
             checks_run = 0
 
             # Is it answering?
@@ -297,17 +394,17 @@ class DeployOpsMixin:
             # rows against 436 deployments: not an unused feature, a broken
             # one. `run_http_health_check` records its own result, so there is
             # no second call to get wrong.
-            result = tracking_service.run_http_health_check(
+            http_result = tracking_service.run_http_health_check(
                 deployment_id=deployment_id,
                 check_name='HTTP Response',
                 url=url,
             )
             checks_run += 1
-            print(f"  [{'OK' if result.status == 'pass' else result.status.upper()}] HTTP Response: "
-                  f"{result.status_code or '-'} ({result.response_time_ms or 0}ms)"
-                  + (f" - {result.error_message}" if result.error_message else ""))
-            if result.status in ('fail', 'timeout'):
-                all_passed = False
+            print(f"  [{'OK' if http_result.status == 'pass' else http_result.status.upper()}] "
+                  f"HTTP Response: {http_result.status_code or '-'} "
+                  f"({http_result.response_time_ms or 0}ms)"
+                  + (f" - {http_result.error_message}"
+                     if http_result.error_message else ""))
 
             # Is it answering with what we deployed?
             #
@@ -316,25 +413,42 @@ class DeployOpsMixin:
             # left the edge serving last week's bundle passes it. See
             # run_version_health_check for why that distinction is the whole
             # point.
+            version_result = None
             expected = tracking_service.default_branch_head(target_config['project_id'])
             if expected:
-                result = tracking_service.run_version_health_check(
+                version_result = tracking_service.run_version_health_check(
                     deployment_id=deployment_id,
                     base_url=url,
                     expected_commit=expected,
                 )
                 checks_run += 1
-                print(f"  [{'OK' if result.status == 'pass' else result.status.upper()}] live commit: "
-                      f"{expected[:16]} expected"
-                      + (f" - {result.error_message}" if result.error_message else ""))
-                if result.status in ('fail', 'timeout'):
-                    all_passed = False
+                print(f"  [{'OK' if version_result.status == 'pass' else version_result.status.upper()}] "
+                      f"live commit: {expected[:16]} expected"
+                      + (f" - {version_result.error_message}"
+                         if version_result.error_message else ""))
 
             print()
-            # 'skip' is not failure — a host with no `requests` cannot make the
-            # probe, and reporting that as a drifted deployment would make the
-            # exit code useless to the timer this command is meant for.
-            return 0 if all_passed else 1
+            code = classify_verify_result(http_result, version_result)
+
+            # Say which failure this was in the output too, not only in the
+            # exit code. The journal is what a human reads after systemd has
+            # told them the number, and a one-line verdict there is cheaper
+            # than reconstructing it from two check lines.
+            if code == VERIFY_UNREACHABLE:
+                print("  UNREACHABLE: production did not answer. Either the "
+                      "site is down or this")
+                print("  host cannot resolve it — check `getent hosts` before "
+                      "escalating.")
+            elif code == VERIFY_DEGRADED:
+                print("  DEGRADED: production answered, but not usably. This "
+                      "is not deploy drift.")
+            elif code == VERIFY_DRIFT:
+                print("  DRIFT: production is answering, with an older commit. "
+                      "Expected between")
+                print("  manual deploys; a deploy is what clears it.")
+            if code != VERIFY_OK:
+                print()
+            return code
 
         except Exception as e:
             logger.error(f"Health check failed: {e}")
@@ -474,9 +588,21 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-{env_lines}# Exits non-zero when a check fails, which is the whole signal: a red
-# unit means production is answering with something other than the graph
-# head. 'skip' is not a failure — see the exit code in health_check.
+{env_lines}# Exits non-zero when a check fails, which is the whole signal. The code
+# says WHICH failure, because `status=1/FAILURE` on its own sent people
+# to the journal to find out whether the site was down or merely behind:
+#
+#   10  DRIFT        — answering, with an older commit. Routine between
+#                      manual deploys; a deploy clears it.
+#   11  UNREACHABLE  — no answer at all. The site is down, or this host
+#                      cannot resolve it. Check DNS before escalating.
+#   12  DEGRADED     — answered, but not usably: a non-200, or a version
+#                      endpoint with no sha in it. Not drift.
+#    1  the check could not be run (no deployment, no target, crash).
+#
+# Codes start at 10 because systemd labels 2 and 3 from its LSB table as
+# INVALIDARGUMENT and NOTIMPLEMENTED, which would both be lies here.
+# 'skip' is not a failure — see classify_verify_result.
 ExecStart={templedb_bin} deploy health-check {slug} --target {target}
 # One HTTP request and a DB read. Anything beyond a minute is a hang.
 TimeoutStartSec=120

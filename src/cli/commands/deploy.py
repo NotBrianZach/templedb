@@ -760,7 +760,18 @@ def register(cli):
     cli.commands['deploy.stats'] = deploy_handler.stats
 
     # deploy health-check command
-    health_parser = subparsers.add_parser('health-check', help='Run health checks on deployed project')
+    #
+    # The exit codes are in the help text because they are the contract a
+    # timer branches on, and `admin schema` is how the CLI surface gets
+    # read. 10/11/12 rather than 2/3/4 because systemd labels low codes
+    # from its LSB table — see classify_verify_result in deploy_ops.py.
+    health_parser = subparsers.add_parser(
+        'health-check',
+        help='Run health checks on deployed project. Exits 0 current, '
+             '10 drift (answering, older commit — routine between manual '
+             'deploys), 11 unreachable (no answer; site down or local DNS), '
+             '12 degraded (answered unusably — not drift), 1 the check '
+             'could not be run.')
     health_parser.add_argument('slug', help='Project slug')
     health_parser.add_argument('--target', default='production', help='Deployment target (default: production)')
     cli.commands['deploy.health-check'] = deploy_handler.health_check
