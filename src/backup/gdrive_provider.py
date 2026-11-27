@@ -78,13 +78,21 @@ class GDriveBackupProvider(CloudBackupProvider):
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
 
-            # Get secret blob from system_config project
+            # Get secret blob from system_config project.
+            #
+            # Via project_secret_blobs: migration 033 dropped
+            # secret_blobs.project_id. Joining projects off sb raised "no such
+            # column: sb.project_id", which the except below turned into
+            # `return None` -- indistinguishable from "no credentials stored",
+            # so Drive backups quietly degraded rather than reporting a broken
+            # query.
             cursor = conn.execute("""
                 SELECT sb.secret_blob
                 FROM secret_blobs sb
-                JOIN projects p ON p.id = sb.project_id
+                JOIN project_secret_blobs psb ON psb.secret_blob_id = sb.id
+                JOIN projects p ON p.id = psb.project_id
                 WHERE p.slug = 'system_config'
-                AND sb.profile = 'default'
+                AND psb.profile = 'default'
                 AND sb.secret_name = 'gdrive_oauth'
             """)
 

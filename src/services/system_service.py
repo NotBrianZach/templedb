@@ -290,6 +290,89 @@ class SystemService:
                 f"Applied git's executable bit to {changed} file(s)")
         return changed
 
+    # Trailer key that makes the mirror's own history the watermark.
+    #
+    # Written into every materialize commit, read back off the previous one.
+    # The alternative was a column recording "last materialized commit id" per
+    # project, and this is better for one reason: the watermark and the thing it
+    # describes cannot disagree. A column can say 1917 while the git commit it
+    # refers to was never pushed, or was pushed and then the branch was reset;
+    # a trailer that travels inside the commit is correct or absent.
+    _MIRROR_HEAD_TRAILER = "TempleDB-Head"
+
+    def _materialize_manifest(self, conn, project_id: int,
+                              checkout_dir: Path) -> tuple[str, Optional[int]]:
+        """The commit message body naming which TempleDB commits this snapshot carries.
+
+        Returns (body, new_watermark). `body` is '' when there is nothing to
+        name, which is the ordinary case for a materialize that is not a publish
+        — `nixos system-switch` and auto-materialize both land here.
+
+        WHY THIS EXISTS. A materialize commit used to say only "TempleDB
+        materialize (N files)", so the mirror was a snapshot stream with no
+        record of what any snapshot contained. bza has 228 such commits, all
+        identically named, and the seven TempleDB commits in the most recent one
+        — two concept promotions, an atlas change, three authoring runs and a
+        deploy fix — were indistinguishable from a no-op. Searching the mirror
+        for a change was impossible; `git log` answered "a snapshot happened".
+
+        WHAT THIS IS NOT. It does not give the mirror real per-change history:
+        the tree still moves in one jump and `git blame` still attributes every
+        line to the snapshot. Replaying each TempleDB commit as its own git
+        commit is the change that would, and it is bounded by data rather than
+        effort — 145 of bza's 559 commits have no `vcs_file_states` rows at all,
+        so what they changed is unrecoverable and no replay can include them.
+        They are all pre-October; every commit since 2026-10-01 has its delta.
+        So a replay has to be a CUTOVER with the existing snapshots left alone,
+        which is a decision about a public mirror's history and not an
+        implementation detail. This is the part that needs no such decision.
+        """
+        prev = subprocess.run(
+            ["git", "log", "-1", "--format=%B"],
+            cwd=str(checkout_dir), capture_output=True, text=True, check=False
+        )
+        since_id = None
+        if prev.returncode == 0:
+            for line in (prev.stdout or "").splitlines():
+                if line.startswith(f"{self._MIRROR_HEAD_TRAILER}:"):
+                    try:
+                        since_id = int(line.split(":", 1)[1].strip())
+                    except ValueError:
+                        since_id = None
+
+        # No watermark means either the first materialize after this change
+        # shipped, or a checkout whose history predates it. Naming every commit
+        # the project has ever had would be a useless wall of text, so the first
+        # run names nothing and only plants the watermark. One snapshot is
+        # unlabelled; every one after it is labelled.
+        rows = conn.execute(
+            """
+            SELECT id, commit_hash, commit_message
+              FROM vcs_commits
+             WHERE project_id = ? AND (? IS NULL OR id > ?)
+             ORDER BY id
+            """,
+            (project_id, since_id, since_id),
+        ).fetchall()
+        if not rows:
+            return "", None
+
+        head = rows[-1]["id"]
+        if since_id is None:
+            return f"{self._MIRROR_HEAD_TRAILER}: {head}\n", head
+
+        lines = [f"Contains {len(rows)} TempleDB commit(s):", ""]
+        for r in rows:
+            # First line only. A commit message here can be a hundred lines of
+            # reasoning -- the atlas commit that prompted this was 100 -- and
+            # the subject is what makes it findable.
+            subject = (r["commit_message"] or "").strip().splitlines()
+            subject = subject[0] if subject else "(no message)"
+            lines.append(f"  {r['commit_hash'][:16]}  {subject}")
+        lines.append("")
+        lines.append(f"{self._MIRROR_HEAD_TRAILER}: {head}")
+        return "\n".join(lines) + "\n", head
+
     def materialize_from_db(self, project_slug: str, force: bool = False) -> Optional[Path]:
         """Write project files from DB to checkout dir for nix evaluation.
 
@@ -600,10 +683,30 @@ class SystemService:
                 cwd=str(checkout_dir), capture_output=True, check=False
             )
             if diff_result.returncode != 0:
+                # Read the previous commit's watermark BEFORE committing, or the
+                # manifest would describe itself. Failure here must not fail the
+                # materialize: the manifest is a label on work that is already
+                # correct on disk and staged in git, so a broken label is worth
+                # strictly less than the push it would block. Hence the bare
+                # except and the generic message as the fallback.
+                try:
+                    body, _head = self._materialize_manifest(
+                        conn, proj["id"], checkout_dir)
+                except Exception as exc:  # noqa: BLE001 - see above
+                    logger.warning(
+                        f"Could not build the materialize manifest for "
+                        f"{project_slug} ({exc}); committing with the plain "
+                        f"message. The snapshot itself is unaffected."
+                    )
+                    body = ""
+
+                message = f"TempleDB materialize ({written} files)"
+                if body:
+                    message = f"{message}\n\n{body}"
+
                 # There are staged changes — commit them
                 commit = subprocess.run(
-                    ["git", "commit", "-m",
-                     f"TempleDB materialize ({written} files)"],
+                    ["git", "commit", "-m", message],
                     cwd=str(checkout_dir), capture_output=True, text=True,
                     check=False,
                     env={**os.environ, "GIT_AUTHOR_NAME": "TempleDB",

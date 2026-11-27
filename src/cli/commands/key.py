@@ -188,12 +188,26 @@ class KeyCommands(Command):
         if not lazy_mode:
             return 0
 
-        # Get all existing secrets
+        # Get all existing secrets, one row per blob.
+        #
+        # Driven off secret_blobs with the slugs rolled up, not joined through
+        # project_secret_blobs, for two reasons. A join would yield one row per
+        # (project, blob) pair, and since this loop re-encrypts and writes per
+        # row, every shared secret would be processed twice -- appending the new
+        # recipient a second time and re-inserting its key assignment. It would
+        # also be an INNER JOIN, silently skipping any blob with no project link
+        # so the new key never reaches it.
+        #
+        # (The previous form joined projects on sb.project_id, a column
+        # migration 033 removed, so this raised "no such column" instead.)
         secrets = self.repo.query_all("""
-            SELECT sb.id, p.slug, sb.profile, sb.secret_blob
+            SELECT sb.id, sb.profile, sb.secret_blob,
+                   (SELECT group_concat(p.slug, ', ')
+                      FROM project_secret_blobs psb
+                      JOIN projects p ON psb.project_id = p.id
+                     WHERE psb.secret_blob_id = sb.id) AS slug
             FROM secret_blobs sb
-            JOIN projects p ON sb.project_id = p.id
-            ORDER BY p.slug, sb.profile
+            ORDER BY sb.secret_name
         """, ())
 
         if not secrets:
@@ -581,20 +595,34 @@ class KeyCommands(Command):
         if key['notes']:
             print(f"Notes: {key['notes']}")
 
-        # Show secrets encrypted with this key
+        # Show secrets encrypted with this key.
+        #
+        # The project link goes through project_secret_blobs: migration 033
+        # dropped secret_blobs.project_id so a blob could be shared by several
+        # projects. Joining projects straight off sb raises "no such column:
+        # sb.project_id" and kills the command after it has already printed the
+        # header, so it reads as a half-successful run rather than a failure.
+        #
+        # One row per (project, secret) pair is intended here -- a shared
+        # secret should list under every project that holds it.
         secrets = self.repo.query_all("""
-            SELECT p.slug, sb.profile, sb.secret_name
+            SELECT p.slug, psb.profile, sb.secret_name
             FROM secret_key_assignments ska
             JOIN secret_blobs sb ON ska.secret_blob_id = sb.id
-            JOIN projects p ON sb.project_id = p.id
+            JOIN project_secret_blobs psb ON psb.secret_blob_id = sb.id
+            JOIN projects p ON psb.project_id = p.id
             WHERE ska.key_id = ?
-            ORDER BY p.slug, sb.profile
+            ORDER BY p.slug, psb.profile
         """, (key['id'],))
 
         if secrets:
             print(f"\nSecrets encrypted with this key ({len(secrets)}):")
             for secret in secrets:
-                print(f"  - {secret['slug']} ({secret['profile']})")
+                # secret_name was already selected but never printed, so a key
+                # holding 53 secrets rendered as 53 near-identical lines of
+                # "bza (default)" -- a count with no way to tell which secrets
+                # it meant.
+                print(f"  - {secret['slug']}/{secret['secret_name']} ({secret['profile']})")
 
         # Show recent audit entries
         audit = self.repo.query_all("""
@@ -892,13 +920,30 @@ class KeyCommands(Command):
             })
         ))
 
-        # Get all secrets using this key
+        # Get all secrets using this key, one row per blob.
+        #
+        # Same shape as _add_key_to_all_secrets and it matters more here: the
+        # old form joined projects on sb.project_id (removed by migration 033),
+        # so revocation failed outright -- after the audit row claiming the key
+        # was revoked had already been written. A plain join would instead
+        # re-encrypt shared secrets once per project, and being an INNER JOIN
+        # would skip any blob with no project link, quietly leaving the revoked
+        # key able to decrypt it.
+        #
+        # project_id is not selected because nothing below consumes it.
         secrets = self.repo.query_all("""
-            SELECT DISTINCT sb.id, sb.project_id, sb.profile, sb.secret_blob, p.slug
-            FROM secret_key_assignments ska
-            JOIN secret_blobs sb ON ska.secret_blob_id = sb.id
-            JOIN projects p ON sb.project_id = p.id
-            WHERE ska.key_id = ?
+            SELECT sb.id, sb.profile, sb.secret_blob,
+                   (SELECT group_concat(p.slug, ', ')
+                      FROM project_secret_blobs psb
+                      JOIN projects p ON psb.project_id = p.id
+                     WHERE psb.secret_blob_id = sb.id) AS slug
+            FROM secret_blobs sb
+            WHERE sb.id IN (
+                SELECT ska.secret_blob_id
+                FROM secret_key_assignments ska
+                WHERE ska.key_id = ?
+            )
+            ORDER BY sb.secret_name
         """, (key_to_revoke['id'],))
 
         if secrets:
