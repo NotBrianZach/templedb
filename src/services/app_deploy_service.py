@@ -6,10 +6,13 @@ Replaces per-project bash deploy scripts by loading env vars and secrets
 from the DB, injecting them into the subprocess environment, and running
 the configured build + deploy commands.
 """
+import fcntl
+import hashlib
 import json
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -108,6 +111,55 @@ def _derive_worker_secrets(
         for pattern in _ENV_REF_PATTERNS:
             names.update(pattern.findall(text))
     return names
+
+
+# Serialising deploys on the working directory.
+#
+# deploy() rsyncs `-a --delete` into config.working_dir and then builds with
+# cwd set to it, so two deploys of one project overlap on one tree: the second
+# one's sync deletes and rewrites the sources the first one is in the middle of
+# building. The first then records `Build failed (exit 1)` against sources that
+# build. bza's deployment_history rows 450, 455 and 459 are each that — a
+# failure with a success 32-35 seconds behind it, on the same commit, nothing
+# committed between the two starts.
+#
+# The second deploy is usually not a second person. In the two pairs where the
+# caller is recorded, one session launched both ~70 seconds apart: a deploy,
+# then a deliberate relaunch of a deploy it believed had died, because a
+# backgrounded deploy killed at an agent turn boundary looks exactly like one
+# that is still building. So this refuses rather than queueing. A caller who
+# cannot tell "still running" from "dead" is asking a question, and naming the
+# live holder answers it; waiting in line would defer the same confusion and
+# then deploy twice.
+#
+# flock on an open fd rather than a pidfile, because what kills deploys here is
+# a signal rather than a clean exit: the kernel drops the lock when the process
+# dies, so a killed deploy leaves nothing to clean up and no stale lock can
+# wedge releases shut. The lock file is never unlinked, which is the other half
+# of that — unlinking races a third process into a fresh inode that nobody else
+# is locking.
+#
+# Keyed on the working directory rather than the project or the target, because
+# the tree is the thing being rewritten: every config written so far gives
+# production and staging the same working_dir, so they have to take turns.
+
+
+def _work_dir_lock_path(project_slug: str, work_dir: str) -> Path:
+    """Lock file path for a working directory.
+
+    The slug is in the name only so a human can find the file; the digest of
+    the resolved path is what makes it unique, since the directory is the
+    resource being serialised.
+
+    A literal /tmp and not tempfile.gettempdir(), which honours $TMPDIR: two
+    callers with different TMPDIRs would then lock different files and never
+    see each other, and a lock only the callers who happen to agree on its
+    path can see is not a lock. nix-shell sets a private TMPDIR, so that is a
+    live difference on this host rather than a hypothetical one. scripts/
+    deploy.sh in bza hard-codes /tmp/bza-deploy.lock for the same reason.
+    """
+    digest = hashlib.sha256(os.path.realpath(work_dir).encode()).hexdigest()[:12]
+    return Path('/tmp') / f"templedb-deploy-{project_slug}-{digest}.lock"
 
 
 @dataclass
@@ -348,13 +400,86 @@ class AppDeployService(BaseService):
         except subprocess.CalledProcessError as e:
             self.logger.warning(f"rsync failed: {e.stderr}")
 
+    def _acquire_work_dir_lock(self, project_slug: str, work_dir: str,
+                               target: str) -> tuple:
+        """Take the working-directory lock without waiting. See the note above
+        _work_dir_lock_path for why this refuses instead of queueing.
+
+        Returns (fd, holder). A non-empty `holder` means another deploy is in
+        flight and describes it — refuse in that case. Otherwise the lock is
+        held for as long as `fd` stays open, and `fd` is None in the one case
+        where the lock file itself could not be used.
+
+        That last case is deliberate: a lock we cannot take must not become a
+        deploy we cannot run. An unwritable TMPDIR says nothing about whether
+        this release is safe, and failing closed on it would wedge every deploy
+        on the host for a reason nobody would think to look for. It restores
+        the old unguarded behaviour and warns that it has.
+        """
+        path = _work_dir_lock_path(project_slug, work_dir)
+        try:
+            fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError as e:
+            self.logger.warning(
+                f"Could not open deploy lock {path} ({e}); proceeding unguarded"
+            )
+            return None, ''
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Held. Read the holder's own description out of the file so the
+            # refusal can name it; an empty read is survivable, since the lock
+            # being held is the fact that matters.
+            try:
+                holder = os.pread(fd, 4096, 0).decode('utf-8', 'replace').strip()
+            except OSError:
+                holder = ''
+            os.close(fd)
+            return None, holder or f"holder did not describe itself in {path}"
+        except OSError as e:
+            self.logger.warning(
+                f"Could not lock {path} ({e}); proceeding unguarded"
+            )
+            os.close(fd)
+            return None, ''
+
+        # Describe ourselves for whoever gets refused next. Truncate first, so
+        # a short line cannot leave the tail of a longer previous holder behind
+        # it and misreport a dead pid. argv is recorded because
+        # deployment_history has nowhere to put it: every bza row reads
+        # triggered_by=manual, deployed_by=zach, including rows from a detached
+        # script nobody was watching, so the refusal message is currently the
+        # only place a caller is named at all.
+        info = (
+            f"holder: pid {os.getpid()}, slug {project_slug}, target {target},"
+            f" started {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+            f"work_dir: {work_dir}\n"
+            f"cmd: {' '.join(sys.argv)}\n"
+        )
+        try:
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, info.encode('utf-8'), 0)
+        except OSError:
+            pass  # the lock is the point; the description is a courtesy
+
+        return fd, ''
+
     def deploy(self, project_slug: str, target: str = 'production',
                dry_run: bool = False, skip_tests: bool = False) -> AppDeployResult:
         """
         Full deploy pipeline: load config → build env → test → build → deploy → record.
-        """
-        from services.deployment_tracking_service import DeploymentTrackingService
 
+        This wrapper exists only to hold the working-directory lock across the
+        whole pipeline; _deploy_locked is the pipeline. dry_run is inside the
+        lock too, and that is not caution: a dry run still runs
+        _sync_from_checkout before it decides to do nothing, so it rewrites a
+        tree a live build may be reading.
+
+        A refused deploy records nothing in deployment_history. It did no work,
+        and a row for it would read as a deploy that failed — which is the one
+        signal those rows exist to carry.
+        """
         start = time.time()
         config = self.get_config(project_slug)
         if not config:
@@ -372,6 +497,40 @@ class AppDeployService(BaseService):
                 duration_seconds=time.time() - start,
                 error=f"Working directory not found: {work_dir}"
             )
+
+        fd, holder = self._acquire_work_dir_lock(project_slug, work_dir, target)
+        if holder:
+            return AppDeployResult(
+                success=False,
+                duration_seconds=time.time() - start,
+                error=(
+                    f"A deploy is already in flight on {work_dir} — refusing to "
+                    f"start a second one. Deploying over it is what turns a good "
+                    f"build into 'Build failed (exit 1)'. Wait for it, or watch "
+                    f"its log.\n{holder}"
+                ),
+            )
+        try:
+            return self._deploy_locked(
+                project_slug, config, target, dry_run, skip_tests
+            )
+        finally:
+            # Releases the lock. The kernel would do it at process exit anyway,
+            # but this process may deploy again: flock conflicts with itself
+            # across two open file descriptions, so a leaked fd would refuse
+            # the next sequential deploy in the same process.
+            if fd is not None:
+                os.close(fd)
+
+    def _deploy_locked(self, project_slug: str, config: AppDeployConfig,
+                       target: str, dry_run: bool,
+                       skip_tests: bool) -> AppDeployResult:
+        """The deploy pipeline. Call it through deploy(), which holds the
+        working-directory lock for the length of it."""
+        from services.deployment_tracking_service import DeploymentTrackingService
+
+        start = time.time()
+        work_dir = config.working_dir
 
         # Sync source files from materialized checkout to deploy working dir.
         # The checkout is the source of truth (materialized from DB); the FHS
