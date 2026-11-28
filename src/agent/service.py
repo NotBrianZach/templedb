@@ -663,6 +663,36 @@ class AgentService:
                         store.mark_pending_event_dispatched(row["id"])
             except Exception as e:
                 logger.error(f"Ask/pending-event poll error: {e}")
+            # Poll boundary: bound the life of this thread's pooled DB
+            # connection, for the same reason ProtocolServer.run() does it
+            # at a request boundary — in WAL mode a held read snapshot
+            # stops a checkpoint advancing past it, and only the holder
+            # can end it.
+            #
+            # Both existing bounds miss this thread. The request-boundary
+            # release is thread-local, so it can only ever close the main
+            # read loop's connection; `_close_thread_db()` fires when a
+            # worker thread exits, and this thread is a daemon that never
+            # does. So the first query below opened a connection that then
+            # stayed open for the life of the process, which for an Emacs
+            # stdio backend is days.
+            #
+            # Measured 2026-11-27: pids 51137 (3d old) and 333908 (2d)
+            # each held one -shm read lock byte pinning the checkpoint at
+            # frame 195 while the log grew to 171,983 frames / 676 MB —
+            # the 8th sighting of that pin. Both had exactly two threads,
+            # this one being the second; every single-threaded backend
+            # held no read mark.
+            #
+            # Declines unless the connection is past
+            # POOLED_CONN_MAX_AGE_SECONDS, so a 300ms poll retires one
+            # connection a minute rather than one per iteration.
+            try:
+                from db_utils import release_pooled_connection
+                release_pooled_connection()
+            except Exception:
+                logger.debug("ask-poll connection release failed",
+                             exc_info=True)
             self._ask_poll_stop.wait(0.3)
 
     def respond_to_ask(self, ask_id, response, force=False):

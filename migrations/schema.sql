@@ -1,5 +1,5 @@
 -- TempleDB canonical schema
--- Generated from live database, sourced with migrations 001-142 applied.
+-- Generated from live database, sourced with migrations 001-144 applied.
 -- Regenerate after adding any new migration:
 --     python3 scripts/regen_schema.py
 --
@@ -14,7 +14,7 @@
 -- That failure mode has bitten twice (075-082, then 084-125). Use --check in CI.
 
 -- ======================================================================
--- Tables (137)
+-- Tables (139)
 -- ======================================================================
 
 CREATE TABLE IF NOT EXISTS agent_events (
@@ -141,6 +141,47 @@ CREATE TABLE IF NOT EXISTS "agent_sessions" (
     title TEXT,
     status TEXT NOT NULL DEFAULT 'created',
     model TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    project_slug TEXT,
+    prompt TEXT NOT NULL,
+    policy TEXT NOT NULL DEFAULT 'commit',
+    model TEXT,
+    cadence_sec INTEGER,
+    enabled INTEGER NOT NULL DEFAULT 1,
+
+    -- Runaway guards. max_runtime_sec is enforced by the tick wrapper,
+    -- not by the provider's IDLE_TIMEOUT_SEC -- that one only fires when
+    -- a tool is wedged, and a task can burn hours while making perfectly
+    -- healthy forward progress.
+    max_runtime_sec INTEGER NOT NULL DEFAULT 3600,
+
+    -- 'never' | 'error' | 'always' -- which outcomes enqueue an
+    -- agent_notifications row.
+    notify TEXT NOT NULL DEFAULT 'error',
+
+    -- Scheduling state
+    next_run_at TEXT,              -- NULL = due now
+    claimed_at TEXT,               -- non-NULL = a tick is running it
+    claimed_by TEXT,               -- "<host>:<pid>", for stale-claim triage
+
+    -- Last outcome
+    last_run_at TEXT,
+    last_status TEXT,              -- 'completed' | 'failed' | 'timeout'
+    last_error TEXT,
+    -- ON DELETE SET NULL, not the default RESTRICT: `ai agent gc` deletes
+    -- sessions that hold no findings/todos/notes, and a surviving task row
+    -- pointing at one would make that DELETE fail with a FK violation
+    -- rather than cleaning up.
+    last_session_id INTEGER REFERENCES agent_sessions(id) ON DELETE SET NULL,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -2037,9 +2078,76 @@ CREATE TABLE IF NOT EXISTS report_implementations (
 
     -- Timestamps
     linked_at         TEXT NOT NULL DEFAULT (datetime('now')),
-    verified_at       TEXT,
+    verified_at       TEXT, report_id INTEGER
+    REFERENCES reports(id) ON DELETE CASCADE,
 
     UNIQUE(report_path, commit_hash)
+);
+
+CREATE TABLE IF NOT EXISTS reports (
+    id            INTEGER PRIMARY KEY,
+
+    -- Which project the report is ABOUT. A real FK, where the old model
+    -- had "whichever project happened to track the file" -- so a report
+    -- about bza that someone filed under templedb/reports/ was simply a
+    -- templedb report, with nothing to disagree with.
+    --
+    -- ON DELETE CASCADE because a report about a project that no longer
+    -- exists is not a report about anything. Note 141_projects_fk_set_null
+    -- went the other way for its table; the difference is that an
+    -- orphaned report has no residual meaning, whereas the rows that
+    -- migration covers do.
+    project_id    INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+
+    -- Stable identity, and the thing a URL and a commit message should
+    -- name. Kebab title with no date and no extension:
+    -- 'mobile-agentic-development', not
+    -- '2026-10-27-1952-mobile-agentic-development.html'.
+    --
+    -- Unique per project rather than globally: two projects may both
+    -- have something to say about 'deploy-pipeline', and forcing them to
+    -- disambiguate would be the filename problem again in a column.
+    slug          TEXT NOT NULL,
+
+    title         TEXT NOT NULL,
+
+    -- One paragraph, for the index listing. A column because it was a
+    -- regex over `<p class="lede">` -- which meant the index summary was
+    -- a function of the body's markup, and a report that styled its
+    -- opening differently simply had no summary.
+    lede          TEXT,
+
+    -- The document. Whole, as authored.
+    body          TEXT NOT NULL,
+
+    -- The fix the whole migration is for. Rendering is now a property of
+    -- the row, so a markdown report is a report.
+    format        TEXT NOT NULL DEFAULT 'markdown'
+                    CHECK (format IN ('markdown', 'html')),
+
+    -- A real timestamp. Reports keep arriving several a day and the
+    -- filename convention grew an HHMM to cope; this orders them
+    -- properly and lets the display decide how much precision to show.
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+
+    -- Reports supersede each other -- a design pass, then what was built
+    -- from it. That relationship was previously prose inside the newer
+    -- document, so nothing could follow it. Nullable, self-referential,
+    -- SET NULL rather than CASCADE: deleting the newer report must not
+    -- delete the history it was describing.
+    supersedes_id INTEGER REFERENCES reports(id) ON DELETE SET NULL,
+
+    -- The path this was migrated from, for exactly one purpose: making
+    -- the 83 report_implementations rows and the links in old commit
+    -- messages resolvable. Nullable, because a report written after this
+    -- migration never had a path and should not pretend to.
+    --
+    -- NOT the identity. `slug` is. This column is a forwarding address
+    -- and nothing should start reading it as a key.
+    legacy_path   TEXT,
+
+    UNIQUE(project_id, slug)
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -3407,7 +3515,7 @@ WHERE m.impact_level IN ('high', 'critical')
 ORDER BY c.commit_timestamp DESC;
 
 -- ======================================================================
--- Indexes (262)
+-- Indexes (268)
 -- ======================================================================
 
 CREATE INDEX IF NOT EXISTS agent_pending_asks_session_status
@@ -3454,6 +3562,14 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_agent_sessions_project ON agent_sessions(project_id);
 
 CREATE INDEX IF NOT EXISTS idx_agent_sessions_status ON agent_sessions(status);
+
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_claimed
+    ON agent_tasks(claimed_at)
+    WHERE claimed_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_due
+    ON agent_tasks(next_run_at)
+    WHERE enabled = 1 AND claimed_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_agent_work_log_created ON agent_work_log(created_at);
 
@@ -3895,6 +4011,9 @@ CREATE INDEX IF NOT EXISTS idx_relations_sync_scope
 CREATE INDEX IF NOT EXISTS idx_relations_to
     ON relations(to_entity_id, kind);
 
+CREATE INDEX IF NOT EXISTS idx_report_impl_report
+    ON report_implementations(report_id);
+
 CREATE INDEX IF NOT EXISTS idx_report_impls_commit
     ON report_implementations(commit_hash);
 
@@ -3903,6 +4022,12 @@ CREATE INDEX IF NOT EXISTS idx_report_impls_confidence
 
 CREATE INDEX IF NOT EXISTS idx_report_impls_report
     ON report_implementations(report_path);
+
+CREATE INDEX IF NOT EXISTS idx_reports_created ON reports(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_reports_legacy_path ON reports(legacy_path);
+
+CREATE INDEX IF NOT EXISTS idx_reports_project ON reports(project_id);
 
 CREATE INDEX IF NOT EXISTS idx_secret_key_assignments_key ON secret_key_assignments(key_id);
 

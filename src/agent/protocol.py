@@ -17,6 +17,7 @@ Methods:
   notes.set
 """
 import json
+import queue
 import sys
 import threading
 import traceback
@@ -25,6 +26,18 @@ from logger import get_logger
 from agent.service import AgentService
 
 logger = get_logger("AgentProtocol")
+
+# How long run() waits for a request before taking an idle tick. The
+# request-boundary release only fires when a request arrives, so a quiet
+# Emacs buffer -- which is most of them, most of the time -- left the
+# read loop's connection open with no bound at all. Shorter than
+# POOLED_CONN_MAX_AGE_SECONDS so the first tick past that bound still
+# lands promptly, and long enough that an idle backend is doing nothing
+# measurable.
+IDLE_TICK_SECONDS = 30
+
+# Put on the line queue by the reader thread when input is exhausted.
+_EOF = object()
 
 
 def _close_thread_db():
@@ -99,8 +112,23 @@ class ProtocolServer:
         self._running = True
         logger.info("Protocol server started")
 
-        for line in self.input:
-            line = line.strip()
+        lines = queue.Queue()
+        threading.Thread(target=self._read_input, args=(lines,),
+                         name="stdin-reader", daemon=True).start()
+
+        while True:
+            try:
+                raw = lines.get(timeout=IDLE_TICK_SECONDS)
+            except queue.Empty:
+                # No request for a while. Same obligation as the request
+                # boundary below, and the only place a backend nobody is
+                # typing at ever meets it.
+                self._release_db()
+                continue
+            if raw is _EOF:
+                break
+
+            line = raw.strip()
             if not line:
                 continue
 
@@ -132,15 +160,36 @@ class ProtocolServer:
                 # with 27,039 frames behind it on 2026-10-17. Declines
                 # on its own if a transaction is open, so a long handler
                 # that commits later is unaffected.
-                try:
-                    from db_utils import release_pooled_connection
-                    release_pooled_connection()
-                except Exception:
-                    logger.debug("pooled connection release failed",
-                                 exc_info=True)
+                self._release_db()
 
         self._running = False
         logger.info("Protocol server stopped")
+
+    def _read_input(self, lines):
+        """Feed input lines to run()'s loop, ending with the _EOF sentinel.
+
+        Reading on its own thread is what lets run() wake on a timeout
+        and still block on a real readline the rest of the time.
+        select() on the fd would not do: a line already sitting in the
+        text layer's buffer leaves the fd unreadable, so the request
+        would wait for the next one to arrive. This thread only touches
+        the streams, so it has no pooled connection of its own to bound.
+        """
+        try:
+            for line in self.input:
+                lines.put(line)
+        except Exception:
+            logger.debug("stdin reader stopped", exc_info=True)
+        finally:
+            lines.put(_EOF)
+
+    def _release_db(self):
+        """Retire this thread's pooled DB connection if it is past its bound."""
+        try:
+            from db_utils import release_pooled_connection
+            release_pooled_connection()
+        except Exception:
+            logger.debug("pooled connection release failed", exc_info=True)
 
     def _dispatch(self, request_id, method, params):
         """Route a method to its handler."""
